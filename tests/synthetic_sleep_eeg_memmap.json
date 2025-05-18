@@ -1,0 +1,1 @@
+{"filepath": "/Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/TurtleWave/tests/synthetic_sleep_eeg_memmap.dat", "shape": [3, 60000], "channels": ["C3", "C4", "O1"], "sampling_rate": 100, "dtype": "float32"}
