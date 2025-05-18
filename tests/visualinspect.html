@@ -1,0 +1,549 @@
+<style>
+  body {
+    font-family: 'Helvetica Neue', sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f0f2f6;
+  }
+  .streamlit-container {
+    display: flex;
+    min-height: 100vh;
+  }
+  .sidebar {
+    width: 250px;
+    background-color: white;
+    padding: 20px;
+    border-right: 1px solid #eee;
+    box-shadow: 2px 0 5px rgba(0,0,0,0.05);
+  }
+  .main-content {
+    flex: 1;
+    padding: 20px;
+  }
+  .controls-section {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .control-card {
+    background-color: white;
+    padding: 15px;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    flex: 1;
+    min-width: 200px;
+  }
+  .visualization-section {
+    background-color: white;
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+  }
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid #ddd;
+    margin-bottom: 15px;
+  }
+  .tab {
+    padding: 10px 15px;
+    cursor: pointer;
+  }
+  .tab.active {
+    border-bottom: 2px solid #ff4b4b;
+    font-weight: bold;
+  }
+  .tab-content {
+    display: none;
+  }
+  .tab-content.active {
+    display: block;
+  }
+  .eeg-plot {
+    height: 180px;
+    background-color: #f9f9f9;
+    border: 1px solid #eee;
+    margin-bottom: 15px;
+    position: relative;
+    overflow: hidden;
+  }
+  .hypnogram-plot {
+    height: 120px;
+    background-color: #f9f9f9;
+    border: 1px solid #eee;
+    margin-bottom: 15px;
+    position: relative;
+    overflow: hidden;
+  }
+  .eeg-trace {
+    stroke: steelblue;
+    stroke-width: 1.5;
+    fill: none;
+  }
+  .spindle-highlight {
+    position: absolute;
+    background-color: rgba(255, 0, 0, 0.2);
+    height: 100%;
+    width: 20%;
+    left: 40%;
+  }
+  .spectrogram {
+    height: 250px;
+    background-image: linear-gradient(to bottom, 
+      #000080, #0000ff, #00ffff, #ffff00, #ff0000);
+    opacity: 0.7;
+    margin-bottom: 15px;
+  }
+  .topomap {
+    height: 300px;
+    background-image: radial-gradient(circle, #ff0000, #ffff00, #0000ff);
+    border-radius: 50%;
+    width: 300px;
+    margin: 0 auto;
+  }
+  .topomap::before {
+    content: "";
+    position: absolute;
+    width: 300px;
+    height: 300px;
+    background-size: contain;
+    opacity: 0.3;
+  }
+  .review-section {
+    display: flex;
+    gap: 15px;
+  }
+  .review-btn {
+    flex: 1;
+    padding: 10px;
+    border: none;
+    border-radius: 5px;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  .accept-btn {
+    background-color: #00cc66;
+  }
+  .reject-btn {
+    background-color: #ff4b4b;
+  }
+  .comment-input {
+    flex: 1;
+    padding: 10px;
+  }
+  h1, h2, h3 {
+    color: #444;
+  }
+  .stats-section {
+    display: flex;
+    gap: 15px;
+    margin-top: 20px;
+  }
+  .stat-card {
+    background-color: white;
+    padding: 15px;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    flex: 1;
+    text-align: center;
+  }
+  .stat-value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #ff4b4b;
+  }
+  .slider {
+    width: 100%;
+  }
+  .channel-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 10px;
+  }
+  .channel-item {
+    background-color: #f0f2f6;
+    padding: 5px 10px;
+    border-radius: 15px;
+    font-size: 12px;
+  }
+  .progress-bar {
+    background-color: #eee;
+    height: 10px;
+    border-radius: 5px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .progress {
+    background-color: #ff4b4b;
+    height: 100%;
+    width: 35%;
+  }
+  .eeg-line {
+    fill: none;
+    stroke: #333;
+    stroke-width: 1;
+  }
+  .filter-controls {
+    display: flex;
+    gap: 10px;
+    margin: 10px 0;
+    align-items: center;
+  }
+  .stage-filter {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .stage-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+</style>
+
+<div class="streamlit-container">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <h2>EEG Spindle Review</h2>
+    <div style="margin: 20px 0;">
+      <p style="margin-bottom: 5px;">Upload EEG data (.fif, .edf, .set)</p>
+      <button style="width: 100%; padding: 8px; margin-bottom: 15px;">Browse files</button>
+      
+      <p style="margin-bottom: 5px;">Upload spindle detections (.csv)</p>
+      <button style="width: 100%; padding: 8px;">Browse files</button>
+      
+      <div style="margin-top: 20px; padding: 10px; background-color: #d1f5d3; border-radius: 5px;">
+        <p>Loaded 127 spindle detections</p>
+      </div>
+      
+      <div style="margin-top: 20px;">
+        <h3>Sleep Stage Filter</h3>
+        <div class="stage-filter">
+          <div class="stage-checkbox">
+            <input type="checkbox" id="stageW" checked>
+            <label for="stageW">W</label>
+          </div>
+          <div class="stage-checkbox">
+            <input type="checkbox" id="stageN1" checked>
+            <label for="stageN1">N1</label>
+          </div>
+          <div class="stage-checkbox">
+            <input type="checkbox" id="stageN2" checked>
+            <label for="stageN2">N2</label>
+          </div>
+          <div class="stage-checkbox">
+            <input type="checkbox" id="stageN3" checked>
+            <label for="stageN3">N3</label>
+          </div>
+          <div class="stage-checkbox">
+            <input type="checkbox" id="stageREM" checked>
+            <label for="stageREM">REM</label>
+          </div>
+        </div>
+        <button style="width: 100%; padding: 8px; margin-top: 10px;">Apply Filter</button>
+      </div>
+      
+      <div style="margin-top: 20px;">
+        <h3>Available Channels</h3>
+        <div style="margin-top: 10px; max-height: 200px; overflow-y: auto;">
+          <p style="font-weight: bold; margin-bottom: 5px;">EEG:</p>
+          <div class="channel-list">
+            <div class="channel-item">Fz</div>
+            <div class="channel-item">F3</div>
+            <div class="channel-item">F4</div>
+            <div class="channel-item">Cz</div>
+            <div class="channel-item">C3</div>
+            <div class="channel-item">C4</div>
+            <div class="channel-item">Pz</div>
+            <div class="channel-item">P3</div>
+            <div class="channel-item">P4</div>
+            <div class="channel-item">O1</div>
+            <div class="channel-item">O2</div>
+          </div>
+          <p style="font-weight: bold; margin-bottom: 5px; margin-top: 10px;">EMG:</p>
+          <div class="channel-list">
+            <div class="channel-item">Chin1</div>
+            <div class="channel-item">Chin2</div>
+          </div>
+          <p style="font-weight: bold; margin-bottom: 5px; margin-top: 10px;">EOG:</p>
+          <div class="channel-list">
+            <div class="channel-item">EOG-L</div>
+            <div class="channel-item">EOG-R</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Main Content -->
+  <div class="main-content">
+    <!-- Top Controls Section -->
+    <div class="controls-section">
+      <div class="control-card">
+        <h3>Key channels</h3>
+        <div class="channel-list">
+          <div class="channel-item">Fz</div>
+          <div class="channel-item">F3</div>
+          <div class="channel-item">F4</div>
+          <div class="channel-item">Cz</div>
+          <div class="channel-item">C3</div>
+          <div class="channel-item">C4</div>
+          <div class="channel-item">+ Add</div>
+        </div>
+      </div>
+      
+      <div class="control-card">
+        <h3>Filter settings</h3>
+        <div class="filter-controls">
+          <span>Low: </span>
+          <input type="number" value="0.5" min="0.1" max="49.9" step="0.1" style="width: 60px;">
+          <span>Hz</span>
+          <span style="margin-left: 10px;">High: </span>
+          <input type="number" value="45" min="0.2" max="50" step="0.1" style="width: 60px;">
+          <span>Hz</span>
+        </div>
+        <button style="padding: 5px 10px; margin-top: 5px;">Apply Filter</button>
+      </div>
+      
+      <div class="control-card">
+        <h3>Confidence threshold</h3>
+        <input type="range" min="0" max="100" value="50" class="slider">
+        <p>Value: 0.50</p>
+        <p>Displaying 89 spindles above threshold</p>
+      </div>
+    </div>
+    
+    <div class="controls-section">
+      <div class="control-card">
+        <h3>Navigation</h3>
+        <div style="display: flex; gap: 10px; margin-top: 15px;">
+          <button style="flex: 1; padding: 8px;">Previous Spindle</button>
+          <button style="flex: 1; padding: 8px;">Next Spindle</button>
+        </div>
+      </div>
+      
+      <div class="control-card">
+        <h3>Review Progress</h3>
+        <div style="text-align: center; margin-top: 15px;">
+          <span style="font-size: 24px; font-weight: bold;">31/89</span>
+          <div class="progress-bar">
+            <div class="progress"></div>
+          </div>
+          <p>34.8% Complete</p>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Visualization Section -->
+    <div class="visualization-section">
+      <h3>Spindle #32 (Ch: F3, 12.5-14.2 Hz, Duration: 0.83s, Stage: N2)</h3>
+      
+      <!-- Hypnogram Section -->
+      <div style="margin-bottom: 20px;">
+        <h4>Sleep Hypnogram</h4>
+        <div class="hypnogram-plot">
+          <svg width="100%" height="100%" viewBox="0 0 1000 120">
+            <!-- Time axis -->
+            <line x1="60" y1="100" x2="950" y2="100" stroke="black" stroke-width="1"/>
+            <text x="60" y="115" font-size="10">22:00</text>
+            <text x="250" y="115" font-size="10">23:00</text>
+            <text x="450" y="115" font-size="10">00:00</text>
+            <text x="650" y="115" font-size="10">01:00</text>
+            <text x="850" y="115" font-size="10">02:00</text>
+            
+            <!-- Stage labels -->
+            <text x="20" y="20" font-size="10">W</text>
+            <text x="20" y="40" font-size="10">R</text>
+            <text x="20" y="60" font-size="10">N1</text>
+            <text x="20" y="80" font-size="10">N2</text>
+            <text x="20" y="100" font-size="10">N3</text>
+            
+            <!-- Stage lines and transitions -->
+            <polyline points="60,20 100,20 100,80 150,80 150,60 200,60 200,80 250,80 250,100 300,100 300,80 
+                             350,80 350,40 400,40 400,80 450,80 450,100 500,100 500,80 550,80 550,60 600,60 
+                             600,80 650,80 650,100 700,100 700,80 750,80 750,40 800,40 800,80 850,80 850,100 900,100 950,100" 
+                     fill="none" stroke="black" stroke-width="2"/>
+            
+            <!-- Current spindle marker -->
+            <line x1="500" y1="0" x2="500" y2="100" stroke="red" stroke-width="2" stroke-dasharray="5,5"/>
+          </svg>
+        </div>
+      </div>
+      
+      <div class="tabs">
+        <div class="tab active">EEG Views</div>
+        <div class="tab">Time-Frequency</div>
+        <div class="tab">Topography</div>
+      </div>
+      
+      <div class="tab-content active">
+        <!-- Raw EEG Plot -->
+        <h4>Raw EEG</h4>
+        <div class="eeg-plot">
+          <svg width="100%" height="100%" viewBox="0 0 1000 180">
+            <!-- Channel labels -->
+            <text x="40" y="30" font-size="12">Fz</text>
+            <text x="40" y="60" font-size="12">F3</text>
+            <text x="40" y="90" font-size="12">F4</text>
+            <text x="40" y="120" font-size="12">Cz</text>
+            <text x="40" y="150" font-size="12">EOG-L</text>
+            
+            <!-- Time axis -->
+            <line x1="60" y1="170" x2="950" y2="170" stroke="black" stroke-width="1"/>
+            <text x="60" y="185" font-size="10">23.0s</text>
+            <text x="500" y="185" font-size="10">24.0s</text>
+            <text x="950" y="185" font-size="10">25.0s</text>
+            
+            <!-- EEG traces with random paths -->
+            <path d="M60,30 Q90,20 120,35 T180,25 T240,40 T300,20 T360,35 T420,15 T480,30 T540,10 T600,35 T660,15 T720,40 T780,20 T840,35 T900,15 T950,30" class="eeg-line"/>
+            
+            <path d="M60,60 Q90,50 120,65 T180,55 T240,70 T300,50 T360,65 T420,45 T480,60 T540,40 T600,65 T660,45 T720,70 T780,50 T840,65 T900,45 T950,60" class="eeg-line"/>
+            
+            <path d="M60,90 Q90,80 120,95 T180,85 T240,100 T300,80 T360,95 T420,75 T480,90 T540,70 T600,95 T660,75 T720,100 T780,80 T840,95 T900,75 T950,90" class="eeg-line"/>
+            
+            <path d="M60,120 Q90,110 120,125 T180,115 T240,130 T300,110 T360,125 T420,105 T480,120 T540,100 T600,125 T660,105 T720,130 T780,110 T840,125 T900,105 T950,120" class="eeg-line"/>
+            
+            <path d="M60,150 Q100,140 140,150 T220,150 T320,140 T400,160 T480,150 T560,130 T640,150 T720,150 T800,140 T880,160 T950,150" class="eeg-line"/>
+            
+            <!-- Spindle highlight -->
+            <rect x="400" y="0" width="200" height="170" fill="rgba(255,0,0,0.2)"/>
+          </svg>
+        </div>
+        
+        <!-- Filtered EEG Plot -->
+        <h4>Filtered EEG (0.5-45 Hz)</h4>
+        <div class="eeg-plot">
+          <svg width="100%" height="100%" viewBox="0 0 1000 180">
+            <!-- Channel labels -->
+            <text x="40" y="30" font-size="12">Fz</text>
+            <text x="40" y="60" font-size="12">F3</text>
+            <text x="40" y="90" font-size="12">F4</text>
+            <text x="40" y="120" font-size="12">Cz</text>
+            <text x="40" y="150" font-size="12">EOG-L</text>
+            
+            <!-- Time axis -->
+            <line x1="60" y1="170" x2="950" y2="170" stroke="black" stroke-width="1"/>
+            <text x="60" y="185" font-size="10">23.0s</text>
+            <text x="500" y="185" font-size="10">24.0s</text>
+            <text x="950" y="185" font-size="10">25.0s</text>
+            
+            <!-- Filtered EEG traces - smoother due to filtering -->
+            <path d="M60,30 Q120,25 180,32 T300,28 T420,33 T540,27 T660,32 T780,28 T900,33 T950,30" class="eeg-line"/>
+            
+            <path d="M60,60 Q120,55 180,62 T300,58 T400,65 T450,55 T500,65 T550,55 T600,65 T700,58 T800,62 T900,58 T950,60" stroke="#0066cc" stroke-width="1.5" fill="none"/>
+            
+            <path d="M60,90 Q120,85 180,92 T300,88 T420,93 T540,87 T660,92 T780,88 T900,93 T950,90" class="eeg-line"/>
+            
+            <path d="M60,120 Q120,115 180,122 T300,118 T420,123 T540,117 T660,122 T780,118 T900,123 T950,120" class="eeg-line"/>
+            
+            <path d="M60,150 Q150,145 250,150 T400,148 T550,152 T700,148 T850,152 T950,150" class="eeg-line"/>
+            
+            <!-- Spindle highlight - more visible in filtered view -->
+            <rect x="400" y="0" width="200" height="170" fill="rgba(255,0,0,0.2)"/>
+          </svg>
+        </div>
+      </div>
+      
+      <div class="tab-content">
+        <!-- Time-Frequency Plot -->
+        <div class="spectrogram">
+          <svg width="100%" height="100%" viewBox="0 0 1000 250">
+            <!-- Frequency axis -->
+            <line x1="60" y1="20" x2="60" y2="230" stroke="black" stroke-width="1"/>
+            <text x="30" y="230" font-size="10">0 Hz</text>
+            <text x="30" y="140" font-size="10">15 Hz</text>
+            <text x="30" y="50" font-size="10">30 Hz</text>
+            
+            <!-- Time axis -->
+            <line x1="60" y1="230" x2="950" y2="230" stroke="black" stroke-width="1"/>
+            <text x="60" y="245" font-size="10">23.0s</text>
+            <text x="500" y="245" font-size="10">24.0s</text>
+            <text x="950" y="245" font-size="10">25.0s</text>
+            
+            <!-- Spindle highlight box -->
+            <rect x="400" y="120" width="200" height="40" stroke="black" stroke-width="2" fill="none"/>
+          </svg>
+        </div>
+      </div>
+      
+      <div class="tab-content">
+        <!-- Topography Map -->
+        <div style="display: flex; justify-content: center;">
+          <div class="topomap">
+            <svg width="300" height="300" viewBox="0 0 300 300">
+              <!-- Head outline -->
+              <circle cx="150" cy="150" r="140" fill="none" stroke="black" stroke-width="2"/>
+              <!-- Nose marker -->
+              <path d="M150,10 L140,30 L160,30 Z" fill="black"/>
+              <!-- Ear markers -->
+              <path d="M10,150 Q0,170 10,190" fill="none" stroke="black" stroke-width="2"/>
+              <path d="M290,150 Q300,170 290,190" fill="none" stroke="black" stroke-width="2"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Review Controls Section -->
+    <div class="review-section">
+      <button class="review-btn accept-btn">Accept Spindle</button>
+      <button class="review-btn reject-btn">Reject Spindle</button>
+      <input type="text" placeholder="Comments (optional)" class="comment-input">
+    </div>
+    
+    <!-- Statistics Section -->
+    <div style="margin-top: 30px;">
+      <h3>Review Statistics</h3>
+      <div class="stats-section">
+        <div class="stat-card">
+          <h4>Accepted Spindles</h4>
+          <div class="stat-value">24</div>
+        </div>
+        <div class="stat-card">
+          <h4>Rejected Spindles</h4>
+          <div class="stat-value">7</div>
+        </div>
+        <div class="stat-card">
+          <h4>By Sleep Stage</h4>
+          <div style="text-align: left; margin-top: 10px; font-size: 14px;">
+            <div style="display: flex; justify-content: space-between;">
+              <span>N1:</span><span>3 spindles</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span>N2:</span><span>25 spindles</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span>N3:</span><span>3 spindles</span>
+            </div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <button style="width: 100%; padding: 10px; margin-top: 15px; background-color: #4285f4; color: white; border: none; border-radius: 5px;">Export Review Results</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Simple tab switching functionality
+  document.addEventListener('DOMContentLoaded', function() {
+    const tabs = document.querySelectorAll('.tab');
+    const tabContents = document.querySelectorAll('.tab-content');
+    
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', function() {
+        // Remove active class from all tabs and contents
+        tabs.forEach(t => t.classList.remove('active'));
+        tabContents.forEach(content => content.classList.remove('active'));
+        
+        // Add active class to clicked tab and corresponding content
+        tab.classList.add('active');
+        tabContents[index].classList.add('active');
+      });
+    });
+  });
+</script>

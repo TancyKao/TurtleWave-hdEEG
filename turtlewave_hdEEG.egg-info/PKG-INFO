@@ -1,0 +1,38 @@
+Metadata-Version: 2.4
+Name: turtlewave-hdEEG
+Version: 1.1.0
+Summary: High-density EEG processing for sleep event detection
+Home-page: https://github.com/TancyKao/TurtleWave-hdEEG
+Author: Tancy Kao
+Author-email: tancy.kao@woolcock.org.au
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.17.0
+Requires-Dist: scipy>=1.3.0
+Requires-Dist: matplotlib>=3.1.0
+Requires-Dist: h5py>=2.10.0
+Requires-Dist: PyQt5>=5.12.0
+Requires-Dist: wonambi>=7.15
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# TurtleWave-hdEEG
+
+High-density EEG processing for sleep research, extended from Wonambi for large datasets.
+
+## Installation
+
+```bash
+pip install turtlewave-hdEEG
