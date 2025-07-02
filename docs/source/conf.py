@@ -4,41 +4,54 @@
 
 import os
 import sys
-sys.path.insert(0, os.path.abspath('/Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/TurtleWave-hdEEG'))  
+sys.path.insert(0, os.path.abspath('../..'))
+
+# Check if we're running on Read the Docs
+on_rtd = os.environ.get('READTHEDOCS') == 'True'
+
 
 # -- Project information -----------------------------------------------------
-# https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 project = 'TurtleWave hdEEG'
 copyright = '2025, Tancy Kao'
 author = 'Tancy Kao'
 release = '2.0.0'
 
+# -- General configuration ---------------------------------------------------
 # Extensions
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.viewcode',
     'sphinx.ext.napoleon',
-    'sphinx.ext.mathjax',
-    'sphinx_rtd_theme',
+    'sphinx.ext.mathjax',  # Add cross-references to other documentation
+    'sphinx_rtd_theme', # Check documentation coverage
 ]
 
+# Mock imports for C extensions or other hard-to-install dependencies
+# This prevents build failures on Read the Docs when dependencies cannot be installed
+autodoc_mock_imports = [
+    'PyQt5', 
+    'QtWidgets', 
+    'QtCore', 
+    'QtGui'
+    # Add other C extensions or difficult dependencies here
+]
 
+# Master document (required for older versions of Sphinx on RTD)
+master_doc = 'index'
 
-#templates_path = ['_templates']
-#exclude_patterns = []
-
-
+# Exclude patterns for documentation build
+exclude_patterns = [
+    '_build', 
+    'Thumbs.db', 
+    '.DS_Store', 
+    '**.ipynb_checkpoints'
+]
 
 # -- Options for HTML output -------------------------------------------------
-# https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 # Set theme
 html_theme = 'sphinx_rtd_theme'
 
-
-# Include Python modules in autodoc
-#autodoc_member_order = 'bysource'
-#autoclass_content = 'both'
 
 # add theme options for Read the Docs
 html_theme_options = {
@@ -78,3 +91,11 @@ napoleon_use_rtype = True
 napoleon_preprocess_types = False
 napoleon_type_aliases = None
 napoleon_attr_annotations = True
+
+# Intersphinx mappings for external references
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3', None),
+    'numpy': ('https://numpy.org/doc/stable/', None),
+    'pandas': ('https://pandas.pydata.org/docs/', None),
+    'matplotlib': ('https://matplotlib.org/stable/', None),
+}
