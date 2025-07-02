@@ -1,14 +1,10 @@
-.. turtlewave documentation master file, created by
-   sphinx-quickstart on Sun May 18 21:09:57 2025.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
 
-turtlewave documentation
-========================
+Welcome to TurtleWave hdEEG's documentation!
+===========================================
 
-Add your content using ``reStructuredText`` syntax. See the
-`reStructuredText <https://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`_
-documentation for details.
+TurtleWave hdEEG is a comprehensive GUI-based tool for analyzing high-density EEG data,
+with a focus on sleep event detection, phase-amplitude coupling, and neural event processing.
+
 
 
 .. toctree::
@@ -16,11 +12,10 @@ documentation for details.
    :caption: Contents:
 
    introduction
-   features
    installation
-   tutorial
+   usage
    modules
-   development
+   gui
    changelog
 
 Indices and tables

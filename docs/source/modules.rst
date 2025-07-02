@@ -1,7 +1,13 @@
-Modules, classes, functions
-=========================
+API Reference
+============
+
+Core Modules
+-----------
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 2
 
-   api/turtlewave
+   eventprocessor
+   swprocessor
+   pacprocessor
+   annotation

@@ -1,16 +1,20 @@
-Installation
+nstallation
 ===========
 
-Linux / Mac OS X
----------------
+Install TurtleWave hdEEG using pip:
 
 .. code-block:: bash
 
-   pip install turtlewave
+   pip install turtlewave_hdEEG
 
-Windows
--------
+Dependencies
+-----------
 
-.. code-block:: bash
+TurtleWave requires the following packages:
 
-   pip install turtlewave
+- PyQt5
+- numpy
+- pandas
+- wonambi
+- tensorpac
+- matplotlib
