@@ -2,13 +2,8 @@ README.md
 pyproject.toml
 setup.py
 frontend/__init__.py
+frontend/eeg_eventview.py
 frontend/turtlewave_gui.py
-frontend/event_review/__init__.py
-frontend/event_review/eeg_visualizer.py
-frontend/event_review/event_navigator.py
-frontend/event_review/hypnogram_visualizer.py
-frontend/event_review/result_manager.py
-frontend/event_review/review_tab.py
 tests/test dataset.py
 tests/test_turtlewave.py
 turtlewave_hdEEG/__init__.py
@@ -18,6 +13,7 @@ turtlewave_hdEEG/dataset.py
 turtlewave_hdEEG/eventprocessor.py
 turtlewave_hdEEG/extensions.py
 turtlewave_hdEEG/json_to_annotations.py
+turtlewave_hdEEG/pacprocessor.py
 turtlewave_hdEEG/swprocessor.py
 turtlewave_hdEEG/utils.py
 turtlewave_hdEEG/visualization.py
