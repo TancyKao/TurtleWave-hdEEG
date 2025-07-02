@@ -73,6 +73,35 @@ class ParalSWA:
         
         return logger
 
+    def clean_memory(self):
+        """
+        Perform thorough memory cleanup to release resources
+        """
+        import gc
+        import sys
+        
+        # Clear any large variables in the class
+        if hasattr(self, '_temp_data'):
+            del self._temp_data
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # For more aggressive cleanup on systems that support it
+        if sys.platform == 'linux':
+            try:
+                import resource
+                import psutil
+                # Suggest to OS to release memory
+                psutil.Process().memory_info()
+                resource.RUSAGE_SELF
+            except ImportError:
+                self.logger.info("psutil not available for advanced memory cleanup")
+        
+        self.logger.info("Memory cleanup performed")
+
+
+
     def detect_slow_waves(self, method='Massimini2004', chan=None, ref_chan=[], grp_name='eeg',
                      frequency=(0.1, 4), trough_duration=(0.3, 1.5), 
                      neg_peak_thresh=-80.0,  
@@ -135,15 +164,14 @@ class ParalSWA:
         import uuid    
        
         self.logger.info(r"""
-                   .==.                   
-                  ()''()-.    Sweet Dreams...
-                   .--''  (Detecting Slow Waves)
-                 .'O_O  '._   ____  
-                 _(z_z)_ /  |_||__|  
-               ,'| |  /\   _//--'     
-              /  |_|'||  |/|         
-             |  | | |\   ||          
-             |_/'\_|_| \_|'\         
+               ___    __,__,__,__, 
+              /_@ \  /  /  \  \  \
+               \__\/-<_>-<_>-<->-|-<
+                    /\____________/~
+                   / /===/ /=====\ \
+                   ""    ""       "" ''''  
+                searching for slow waves...
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         """)
         # Validate polar parameter
         if polar not in ['normal', 'opposite']:
@@ -305,7 +333,7 @@ class ParalSWA:
                             detection = DetectSlowWave(
                                 meth,
                                 frequency=frequency,
-                                # MODIFIED: Use appropriate duration parameter based on method
+                                # Use appropriate duration parameter based on method
                                 duration=trough_duration if meth in ['Massimini2004', 'AASM/Massimini2004'] else None,
                                 neg_peak_thresh=neg_peak_thresh,
                                 p2p_thresh=p2p_thresh,
@@ -398,6 +426,9 @@ class ParalSWA:
         self.logger.info(f"Total slow waves detected across all channels: {len(all_slow_waves)}")
         return all_slow_waves
     
+ 
+
+
     def export_slow_wave_parameters_to_csv(self, json_input, csv_file, export_params='all', 
                                          frequency=None, ref_chan=None, grp_name='eeg', 
                                          n_fft_sec=4, file_pattern=None,skip_empty_files=True):
@@ -424,6 +455,9 @@ class ParalSWA:
         from wonambi.trans.analyze import event_params, export_event_params
         import glob
         
+        # Clean memory first
+        self.clean_memory()
+
         self.logger.info("Calculating slow wave parameters for CSV export...")
          
         # Load slow waves from JSON file(s)
@@ -951,3 +985,610 @@ class ParalSWA:
         
         self.logger.info(f"Exported slow wave statistics to {csv_file}")
         return dict(stage_channel_stats)
+    
+
+    def save_detection_summary(self, output_dir, method, parameters, results_summary):
+        """
+        Save a comprehensive summary of detection parameters and results.
+        
+        Parameters
+        ----------
+        output_dir : str
+            Directory to save the summary
+        method : str
+            Detection method used
+        parameters : dict
+            All parameters used for detection
+        results_summary : dict
+            Summary of detection results
+        """
+        try:
+            import datetime
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            summary_file = os.path.join(output_dir, f"detection_summary_{method}_{timestamp}.json")
+            
+            summary_data = {
+                'detection_method': method,
+                'parameters': parameters,
+                'results': results_summary,
+                'timestamp': datetime.datetime.now().isoformat(),
+                'software_version': 'TurtleWave hdEEG GUI'
+            }
+            
+            with open(summary_file, 'w') as f:
+                json.dump(summary_data, f, indent=2)
+            
+            self.logger.info(f"Saved detection summary to: {summary_file}")
+            return summary_file
+        except Exception as e:
+            self.logger.error(f"Error saving detection summary: {e}")
+            return None
+
+    ############# SQLite Database Initialization and Import Functions #############
+
+    def initialize_sqlite_database(self, db_path='neural_events.db'):
+            """
+            Create SQLite database optimized for storing calculated event parameters 
+            from event_params() function.
+            
+            Parameters
+            ----------
+            db_path : str
+                Path to SQLite database file
+                
+            Returns
+            -------
+            str
+                Path to created database
+            """
+            import sqlite3
+            import os
+
+            # If db_path is a directory, append the default filename
+            if os.path.isdir(db_path):
+                db_path = os.path.join(db_path, 'neural_events.db')
+                self.logger.info(f"Database path was a directory, using: {db_path}")
+            
+            # Create directory for database if it doesn't exist
+            db_dir = os.path.dirname(db_path)
+            if db_dir and not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
+                self.logger.info(f"Created directory for database: {db_dir}")
+            
+            # Check if database exists
+            db_exists = os.path.exists(db_path)
+            
+            # Define the database initialization operation
+            def init_db(conn):
+                cursor = conn.cursor()
+                # Main events table with common fields across all event types
+                conn.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    uuid TEXT PRIMARY KEY,
+                    event_type TEXT,           -- 'spindle', 'slow_wave', 'ripple', etc.
+                    channel TEXT,
+                    
+                    -- Basic temporal properties
+                    start_time REAL,
+                    end_time REAL,
+                    duration REAL,
+                    start_time_hms TEXT,       -- formatted time (HH:MM:SS)
+                    stage TEXT,
+                    cycle TEXT,                -- sleep cycle
+                    method TEXT,
+
+
+                    -- Frequency band information
+                    freq_band TEXT,            -- Full text representation (e.g. "0.5-3Hz")
+                    freq_lower REAL,           -- Lower bound of frequency band (e.g. 0.5)
+                    freq_upper REAL,           -- Upper bound of frequency band (e.g. 3.0)
+                                            
+
+                    -- Amplitude metrics
+                    min_amp REAL,          -- minimum amplitude
+                    max_amp REAL,          -- maximum amplitude
+
+                    peak2peak_amp REAL,    -- peak-to-peak amplitude
+
+                    -- Processing metadata         
+                    processing_timestamp TEXT,
+                    n_fft_sec INTEGER,
+                    
+                    CONSTRAINT event_chan_time UNIQUE (event_type, channel, start_time, method, freq_lower, freq_upper, stage)
+                )''')
+
+                # Create tracking table for batch processing
+                conn.execute('''
+                CREATE TABLE IF NOT EXISTS processing_status (
+                    channel TEXT,
+                    event_type TEXT,
+                    json_file TEXT,
+                    processed BOOLEAN DEFAULT 0,
+                    attempts INTEGER DEFAULT 0,
+                    last_attempt_time TEXT,
+                    success BOOLEAN DEFAULT 0,
+                    error_message TEXT,
+                            
+                    PRIMARY KEY (channel, event_type)
+                )''')
+
+                # Create indexes for efficient querying
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_event_type ON events(event_type)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_channel ON events(channel)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_timerange ON events(start_time, end_time)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_stage ON events(stage)')
+                
+                
+                conn.commit()
+
+
+                # If database didn't exist, log creation
+                if not db_exists:
+                    self.logger.info(f"Created new database at: {db_path}")
+                    
+                return db_path
+        
+            # Use the safe database operation
+            return self._safe_database_operation(db_path, init_db)
+
+
+
+    def _safe_database_operation(self, db_path, operation_func):
+        """Safely perform a database operation with proper connection handling"""
+        import sqlite3
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            result = operation_func(conn)
+            return result
+        except Exception as e:
+            self.logger.error(f"Database error: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+
+    def import_parameters_csv_to_database(self, csv_file, db_path,  append=True):
+        """
+        Import event parameters from an existing CSV file into SQLite database.
+        Supports multiple event types and incremental updates.
+        
+        Parameters
+        ----------
+        csv_file : str
+            Path to existing parameters CSV file
+        db_path : str
+            Path to SQLite database
+        append : bool
+            If True, adds to existing database without replacing existing entries
+            If False, replaces any existing entries with the same UUID
+                
+        Returns
+        -------
+        dict
+            Summary of the operation with counts of added, updated, and skipped rows
+        """
+        import sqlite3
+        import pandas as pd
+        import os
+        import glob
+        
+
+        self.clean_memory()
+
+        # Initialize database if needed
+        if not os.path.exists(db_path):
+            self.initialize_sqlite_database(db_path)
+        
+        # Check if the file exists
+        if not os.path.exists(csv_file):
+            self.logger.error(f"CSV file not found: {csv_file}")
+            return {"error": "CSV file not found", "added": 0, "updated": 0, "skipped": 0}
+        
+        # Track statistics
+        stats = {
+            "added": 0,
+            "updated": 0,
+            "skipped": 0
+        }
+        
+        # Read the CSV file
+        self.logger.info(f"Reading parameters from CSV: {csv_file}")
+        try:
+            # First determine how many rows to skip (header plus statistics)
+            with open(csv_file, 'r') as f:
+                lines = f.readlines()
+                
+            # Find the header row (contains 'Start time')
+            header_row = None
+            for i, line in enumerate(lines):
+                if 'Start time' in line:
+                    header_row = i
+                    break
+            
+            if header_row is None:
+                self.logger.error("Could not find header row in CSV")
+                return {"error": "Could not find header row", "added": 0, "updated": 0, "skipped": 0}
+            
+            # Check if there are statistic rows after the header
+            has_stat_rows = False
+            if header_row + 1 < len(lines):
+                next_line = lines[header_row + 1]
+                # Check if the next line starts with "Mean" or contains statistical summaries
+                if next_line.strip().startswith('Mean') or 'Mean' in next_line:
+                    has_stat_rows = True
+
+            # Skip header row and 4 statistic rows
+            skiprows = header_row + 4 if has_stat_rows else header_row
+            
+            # Read the CSV, skipping header and statistics
+            df = pd.read_csv(csv_file, skiprows=skiprows)
+            
+            if df.empty:
+                self.logger.warning("CSV file contains no data rows")
+                return {"error": "Empty CSV file", "added": 0, "updated": 0, "skipped": 0}
+                
+            self.logger.info(f"Read {len(df)} parameter rows from CSV")
+            
+
+            # Define database operation function
+            def process_csv_data(conn):
+                cursor = conn.cursor()
+            
+                # Determine event type from CSV filename or content
+                event_type = "slow_wave"  # Default
+                filename = os.path.basename(csv_file).lower()
+                if 'slow_wave' in filename or 'slowwave' in filename or 'sw' in filename:
+                    event_type = "slow_wave"
+                elif 'spindle' in filename:
+                    event_type = "spindle"
+
+                # Override event_type if 'Event type' column exists in CSV
+                if 'Event type' in df.columns:
+                    # Use the first non-null value in the Event type column
+                    event_types = df['Event type'].dropna()
+                    if len(event_types) > 0:
+                        event_type = event_types.iloc[0]
+
+                self.logger.info(f"Importing parameters for event type: {event_type}")
+
+                # Map column names from CSV to database columns
+                column_mapping = {
+                    'Start time': 'start_time',
+                    'Start time (HH:MM:SS)': 'start_time_hms',
+                    'End time': 'end_time',
+                    'Stage': 'stage',
+                    'Cycle': 'cycle',
+                    'Event type': 'event_type',
+                    'Channel': 'channel',                
+                    'Duration (s)': 'duration',                
+                    'Min. amplitude (uV)':'min_amp',
+                    'Max. amplitude (uV)': 'max_amp',
+                    'Peak-to-peak amplitude (uV)': 'peak2peak_amp',
+                    #'RMS (uV)': 'rms',
+                    #'Power (uV^2)': 'power',
+                    #'Peak power frequency (Hz)': 'peak_power_freq',
+                    #'Energy (uV^2s)': 'energy',
+                    #'Peak energy frequency': 'peak_energy_freq',
+                    'UUID': 'uuid'
+                }
+                
+                # Create a list of columns that exist in the dataframe
+                existing_columns = []
+                db_columns = []
+                
+                for csv_col, db_col in column_mapping.items():
+                    if csv_col in df.columns:
+                        existing_columns.append(csv_col)
+                        db_columns.append(db_col)
+                
+                # Add processing timestamp
+                import datetime
+                now = datetime.datetime.now().isoformat()
+                df['processing_timestamp'] = now
+                existing_columns.append('processing_timestamp')
+                db_columns.append('processing_timestamp')
+                
+                # Extract frequency band from filename if possible
+                filename = os.path.basename(csv_file)
+                freq_band = "unknown"
+                
+                # Try to extract frequency from filename (e.g., sw_parameters_Staresina2015_0.3-2.0Hz_NREM2NREM3.csv)
+                if "_" in filename and "Hz" in filename:
+                    parts = filename.split('_')
+                    for part in parts:
+                        if "Hz" in part:
+                            freq_band = part
+                            try:
+                                # Handle formats like "9-12Hz" or "9.0-12.0Hz"
+                                freq_parts = freq_band.replace("Hz", "").split("-")
+                                if len(freq_parts) == 2:
+                                    freq_lower = float(freq_parts[0])
+                                    freq_upper = float(freq_parts[1])
+
+                            except ValueError:
+                                self.logger.warning(f"Could not parse frequency bounds from {freq_band}")
+
+                            break
+                
+                df['freq_band'] = freq_band
+                df['freq_lower'] = freq_lower
+                df['freq_upper'] = freq_upper
+                
+                existing_columns.append('freq_band')
+                existing_columns.append('freq_lower')
+                existing_columns.append('freq_upper')
+                
+                db_columns.append('freq_band')
+                db_columns.append('freq_lower')
+                db_columns.append('freq_upper')
+                
+                # Extract method from filename if possible
+                method = "unknown"
+                if "_" in filename:
+                    parts = filename.split('_')
+                    if len(parts) > 2:
+                        # Typically the format is sw_parameters_METHOD_freq_stages.csv
+                        method = parts[2]
+                
+                df['method'] = method
+                existing_columns.append('method')
+                db_columns.append('method')
+                
+                # Set event_type from our detection
+                df['event_type'] = event_type
+                if 'event_type' not in db_columns:
+                    existing_columns.append('event_type')
+                    db_columns.append('event_type')
+
+                # Check for UUID column, which is essential for avoiding duplicates
+                uuid_col = 'UUID' if 'UUID' in df.columns else 'uuid' if 'uuid' in df.columns else None
+                
+                # If no UUID column, create one
+                if uuid_col is None:
+                    self.logger.warning("No UUID column found, creating UUIDs based on channel and time")
+                    import uuid
+                    df['uuid'] = [
+                        str(uuid.uuid4()) for _ in range(len(df))
+                    ]
+                    uuid_col = 'uuid'
+                    existing_columns.append('uuid')
+                    db_columns.append('uuid')
+                
+
+                # Check if the required columns for uniqueness constraint exist
+                if 'Channel' not in df.columns or 'Start time' not in df.columns:
+                    self.logger.warning("Missing required columns for uniqueness check")
+
+                # Pre-check existing events by unique constraint (event_type, channel, start_time, method)
+                # rather than just UUID to avoid constraint violations
+                existing_events = set()
+                if append and 'Channel' in df.columns and 'Start time' in df.columns:
+                    # Get all unique combinations of event_type, channel, start_time
+                    channels = df['Channel'].astype(str).tolist()
+                    start_times = df['Start time'].astype(float).tolist()
+                    
+                    # Build a query to get existing events matching these combinations
+                    query_parts = []
+                    query_params = []
+                    
+                    for i in range(len(channels)):
+                        freq_lower = df['freq_lower'].iloc[i] if 'freq_lower' in df.columns else None
+                        freq_upper = df['freq_upper'].iloc[i] if 'freq_upper' in df.columns else None
+                        stage = df['Stage'].iloc[i] if 'Stage' in df.columns else None
+
+                        query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)")
+                        query_params.extend([event_type, channels[i], start_times[i],method, freq_lower, freq_upper, stage])
+                    
+                    if query_parts:
+                        query = f"SELECT event_type, channel, start_time, method, freq_lower, freq_upper, stage FROM events WHERE {' OR '.join(query_parts)}"
+                        cursor.execute(query, query_params)
+                        
+                        for row in cursor.fetchall():
+                            # Create a tuple of (event_type, channel, start_time. method) to check against
+                            existing_events.add((row[0], row[1], row[2], row[3], row[4], row[5], row[6]))
+                        
+                        self.logger.info(f"Found {len(existing_events)} existing entries matching event type, channel, and start time")
+                
+                # Mark rows that exist in the database based on the uniqueness constraint
+                df['exists_in_db'] = df.apply(
+                    lambda row: (
+                        event_type, 
+                        str(row.get('Channel', '')), 
+                        float(row.get('Start time', 0)), 
+                        method,
+                        row.get('freq_lower', None),
+                        row.get('freq_upper', None),
+                        str(row.get('Stage',''))
+                        ) in existing_events, 
+                    axis=1
+                )
+
+
+
+                # # If appending, we need to check which rows already exist in the database
+                # if append and uuid_col:
+                #     # Get all UUIDs from the dataframe
+                #     all_uuids = df[uuid_col].astype(str).tolist()
+                    
+                #     # Check which UUIDs already exist in the database
+                #     placeholders = ','.join(['?' for _ in all_uuids])
+                #     cursor.execute(f"SELECT uuid FROM events WHERE uuid IN ({placeholders})", all_uuids)
+                #     existing_uuids = {row[0] for row in cursor.fetchall()}
+                    
+                #     self.logger.info(f"Found {len(existing_uuids)} existing entries in database")
+                    
+                #     # Mark rows that already exist in the database
+                #     df['exists_in_db'] = df[uuid_col].apply(lambda x: str(x) in existing_uuids)
+                # else:
+                #     # If not appending, mark all rows as not existing
+                #     df['exists_in_db'] = False
+                
+                # Process each row based on whether it exists and append mode
+                for _, row in df.iterrows():
+                    if isinstance(row['Stage'], list):
+                        row['Stage'] = '+'.join(row['Stage'])
+                    elif isinstance(row['Stage'], str) and '[' in row['Stage']:
+                        # Sometimes stage might be a string representation of a list like "['NREM2', 'NREM3']"
+                        # Try to convert it to a proper list then join
+                        try:
+                            import ast
+                            stage_list = ast.literal_eval(row['Stage'])
+                            if isinstance(stage_list, list):
+                                row['Stage'] = ''.join(stage_list)
+                        except:
+                            # If conversion fails, keep as is
+                            pass
+                    # Skip existing rows when in append mode
+                    if append and row['exists_in_db']:
+                        stats["skipped"] += 1
+                        continue
+                    values = [row[col] if col in row else None for col in existing_columns]
+                    
+                    # Handle NaN values
+                    for i, val in enumerate(values):
+                        # Check if value is NaN (using pandas or numpy's isnan)
+                        if pd.isna(val) or (hasattr(val, 'isnan') and val.isnan()):
+                            values[i] = None  # Convert NaN to None (which becomes NULL in SQLite)
+
+                    try:
+                        if append and row['exists_in_db']:
+                            # Skip existing rows when in append mode
+                            stats["skipped"] += 1
+                            continue
+                        if not append and row['exists_in_db']:
+                            # Update existing row when not in append mode
+                            update_columns = [col for col in db_columns if col != 'uuid']
+                            update_values = [val for i, val in enumerate(values) if db_columns[i] != 'uuid']
+                            
+                            # Update based on the unique constraint, not just UUID
+                            cursor.execute(f"""
+                            UPDATE events
+                            SET {', '.join([f'{col} = ?' for col in update_columns])}
+                            WHERE event_type = ? AND channel = ? AND start_time = ? AND method = ?
+                                AND freq_lower = ? AND freq_upper = ? AND stage = ?
+                            """, update_values + [
+                                event_type, 
+                                row.get('Channel', ''), 
+                                row.get('Start time', 0), 
+                                method,
+                                row.get('freq_lower', None),
+                                row.get('freq_upper', None),
+                                str(row.get('Stage', ''))
+                                    ])
+                            
+                            stats["updated"] += 1
+                        else:
+                            # Insert new row - use REPLACE to handle any constraint violations
+                            cursor.execute(f"""
+                            INSERT OR REPLACE INTO events
+                            ({', '.join(db_columns)})
+                            VALUES ({', '.join(['?' for _ in db_columns])})
+                            """, values)
+                            
+                            stats["added"] += 1
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error processing row: {e}")
+                        stats["skipped"] += 1
+                
+                conn.commit()
+                self.logger.info(f"Database updated: {stats['added']} added, {stats['updated']} updated, {stats['skipped']} skipped")
+                
+                # Update processing status
+                #cursor.execute("PRAGMA table_info(processing_status)")
+                #columns = cursor.fetchall()
+                #print("Columns in processing_status table:", columns)
+
+                # Update processing status with handling for both channels with events and empty channels
+                if 'Channel' in df.columns:
+                    processed_channels = set(df['Channel'].unique())
+                    
+                    # Add channels that have events in the CSV
+                    for channel in processed_channels:
+                        cursor.execute('''
+                        INSERT OR REPLACE INTO processing_status
+                        (channel, event_type, processed, success, attempts, last_attempt_time)
+                        VALUES (?, ?, 1, 1, 1, datetime('now'))
+                        ''', (channel,event_type))
+                    
+                    # Try to identify empty channels from JSON filenames
+                    # Note: This assumes the CSV file name contains information to identify related JSON files
+                    csv_basename = os.path.basename(csv_file)
+                    parts = csv_basename.split('_')
+                    if len(parts) >= 3:
+                        # For CSVs like: spindle_parameters_Ferrarelli2007_9-12Hz_NREM2NREM3.csv
+                        # Matching JSONs like: spindles_Ferrarelli2007_9-12Hz_NREM2NREM3_E101.json
+                        
+                        # Extract the method and frequency-stage parts
+                        method = parts[2]  # Ferrarelli2007
+                        freq_stage = parts[3:]  # ['9-12Hz', 'NREM2NREM3']
+                        freq_stage_str = '_'.join(freq_stage).replace('.csv', '')
+                        
+                        # Construct pattern to find related JSON files
+                        json_pattern = f"{event_type}s_{method}_{freq_stage_str}_*"
+                        
+                        # Find JSON files matching the pattern
+                        json_dir = os.path.dirname(csv_file)
+                        all_json_files = glob.glob(os.path.join(json_dir, f"{json_pattern}.json"))
+                        
+                        self.logger.info(f"Looking for JSON files matching pattern: {json_pattern}.json")
+                        self.logger.info(f"Found {len(all_json_files)} matching JSON files")
+
+                        # Extract channel names from JSON files
+                        empty_channels = set()
+                        for file in all_json_files:
+                            try:
+                                # Extract channel name from filename
+                                # Assuming format like "spindles_method_freq_stage_CHANNELNAME.json"
+                                channel_name = os.path.basename(file).split('_')[-1].replace('.json', '')
+                                # Skip if channel already in processed_channels
+                                if channel_name in processed_channels:
+                                    continue
+                                
+                                # Read JSON file to check if it's empty
+                                with open(file, 'r') as f:
+                                    content = json.load(f)
+                                    
+                                # If JSON file contains an empty array, add to empty_channels
+                                if isinstance(content, list) and len(content) == 0:
+                                    empty_channels.add(channel_name)
+                                    self.logger.info(f"Found empty JSON file for channel: {channel_name}")
+                            except Exception as e:
+                                self.logger.warning(f"Error checking JSON file {file}: {e}")
+    
+                        
+                        # Add empty channels to processing_status
+                        for channel in empty_channels:
+                            cursor.execute('''
+                            INSERT OR REPLACE INTO processing_status
+                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
+                            VALUES (?, ?, 1, 1, 1, datetime('now'), 'No events detected')
+                            ''', (channel,event_type))
+            
+                        if empty_channels:
+                            self.logger.info(f"Recorded {len(empty_channels)} channels with no events: {', '.join(empty_channels)}")
+                        # Add empty channels count to stats
+                        stats["empty_channels"] = len(empty_channels)
+                    
+                    conn.commit()
+
+                # Get total count
+                cursor.execute("SELECT COUNT(*) FROM events")
+                total_count = cursor.fetchone()[0]
+                self.logger.info(f"Total parameters in database: {total_count}")
+
+                conn.close()
+
+                return stats
+            # Use the safe database operation
+            return self._safe_database_operation(db_path, process_csv_data)
+        
+        except Exception as e:
+            self.logger.error(f"Error processing CSV: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e), "added": 0, "updated": 0, "skipped": 0}
+
+

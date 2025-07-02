@@ -27,9 +27,9 @@ from turtlewave_hdEEG import ParalSWA, CustomAnnotations
 import logging
 
 # 1. Define the file paths for the dataset and annotations
-root_dir = "/Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/Coupling_python/CFC_080920/individual/OSA_BL13PR/"
-datafilename = "OSA_BL13PR.set"
-annotfilename = "OSA_BL13PR.xml"
+root_dir = "/Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/turtleRef/01js/ses-1/"
+datafilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.set"
+annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 
 channels_csv_path = os.path.join(root_dir, "channels.csv")
 
@@ -41,6 +41,8 @@ print(f"Channels loaded from CSV: {test_channels}")
 data_file = os.path.join(root_dir, datafilename)
 annot_file = os.path.join(root_dir, "wonambi", annotfilename)
 json_dir = os.path.join(root_dir, "wonambi", "sw_results")
+db_path = os.path.join(root_dir, "wonambi",'neural_events.db')
+
 
 # 2. Load dataset and annotations
 print("Loading dataset and annotations...")
@@ -56,6 +58,7 @@ event_processor = ParalSWA(
 # 4. Custom define parameters
 test_method = 'Staresina2015'  # 'Massimini2004','AASM/Massimini2004', 'Ngo2015', 'Staresina2015'
 test_stages = ['NREM2', 'NREM3']  # Sleep stages to analyze
+#test_channels = ['E101']  # Channels
 test_frequency = (0.3, 2.0)  # Frequency range for slow waves
 test_trough_duration = (0.8, 2)  # Min and max trough duration
 test_amplitude = {
@@ -104,6 +107,13 @@ density2CSV = event_processor.export_slow_wave_density_to_csv(
     stage=test_stages,
     file_pattern=file_pattern
 )
+
+csv2db = event_processor.import_parameters_csv_to_database(
+    csv_file     = os.path.join(json_dir, f'sw_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
+    db_path      = db_path
+    )
+
+
 
 print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
 print(f"Slow wave parameters saved")

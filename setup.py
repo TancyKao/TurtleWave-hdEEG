@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="turtlewave-hdEEG",  # Use hyphen for PyPI name
-    version="1.1.0",
+    version="2.0.0",
     author="Tancy Kao",
     author_email="tancy.kao@woolcock.org.au",
     description="High-density EEG processing for sleep event detection",

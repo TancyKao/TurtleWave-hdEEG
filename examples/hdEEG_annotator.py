@@ -36,10 +36,9 @@ import os
 
 ## 1. Loading a clean EEG_processor dataset
 
-root_dir = "/Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/turtleRef/"
-datafilename = "13PR_clean_rebuilt.set"
 
-
+root_dir = "//Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/turtleRef/"
+datafilename = "Cleaned and Rebuilt Dataset.set"
 
 
 

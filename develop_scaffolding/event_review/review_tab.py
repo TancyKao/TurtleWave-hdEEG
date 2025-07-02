@@ -2,11 +2,14 @@
 import os
 import numpy as np
 import pandas as pd
+
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
                              QComboBox, QTabWidget, QSplitter, QGroupBox, QCheckBox,
                              QSpinBox, QDoubleSpinBox, QProgressBar, QMessageBox)
 
+
+from turtlewave_hdEEG import LargeDataset, XLAnnotations, ParalEvents, ParalSWA, CustomAnnotations
 from .eeg_visualizer import EEGVisualizerWidget
 from .hypnogram_visualizer import HypnogramWidget
 from .event_navigator import EventNavigator
@@ -375,7 +378,8 @@ class EventReviewTab(QWidget):
     
     def load_data(self, dataset, annotations=None):
         """Load dataset and annotations for review"""
-        self.dataset = dataset
+        self.dataset = dataset  # Use the dataset passed from the main application
+        
         self.annotations = annotations
         
         # Initialize visualizers with dataset
