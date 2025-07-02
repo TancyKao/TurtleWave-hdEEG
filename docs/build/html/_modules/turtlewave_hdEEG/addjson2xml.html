@@ -1,0 +1,318 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>turtlewave_hdEEG.addjson2xml &mdash; turtlewave 1.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=fc837d61"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            turtlewave
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../introduction.html">TURTLEWAVE</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">nstallation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../usage.html">Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../gui.html">GUI Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">turtlewave</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">turtlewave_hdEEG.addjson2xml</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for turtlewave_hdEEG.addjson2xml</h1><div class="highlight"><pre>
+<span></span><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">xml.etree.ElementTree</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ET</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">xml.dom</span><span class="w"> </span><span class="kn">import</span> <span class="n">minidom</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span>
+
+<div class="viewcode-block" id="convert_json_to_xml">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.addjson2xml.convert_json_to_xml">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">convert_json_to_xml</span><span class="p">(</span><span class="n">json_files</span><span class="p">,</span> <span class="n">output_dir</span><span class="o">=</span><span class="s1">&#39;.&#39;</span><span class="p">,</span> <span class="n">existing_xml</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">event_type</span><span class="o">=</span><span class="s1">&#39;slowwave&#39;</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Convert multiple JSON files containing events (slow waves or spindles) into a single XML file.</span>
+<span class="sd">    Can append to an existing XML file if provided.</span>
+<span class="sd">    </span>
+<span class="sd">    Parameters:</span>
+<span class="sd">    json_files (list): List of paths to JSON files</span>
+<span class="sd">    output_dir (str): Directory to save the output XML file</span>
+<span class="sd">    existing_xml (str): Path to existing XML file to append to (optional)</span>
+<span class="sd">    event_type (str): Type of event to create (&#39;slowwave&#39; or &#39;spindle&#39;)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="c1"># Initialize the root XML element or load existing XML</span>
+    <span class="k">if</span> <span class="n">existing_xml</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">existing_xml</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">tree</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">existing_xml</span><span class="p">)</span>
+            <span class="n">root</span> <span class="o">=</span> <span class="n">tree</span><span class="o">.</span><span class="n">getroot</span><span class="p">()</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Loaded existing XML file: </span><span class="si">{</span><span class="n">existing_xml</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">ET</span><span class="o">.</span><span class="n">ParseError</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error parsing existing XML file: </span><span class="si">{</span><span class="n">existing_xml</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="n">root</span> <span class="o">=</span> <span class="n">create_new_wonambi_xml</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="n">create_new_wonambi_xml</span><span class="p">()</span>
+    
+    <span class="c1"># Track unique channels to create filename</span>
+    <span class="n">channels</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+    <span class="c1"># Find or create the appropriate event_type element in the XML structure</span>
+    <span class="n">events_elem</span> <span class="o">=</span> <span class="n">root</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">&quot;.//events&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">events_elem</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="c1"># Look for rater element</span>
+        <span class="n">rater_elem</span> <span class="o">=</span> <span class="n">root</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">&quot;.//rater&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">rater_elem</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Create rater element</span>
+            <span class="n">dataset_elem</span> <span class="o">=</span> <span class="n">root</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">&quot;.//dataset&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">dataset_elem</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">dataset_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="s2">&quot;dataset&quot;</span><span class="p">)</span>
+            
+            <span class="n">rater_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">dataset_elem</span><span class="p">,</span> <span class="s2">&quot;rater&quot;</span><span class="p">)</span>
+            <span class="n">rater_elem</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;name&quot;</span><span class="p">,</span> <span class="s2">&quot;Anon&quot;</span><span class="p">)</span>
+            <span class="n">now</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span><span class="o">.</span><span class="n">strftime</span><span class="p">(</span><span class="s2">&quot;%Y-%m-</span><span class="si">%d</span><span class="s2">T%H:%M:%S.</span><span class="si">%f</span><span class="s2">&quot;</span><span class="p">)[:</span><span class="o">-</span><span class="mi">3</span><span class="p">]</span>
+            <span class="n">rater_elem</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;created&quot;</span><span class="p">,</span> <span class="n">now</span><span class="p">)</span>
+            <span class="n">rater_elem</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;modified&quot;</span><span class="p">,</span> <span class="n">now</span><span class="p">)</span>
+            <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">rater_elem</span><span class="p">,</span> <span class="s2">&quot;bookmarks&quot;</span><span class="p">)</span>
+        
+        <span class="c1"># Create events element</span>
+        <span class="n">events_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">rater_elem</span><span class="p">,</span> <span class="s2">&quot;events&quot;</span><span class="p">)</span>
+    
+    <span class="c1"># Find or create the event_type element for this event type</span>
+    <span class="n">event_type_elem</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">for</span> <span class="n">elem</span> <span class="ow">in</span> <span class="n">events_elem</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="s2">&quot;event_type&quot;</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">elem</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="n">event_type</span><span class="p">:</span>
+            <span class="n">event_type_elem</span> <span class="o">=</span> <span class="n">elem</span>
+            <span class="k">break</span>
+    
+    <span class="k">if</span> <span class="n">event_type_elem</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">event_type_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">events_elem</span><span class="p">,</span> <span class="s2">&quot;event_type&quot;</span><span class="p">)</span>
+        <span class="n">event_type_elem</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">,</span> <span class="n">event_type</span><span class="p">)</span>
+
+    
+    <span class="c1"># Extract existing channels from XML if it exists</span>
+    <span class="k">if</span> <span class="n">existing_xml</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">existing_xml</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">root</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="s1">&#39;.//event&#39;</span><span class="p">):</span>
+            <span class="n">chan_elem</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s1">&#39;event_chan&#39;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">chan_elem</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">chan_elem</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+                <span class="c1"># Extract channel name </span>
+                <span class="n">chan_text</span> <span class="o">=</span> <span class="n">chan_elem</span><span class="o">.</span><span class="n">text</span>
+                <span class="k">if</span> <span class="s1">&#39;(&#39;</span> <span class="ow">in</span> <span class="n">chan_text</span><span class="p">:</span>
+                    <span class="n">chan</span> <span class="o">=</span> <span class="n">chan_text</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;(&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+                    <span class="n">channels</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">chan</span><span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">channels</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">chan_text</span><span class="p">)</span>
+    
+    <span class="c1"># Process each JSON file</span>
+    <span class="k">for</span> <span class="n">json_file</span> <span class="ow">in</span> <span class="n">json_files</span><span class="p">:</span>
+        <span class="c1"># Load the JSON data</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">json_file</span><span class="p">,</span> <span class="s1">&#39;r&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="n">events</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+        
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">events</span><span class="p">:</span>
+            <span class="k">continue</span>
+        
+
+        <span class="c1"># Process each event in the JSON file</span>
+        <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">events</span><span class="p">:</span>
+            <span class="n">chan</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;chan&#39;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">chan</span><span class="p">:</span>
+                <span class="n">channels</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">chan</span><span class="p">)</span>
+            
+            <span class="c1"># Get start and end times</span>
+            <span class="n">start_time</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;start_time&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">event</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;start&#39;</span><span class="p">)</span>
+            <span class="n">end_time</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;end_time&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">event</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;end&#39;</span><span class="p">)</span>
+            
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">start_time</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">end_time</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Warning: Event missing start/end time: </span><span class="si">{</span><span class="n">event</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+                <span class="k">continue</span>
+            
+            <span class="c1"># Create event element under the event_type element</span>
+            <span class="n">event_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">event_type_elem</span><span class="p">,</span> <span class="s2">&quot;event&quot;</span><span class="p">)</span>
+            
+ 
+            <span class="c1"># Add start time</span>
+            <span class="n">start_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">event_elem</span><span class="p">,</span> <span class="s2">&quot;event_start&quot;</span><span class="p">)</span>
+            <span class="n">start_elem</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">start_time</span><span class="p">)</span>
+            
+            <span class="c1"># Add end time</span>
+            <span class="n">end_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">event_elem</span><span class="p">,</span> <span class="s2">&quot;event_end&quot;</span><span class="p">)</span>
+            <span class="n">end_elem</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">end_time</span><span class="p">)</span>
+            
+            <span class="c1"># Add channel</span>
+            <span class="n">chan_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">event_elem</span><span class="p">,</span> <span class="s2">&quot;event_chan&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">chan</span><span class="p">:</span>
+                <span class="n">chan_elem</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="n">chan</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">chan_elem</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;(all)&quot;</span>
+            
+            <span class="c1"># Add quality</span>
+            <span class="n">qual_elem</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">event_elem</span><span class="p">,</span> <span class="s2">&quot;event_qual&quot;</span><span class="p">)</span>
+            <span class="n">qual_elem</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;Good&quot;</span>
+    
+   
+    <span class="c1"># Create the filename based on channels and input filenames</span>
+    <span class="c1"># Extract channel names from JSON filenames if they match pattern</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">channels</span><span class="p">:</span>
+        <span class="c1"># Try to extract channel info from JSON filenames</span>
+        <span class="k">for</span> <span class="n">json_file</span> <span class="ow">in</span> <span class="n">json_files</span><span class="p">:</span>
+            <span class="n">basename</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">json_file</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s1">&#39;_&#39;</span> <span class="ow">in</span> <span class="n">basename</span><span class="p">:</span>
+                <span class="c1"># Extract text after the last underscore before .json</span>
+                <span class="n">parts</span> <span class="o">=</span> <span class="n">basename</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)</span>
+                <span class="n">potential_chan</span> <span class="o">=</span> <span class="n">parts</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;.&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+                <span class="k">if</span> <span class="n">potential_chan</span><span class="p">:</span>
+                    <span class="n">channels</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">potential_chan</span><span class="p">)</span>
+    
+ 
+    <span class="n">chan_list</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">channels</span><span class="p">))</span>
+    
+    <span class="k">if</span> <span class="n">existing_xml</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">existing_xml</span><span class="p">):</span>
+        <span class="c1"># If we&#39;re appending to an existing file, start with that basename</span>
+        <span class="n">base_filename</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">existing_xml</span><span class="p">))[</span><span class="mi">0</span><span class="p">]</span>
+        
+        <span class="c1"># Add the channel info as a suffix</span>
+        <span class="k">if</span> <span class="n">chan_list</span><span class="p">:</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">chan_list</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mi">3</span><span class="p">:</span>
+                <span class="n">chan_str</span> <span class="o">=</span> <span class="s2">&quot;_&quot;</span> <span class="o">+</span> <span class="s2">&quot;_&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">chan_list</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">chan_str</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;_</span><span class="si">{</span><span class="n">chan_list</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">_plus_</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">chan_list</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="si">}</span><span class="s2">_chans&quot;</span>
+            
+            <span class="n">annotation_filename</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">base_filename</span><span class="si">}{</span><span class="n">chan_str</span><span class="si">}</span><span class="s2">.xml&quot;</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">annotation_filename</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">existing_xml</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+       
+    
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">chan_list</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="n">chan_str</span> <span class="o">=</span> <span class="s2">&quot;_&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">chan_list</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">chan_str</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">chan_list</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">_plus_</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">chan_list</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="si">}</span><span class="s2">_chans&quot;</span>
+    
+    <span class="c1"># Create final filename</span>
+        <span class="n">annotation_filename</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">event_type</span><span class="si">}</span><span class="s2">_</span><span class="si">{</span><span class="n">chan_str</span><span class="si">}</span><span class="s2">.xml&quot;</span>
+    
+
+    
+    <span class="c1"># Create a pretty formatted XML string</span>
+    <span class="n">rough_string</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">tostring</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="s1">&#39;utf-8&#39;</span><span class="p">)</span>
+    <span class="n">reparsed</span> <span class="o">=</span> <span class="n">minidom</span><span class="o">.</span><span class="n">parseString</span><span class="p">(</span><span class="n">rough_string</span><span class="p">)</span>
+    <span class="n">pretty_xml</span> <span class="o">=</span> <span class="n">reparsed</span><span class="o">.</span><span class="n">toprettyxml</span><span class="p">(</span><span class="n">indent</span><span class="o">=</span><span class="s2">&quot;  &quot;</span><span class="p">)</span>
+    
+    <span class="c1"># Save the XML file</span>
+    <span class="n">output_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">output_dir</span><span class="p">,</span> <span class="n">annotation_filename</span><span class="p">)</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">output_path</span><span class="p">,</span> <span class="s1">&#39;w&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">pretty_xml</span><span class="p">)</span>
+    
+    <span class="k">return</span> <span class="n">output_path</span></div>
+
+<div class="viewcode-block" id="create_new_wonambi_xml">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.addjson2xml.create_new_wonambi_xml">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">create_new_wonambi_xml</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Create a new Wonambi-compatible XML structure&quot;&quot;&quot;</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">Element</span><span class="p">(</span><span class="s2">&quot;annotations&quot;</span><span class="p">)</span>
+    <span class="n">root</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;version&quot;</span><span class="p">,</span> <span class="s2">&quot;5&quot;</span><span class="p">)</span>
+    
+    <span class="c1"># Create dataset element</span>
+    <span class="n">dataset</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="s2">&quot;dataset&quot;</span><span class="p">)</span>
+    
+    <span class="c1"># Add placeholder elements</span>
+    <span class="n">filename</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="s2">&quot;filename&quot;</span><span class="p">)</span>
+    <span class="n">filename</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+    
+    <span class="n">path</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="s2">&quot;path&quot;</span><span class="p">)</span>
+    <span class="n">path</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+    
+    <span class="n">start_time</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="s2">&quot;start_time&quot;</span><span class="p">)</span>
+    <span class="n">start_time</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+    
+    <span class="n">first_second</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="s2">&quot;first_second&quot;</span><span class="p">)</span>
+    <span class="n">first_second</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;0&quot;</span>
+    
+    <span class="n">last_second</span> <span class="o">=</span> <span class="n">ET</span><span class="o">.</span><span class="n">SubElement</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="s2">&quot;last_second&quot;</span><span class="p">)</span>
+    <span class="n">last_second</span><span class="o">.</span><span class="n">text</span> <span class="o">=</span> <span class="s2">&quot;0&quot;</span>
+    
+    <span class="k">return</span> <span class="n">root</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Tancy Kao.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,360 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Event Processor &mdash; turtlewave 1.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=fc837d61"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=f281be69"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="GUI Reference" href="gui.html" />
+    <link rel="prev" title="Event Processor" href="pacprocessor.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            turtlewave
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="introduction.html">TURTLEWAVE</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">nstallation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="usage.html">Usage</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="modules.html">API Reference</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="modules.html#core-modules">Core Modules</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="eventprocessor.html">Event Processor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="swprocessor.html">Event Processor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="pacprocessor.html">Event Processor</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Event Processor</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#turtlewave_hdEEG.annotation.XLAnnotations"><code class="docutils literal notranslate"><span class="pre">XLAnnotations</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#turtlewave_hdEEG.annotation.CustomAnnotations"><code class="docutils literal notranslate"><span class="pre">CustomAnnotations</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="gui.html">GUI Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">turtlewave</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="modules.html">API Reference</a></li>
+      <li class="breadcrumb-item active">Event Processor</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/annotation.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="event-processor">
+<h1>Event Processor<a class="headerlink" href="#event-processor" title="Link to this heading"></a></h1>
+<p id="module-turtlewave_hdEEG.annotation">Annotations module for turtlewave_hdEEG
+Provides tools to create and save annotations using event information from EEGLAB</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.annotation.</span></span><span class="sig-name descname"><span class="pre">XLAnnotations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">annot_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rater_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Anon'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Simplified annotations for large datasets</p>
+<p>Initialize annotations object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset</strong> (<a class="reference internal" href="turtlewave_hdEEG.html#turtlewave_hdEEG.dataset.LargeDataset" title="turtlewave_hdEEG.dataset.LargeDataset"><em>LargeDataset</em></a>) – Dataset to associate with annotations.</p></li>
+<li><p><strong>annot_file</strong> (<em>str</em>) – Path to the annotation file.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_artefacts_from_events">
+<span class="sig-name descname"><span class="pre">add_artefacts_from_events</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_artefacts_from_events"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_artefacts_from_events" title="Link to this definition"></a></dt>
+<dd><p>Add artefact and arousal annotations from the dataset’s event information.</p>
+<p>Uses the ‘isreject’ flag in events to identify artefacts.
+Also identifies arousal events if ‘arousal’ is in the event type (case-insensitive).</p>
+<p>Highly optimized for large datasets by pre-filtering relevant events.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_stages_from_header">
+<span class="sig-name descname"><span class="pre">add_stages_from_header</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_stages_from_header"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_stages_from_header" title="Link to this definition"></a></dt>
+<dd><p>Import stages from header array into annotations using Wonambi’s import_staging
+with Compumedics format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>rater_name</strong> (<em>str</em>) – Name of the rater to use for staging (default: “Automatic_Staging”)</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if successful, False otherwise</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_annotations_batch">
+<span class="sig-name descname"><span class="pre">add_annotations_batch</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">label</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start_times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">end_times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">channels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_annotations_batch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_annotations_batch" title="Link to this definition"></a></dt>
+<dd><p>Add multiple annotations at once.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_annotation">
+<span class="sig-name descname"><span class="pre">add_annotation</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">label</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">end_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">channel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_annotation"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_annotation" title="Link to this definition"></a></dt>
+<dd><p>Add a single annotation to the annotations object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>label</strong> (<em>str</em>) – Label for the annotation</p></li>
+<li><p><strong>start_time</strong> (<em>float</em>) – Start time in seconds</p></li>
+<li><p><strong>end_time</strong> (<em>float</em>) – End time in seconds</p></li>
+<li><p><strong>channel</strong> (<em>str</em><em>, </em><em>list</em><em>, or </em><em>None</em>) – Channel(s) associated with the annotation.
+If None, uses ‘(all)’ to indicate all channels.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if successful, False otherwise</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.process_all">
+<span class="sig-name descname"><span class="pre">process_all</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.process_all"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.process_all" title="Link to this definition"></a></dt>
+<dd><p>Process all annotations - add artefacts and stages.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.save"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.save" title="Link to this definition"></a></dt>
+<dd><p>Save annotations to the XML file in Wonambi format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename</strong> (<em>str</em><em> or </em><em>None</em>) – Path to save the file. If None, uses the annot_file from initialization.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.annotation.</span></span><span class="sig-name descname"><span class="pre">CustomAnnotations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">annot_file</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Helper class for reading and working with Wonambi annotations</p>
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.last_second">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">last_second</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.last_second" title="Link to this definition"></a></dt>
+<dd><p>Return the last second in the recording</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.first_second">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">first_second</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.first_second" title="Link to this definition"></a></dt>
+<dd><p>Return the first second in the recording</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.dataset">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dataset</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.dataset" title="Link to this definition"></a></dt>
+<dd><p>Return the dataset associated with the annotations</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.rater">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">rater</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.rater" title="Link to this definition"></a></dt>
+<dd><p>Return the current rater</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.raters">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">raters</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.raters" title="Link to this definition"></a></dt>
+<dd><p>Return all raters in the annotation file</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.epochs">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">epochs</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.epochs" title="Link to this definition"></a></dt>
+<dd><p>Get all epochs from the annotation file</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_epochs">
+<span class="sig-name descname"><span class="pre">get_epochs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_epochs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_epochs" title="Link to this definition"></a></dt>
+<dd><p>Get epochs that match the specified criteria.
+This method matches the Wonambi API for compatibility.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list of epochs, which are dict with ‘start’ and ‘end’ times, plus
+additional parameters</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list of dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_rater">
+<span class="sig-name descname"><span class="pre">get_rater</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">rater</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_rater"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_rater" title="Link to this definition"></a></dt>
+<dd><p>Select one rater.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>rater</strong> (<em>str</em>) – name of the rater</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.add_rater">
+<span class="sig-name descname"><span class="pre">add_rater</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">rater</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.add_rater"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.add_rater" title="Link to this definition"></a></dt>
+<dd><p>Add one rater.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>rater</strong> (<em>str</em>) – name of the rater</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_stages">
+<span class="sig-name descname"><span class="pre">get_stages</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_stages"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_stages" title="Link to this definition"></a></dt>
+<dd><p>Extract just the stages from the epochs</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_hypnogram">
+<span class="sig-name descname"><span class="pre">get_hypnogram</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_hypnogram"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_hypnogram" title="Link to this definition"></a></dt>
+<dd><p>Convert stages to numeric values for hypnogram plotting</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.save"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.save" title="Link to this definition"></a></dt>
+<dd><p>Save annotations to the XML file in Wonambi format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename</strong> (<em>str</em><em> or </em><em>None</em>) – Path to save the file. If None, uses the annot_file from initialization.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.create_epochs">
+<span class="sig-name descname"><span class="pre">create_epochs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">epoch_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">30</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.create_epochs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.create_epochs" title="Link to this definition"></a></dt>
+<dd><p>Create epochs from a sequence of time points.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>times</strong> (<em>list</em><em> or </em><em>ndarray</em>) – List of time points (in seconds)</p></li>
+<li><p><strong>epoch_length</strong> (<em>float</em><em>, </em><em>optional</em>) – Length of each epoch in seconds</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_times">
+<span class="sig-name descname"><span class="pre">get_times</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cycle</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_times"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_times" title="Link to this definition"></a></dt>
+<dd><p>Return the times (start and end) for all epochs that match the parameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>stage</strong> (<em>str</em><em> or </em><em>None</em>) – Stage to match with</p></li>
+<li><p><strong>cycle</strong> (<em>str</em><em> or </em><em>None</em>) – Cycle to match with</p></li>
+<li><p><strong>exclude</strong> (<em>str</em><em> or </em><em>None</em>) – Stage to exclude</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Each tuple contains the start and end time of an epoch</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list of tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="pacprocessor.html" class="btn btn-neutral float-left" title="Event Processor" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="gui.html" class="btn btn-neutral float-right" title="GUI Reference" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Tancy Kao.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

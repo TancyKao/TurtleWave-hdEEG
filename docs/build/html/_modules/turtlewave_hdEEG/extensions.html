@@ -1,0 +1,691 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>turtlewave_hdEEG.extensions &mdash; turtlewave 1.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=fc837d61"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            turtlewave
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../introduction.html">TURTLEWAVE</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">nstallation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../usage.html">Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../gui.html">GUI Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">turtlewave</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">turtlewave_hdEEG.extensions</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for turtlewave_hdEEG.extensions</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">Custom extensions to Wonambi spindle detection</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="kn">import</span> <span class="n">mean</span><span class="p">,</span> <span class="n">arange</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">wonambi.detect</span><span class="w"> </span><span class="kn">import</span> <span class="n">DetectSpindle</span> <span class="k">as</span> <span class="n">OriginalDetectSpindle</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">wonambi.detect</span><span class="w"> </span><span class="kn">import</span> <span class="n">DetectSlowWave</span> <span class="k">as</span> <span class="n">OriginalDetectSlowWave</span>
+
+
+
+<div class="viewcode-block" id="ImprovedDetectSpindle">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.extensions.ImprovedDetectSpindle">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ImprovedDetectSpindle</span><span class="p">(</span><span class="n">OriginalDetectSpindle</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s1">&#39;Moelle2011&#39;</span><span class="p">,</span> <span class="n">frequency</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">duration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> 
+                 <span class="n">det_thresh</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">sel_thresh</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">moving_rms</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> 
+                 <span class="n">smooth_dur</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tolerance</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">min_interval</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">merge</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> 
+                 <span class="n">polar</span><span class="o">=</span><span class="s1">&#39;normal&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize improved spindle detection.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        method : str</span>
+<span class="sd">            Detection method. Supported methods include: &#39;Ferrarelli2007&#39;, </span>
+<span class="sd">            &#39;Moelle2011&#39;, &#39;Nir2011&#39;, &#39;Wamsley2012&#39;, &#39;Martin2013&#39;, &#39;Ray2015&#39;,</span>
+<span class="sd">            &#39;Lacourse2018&#39;</span>
+<span class="sd">        frequency : tuple of float</span>
+<span class="sd">            Frequency range for spindle detection (low and high)</span>
+<span class="sd">        duration : tuple of float</span>
+<span class="sd">            Duration range for spindles in seconds (min and max)</span>
+<span class="sd">        det_thresh : float or None</span>
+<span class="sd">            Detection threshold (method-specific units)</span>
+<span class="sd">        sel_thresh : float or None</span>
+<span class="sd">            Selection threshold (method-specific units)</span>
+<span class="sd">        moving_rms : dict or float or None</span>
+<span class="sd">            Parameters for moving RMS, format: {&#39;dur&#39;: float, &#39;step&#39;: float or None}</span>
+<span class="sd">            or just duration as float</span>
+<span class="sd">        smooth_dur : float or None</span>
+<span class="sd">            Duration for smoothing window in seconds</span>
+<span class="sd">        tolerance : float or None</span>
+<span class="sd">            Tolerance for merging events in seconds</span>
+<span class="sd">        min_interval : float or None</span>
+<span class="sd">            Minimum interval between events in seconds</span>
+<span class="sd">        merge : bool</span>
+<span class="sd">            If True, merge events across channels</span>
+<span class="sd">        polar : str</span>
+<span class="sd">            Signal polarity - &#39;normal&#39; or &#39;opposite&#39;</span>
+<span class="sd">        **kwargs : dict</span>
+<span class="sd">            Additional method-specific parameters</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Call parent constructor</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">method</span><span class="p">,</span> <span class="n">frequency</span><span class="p">,</span> <span class="n">duration</span><span class="p">,</span> <span class="n">merge</span><span class="p">)</span>
+        
+        <span class="c1"># Store signal inversion</span>
+        <span class="k">if</span> <span class="n">polar</span> <span class="o">==</span> <span class="s1">&#39;normal&#39;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">invert</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="k">elif</span> <span class="n">polar</span> <span class="o">==</span> <span class="s1">&#39;opposite&#39;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">invert</span> <span class="o">=</span> <span class="kc">True</span>
+        
+        <span class="c1"># Store parameters that will be applied after default initialization</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s1">&#39;det_thresh&#39;</span><span class="p">:</span> <span class="n">det_thresh</span><span class="p">,</span>
+            <span class="s1">&#39;sel_thresh&#39;</span><span class="p">:</span> <span class="n">sel_thresh</span><span class="p">,</span>
+            <span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">:</span> <span class="n">moving_rms</span><span class="p">,</span>
+            <span class="s1">&#39;smooth_dur&#39;</span><span class="p">:</span> <span class="n">smooth_dur</span><span class="p">,</span>
+            <span class="s1">&#39;tolerance&#39;</span><span class="p">:</span> <span class="n">tolerance</span><span class="p">,</span>
+            <span class="s1">&#39;min_interval&#39;</span><span class="p">:</span> <span class="n">min_interval</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span>  <span class="c1"># Include any other custom parameters</span>
+        <span class="p">}</span>
+        
+        <span class="c1"># Set method-specific parameters</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_method_params</span><span class="p">()</span>
+        <span class="c1"># Apply custom parameters to override defaults</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_apply_custom_parameters</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_set_method_params</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set parameters specific to each detection method.&quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Ferrarelli2007&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mi">11</span><span class="p">,</span> <span class="mi">15</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">0.3</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_remez</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">,</span>
+                              <span class="s1">&#39;rolloff&#39;</span><span class="p">:</span> <span class="mf">0.9</span><span class="p">,</span>
+                              <span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">2.56</span><span class="p">,</span>
+                              <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span>
+                              <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="mi">8</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sel_thresh</span> <span class="o">=</span> <span class="mi">2</span>
+            
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Moelle2011&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mi">12</span><span class="p">,</span> <span class="mi">15</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_remez</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">,</span>
+                              <span class="s1">&#39;rolloff&#39;</span><span class="p">:</span> <span class="mf">1.7</span><span class="p">,</span>
+                              <span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">2.36</span><span class="p">,</span>
+                              <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span>
+                               <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">moving_rms</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">.2</span><span class="p">,</span>
+                               <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">smooth</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">.2</span><span class="p">,</span>
+                           <span class="s1">&#39;win&#39;</span><span class="p">:</span> <span class="s1">&#39;flat&#39;</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="mf">1.5</span>
+            
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Nir2011&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mf">9.2</span><span class="p">,</span> <span class="mf">16.8</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_butter</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+                               <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">,</span>
+                               <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span>
+                               <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">tolerance</span> <span class="o">=</span> <span class="mi">1</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">smooth</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">.04</span><span class="p">}</span>  <span class="c1"># is in fact sigma</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="mi">3</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sel_thresh</span> <span class="o">=</span> <span class="mi">1</span>
+            
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Wamsley2012&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mi">12</span><span class="p">,</span> <span class="mi">15</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">0.3</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;f0&#39;</span><span class="p">:</span> <span class="n">mean</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">),</span>
+                                <span class="s1">&#39;sd&#39;</span><span class="p">:</span> <span class="mf">.8</span><span class="p">,</span>
+                                <span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">1.</span><span class="p">,</span>
+                                <span class="s1">&#39;output&#39;</span><span class="p">:</span> <span class="s1">&#39;complex&#39;</span><span class="p">,</span>
+                                <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span>
+                                <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">smooth</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">.1</span><span class="p">,</span>
+                           <span class="s1">&#39;win&#39;</span><span class="p">:</span> <span class="s1">&#39;flat&#39;</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="mf">4.5</span>
+
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Martin2013&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mf">11.5</span><span class="p">,</span> <span class="mf">14.5</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">.5</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_remez</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">,</span>
+                              <span class="s1">&#39;rolloff&#39;</span><span class="p">:</span> <span class="mf">1.1</span><span class="p">,</span>
+                              <span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">2.56</span><span class="p">,</span>
+                              <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span>
+                               <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">moving_rms</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">.25</span><span class="p">,</span>
+                               <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="mf">.25</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="mi">95</span>
+            
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Ray2015&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mi">11</span><span class="p">,</span> <span class="mi">16</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">.49</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">cdemod</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="n">mean</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">)}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_butter</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mf">0.3</span><span class="p">,</span> <span class="mi">35</span><span class="p">),</span>
+                               <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span>
+                               <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_low_butter</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+                                   <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span>
+                                   <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_interval</span> <span class="o">=</span> <span class="mf">0.25</span> <span class="c1"># they only start looking again after .25s</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">smooth</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mi">2</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">cdemod</span><span class="p">[</span><span class="s1">&#39;freq&#39;</span><span class="p">],</span>
+                           <span class="s1">&#39;win&#39;</span><span class="p">:</span> <span class="s1">&#39;triangle&#39;</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mi">60</span><span class="p">,</span>
+                           <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+                           <span class="s1">&#39;pcl_range&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="mf">2.33</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sel_thresh</span> <span class="o">=</span> <span class="mf">0.1</span>
+        
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Lacourse2018&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="o">=</span> <span class="p">(</span><span class="mi">11</span><span class="p">,</span> <span class="mi">16</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;duration&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">.3</span><span class="p">,</span> <span class="mf">2.5</span><span class="p">)</span>
+                
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_butter</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">,</span>
+                               <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">20</span><span class="p">,</span>
+                               <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_butter2</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mf">.3</span><span class="p">,</span> <span class="mi">30</span><span class="p">),</span>
+                                <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+                                <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">windowing</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">.3</span><span class="p">,</span>
+                              <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="mf">.1</span><span class="p">}</span>
+            <span class="n">win</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">windowing</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">moving_ms</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">],</span>
+                              <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">],</span>
+                                     <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">],</span>
+                                     <span class="s1">&#39;freq_narrow&#39;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">,</span>
+                                     <span class="s1">&#39;freq_broad&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mf">4.5</span><span class="p">,</span> <span class="mi">30</span><span class="p">),</span>
+                                     <span class="s1">&#39;fft_dur&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span>
+                           <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+                           <span class="s1">&#39;pcl_range&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">90</span><span class="p">)}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">moving_covar</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">],</span>
+                                 <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">moving_sd</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">],</span>
+                              <span class="s1">&#39;step&#39;</span><span class="p">:</span> <span class="n">win</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">smooth</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;dur&#39;</span><span class="p">:</span> <span class="mf">0.3</span><span class="p">,</span>
+                           <span class="s1">&#39;win&#39;</span><span class="p">:</span> <span class="s1">&#39;flat_left&#39;</span><span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">abs_pow_thresh</span> <span class="o">=</span> <span class="mf">1.25</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">rel_pow_thresh</span> <span class="o">=</span> <span class="mf">1.6</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">covar_thresh</span> <span class="o">=</span> <span class="mf">1.3</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">corr_thresh</span> <span class="o">=</span> <span class="mf">0.69</span>
+  
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Unknown method: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">method</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+
+        <span class="c1"># Safety checks for all methods - include step parameter checks here</span>
+        <span class="k">for</span> <span class="n">param_name</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;moving_rms&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_ms&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_power_ratio&#39;</span><span class="p">,</span> 
+                        <span class="s1">&#39;moving_covar&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_sd&#39;</span><span class="p">,</span> <span class="s1">&#39;windowing&#39;</span><span class="p">,</span> <span class="s1">&#39;zscore&#39;</span><span class="p">,</span>
+                        <span class="s1">&#39;det_butter&#39;</span><span class="p">,</span> <span class="s1">&#39;det_remez&#39;</span><span class="p">,</span> <span class="s1">&#39;det_wavelet&#39;</span><span class="p">]:</span>
+            <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">param_name</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">param_name</span><span class="p">),</span> <span class="nb">dict</span><span class="p">):</span>
+                <span class="n">param_dict</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">param_name</span><span class="p">)</span>
+                <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">param_dict</span><span class="p">:</span>
+                    <span class="n">param_dict</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_ensure_step_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Ensure all required parameters exist in method dictionaries with comprehensive check.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Get all attributes of self that are dictionaries</span>
+        <span class="k">for</span> <span class="n">attr_name</span> <span class="ow">in</span> <span class="nb">dir</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+            <span class="c1"># Skip private attributes and non-data attributes</span>
+            <span class="k">if</span> <span class="n">attr_name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">callable</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">)):</span>
+                <span class="k">continue</span>
+            
+            <span class="n">attr</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">)</span>
+            
+            <span class="c1"># Check if it&#39;s a dictionary</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                <span class="c1"># If it&#39;s a nested dictionary that contains parameters</span>
+                <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">k</span> <span class="ow">in</span> <span class="n">attr</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">,</span> <span class="s1">&#39;freq&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">]):</span>
+                    <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">:</span>
+                        <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="c1"># Ensure pcl_range exists for zscore dictionaries</span>
+                <span class="k">if</span> <span class="n">attr_name</span> <span class="o">==</span> <span class="s1">&#39;zscore&#39;</span> <span class="ow">or</span> <span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s1">&#39;dur&#39;</span> <span class="ow">in</span> <span class="n">attr</span> <span class="ow">and</span> <span class="s1">&#39;pcl_range&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">):</span>
+                    <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;pcl_range&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+                
+                <span class="c1"># Handle other common missing parameters</span>
+                <span class="k">if</span> <span class="s1">&#39;freq&#39;</span> <span class="ow">in</span> <span class="n">attr</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">[</span><span class="s1">&#39;freq&#39;</span><span class="p">],</span> <span class="nb">tuple</span><span class="p">)</span> <span class="ow">and</span> <span class="s1">&#39;rolloff&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span> <span class="ow">and</span> <span class="n">attr_name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;det_&#39;</span><span class="p">):</span>
+                    <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;rolloff&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.5</span>
+
+            <span class="c1"># Handle moving_power_ratio parameters</span>
+            <span class="k">if</span> <span class="n">attr_name</span> <span class="o">==</span> <span class="s1">&#39;moving_power_ratio&#39;</span> <span class="ow">or</span> <span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="s1">&#39;dur&#39;</span> <span class="ow">in</span> <span class="n">attr</span> <span class="ow">and</span> <span class="p">(</span><span class="s1">&#39;freq_narrow&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span> <span class="ow">or</span> <span class="s1">&#39;freq_broad&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">)):</span>
+                <span class="c1"># Add default parameters for moving_power_ratio</span>
+                <span class="k">if</span> <span class="s1">&#39;freq_narrow&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">:</span>
+                    <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;freq_narrow&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span> <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;frequency&#39;</span><span class="p">)</span> <span class="k">else</span> <span class="p">(</span><span class="mi">11</span><span class="p">,</span> <span class="mi">16</span><span class="p">)</span>
+                <span class="k">if</span> <span class="s1">&#39;freq_broad&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">:</span>
+                    <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;freq_broad&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mf">4.5</span><span class="p">,</span> <span class="mi">30</span><span class="p">)</span>
+                <span class="k">if</span> <span class="s1">&#39;fft_dur&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">:</span>
+                    <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;fft_dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">2</span>
+
+                        
+            <span class="c1"># handle dictionaries in list attributes</span>
+            <span class="k">elif</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                        <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">k</span> <span class="ow">in</span> <span class="n">item</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">,</span> <span class="s1">&#39;freq&#39;</span><span class="p">,</span> <span class="s1">&#39;order&#39;</span><span class="p">]):</span>
+                            <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">item</span><span class="p">:</span>
+                                <span class="n">item</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+                            <span class="k">if</span> <span class="s1">&#39;dur&#39;</span> <span class="ow">in</span> <span class="n">item</span> <span class="ow">and</span> <span class="s1">&#39;pcl_range&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">item</span><span class="p">:</span>
+                                                    <span class="n">item</span><span class="p">[</span><span class="s1">&#39;pcl_range&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+                            <span class="k">if</span> <span class="s1">&#39;sd&#39;</span> <span class="ow">in</span> <span class="n">item</span> <span class="ow">and</span> <span class="s1">&#39;output&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">item</span><span class="p">:</span>
+                                <span class="n">item</span><span class="p">[</span><span class="s1">&#39;output&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;complex&#39;</span>
+        <span class="c1"># Specific method checks</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Ray2015&#39;</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;zscore&#39;</span><span class="p">):</span>
+            <span class="k">if</span> <span class="s1">&#39;pcl_range&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span><span class="p">[</span><span class="s1">&#39;pcl_range&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+        
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Wamsley2012&#39;</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_wavelet&#39;</span><span class="p">):</span>
+            <span class="k">if</span> <span class="s1">&#39;f0&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">[</span><span class="s1">&#39;f0&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">mean</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s1">&#39;output&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">[</span><span class="s1">&#39;output&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;complex&#39;</span>
+        
+        <span class="c1"># Lacourse2018-specific checks</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Lacourse2018&#39;</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;moving_power_ratio&#39;</span><span class="p">):</span>
+            <span class="c1"># Ensure all required parameters exist</span>
+            <span class="k">if</span> <span class="s1">&#39;freq_narrow&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span><span class="p">[</span><span class="s1">&#39;freq_narrow&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency</span>
+            <span class="k">if</span> <span class="s1">&#39;freq_broad&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span><span class="p">[</span><span class="s1">&#39;freq_broad&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mf">4.5</span><span class="p">,</span> <span class="mi">30</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s1">&#39;fft_dur&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">moving_power_ratio</span><span class="p">[</span><span class="s1">&#39;fft_dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">2</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="nf">_apply_custom_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Apply custom parameters, overriding defaults&quot;&quot;&quot;</span>
+        <span class="c1"># Simple parameter overrides</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;det_thresh&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_thresh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;det_thresh&#39;</span><span class="p">]</span>
+        
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;sel_thresh&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;sel_thresh&#39;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">sel_thresh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;sel_thresh&#39;</span><span class="p">]</span>
+        
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;tolerance&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">tolerance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;tolerance&#39;</span><span class="p">]</span>
+        
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;min_interval&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_interval</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;min_interval&#39;</span><span class="p">]</span>
+        
+        <span class="c1"># Update moving RMS duration if provided</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;moving_rms&#39;</span><span class="p">):</span>
+            <span class="c1"># Handle both dictionary and float inputs for moving_rms</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">],</span> <span class="nb">dict</span><span class="p">):</span>
+                <span class="k">if</span> <span class="s1">&#39;dur&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">]:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">moving_rms</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">][</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span>
+                <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">]:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">moving_rms</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">][</span><span class="s1">&#39;step&#39;</span><span class="p">]</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="c1"># If just a float is provided, assume it&#39;s the duration</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">moving_rms</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;moving_rms_dur&#39;</span><span class="p">]</span>
+        
+        <span class="c1"># Update smooth duration if provided</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;smooth_dur&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;smooth&#39;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">smooth</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;smooth_dur&#39;</span><span class="p">]</span>
+        
+        <span class="c1"># Method-specific parameters</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Lacourse2018&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="s1">&#39;abs_pow_thresh&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">abs_pow_thresh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;abs_pow_thresh&#39;</span><span class="p">]</span>
+            <span class="k">if</span> <span class="s1">&#39;rel_pow_thresh&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">rel_pow_thresh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;rel_pow_thresh&#39;</span><span class="p">]</span>
+            <span class="k">if</span> <span class="s1">&#39;covar_thresh&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">covar_thresh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;covar_thresh&#39;</span><span class="p">]</span>
+            <span class="k">if</span> <span class="s1">&#39;corr_thresh&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">corr_thresh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;corr_thresh&#39;</span><span class="p">]</span>
+            <span class="k">if</span> <span class="s1">&#39;window_dur&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;window_dur&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="c1"># Update all window durations</span>
+                <span class="n">win_dur</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;window_dur&#39;</span><span class="p">]</span>
+ 
+            <span class="k">for</span> <span class="n">attr_name</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;windowing&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_ms&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_power_ratio&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_covar&#39;</span><span class="p">,</span> <span class="s1">&#39;moving_sd&#39;</span><span class="p">]:</span>
+                <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">):</span>
+                    <span class="n">attr</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+                        <span class="c1"># Set step equal to dur/2 if not specified (common default)</span>
+                        <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">attr</span> <span class="ow">or</span> <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="k">if</span> <span class="s1">&#39;dur&#39;</span> <span class="ow">in</span> <span class="n">attr</span><span class="p">:</span>
+                                <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">attr</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span> <span class="o">/</span> <span class="mi">2</span>
+    
+
+
+
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Ray2015&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="s1">&#39;zscore_dur&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;zscore_dur&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;zscore&#39;</span><span class="p">):</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;zscore_dur&#39;</span><span class="p">]</span>
+                    <span class="c1"># Always ensure step is present</span>
+                    <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">zscore</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Wamsley2012&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="s1">&#39;wavelet_sd&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;wavelet_sd&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_wavelet&#39;</span><span class="p">):</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">[</span><span class="s1">&#39;sd&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;wavelet_sd&#39;</span><span class="p">]</span>
+            <span class="k">if</span> <span class="s1">&#39;wavelet_dur&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;wavelet_dur&#39;</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_wavelet&#39;</span><span class="p">):</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">[</span><span class="s1">&#39;dur&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="p">[</span><span class="s1">&#39;wavelet_dur&#39;</span><span class="p">]</span>
+            
+            <span class="c1"># Always ensure f0 is present for Wamsley2012</span>
+            <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_wavelet&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">[</span><span class="s1">&#39;f0&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">mean</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency</span><span class="p">)</span>
+                <span class="c1"># Always ensure step is present</span>
+                <span class="k">if</span> <span class="s1">&#39;step&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">det_wavelet</span><span class="p">[</span><span class="s1">&#39;step&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="c1"># Apply any additional custom parameters</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_custom_params</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span> <span class="ow">and</span> <span class="n">value</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+        
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ensure_step_parameters</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">parent</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span> <span class="c1"># 5 minutes timeout</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Detect spindles in the data with optional signal inversion.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        data : instance of Data</span>
+<span class="sd">            The data to analyze</span>
+<span class="sd">        parent : QWidget</span>
+<span class="sd">            For use with GUI, as parent widget for the progress bar</span>
+<span class="sd">        </span>
+<span class="sd">        timeout : int</span>
+<span class="sd">            Maximum time in seconds to allow for detection before timing out</span>
+
+<span class="sd">            </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        instance of graphoelement.Spindles</span>
+<span class="sd">            Detected spindles</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        
+        <span class="c1"># Add comprehensive check for step parameters right before detection</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ensure_step_parameters</span><span class="p">()</span>
+
+
+        <span class="c1"># Check if we need to invert the signal</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;invert&#39;</span><span class="p">)</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">invert</span><span class="p">:</span>
+            <span class="c1"># Make a copy to avoid modifying the original</span>
+            <span class="n">data_copy</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+            <span class="c1"># Invert signal for all epochs</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data_copy</span><span class="o">.</span><span class="n">data</span><span class="p">)):</span>
+                <span class="n">data_copy</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="n">data_copy</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
+            <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">data_copy</span><span class="p">,</span> <span class="n">parent</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># No inversion needed, call parent method directly</span>
+            <span class="k">return</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">parent</span><span class="p">)</span></div>
+
+            
+
+
+<div class="viewcode-block" id="ImprovedDetectSlowWave">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.extensions.ImprovedDetectSlowWave">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ImprovedDetectSlowWave</span><span class="p">(</span><span class="n">OriginalDetectSlowWave</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s1">&#39;Massimini2004&#39;</span><span class="p">,</span> <span class="n">frequency</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> 
+                 <span class="n">duration</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">neg_peak_thresh</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span> <span class="n">p2p_thresh</span><span class="o">=</span><span class="mi">75</span><span class="p">,</span>
+                 <span class="n">min_dur</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">max_dur</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">polar</span><span class="o">=</span><span class="s1">&#39;normal&#39;</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize improved slow wave detection.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        method : str</span>
+<span class="sd">            Detection method. Supported methods:</span>
+<span class="sd">            - &#39;Massimini2004&#39;: Traditional threshold-based detection</span>
+<span class="sd">            - &#39;AASM/Massimini2004&#39;: AASM criteria with Massimini method</span>
+<span class="sd">            - &#39;Ngo2015&#39;: Detection based on Ngo et al. 2015</span>
+<span class="sd">            - &#39;Staresina2015&#39;: Detection based on Staresina et al. 2015</span>
+<span class="sd">        frequency : tuple of float</span>
+<span class="sd">            Frequency range for slow wave detection</span>
+<span class="sd">        duration : tuple of float</span>
+<span class="sd">            Duration range for slow waves in seconds (used for trough_duration in Massimini methods)</span>
+<span class="sd">        neg_peak_thresh : float</span>
+<span class="sd">            Minimum negative peak amplitude in μV</span>
+<span class="sd">        p2p_thresh : float</span>
+<span class="sd">            Minimum peak-to-peak amplitude in μV</span>
+<span class="sd">        min_dur : float or None</span>
+<span class="sd">            Minimum duration of a slow wave in seconds (used for Ngo2015 and Staresina2015)</span>
+<span class="sd">        max_dur : float or None</span>
+<span class="sd">            Maximum duration of a slow wave in seconds (used for Ngo2015 and Staresina2015)</span>
+<span class="sd">        polar : str</span>
+<span class="sd">            Signal polarity - &#39;normal&#39; or &#39;opposite&#39;</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">method</span><span class="p">,</span> <span class="n">duration</span><span class="p">)</span>
+        
+        <span class="c1"># Store additional parameters</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">min_neg_amp</span> <span class="o">=</span> <span class="n">neg_peak_thresh</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">min_ptp_amp</span> <span class="o">=</span> <span class="n">p2p_thresh</span>
+        <span class="k">if</span> <span class="n">polar</span> <span class="o">==</span> <span class="s1">&#39;normal&#39;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">invert</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="k">elif</span> <span class="n">polar</span> <span class="o">==</span> <span class="s1">&#39;opposite&#39;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">invert</span> <span class="o">=</span> <span class="kc">True</span>
+        
+        <span class="c1"># Store duration parameters</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">min_dur_param</span> <span class="o">=</span> <span class="n">min_dur</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max_dur_param</span> <span class="o">=</span> <span class="n">max_dur</span>
+                
+        <span class="c1"># Override frequency if provided</span>
+        <span class="k">if</span> <span class="n">frequency</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">method</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;Massimini2004&#39;</span><span class="p">,</span> <span class="s1">&#39;AASM/Massimini2004&#39;</span><span class="p">]:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span><span class="p">[</span><span class="s1">&#39;freq&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">frequency</span>
+            <span class="k">elif</span> <span class="n">method</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;Ngo2015&#39;</span><span class="p">,</span> <span class="s1">&#39;Staresina2015&#39;</span><span class="p">]:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">lowpass</span><span class="p">[</span><span class="s1">&#39;freq&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">frequency</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>  <span class="c1"># Use upper bound</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span><span class="p">[</span><span class="s1">&#39;freq&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">frequency</span>
+        
+        <span class="c1"># Set method-specific parameters</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_method_params</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_set_method_params</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set parameters specific to each detection method.&quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Massimini2004&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_filt&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+                    <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">4.0</span><span class="p">)</span>
+                <span class="p">}</span>
+            <span class="c1"># Use default values unless overridden</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">trough_duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">0.3</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">max_trough_amp</span> <span class="o">=</span> <span class="o">-</span><span class="mi">80</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_ptp</span> <span class="o">=</span> <span class="mi">140</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span> <span class="o">=</span> <span class="kc">None</span>
+
+
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;AASM/Massimini2004&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_filt&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+                    <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+                <span class="p">}</span>
+            <span class="c1"># Use default values unless overridden</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">trough_duration</span> <span class="o">=</span> <span class="p">(</span><span class="mf">0.25</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">max_trough_amp</span> <span class="o">=</span> <span class="o">-</span><span class="mi">37</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_ptp</span> <span class="o">=</span> <span class="mi">70</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Ngo2015&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;lowpass&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">lowpass</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+                    <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="mf">3.5</span>
+                <span class="p">}</span>
+            <span class="c1"># Use provided min_dur and max_dur if available, otherwise use defaults</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span> <span class="o">=</span> <span class="mf">0.833</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur_param</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur_param</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur_param</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur_param</span>
+
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_filt&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span><span class="p">,</span> <span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span><span class="p">)</span>
+                <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">peak_thresh</span> <span class="o">=</span> <span class="mf">1.25</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">ptp_thresh</span> <span class="o">=</span> <span class="mf">1.25</span>
+
+
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s1">&#39;Staresina2015&#39;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;lowpass&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">lowpass</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s1">&#39;order&#39;</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+                    <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="mf">1.25</span>
+                <span class="p">}</span>
+            
+            <span class="c1"># Use provided min_dur and max_dur if available, otherwise use defaults</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span> <span class="o">=</span> <span class="mf">0.8</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur_param</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur_param</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur_param</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur_param</span>
+
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;det_filt&#39;</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s1">&#39;freq&#39;</span><span class="p">:</span> <span class="p">(</span><span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span><span class="p">,</span> <span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span><span class="p">)</span>
+                <span class="p">}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">ptp_thresh</span> <span class="o">=</span> <span class="mi">75</span>
+ 
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Method must be one of: Massimini2004, AASM/Massimini2004, Ngo2015, or Staresina2015&#39;</span><span class="p">)</span>
+        
+        <span class="c1"># Always update filter frequency based on min_dur and max_dur for these methods</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">method</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;Ngo2015&#39;</span><span class="p">,</span> <span class="s1">&#39;Staresina2015&#39;</span><span class="p">]</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">det_filt</span><span class="p">[</span><span class="s1">&#39;freq&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_dur</span><span class="p">,</span> <span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_dur</span><span class="p">)</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Detect slow waves in the data.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        data : instance of Data</span>
+<span class="sd">            The data to analyze</span>
+<span class="sd">        </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        instance of graphoelement.SlowWaves</span>
+<span class="sd">            Detected slow waves</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Invert signal if requested</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">invert</span><span class="p">:</span>
+            <span class="n">data</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="n">data</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+        
+        <span class="c1"># Run detection using parent class</span>
+        <span class="n">events</span> <span class="o">=</span> <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+        
+        <span class="c1"># Apply additional amplitude criteria if needed</span>
+        <span class="n">filtered_events</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">evt</span> <span class="ow">in</span> <span class="n">events</span><span class="p">:</span>
+            <span class="k">if</span> <span class="p">(</span><span class="nb">abs</span><span class="p">(</span><span class="n">evt</span><span class="p">[</span><span class="s1">&#39;trough_val&#39;</span><span class="p">])</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_neg_amp</span> <span class="ow">and</span> 
+                <span class="nb">abs</span><span class="p">(</span><span class="n">evt</span><span class="p">[</span><span class="s1">&#39;ptp&#39;</span><span class="p">])</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_ptp_amp</span><span class="p">):</span>
+                <span class="n">filtered_events</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">evt</span><span class="p">)</span>
+        
+        <span class="c1"># Update events</span>
+        <span class="n">events</span><span class="o">.</span><span class="n">events</span> <span class="o">=</span> <span class="n">filtered_events</span>
+        <span class="k">return</span> <span class="n">events</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Tancy Kao.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

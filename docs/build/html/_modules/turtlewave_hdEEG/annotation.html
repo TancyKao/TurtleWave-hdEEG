@@ -1,0 +1,630 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>turtlewave_hdEEG.annotation &mdash; turtlewave 1.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=fc837d61"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            turtlewave
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../introduction.html">TURTLEWAVE</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">nstallation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../usage.html">Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../gui.html">GUI Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">turtlewave</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">turtlewave_hdEEG.annotation</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for turtlewave_hdEEG.annotation</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">Annotations module for turtlewave_hdEEG</span>
+<span class="sd">Provides tools to create and save annotations using event information from EEGLAB</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">datetime</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tempfile</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">wonambi.attr</span><span class="w"> </span><span class="kn">import</span> <span class="n">Annotations</span> <span class="k">as</span> <span class="n">WonambiAnnotations</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">wonambi.attr.annotations</span><span class="w"> </span><span class="kn">import</span> <span class="n">create_empty_annotations</span>
+
+<div class="viewcode-block" id="XLAnnotations">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">XLAnnotations</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Simplified annotations for large datasets&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dataset</span><span class="p">,</span> <span class="n">annot_file</span><span class="p">,</span><span class="n">rater_name</span><span class="o">=</span><span class="s2">&quot;Anon&quot;</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize annotations object.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        dataset : LargeDataset</span>
+<span class="sd">            Dataset to associate with annotations.</span>
+<span class="sd">        annot_file : str</span>
+<span class="sd">            Path to the annotation file.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">annot_file</span> <span class="o">=</span> <span class="n">annot_file</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">rater_name</span> <span class="o">=</span> <span class="n">rater_name</span>
+
+        <span class="c1"># Create or load annotations</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">Path</span><span class="p">(</span><span class="n">annot_file</span><span class="p">)</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span> <span class="o">=</span> <span class="n">create_empty_annotations</span><span class="p">(</span><span class="n">annot_file</span><span class="p">,</span> <span class="n">dataset</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span> <span class="o">=</span> <span class="n">WonambiAnnotations</span><span class="p">(</span><span class="n">annot_file</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">add_rater</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rater_name</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Created a new annotation object for </span><span class="si">{</span><span class="n">annot_file</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Load existing annotations</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span> <span class="o">=</span> <span class="n">WonambiAnnotations</span><span class="p">(</span><span class="n">annot_file</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">rater_name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">raters</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">add_rater</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">rater_name</span><span class="p">)</span>
+
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Loaded existing annotation file: </span><span class="si">{</span><span class="n">annot_file</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="XLAnnotations.add_artefacts_from_events">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations.add_artefacts_from_events">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_artefacts_from_events</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Add artefact and arousal annotations from the dataset&#39;s event information.</span>
+<span class="sd">        </span>
+<span class="sd">        Uses the &#39;isreject&#39; flag in events to identify artefacts.</span>
+<span class="sd">        Also identifies arousal events if &#39;arousal&#39; is in the event type (case-insensitive).</span>
+<span class="sd">        </span>
+<span class="sd">        Highly optimized for large datasets by pre-filtering relevant events.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+        
+        <span class="c1"># Check if event information exists in header</span>
+        <span class="k">if</span> <span class="s1">&#39;event&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">header</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;No event information found in dataset header.&quot;</span><span class="p">)</span>
+            <span class="n">end_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Processing time: </span><span class="si">{</span><span class="n">end_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">start_time</span><span class="si">:</span><span class="s2">.4f</span><span class="si">}</span><span class="s2"> seconds&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="mi">0</span><span class="p">,</span> <span class="n">end_time</span> <span class="o">-</span> <span class="n">start_time</span>
+        
+        <span class="n">event_info</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;event&#39;</span><span class="p">]</span>
+        <span class="n">onsets</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">event_info</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;onsets&#39;</span><span class="p">,</span> <span class="p">[]))</span>
+        <span class="n">types</span> <span class="o">=</span> <span class="n">event_info</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;types&#39;</span><span class="p">,</span> <span class="p">[])</span>
+        <span class="n">durations</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">event_info</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;durations&#39;</span><span class="p">,</span> <span class="p">[]))</span>
+        <span class="c1">#isreject = [str(t).lower() == &#39;reject&#39; for t in types] if types else []</span>
+        <span class="c1"># Check if we have any events</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">onsets</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;No events found in dataset.&quot;</span><span class="p">)</span>
+            
+            <span class="k">return</span> <span class="mi">0</span><span class="p">,</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+        
+        <span class="n">s_freq</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">sampling_rate</span>
+        <span class="n">onset_seconds</span> <span class="o">=</span> <span class="n">onsets</span> <span class="o">/</span> <span class="n">s_freq</span>
+        <span class="n">duration_seconds</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">onsets</span><span class="p">)</span>
+        <span class="n">valid_durations</span> <span class="o">=</span> <span class="n">durations</span><span class="p">[:</span><span class="nb">len</span><span class="p">(</span><span class="n">onset_seconds</span><span class="p">)]</span>
+        <span class="n">duration_seconds</span><span class="p">[:</span><span class="nb">len</span><span class="p">(</span><span class="n">valid_durations</span><span class="p">)]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+            <span class="n">valid_durations</span> <span class="o">!=</span> <span class="kc">None</span><span class="p">,</span> 
+            <span class="n">valid_durations</span> <span class="o">/</span> <span class="n">s_freq</span><span class="p">,</span> 
+            <span class="mf">1.0</span>
+        <span class="p">)</span>
+        <span class="n">end_seconds</span> <span class="o">=</span> <span class="n">onset_seconds</span> <span class="o">+</span> <span class="n">duration_seconds</span>
+
+        <span class="c1"># Pre-compile type checks</span>
+        <span class="n">types_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="nb">str</span><span class="p">(</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="k">if</span> <span class="n">t</span> <span class="k">else</span> <span class="s1">&#39;&#39;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">types</span><span class="p">[:</span><span class="nb">len</span><span class="p">(</span><span class="n">onsets</span><span class="p">)]])</span>
+    
+        <span class="n">event_masks</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;Artefact&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">char</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="n">types_arr</span><span class="p">,</span> <span class="s1">&#39;reject&#39;</span><span class="p">)</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;Arousal&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">char</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="n">types_arr</span><span class="p">,</span> <span class="s1">&#39;arousal&#39;</span><span class="p">)</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;Resp&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">any</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">char</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="n">types_arr</span><span class="p">,</span> <span class="n">x</span><span class="p">)</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;hypopnea&#39;</span><span class="p">,</span> <span class="s1">&#39;obstructiveapnea&#39;</span><span class="p">,</span> <span class="s1">&#39;spo2desat&#39;</span><span class="p">]],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span>
+            <span class="s2">&quot;Move&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">any</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">char</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="n">types_arr</span><span class="p">,</span> <span class="n">x</span><span class="p">)</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;move&#39;</span><span class="p">,</span> <span class="s1">&#39;leg&#39;</span><span class="p">]]</span> <span class="o">+</span> <span class="p">[</span><span class="n">types_arr</span> <span class="o">==</span> <span class="n">x</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;lklr&#39;</span><span class="p">,</span> <span class="s1">&#39;lkud&#39;</span><span class="p">]],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span>
+            <span class="s2">&quot;Snore&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">any</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">char</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="n">types_arr</span><span class="p">,</span> <span class="n">x</span><span class="p">)</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">&#39;snor&#39;</span><span class="p">,</span> <span class="s1">&#39;jaw&#39;</span><span class="p">]],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="p">}</span>
+
+        <span class="n">event_counts</span> <span class="o">=</span> <span class="p">{</span><span class="n">key</span><span class="p">:</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">event_masks</span><span class="p">}</span>
+        
+        <span class="c1"># Batch process annotations</span>
+        <span class="k">for</span> <span class="n">event_type</span><span class="p">,</span> <span class="n">mask</span> <span class="ow">in</span> <span class="n">event_masks</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">indices</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">mask</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">indices</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="c1"># Add annotations for the event type</span>
+                <span class="n">success</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">add_annotations_batch</span><span class="p">(</span>
+                    <span class="n">label</span><span class="o">=</span><span class="n">event_type</span><span class="p">,</span>
+                    <span class="n">start_times</span><span class="o">=</span><span class="n">onset_seconds</span><span class="p">[</span><span class="n">indices</span><span class="p">],</span>
+                    <span class="n">end_times</span><span class="o">=</span><span class="n">end_seconds</span><span class="p">[</span><span class="n">indices</span><span class="p">],</span>
+                    <span class="n">channels</span><span class="o">=</span><span class="kc">None</span>
+                <span class="p">)</span>
+                <span class="k">if</span> <span class="n">success</span><span class="p">:</span>
+                    <span class="n">event_counts</span><span class="p">[</span><span class="n">event_type</span><span class="p">]</span> <span class="o">+=</span> <span class="nb">len</span><span class="p">(</span><span class="n">indices</span><span class="p">)</span>
+            
+        <span class="n">total_count</span> <span class="o">=</span> <span class="n">event_counts</span><span class="p">[</span><span class="s2">&quot;Artefact&quot;</span><span class="p">]</span> <span class="o">+</span> <span class="n">event_counts</span><span class="p">[</span><span class="s2">&quot;Arousal&quot;</span><span class="p">]</span>
+    
+        <span class="k">if</span> <span class="n">total_count</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+            <span class="nb">print</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Added </span><span class="si">{</span><span class="n">event_counts</span><span class="p">[</span><span class="s1">&#39;Artefact&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> artefact annotations and &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">event_counts</span><span class="p">[</span><span class="s1">&#39;Arousal&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> arousal annotations from event information. &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">event_counts</span><span class="p">[</span><span class="s1">&#39;Resp&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> respiratory events, &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">event_counts</span><span class="p">[</span><span class="s1">&#39;Move&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> movement events, &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">event_counts</span><span class="p">[</span><span class="s1">&#39;Snore&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> snore events.&quot;</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;No artefacts or arousals found in event information.&quot;</span><span class="p">)</span>
+
+        <span class="n">execution_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Processing time: </span><span class="si">{</span><span class="n">execution_time</span><span class="si">:</span><span class="s2">.4f</span><span class="si">}</span><span class="s2"> seconds&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">total_count</span><span class="p">,</span> <span class="n">execution_time</span></div>
+
+
+
+
+<div class="viewcode-block" id="XLAnnotations.add_stages_from_header">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations.add_stages_from_header">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_stages_from_header</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Import stages from header array into annotations using Wonambi&#39;s import_staging</span>
+<span class="sd">        with Compumedics format.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        rater_name : str</span>
+<span class="sd">            Name of the rater to use for staging (default: &quot;Automatic_Staging&quot;)</span>
+<span class="sd">        </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        bool</span>
+<span class="sd">            True if successful, False otherwise</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="c1"># Make sure we have a header with stages</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="p">,</span> <span class="s1">&#39;header&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">&#39;stages&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">header</span><span class="p">:</span>
+                <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;No stages found in header&quot;</span><span class="p">)</span>
+                <span class="k">return</span> <span class="kc">False</span>
+                
+            <span class="c1"># Get stages from header</span>
+            <span class="n">stages</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;stages&#39;</span><span class="p">]</span>
+            
+            <span class="c1"># Make sure we have an annotations object</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s1">&#39;annotations&#39;</span><span class="p">):</span>
+                <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;No annotations object available&quot;</span><span class="p">)</span>
+                <span class="k">return</span> <span class="kc">False</span>
+            
+            <span class="c1"># Get epoch length - either from header or use default 30s</span>
+            <span class="n">epoch_length</span> <span class="o">=</span> <span class="mi">30</span> <span class="c1"># default 30sec</span>
+            
+            <span class="c1"># Get recording start time</span>
+            <span class="k">if</span> <span class="s1">&#39;start_time&#39;</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">header</span><span class="p">:</span>
+                <span class="n">rec_start</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;start_time&#39;</span><span class="p">]</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="c1"># Default to current date/time if not available</span>
+                <span class="n">rec_start</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+            
+            <span class="c1"># Create a temporary file with Compumedics format staging</span>
+            <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">NamedTemporaryFile</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="s1">&#39;w&#39;</span><span class="p">,</span> <span class="n">delete</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">suffix</span><span class="o">=</span><span class="s1">&#39;.txt&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">temp_file</span><span class="p">:</span>
+                <span class="n">temp_filename</span> <span class="o">=</span> <span class="n">temp_file</span><span class="o">.</span><span class="n">name</span>
+                
+                <span class="c1"># Write stages directly in Compumedics format (one stage code per line)</span>
+                <span class="k">for</span> <span class="n">stage_code</span> <span class="ow">in</span> <span class="n">stages</span><span class="p">:</span>
+                    <span class="c1"># Convert to string and write to file</span>
+                    <span class="n">temp_file</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">stage_code</span><span class="si">}</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+            
+            <span class="k">try</span><span class="p">:</span>
+                <span class="c1"># Import the staging using Wonambi&#39;s import_staging method</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">import_staging</span><span class="p">(</span>
+                    <span class="n">filename</span><span class="o">=</span><span class="n">temp_filename</span><span class="p">,</span>
+                    <span class="n">source</span><span class="o">=</span><span class="s1">&#39;compumedics&#39;</span><span class="p">,</span>  <span class="c1"># Use compumedics format</span>
+                    <span class="n">rater_name</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">rater_name</span><span class="p">,</span>
+                    <span class="n">rec_start</span><span class="o">=</span><span class="n">rec_start</span><span class="p">,</span>
+                    <span class="n">staging_start</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>  <span class="c1"># Use default (no offset)</span>
+                    <span class="n">epoch_length</span><span class="o">=</span><span class="n">epoch_length</span><span class="p">,</span>
+                    <span class="n">poor</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;Artefact&#39;</span><span class="p">],</span>  <span class="c1"># Default poor quality markers</span>
+                    <span class="n">as_qual</span><span class="o">=</span><span class="kc">False</span>  <span class="c1"># Don&#39;t import as quality markers</span>
+                <span class="p">)</span>
+                
+                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Successfully imported </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">stages</span><span class="p">)</span><span class="si">}</span><span class="s2"> stages from header as rater &#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">rater_name</span><span class="si">}</span><span class="s2">&#39;&quot;</span><span class="p">)</span>
+                <span class="k">return</span> <span class="kc">True</span>
+                
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="c1"># Clean up the temporary file</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">os</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">temp_filename</span><span class="p">)</span>
+                <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+                    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Warning: Could not delete temporary file </span><span class="si">{</span><span class="n">temp_filename</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+                    
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error importing stages from header: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span></div>
+
+
+<div class="viewcode-block" id="XLAnnotations.add_annotations_batch">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations.add_annotations_batch">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_annotations_batch</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">label</span><span class="p">,</span> <span class="n">start_times</span><span class="p">,</span> <span class="n">end_times</span><span class="p">,</span> <span class="n">channels</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Add multiple annotations at once.&quot;&quot;&quot;</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">label</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">event_types</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">add_event_type</span><span class="p">(</span><span class="n">label</span><span class="p">)</span>
+                
+            <span class="k">if</span> <span class="n">channels</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">channels</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;(all)&#39;</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">start_times</span><span class="p">)</span>
+                
+            <span class="c1"># Add events in batch</span>
+            <span class="k">for</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="p">,</span> <span class="n">chan</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">start_times</span><span class="p">,</span> <span class="n">end_times</span><span class="p">,</span> <span class="n">channels</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">add_event</span><span class="p">(</span>
+                    <span class="n">name</span><span class="o">=</span><span class="n">label</span><span class="p">,</span>
+                    <span class="n">time</span><span class="o">=</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">start</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">end</span><span class="p">)),</span>
+                    <span class="n">chan</span><span class="o">=</span><span class="n">chan</span>
+                <span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error adding batch annotations: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span>    </div>
+
+
+
+<div class="viewcode-block" id="XLAnnotations.add_annotation">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations.add_annotation">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_annotation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">label</span><span class="p">,</span> <span class="n">start_time</span><span class="p">,</span> <span class="n">end_time</span><span class="p">,</span> <span class="n">channel</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Add a single annotation to the annotations object.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        label : str</span>
+<span class="sd">            Label for the annotation</span>
+<span class="sd">        start_time : float</span>
+<span class="sd">            Start time in seconds</span>
+<span class="sd">        end_time : float</span>
+<span class="sd">            End time in seconds</span>
+<span class="sd">        channel : str, list, or None</span>
+<span class="sd">            Channel(s) associated with the annotation. </span>
+<span class="sd">            If None, uses &#39;(all)&#39; to indicate all channels.</span>
+<span class="sd">        </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        bool</span>
+<span class="sd">            True if successful, False otherwise</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="c1"># Format the time as a tuple of float values</span>
+            <span class="n">time_tuple</span> <span class="o">=</span> <span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">start_time</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">end_time</span><span class="p">))</span>
+
+            
+            <span class="k">if</span> <span class="n">channel</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">channel</span> <span class="o">=</span> <span class="s1">&#39;(all)&#39;</span>  <span class="c1"># Wonambi standard for all channels</span>
+
+            <span class="c1"># Make sure the event type exists</span>
+            <span class="k">if</span> <span class="n">label</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">event_types</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">add_event_type</span><span class="p">(</span><span class="n">label</span><span class="p">)</span>
+
+            <span class="c1"># Add the event with proper rater specification</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">add_event</span><span class="p">(</span>
+                <span class="n">name</span><span class="o">=</span><span class="n">label</span><span class="p">,</span> 
+                <span class="n">time</span><span class="o">=</span><span class="n">time_tuple</span><span class="p">,</span>
+                <span class="n">chan</span><span class="o">=</span><span class="n">channel</span>
+            <span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error adding annotation: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span></div>
+
+
+
+<div class="viewcode-block" id="XLAnnotations.process_all">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations.process_all">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">process_all</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Process all annotations - add artefacts and stages.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Add artefacts</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">add_artefacts_from_events</span><span class="p">()</span>
+        
+        <span class="n">stages_from_header</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">add_stages_from_header</span><span class="p">()</span>
+        <span class="k">return</span> <span class="kc">True</span></div>
+
+    
+<div class="viewcode-block" id="XLAnnotations.save">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.XLAnnotations.save">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">filename</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Save annotations to the XML file in Wonambi format.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        filename : str or None</span>
+<span class="sd">            Path to save the file. If None, uses the annot_file from initialization.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="n">filename</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">filename</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">annot_file</span>
+            
+        <span class="k">try</span><span class="p">:</span>    
+            <span class="bp">self</span><span class="o">.</span><span class="n">annotations</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Annotations saved to </span><span class="si">{</span><span class="n">filename</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error saving annotations: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="CustomAnnotations">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">CustomAnnotations</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Helper class for reading and working with Wonambi annotations&quot;&quot;&quot;</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">annot_file</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">annot_file</span> <span class="o">=</span> <span class="n">annot_file</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span> <span class="o">=</span> <span class="n">WonambiAnnotations</span><span class="p">(</span><span class="n">annot_file</span><span class="p">)</span>
+        
+        <span class="c1"># Try to explicitly select a rater if none is selected</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">rater</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">raters</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">get_rater</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">raters</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">last_second</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the last second in the recording&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">last_second</span>
+    
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">first_second</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the first second in the recording&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">first_second</span>
+    
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">dataset</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the dataset associated with the annotations&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">dataset</span>
+    
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">rater</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the current rater&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">rater</span>
+    
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">raters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return all raters in the annotation file&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">raters</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">epochs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Get all epochs from the annotation file&quot;&quot;&quot;</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">epochs</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">IndexError</span><span class="p">:</span>
+            <span class="c1"># If no rater is found, find all raters and use the first one</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">raters</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">get_rater</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">raters</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+                <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">epochs</span><span class="p">)</span>
+            <span class="k">return</span> <span class="p">[]</span>
+        
+<div class="viewcode-block" id="CustomAnnotations.get_epochs">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.get_epochs">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_epochs</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get epochs that match the specified criteria.</span>
+<span class="sd">        This method matches the Wonambi API for compatibility.</span>
+<span class="sd">        </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        list of dict</span>
+<span class="sd">            list of epochs, which are dict with &#39;start&#39; and &#39;end&#39; times, plus</span>
+<span class="sd">            additional parameters</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Delegate to the underlying Wonambi annotations object</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">get_epochs</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="CustomAnnotations.get_rater">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.get_rater">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_rater</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rater</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Select one rater.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        rater : str</span>
+<span class="sd">            name of the rater</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">get_rater</span><span class="p">(</span><span class="n">rater</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="CustomAnnotations.add_rater">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.add_rater">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">add_rater</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rater</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Add one rater.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        rater : str</span>
+<span class="sd">            name of the rater</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">add_rater</span><span class="p">(</span><span class="n">rater</span><span class="p">)</span></div>
+
+    
+<div class="viewcode-block" id="CustomAnnotations.get_stages">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.get_stages">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_stages</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Extract just the stages from the epochs&quot;&quot;&quot;</span>
+        <span class="n">epochs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">epochs</span>
+        <span class="k">if</span> <span class="n">epochs</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">[</span><span class="n">epoch</span><span class="p">[</span><span class="s1">&#39;stage&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">epoch</span> <span class="ow">in</span> <span class="n">epochs</span><span class="p">]</span>
+        <span class="k">return</span> <span class="p">[]</span></div>
+
+    
+<div class="viewcode-block" id="CustomAnnotations.get_hypnogram">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.get_hypnogram">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_hypnogram</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Convert stages to numeric values for hypnogram plotting&quot;&quot;&quot;</span>
+        <span class="n">stage_map</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s1">&#39;Wake&#39;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+            <span class="s1">&#39;NREM1&#39;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s1">&#39;NREM2&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> 
+            <span class="s1">&#39;NREM3&#39;</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+            <span class="s1">&#39;REM&#39;</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span>
+            <span class="s1">&#39;Artefact&#39;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="s1">&#39;Movement&#39;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="s1">&#39;Unknown&#39;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="s1">&#39;Undefined&#39;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span>
+        <span class="p">}</span>
+        
+        <span class="n">stages</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_stages</span><span class="p">()</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">stage_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">stage</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">for</span> <span class="n">stage</span> <span class="ow">in</span> <span class="n">stages</span><span class="p">]</span></div>
+
+    
+<div class="viewcode-block" id="CustomAnnotations.save">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.save">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">filename</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Save annotations to the XML file in Wonambi format.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        filename : str or None</span>
+<span class="sd">            Path to save the file. If None, uses the annot_file from initialization.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="n">filename</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">filename</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">annot_file</span>
+            
+        <span class="k">try</span><span class="p">:</span>    
+            <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Annotations saved to </span><span class="si">{</span><span class="n">filename</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error saving annotations: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span></div>
+
+    <span class="c1"># Special method for fetch compatibility</span>
+<div class="viewcode-block" id="CustomAnnotations.create_epochs">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.create_epochs">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">create_epochs</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">times</span><span class="p">,</span> <span class="n">epoch_length</span><span class="o">=</span><span class="mi">30</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Create epochs from a sequence of time points.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        times : list or ndarray</span>
+<span class="sd">            List of time points (in seconds)</span>
+<span class="sd">        epoch_length : float, optional</span>
+<span class="sd">            Length of each epoch in seconds</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">times</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">times</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">create_epochs</span><span class="p">(</span><span class="n">times</span><span class="p">,</span> <span class="n">epoch_length</span><span class="p">)</span></div>
+
+    
+    <span class="c1"># Add method to get time points for a specific stage</span>
+<div class="viewcode-block" id="CustomAnnotations.get_times">
+<a class="viewcode-back" href="../../turtlewave_hdEEG.html#turtlewave_hdEEG.annotation.CustomAnnotations.get_times">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_times</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">cycle</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">exclude</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Return the times (start and end) for all epochs that match the parameters.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        stage : str or None</span>
+<span class="sd">            Stage to match with</span>
+<span class="sd">        cycle : str or None</span>
+<span class="sd">            Cycle to match with</span>
+<span class="sd">        exclude : str or None</span>
+<span class="sd">            Stage to exclude</span>
+<span class="sd">            </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        list of tuple</span>
+<span class="sd">            Each tuple contains the start and end time of an epoch</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="o">.</span><span class="n">get_times</span><span class="p">(</span><span class="n">stage</span><span class="o">=</span><span class="n">stage</span><span class="p">,</span> <span class="n">cycle</span><span class="o">=</span><span class="n">cycle</span><span class="p">,</span> <span class="n">exclude</span><span class="o">=</span><span class="n">exclude</span><span class="p">)</span></div>
+
+            
+    <span class="c1"># Add any other methods you need to access from the original WonambiAnnotations</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__getattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Delegate any other method calls to the original WonambiAnnotations object&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">wonb_annot</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Tancy Kao.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

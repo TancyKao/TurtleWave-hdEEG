@@ -1,0 +1,6 @@
+sphinx>=4.0.0
+sphinx_rtd_theme
+numpy
+pandas
+matplotlib
+PyQt5

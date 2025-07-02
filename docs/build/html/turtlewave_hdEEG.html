@@ -1,0 +1,1068 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>turtlewave_hdEEG package &mdash; turtlewave 1.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=fc837d61"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=f281be69"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            turtlewave
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="introduction.html">TURTLEWAVE</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">nstallation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="usage.html">Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="modules.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="gui.html">GUI Reference</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">turtlewave</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">turtlewave_hdEEG package</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/turtlewave_hdEEG.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="turtlewave-hdeeg-package">
+<h1>turtlewave_hdEEG package<a class="headerlink" href="#turtlewave-hdeeg-package" title="Link to this heading"></a></h1>
+<section id="submodules">
+<h2>Submodules<a class="headerlink" href="#submodules" title="Link to this heading"></a></h2>
+</section>
+<section id="module-turtlewave_hdEEG.addjson2xml">
+<span id="turtlewave-hdeeg-addjson2xml-module"></span><h2>turtlewave_hdEEG.addjson2xml module<a class="headerlink" href="#module-turtlewave_hdEEG.addjson2xml" title="Link to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.addjson2xml.convert_json_to_xml">
+<span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.addjson2xml.</span></span><span class="sig-name descname"><span class="pre">convert_json_to_xml</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_files</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'.'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">existing_xml</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">event_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'slowwave'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/addjson2xml.html#convert_json_to_xml"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.addjson2xml.convert_json_to_xml" title="Link to this definition"></a></dt>
+<dd><p>Convert multiple JSON files containing events (slow waves or spindles) into a single XML file.
+Can append to an existing XML file if provided.</p>
+<p>Parameters:
+json_files (list): List of paths to JSON files
+output_dir (str): Directory to save the output XML file
+existing_xml (str): Path to existing XML file to append to (optional)
+event_type (str): Type of event to create (‘slowwave’ or ‘spindle’)</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.addjson2xml.create_new_wonambi_xml">
+<span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.addjson2xml.</span></span><span class="sig-name descname"><span class="pre">create_new_wonambi_xml</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/addjson2xml.html#create_new_wonambi_xml"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.addjson2xml.create_new_wonambi_xml" title="Link to this definition"></a></dt>
+<dd><p>Create a new Wonambi-compatible XML structure</p>
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.annotation">
+<span id="turtlewave-hdeeg-annotation-module"></span><h2>turtlewave_hdEEG.annotation module<a class="headerlink" href="#module-turtlewave_hdEEG.annotation" title="Link to this heading"></a></h2>
+<p>Annotations module for turtlewave_hdEEG
+Provides tools to create and save annotations using event information from EEGLAB</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.annotation.</span></span><span class="sig-name descname"><span class="pre">XLAnnotations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">annot_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rater_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Anon'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Simplified annotations for large datasets</p>
+<p>Initialize annotations object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset</strong> (<a class="reference internal" href="#turtlewave_hdEEG.dataset.LargeDataset" title="turtlewave_hdEEG.dataset.LargeDataset"><em>LargeDataset</em></a>) – Dataset to associate with annotations.</p></li>
+<li><p><strong>annot_file</strong> (<em>str</em>) – Path to the annotation file.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_artefacts_from_events">
+<span class="sig-name descname"><span class="pre">add_artefacts_from_events</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_artefacts_from_events"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_artefacts_from_events" title="Link to this definition"></a></dt>
+<dd><p>Add artefact and arousal annotations from the dataset’s event information.</p>
+<p>Uses the ‘isreject’ flag in events to identify artefacts.
+Also identifies arousal events if ‘arousal’ is in the event type (case-insensitive).</p>
+<p>Highly optimized for large datasets by pre-filtering relevant events.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_stages_from_header">
+<span class="sig-name descname"><span class="pre">add_stages_from_header</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_stages_from_header"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_stages_from_header" title="Link to this definition"></a></dt>
+<dd><p>Import stages from header array into annotations using Wonambi’s import_staging
+with Compumedics format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>rater_name</strong> (<em>str</em>) – Name of the rater to use for staging (default: “Automatic_Staging”)</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if successful, False otherwise</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_annotations_batch">
+<span class="sig-name descname"><span class="pre">add_annotations_batch</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">label</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start_times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">end_times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">channels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_annotations_batch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_annotations_batch" title="Link to this definition"></a></dt>
+<dd><p>Add multiple annotations at once.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.add_annotation">
+<span class="sig-name descname"><span class="pre">add_annotation</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">label</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">end_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">channel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.add_annotation"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.add_annotation" title="Link to this definition"></a></dt>
+<dd><p>Add a single annotation to the annotations object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>label</strong> (<em>str</em>) – Label for the annotation</p></li>
+<li><p><strong>start_time</strong> (<em>float</em>) – Start time in seconds</p></li>
+<li><p><strong>end_time</strong> (<em>float</em>) – End time in seconds</p></li>
+<li><p><strong>channel</strong> (<em>str</em><em>, </em><em>list</em><em>, or </em><em>None</em>) – Channel(s) associated with the annotation.
+If None, uses ‘(all)’ to indicate all channels.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if successful, False otherwise</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.process_all">
+<span class="sig-name descname"><span class="pre">process_all</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.process_all"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.process_all" title="Link to this definition"></a></dt>
+<dd><p>Process all annotations - add artefacts and stages.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.XLAnnotations.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#XLAnnotations.save"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.XLAnnotations.save" title="Link to this definition"></a></dt>
+<dd><p>Save annotations to the XML file in Wonambi format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename</strong> (<em>str</em><em> or </em><em>None</em>) – Path to save the file. If None, uses the annot_file from initialization.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.annotation.</span></span><span class="sig-name descname"><span class="pre">CustomAnnotations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">annot_file</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Helper class for reading and working with Wonambi annotations</p>
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.last_second">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">last_second</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.last_second" title="Link to this definition"></a></dt>
+<dd><p>Return the last second in the recording</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.first_second">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">first_second</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.first_second" title="Link to this definition"></a></dt>
+<dd><p>Return the first second in the recording</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.dataset">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dataset</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.dataset" title="Link to this definition"></a></dt>
+<dd><p>Return the dataset associated with the annotations</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.rater">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">rater</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.rater" title="Link to this definition"></a></dt>
+<dd><p>Return the current rater</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.raters">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">raters</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.raters" title="Link to this definition"></a></dt>
+<dd><p>Return all raters in the annotation file</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.epochs">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">epochs</span></span><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.epochs" title="Link to this definition"></a></dt>
+<dd><p>Get all epochs from the annotation file</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_epochs">
+<span class="sig-name descname"><span class="pre">get_epochs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_epochs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_epochs" title="Link to this definition"></a></dt>
+<dd><p>Get epochs that match the specified criteria.
+This method matches the Wonambi API for compatibility.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list of epochs, which are dict with ‘start’ and ‘end’ times, plus
+additional parameters</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list of dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_rater">
+<span class="sig-name descname"><span class="pre">get_rater</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">rater</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_rater"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_rater" title="Link to this definition"></a></dt>
+<dd><p>Select one rater.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>rater</strong> (<em>str</em>) – name of the rater</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.add_rater">
+<span class="sig-name descname"><span class="pre">add_rater</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">rater</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.add_rater"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.add_rater" title="Link to this definition"></a></dt>
+<dd><p>Add one rater.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>rater</strong> (<em>str</em>) – name of the rater</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_stages">
+<span class="sig-name descname"><span class="pre">get_stages</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_stages"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_stages" title="Link to this definition"></a></dt>
+<dd><p>Extract just the stages from the epochs</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_hypnogram">
+<span class="sig-name descname"><span class="pre">get_hypnogram</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_hypnogram"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_hypnogram" title="Link to this definition"></a></dt>
+<dd><p>Convert stages to numeric values for hypnogram plotting</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.save"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.save" title="Link to this definition"></a></dt>
+<dd><p>Save annotations to the XML file in Wonambi format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename</strong> (<em>str</em><em> or </em><em>None</em>) – Path to save the file. If None, uses the annot_file from initialization.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.create_epochs">
+<span class="sig-name descname"><span class="pre">create_epochs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">epoch_length</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">30</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.create_epochs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.create_epochs" title="Link to this definition"></a></dt>
+<dd><p>Create epochs from a sequence of time points.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>times</strong> (<em>list</em><em> or </em><em>ndarray</em>) – List of time points (in seconds)</p></li>
+<li><p><strong>epoch_length</strong> (<em>float</em><em>, </em><em>optional</em>) – Length of each epoch in seconds</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.get_times">
+<span class="sig-name descname"><span class="pre">get_times</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cycle</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.get_times"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.get_times" title="Link to this definition"></a></dt>
+<dd><p>Return the times (start and end) for all epochs that match the parameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>stage</strong> (<em>str</em><em> or </em><em>None</em>) – Stage to match with</p></li>
+<li><p><strong>cycle</strong> (<em>str</em><em> or </em><em>None</em>) – Cycle to match with</p></li>
+<li><p><strong>exclude</strong> (<em>str</em><em> or </em><em>None</em>) – Stage to exclude</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Each tuple contains the start and end time of an epoch</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list of tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.dataset">
+<span id="turtlewave-hdeeg-dataset-module"></span><h2>turtlewave_hdEEG.dataset module<a class="headerlink" href="#module-turtlewave_hdEEG.dataset" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.dataset.LargeDataset">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.dataset.</span></span><span class="sig-name descname"><span class="pre">LargeDataset</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">create_memmap</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">memmap_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">extract_eeglab_metadata</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/dataset.html#LargeDataset"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.dataset.LargeDataset" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Dataset class optimized for large EEG recordings</p>
+<p>Initialize a large dataset handler</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>filename</strong> (<em>str</em>) – Path to the original EEG file</p></li>
+<li><p><strong>create_memmap</strong> (<em>bool</em>) – Whether to create a memory-mapped version of the data</p></li>
+<li><p><strong>memmap_dir</strong> (<em>str</em><em> or </em><em>None</em>) – Directory to store memory-mapped files, if None use same directory as input</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.dataset.LargeDataset.create_memmap">
+<span class="sig-name descname"><span class="pre">create_memmap</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">memmap_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/dataset.html#LargeDataset.create_memmap"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.dataset.LargeDataset.create_memmap" title="Link to this definition"></a></dt>
+<dd><p>Create a memory-mapped version of the data for faster access</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.dataset.LargeDataset.read_data">
+<span class="sig-name descname"><span class="pre">read_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">begtime</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">endtime</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/dataset.html#LargeDataset.read_data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.dataset.LargeDataset.read_data" title="Link to this definition"></a></dt>
+<dd><p>Read data from the dataset, using memory map if available</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>begtime</strong> (<em>float</em><em> or </em><em>None</em>) – Start time in seconds</p></li>
+<li><p><strong>endtime</strong> (<em>float</em><em> or </em><em>None</em>) – End time in seconds</p></li>
+<li><p><strong>chan</strong> (<em>list</em><em> or </em><em>None</em>) – List of channels to load</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>data</strong> – Array containing the requested data</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>ndarray</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.eventprocessor">
+<span id="turtlewave-hdeeg-eventprocessor-module"></span><h2>turtlewave_hdEEG.eventprocessor module<a class="headerlink" href="#module-turtlewave_hdEEG.eventprocessor" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.eventprocessor.</span></span><span class="sig-name descname"><span class="pre">ParalEvents</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">annotations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">20</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A class for parallel detection and analysis of EEG events such as spindles,
+and other neural events across multiple channels.</p>
+<p>Initialize the ParalEvents object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset</strong> (<em>Dataset</em>) – Dataset object containing EEG data</p></li>
+<li><p><strong>annotations</strong> (<a class="reference internal" href="#turtlewave_hdEEG.annotation.XLAnnotations" title="turtlewave_hdEEG.annotation.XLAnnotations"><em>XLAnnotations</em></a>) – Annotations object for storing and retrieving events</p></li>
+<li><p><strong>log_level</strong> (<em>int</em>) – Logging level (e.g., logging.DEBUG, logging.INFO)</p></li>
+<li><p><strong>log_file</strong> (<em>str</em><em> or </em><em>None</em>) – Path to log file. If None, logs to console only.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.clean_memory">
+<span class="sig-name descname"><span class="pre">clean_memory</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.clean_memory"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.clean_memory" title="Link to this definition"></a></dt>
+<dd><p>Perform thorough memory cleanup to release resources</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.detect_spindles">
+<span class="sig-name descname"><span class="pre">detect_spindles</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Ferrarelli2007'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ref_chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grp_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'eeg'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frequency</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(11,</span> <span class="pre">16)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">duration</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0.5,</span> <span class="pre">3)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">polar</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'normal'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reject_artifacts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reject_arousals</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_to_annotations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">json_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">create_empty_json</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">detector_params</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.detect_spindles"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.detect_spindles" title="Link to this definition"></a></dt>
+<dd><p>Detect spindles in the dataset while considering artifacts and arousals.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>method</strong> (<em>str</em><em> or </em><em>list</em>) – Detection method(s) to use (‘Ferrarelli2007’, ‘Wamsley2012’, etc.)</p></li>
+<li><p><strong>chan</strong> (<em>list</em><em> or </em><em>str</em>) – Channels to analyze</p></li>
+<li><p><strong>ref_chan</strong> (<em>list</em><em> or </em><em>str</em>) – Reference channel(s) for re-referencing, or None to use original reference</p></li>
+<li><p><strong>grp_name</strong> (<em>str</em>) – Group name for channel selection</p></li>
+<li><p><strong>frequency</strong> (<em>tuple</em>) – Frequency range for spindle detection (min, max)</p></li>
+<li><p><strong>duration</strong> (<em>tuple</em>) – Duration range for spindle detection in seconds (min, max)</p></li>
+<li><p><strong>polar</strong> (<em>str</em>) – ‘normal’ or ‘opposite’ for handling signal polarity</p></li>
+<li><p><strong>reject_artifacts</strong> (<em>bool</em>) – Whether to exclude segments marked with artifact annotations</p></li>
+<li><p><strong>reject_arousals</strong> (<em>bool</em>) – Whether to exclude segments marked with arousal annotations</p></li>
+<li><p><strong>json_dir</strong> (<em>str</em><em> or </em><em>None</em>) – Directory to save individual channel JSON files (one per channel)</p></li>
+<li><p><strong>create_empty_json</strong> (<em>bool</em>) – Whether to create empty JSON files when no spindles are found</p></li>
+<li><p><strong>**detector_params</strong> (<em>dict</em>)</p></li>
+<li><p><strong>method-specific</strong> (<em>Additional parameters to pass to the detector. These are</em>)</p></li>
+<li><p><strong>det_thresh</strong> (<em>and can include parameters like</em>)</p></li>
+<li><p><strong>sel_thresh</strong></p></li>
+<li><p><strong>etc.</strong></p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of all detected spindles</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.export_spindle_parameters_to_csv">
+<span class="sig-name descname"><span class="pre">export_spindle_parameters_to_csv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">csv_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'all'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frequency</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ref_chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grp_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'eeg'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_fft_sec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">file_pattern</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">skip_empty_files</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.export_spindle_parameters_to_csv"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.export_spindle_parameters_to_csv" title="Link to this definition"></a></dt>
+<dd><p>Calculate spindle parameters from JSON files and export to CSV.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>json_input</strong> (<em>str</em><em> or </em><em>list</em>) – Path to JSON file, directory of JSON files, or list of JSON files</p></li>
+<li><p><strong>csv_file</strong> (<em>str</em>) – Path to output CSV file</p></li>
+<li><p><strong>export_params</strong> (<em>dict</em><em> or </em><em>str</em>) – Parameters to export. If ‘all’, exports all available parameters</p></li>
+<li><p><strong>frequency</strong> (<em>tuple</em><em> or </em><em>None</em>) – Frequency range for power calculations (default: None, uses original range from JSON)</p></li>
+<li><p><strong>ref_chan</strong> (<em>list</em><em> or </em><em>None</em>) – Reference channel(s) to use for parameter calculation</p></li>
+<li><p><strong>n_fft_sec</strong> (<em>int</em>) – FFT window size in seconds for spectral analysis</p></li>
+<li><p><strong>file_pattern</strong> (<em>str</em><em> or </em><em>None</em>) – Pattern to filter JSON files if json_input is a directory</p></li>
+<li><p><strong>grp_name</strong> (<em>str</em>) – Group name for channel selection</p></li>
+<li><p><strong>skip_empty_files</strong> (<em>bool</em>) – Whether to skip empty JSON files or include them in the report</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary of calculated parameters</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.export_spindle_density_to_csv">
+<span class="sig-name descname"><span class="pre">export_spindle_density_to_csv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">csv_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">file_pattern</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.export_spindle_density_to_csv"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.export_spindle_density_to_csv" title="Link to this definition"></a></dt>
+<dd><p>Export spindle statistics to CSV with both whole night and stage-specific densities.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>json_input</strong> (<em>str</em><em> or </em><em>list</em>) – Path to JSON file, directory of JSON files, or list of JSON files</p></li>
+<li><p><strong>csv_file</strong> (<em>str</em>) – Path to output CSV file</p></li>
+<li><p><strong>stage</strong> (<em>str</em><em> or </em><em>list</em>) – Sleep stage(s) to include (e.g., ‘NREM2’, [‘NREM2’, ‘NREM3’])
+if None, will extract stages from spindles</p></li>
+<li><p><strong>file_pattern</strong> (<em>str</em><em> or </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary with spindle statistics by channel</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.save_detection_summary">
+<span class="sig-name descname"><span class="pre">save_detection_summary</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">method</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parameters</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">results_summary</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.save_detection_summary"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.save_detection_summary" title="Link to this definition"></a></dt>
+<dd><p>Save a comprehensive summary of detection parameters and results.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>output_dir</strong> (<em>str</em>) – Directory to save the summary</p></li>
+<li><p><strong>method</strong> (<em>str</em>) – Detection method used</p></li>
+<li><p><strong>parameters</strong> (<em>dict</em>) – All parameters used for detection</p></li>
+<li><p><strong>results_summary</strong> (<em>dict</em>) – Summary of detection results</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.initialize_sqlite_database">
+<span class="sig-name descname"><span class="pre">initialize_sqlite_database</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">db_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'neural_events.db'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.initialize_sqlite_database"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.initialize_sqlite_database" title="Link to this definition"></a></dt>
+<dd><p>Create SQLite database optimized for storing calculated event parameters
+from event_params() function.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>db_path</strong> (<em>str</em>) – Path to SQLite database file</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to created database</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.eventprocessor.ParalEvents.import_parameters_csv_to_database">
+<span class="sig-name descname"><span class="pre">import_parameters_csv_to_database</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">csv_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">db_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">append</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/eventprocessor.html#ParalEvents.import_parameters_csv_to_database"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.eventprocessor.ParalEvents.import_parameters_csv_to_database" title="Link to this definition"></a></dt>
+<dd><p>Import event parameters from an existing CSV file into SQLite database.
+Supports multiple event types and incremental updates.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>csv_file</strong> (<em>str</em>) – Path to existing parameters CSV file</p></li>
+<li><p><strong>db_path</strong> (<em>str</em>) – Path to SQLite database</p></li>
+<li><p><strong>append</strong> (<em>bool</em>) – If True, adds to existing database without replacing existing entries
+If False, replaces any existing entries with the same UUID</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Summary of the operation with counts of added, updated, and skipped rows</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.extensions">
+<span id="turtlewave-hdeeg-extensions-module"></span><h2>turtlewave_hdEEG.extensions module<a class="headerlink" href="#module-turtlewave_hdEEG.extensions" title="Link to this heading"></a></h2>
+<p>Custom extensions to Wonambi spindle detection</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.extensions.ImprovedDetectSpindle">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.extensions.</span></span><span class="sig-name descname"><span class="pre">ImprovedDetectSpindle</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Moelle2011'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frequency</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">duration</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">det_thresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sel_thresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">moving_rms</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">smooth_dur</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tolerance</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_interval</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">merge</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">polar</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'normal'</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/extensions.html#ImprovedDetectSpindle"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.extensions.ImprovedDetectSpindle" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">DetectSpindle</span></code></p>
+<p>Initialize improved spindle detection.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>method</strong> (<em>str</em>) – Detection method. Supported methods include: ‘Ferrarelli2007’,
+‘Moelle2011’, ‘Nir2011’, ‘Wamsley2012’, ‘Martin2013’, ‘Ray2015’,
+‘Lacourse2018’</p></li>
+<li><p><strong>frequency</strong> (<em>tuple</em><em> of </em><em>float</em>) – Frequency range for spindle detection (low and high)</p></li>
+<li><p><strong>duration</strong> (<em>tuple</em><em> of </em><em>float</em>) – Duration range for spindles in seconds (min and max)</p></li>
+<li><p><strong>det_thresh</strong> (<em>float</em><em> or </em><em>None</em>) – Detection threshold (method-specific units)</p></li>
+<li><p><strong>sel_thresh</strong> (<em>float</em><em> or </em><em>None</em>) – Selection threshold (method-specific units)</p></li>
+<li><p><strong>moving_rms</strong> (<em>dict</em><em> or </em><em>float</em><em> or </em><em>None</em>) – Parameters for moving RMS, format: {‘dur’: float, ‘step’: float or None}
+or just duration as float</p></li>
+<li><p><strong>smooth_dur</strong> (<em>float</em><em> or </em><em>None</em>) – Duration for smoothing window in seconds</p></li>
+<li><p><strong>tolerance</strong> (<em>float</em><em> or </em><em>None</em>) – Tolerance for merging events in seconds</p></li>
+<li><p><strong>min_interval</strong> (<em>float</em><em> or </em><em>None</em>) – Minimum interval between events in seconds</p></li>
+<li><p><strong>merge</strong> (<em>bool</em>) – If True, merge events across channels</p></li>
+<li><p><strong>polar</strong> (<em>str</em>) – Signal polarity - ‘normal’ or ‘opposite’</p></li>
+<li><p><strong>**kwargs</strong> (<em>dict</em>) – Additional method-specific parameters</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.extensions.ImprovedDetectSlowWave">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.extensions.</span></span><span class="sig-name descname"><span class="pre">ImprovedDetectSlowWave</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Massimini2004'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frequency</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">duration</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">neg_peak_thresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">40</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p2p_thresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">75</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_dur</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_dur</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">polar</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'normal'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/extensions.html#ImprovedDetectSlowWave"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.extensions.ImprovedDetectSlowWave" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">DetectSlowWave</span></code></p>
+<p>Initialize improved slow wave detection.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>method</strong> (<em>str</em>) – Detection method. Supported methods:
+- ‘Massimini2004’: Traditional threshold-based detection
+- ‘AASM/Massimini2004’: AASM criteria with Massimini method
+- ‘Ngo2015’: Detection based on Ngo et al. 2015
+- ‘Staresina2015’: Detection based on Staresina et al. 2015</p></li>
+<li><p><strong>frequency</strong> (<em>tuple</em><em> of </em><em>float</em>) – Frequency range for slow wave detection</p></li>
+<li><p><strong>duration</strong> (<em>tuple</em><em> of </em><em>float</em>) – Duration range for slow waves in seconds (used for trough_duration in Massimini methods)</p></li>
+<li><p><strong>neg_peak_thresh</strong> (<em>float</em>) – Minimum negative peak amplitude in μV</p></li>
+<li><p><strong>p2p_thresh</strong> (<em>float</em>) – Minimum peak-to-peak amplitude in μV</p></li>
+<li><p><strong>min_dur</strong> (<em>float</em><em> or </em><em>None</em>) – Minimum duration of a slow wave in seconds (used for Ngo2015 and Staresina2015)</p></li>
+<li><p><strong>max_dur</strong> (<em>float</em><em> or </em><em>None</em>) – Maximum duration of a slow wave in seconds (used for Ngo2015 and Staresina2015)</p></li>
+<li><p><strong>polar</strong> (<em>str</em>) – Signal polarity - ‘normal’ or ‘opposite’</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="turtlewave-hdeeg-json-to-annotations-module">
+<h2>turtlewave_hdEEG.json_to_annotations module<a class="headerlink" href="#turtlewave-hdeeg-json-to-annotations-module" title="Link to this heading"></a></h2>
+</section>
+<section id="module-turtlewave_hdEEG.pacprocessor">
+<span id="turtlewave-hdeeg-pacprocessor-module"></span><h2>turtlewave_hdEEG.pacprocessor module<a class="headerlink" href="#module-turtlewave_hdEEG.pacprocessor" title="Link to this heading"></a></h2>
+<p>pac_processor.py
+A class for phase-amplitude coupling (PAC) analysis for high-density EEG data.
+Based on the OCTOPUS method from the seapipe package.</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.pacprocessor.ParalPAC">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.pacprocessor.</span></span><span class="sig-name descname"><span class="pre">ParalPAC</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">annotations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rootpath</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">20</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/pacprocessor.html#ParalPAC"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.pacprocessor.ParalPAC" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A class for parallel detection and analysis of phase-amplitude coupling (PAC)
+across multiple channels of high-density EEG data.</p>
+<p>Initialize the ParalPAC object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset</strong> (<em>Dataset</em>) – Dataset object containing EEG data</p></li>
+<li><p><strong>annotations</strong> (<em>Annotations</em>) – Annotations object for storing and retrieving events</p></li>
+<li><p><strong>rootpath</strong> (<em>str</em>) – Root path for input/output operations</p></li>
+<li><p><strong>log_level</strong> (<em>int</em>) – Logging level (e.g., logging.DEBUG, logging.INFO)</p></li>
+<li><p><strong>log_file</strong> (<em>str</em><em> or </em><em>None</em>) – Path to log file. If None, logs to console only.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.pacprocessor.ParalPAC.pac_method">
+<span class="sig-name descname"><span class="pre">pac_method</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">method</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">surrogate</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">correction</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">list_methods</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/pacprocessor.html#ParalPAC.pac_method"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.pacprocessor.ParalPAC.pac_method" title="Link to this definition"></a></dt>
+<dd><p>Format the method and corrections to be applied through Tensorpac.
+Adapted from OCTOPUS module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>method</strong> (<em>int</em>) – PAC method number</p></li>
+<li><p><strong>surrogate</strong> (<em>int</em>) – Surrogate method number</p></li>
+<li><p><strong>correction</strong> (<em>int</em>) – Correction method number</p></li>
+<li><p><strong>list_methods</strong> (<em>bool</em>) – If True, return a list of method descriptions</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Either a tuple of (method, surrogate, correction) or a list of descriptions</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple or list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.pacprocessor.ParalPAC.analyze_pac">
+<span class="sig-name descname"><span class="pre">analyze_pac</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ref_chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grp_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'eeg'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rater</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reject_artf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['Artefact',</span> <span class="pre">'Arousal']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cycle_idx</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(1,</span> <span class="pre">1,</span> <span class="pre">1,</span> <span class="pre">0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nbins</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">18</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">phase_freq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0.5,</span> <span class="pre">1.25)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">amp_freq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(11,</span> <span class="pre">16)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">idpac</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(2,</span> <span class="pre">3,</span> <span class="pre">4)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_dur</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">adap_bands_phase</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Fixed'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">adap_bands_amplitude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Fixed'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filter_opts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">event_opts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invert</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_detected_events</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">event_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'slow_wave'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pair_with_spindles</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">time_window</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">db_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">progress</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/pacprocessor.html#ParalPAC.analyze_pac"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.pacprocessor.ParalPAC.analyze_pac" title="Link to this definition"></a></dt>
+<dd><p>Analyze phase-amplitude coupling (PAC) in the dataset.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>chan</strong> (<em>list</em><em> or </em><em>str</em>) – Channels to analyze</p></li>
+<li><p><strong>ref_chan</strong> (<em>list</em><em> or </em><em>str</em>) – Reference channel(s) for re-referencing</p></li>
+<li><p><strong>grp_name</strong> (<em>str</em>) – Group name for channel selection</p></li>
+<li><p><strong>stage</strong> (<em>list</em><em> or </em><em>str</em>) – Sleep stage(s) to analyze</p></li>
+<li><p><strong>rater</strong> (<em>str</em>) – Rater name for annotations</p></li>
+<li><p><strong>reject_artf</strong> (<em>list</em>) – Event types to reject</p></li>
+<li><p><strong>cycle_idx</strong> (<em>list</em><em> or </em><em>None</em>) – Sleep cycle indices to include</p></li>
+<li><p><strong>cat</strong> (<em>tuple</em>) – Category specification for data selection</p></li>
+<li><p><strong>nbins</strong> (<em>int</em>) – Number of phase bins</p></li>
+<li><p><strong>phase_freq</strong> (<em>tuple</em>) – Frequency range for phase signal</p></li>
+<li><p><strong>amp_freq</strong> (<em>tuple</em>) – Frequency range for amplitude signal</p></li>
+<li><p><strong>idpac</strong> (<em>tuple</em>) – PAC method settings (method, surrogate, correction)</p></li>
+<li><p><strong>min_dur</strong> (<em>float</em>) – Minimum event duration in seconds</p></li>
+<li><p><strong>adap_bands_phase</strong> (<em>str</em>) – Type of frequency band adaptation for phase</p></li>
+<li><p><strong>adap_bands_amplitude</strong> (<em>str</em>) – Type of frequency band adaptation for amplitude</p></li>
+<li><p><strong>filter_opts</strong> (<em>dict</em>) – Signal filtering options</p></li>
+<li><p><strong>event_opts</strong> (<em>dict</em>) – Event processing options</p></li>
+<li><p><strong>invert</strong> (<em>bool</em>) – Whether to invert signal polarity</p></li>
+<li><p><strong>use_detected_events</strong> (<em>bool</em>) – Whether to use detected events for PAC analysis</p></li>
+<li><p><strong>event_type</strong> (<em>str</em>) – Type of events to use (‘slow_wave’ or ‘spindle’)</p></li>
+<li><p><strong>pair_with_spindles</strong> (<em>bool</em>) – If True and event_type is ‘slow_wave’, will pair slow waves with spindles</p></li>
+<li><p><strong>time_window</strong> (<em>float</em>) – Time window (in seconds) to search for spindles around slow waves</p></li>
+<li><p><strong>db_path</strong> (<em>str</em>) – Path to the SQLite database containing events</p></li>
+<li><p><strong>out_dir</strong> (<em>str</em>) – Output directory for results</p></li>
+<li><p><strong>progress</strong> (<em>bool</em>) – Whether to show progress bar</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary containing PAC results</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.pacprocessor.ParalPAC.generate_comodulogram">
+<span class="sig-name descname"><span class="pre">generate_comodulogram</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">phase_freqs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">amp_freqs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">idpac</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(2,</span> <span class="pre">3,</span> <span class="pre">4)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">buffer</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reject_artf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['Artefact',</span> <span class="pre">'Arousal']</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/pacprocessor.html#ParalPAC.generate_comodulogram"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.pacprocessor.ParalPAC.generate_comodulogram" title="Link to this definition"></a></dt>
+<dd><p>Generate a comodulogram for the given channel and parameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>chan</strong> (<em>str</em>) – Channel to analyze</p></li>
+<li><p><strong>stage</strong> (<em>list</em><em> or </em><em>str</em>) – Sleep stage(s) to analyze</p></li>
+<li><p><strong>phase_freqs</strong> (<em>list</em><em> of </em><em>tuples</em>) – List of phase frequency bands to analyze</p></li>
+<li><p><strong>amp_freqs</strong> (<em>list</em><em> of </em><em>tuples</em>) – List of amplitude frequency bands to analyze</p></li>
+<li><p><strong>idpac</strong> (<em>tuple</em>) – PAC method settings (method, surrogate, correction)</p></li>
+<li><p><strong>buffer</strong> (<em>float</em>) – Buffer in seconds</p></li>
+<li><p><strong>out_dir</strong> (<em>str</em>) – Output directory for results</p></li>
+<li><p><strong>reject_artf</strong> (<em>list</em>) – Event types to reject</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary containing comodulogram results</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.pacprocessor.ParalPAC.compare_conditions">
+<span class="sig-name descname"><span class="pre">compare_conditions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">condition1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">condition2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">test_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'watson_williams'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alpha</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.05</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/pacprocessor.html#ParalPAC.compare_conditions"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.pacprocessor.ParalPAC.compare_conditions" title="Link to this definition"></a></dt>
+<dd><p>Compare PAC between two conditions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>condition1</strong> (<em>dict</em>) – First condition with keys ‘amp_file’, ‘stage’, etc.</p></li>
+<li><p><strong>condition2</strong> (<em>dict</em>) – Second condition with keys ‘amp_file’, ‘stage’, etc.</p></li>
+<li><p><strong>test_type</strong> (<em>str</em>) – Type of statistical test (‘watson_williams’ or ‘permutation’)</p></li>
+<li><p><strong>alpha</strong> (<em>float</em>) – Significance level</p></li>
+<li><p><strong>out_dir</strong> (<em>str</em>) – Output directory for results</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary containing comparison results</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.pacprocessor.ParalPAC.export_pac_parameters_to_csv">
+<span class="sig-name descname"><span class="pre">export_pac_parameters_to_csv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">csv_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">channels</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">phase_freq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">amp_freq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">append</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">method_info</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/pacprocessor.html#ParalPAC.export_pac_parameters_to_csv"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.pacprocessor.ParalPAC.export_pac_parameters_to_csv" title="Link to this definition"></a></dt>
+<dd><p>Export PAC parameters from tracking to a CSV file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>json_dir</strong> (<em>str</em>) – Directory containing JSON files or individual channel CSV files</p></li>
+<li><p><strong>csv_file</strong> (<em>str</em>) – Output CSV file</p></li>
+<li><p><strong>channels</strong> (<em>list</em>) – List of channels to include</p></li>
+<li><p><strong>stages</strong> (<em>list</em>) – List of sleep stages to include</p></li>
+<li><p><strong>phase_freq</strong> (<em>tuple</em>) – Phase frequency range</p></li>
+<li><p><strong>amp_freq</strong> (<em>tuple</em>) – Amplitude frequency range</p></li>
+<li><p><strong>append</strong> (<em>bool</em>) – If True, append to existing CSV file by channel rather than overwrite</p></li>
+<li><p><strong>method_info</strong> (<em>dict</em>) – Dictionary containing method information (sw_method, spindle_method)</p></li>
+<li><p><strong>out_dir</strong> (<em>str</em>) – Base output directory to use</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary containing export results</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.swprocessor">
+<span id="turtlewave-hdeeg-swprocessor-module"></span><h2>turtlewave_hdEEG.swprocessor module<a class="headerlink" href="#module-turtlewave_hdEEG.swprocessor" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.swprocessor.</span></span><span class="sig-name descname"><span class="pre">ParalSWA</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataset</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">annotations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">20</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_file</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A class for parallel detection and analysis of slow wave activity (SWA)
+across multiple channels.</p>
+<p>Initialize the ParalSWA object.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataset</strong> (<em>Dataset</em>) – Dataset object containing EEG data</p></li>
+<li><p><strong>annotations</strong> (<a class="reference internal" href="#turtlewave_hdEEG.annotation.XLAnnotations" title="turtlewave_hdEEG.annotation.XLAnnotations"><em>XLAnnotations</em></a>) – Annotations object for storing and retrieving events</p></li>
+<li><p><strong>log_level</strong> (<em>int</em>) – Logging level (e.g., logging.DEBUG, logging.INFO)</p></li>
+<li><p><strong>log_file</strong> (<em>str</em><em> or </em><em>None</em>) – Path to log file. If None, logs to console only.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.clean_memory">
+<span class="sig-name descname"><span class="pre">clean_memory</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.clean_memory"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.clean_memory" title="Link to this definition"></a></dt>
+<dd><p>Perform thorough memory cleanup to release resources</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.detect_slow_waves">
+<span class="sig-name descname"><span class="pre">detect_slow_waves</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'Massimini2004'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ref_chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grp_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'eeg'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frequency</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0.1,</span> <span class="pre">4)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trough_duration</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0.3,</span> <span class="pre">1.5)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">neg_peak_thresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-80.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p2p_thresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">140.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_dur</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_dur</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">detrend</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">polar</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'normal'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reject_artifacts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reject_arousals</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">peak_thresh_sigma</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ptp_thresh_sigma</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_to_annotations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">json_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">create_empty_json</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.detect_slow_waves"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.detect_slow_waves" title="Link to this definition"></a></dt>
+<dd><p>Detect slow waves in the dataset while considering artifacts and arousals.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>method</strong> (<em>str</em><em> or </em><em>list</em>) – Detection method(s) to use (‘Massimini2004’, ‘AASM/Massimini2004’, ‘Ngo2015’, ‘Staresina2015’)</p></li>
+<li><p><strong>chan</strong> (<em>list</em><em> or </em><em>str</em>) – Channels to analyze</p></li>
+<li><p><strong>ref_chan</strong> (<em>list</em><em> or </em><em>str</em>) – Reference channel(s) for re-referencing</p></li>
+<li><p><strong>grp_name</strong> (<em>str</em>) – Group name for channel selection</p></li>
+<li><p><strong>frequency</strong> (<em>tuple</em>) – Frequency range for slow wave detection (min, max)</p></li>
+<li><p><strong>trough_duration</strong> (<em>tuple</em>) – Duration range for slow wave trough in seconds (min, max)</p></li>
+<li><p><strong>neg_peak_thresh</strong> (<em>float</em>) – Minimum negative peak threshold in μV</p></li>
+<li><p><strong>p2p_thresh</strong> (<em>float</em>) – Minimum peak-to-peak amplitude threshold in μV</p></li>
+<li><p><strong>peak_thresh_sigma</strong> (<em>float</em><em> or </em><em>None</em>) – Peak threshold in standard deviations (for Ngo2015 method)</p></li>
+<li><p><strong>ptp_thresh_sigma</strong> (<em>float</em><em> or </em><em>None</em>) – Peak-to-peak threshold in standard deviations (for Ngo2015 method)</p></li>
+<li><p><strong>invert</strong> (<em>bool</em>) – Whether to invert the signal polarity</p></li>
+<li><p><strong>reject_artifacts</strong> (<em>bool</em>) – Whether to exclude segments marked with artifact annotations</p></li>
+<li><p><strong>reject_arousals</strong> (<em>bool</em>) – Whether to exclude segments marked with arousal annotations</p></li>
+<li><p><strong>stage</strong> (<em>list</em><em> or </em><em>str</em>) – Sleep stage(s) to analyze</p></li>
+<li><p><strong>cat</strong> (<em>tuple</em>) – Category specification for data selection</p></li>
+<li><p><strong>save_to_annotations</strong> (<em>bool</em>) – Whether to save detected slow waves to annotations</p></li>
+<li><p><strong>json_dir</strong> (<em>str</em><em> or </em><em>None</em>) – Directory to save individual channel JSON files</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of all detected slow waves</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.export_slow_wave_parameters_to_csv">
+<span class="sig-name descname"><span class="pre">export_slow_wave_parameters_to_csv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">csv_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'all'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frequency</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ref_chan</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grp_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'eeg'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_fft_sec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">file_pattern</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">skip_empty_files</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.export_slow_wave_parameters_to_csv"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.export_slow_wave_parameters_to_csv" title="Link to this definition"></a></dt>
+<dd><p>Calculate slow wave parameters from JSON files and export to CSV.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>json_input</strong> (<em>str</em><em> or </em><em>list</em>) – Path to JSON file, directory of JSON files, or list of JSON files</p></li>
+<li><p><strong>csv_file</strong> (<em>str</em>) – Path to output CSV file</p></li>
+<li><p><strong>export_params</strong> (<em>dict</em><em> or </em><em>str</em>) – Parameters to export. If ‘all’, exports all available parameters</p></li>
+<li><p><strong>frequency</strong> (<em>tuple</em><em> or </em><em>None</em>) – Frequency range for power calculations</p></li>
+<li><p><strong>ref_chan</strong> (<em>list</em><em> or </em><em>None</em>) – Reference channel(s) for parameter calculation</p></li>
+<li><p><strong>n_fft_sec</strong> (<em>int</em>) – FFT window size in seconds for spectral analysis</p></li>
+<li><p><strong>file_pattern</strong> (<em>str</em><em> or </em><em>None</em>) – Pattern to filter JSON files if json_input is a directory</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.export_slow_wave_density_to_csv">
+<span class="sig-name descname"><span class="pre">export_slow_wave_density_to_csv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">csv_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">file_pattern</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.export_slow_wave_density_to_csv"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.export_slow_wave_density_to_csv" title="Link to this definition"></a></dt>
+<dd><p>Export slow wave statistics to CSV with both whole night and stage-specific densities.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>json_input</strong> (<em>str</em><em> or </em><em>list</em>) – Path to JSON file, directory of JSON files, or list of JSON files</p></li>
+<li><p><strong>csv_file</strong> (<em>str</em>) – Path to output CSV file</p></li>
+<li><p><strong>stage</strong> (<em>str</em><em> or </em><em>list</em>) – Sleep stage(s) to include</p></li>
+<li><p><strong>file_pattern</strong> (<em>str</em><em> or </em><em>None</em>) – Pattern to filter JSON files</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.save_detection_summary">
+<span class="sig-name descname"><span class="pre">save_detection_summary</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">method</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parameters</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">results_summary</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.save_detection_summary"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.save_detection_summary" title="Link to this definition"></a></dt>
+<dd><p>Save a comprehensive summary of detection parameters and results.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>output_dir</strong> (<em>str</em>) – Directory to save the summary</p></li>
+<li><p><strong>method</strong> (<em>str</em>) – Detection method used</p></li>
+<li><p><strong>parameters</strong> (<em>dict</em>) – All parameters used for detection</p></li>
+<li><p><strong>results_summary</strong> (<em>dict</em>) – Summary of detection results</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.initialize_sqlite_database">
+<span class="sig-name descname"><span class="pre">initialize_sqlite_database</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">db_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'neural_events.db'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.initialize_sqlite_database"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.initialize_sqlite_database" title="Link to this definition"></a></dt>
+<dd><p>Create SQLite database optimized for storing calculated event parameters
+from event_params() function.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>db_path</strong> (<em>str</em>) – Path to SQLite database file</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to created database</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.swprocessor.ParalSWA.import_parameters_csv_to_database">
+<span class="sig-name descname"><span class="pre">import_parameters_csv_to_database</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">csv_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">db_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">append</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/swprocessor.html#ParalSWA.import_parameters_csv_to_database"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.swprocessor.ParalSWA.import_parameters_csv_to_database" title="Link to this definition"></a></dt>
+<dd><p>Import event parameters from an existing CSV file into SQLite database.
+Supports multiple event types and incremental updates.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>csv_file</strong> (<em>str</em>) – Path to existing parameters CSV file</p></li>
+<li><p><strong>db_path</strong> (<em>str</em>) – Path to SQLite database</p></li>
+<li><p><strong>append</strong> (<em>bool</em>) – If True, adds to existing database without replacing existing entries
+If False, replaces any existing entries with the same UUID</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Summary of the operation with counts of added, updated, and skipped rows</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.utils">
+<span id="turtlewave-hdeeg-utils-module"></span><h2>turtlewave_hdEEG.utils module<a class="headerlink" href="#module-turtlewave_hdEEG.utils" title="Link to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.utils.process_events_parallel">
+<span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.utils.</span></span><span class="sig-name descname"><span class="pre">process_events_parallel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">events</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data_source</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">window_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_workers</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">func</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/utils.html#process_events_parallel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.utils.process_events_parallel" title="Link to this definition"></a></dt>
+<dd><p>Process EEG events in parallel</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>events</strong> (<em>list</em><em> of </em><em>dict</em>) – List of events with at least ‘start_time’ key</p></li>
+<li><p><strong>data_source</strong> (<a class="reference internal" href="#turtlewave_hdEEG.dataset.LargeDataset" title="turtlewave_hdEEG.dataset.LargeDataset"><em>LargeDataset</em></a><em> or </em><em>str</em>) – Large dataset object or path to data file</p></li>
+<li><p><strong>window_size</strong> (<em>float</em>) – Window size around event in seconds</p></li>
+<li><p><strong>n_workers</strong> (<em>int</em>) – Number of parallel workers</p></li>
+<li><p><strong>func</strong> (<em>callable</em><em> or </em><em>None</em>) – Function to apply to each event data, if None just return the data</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>results</strong> – List of processed event data</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.utils.explore_eeglab_structure">
+<span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.utils.</span></span><span class="sig-name descname"><span class="pre">explore_eeglab_structure</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/utils.html#explore_eeglab_structure"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.utils.explore_eeglab_structure" title="Link to this definition"></a></dt>
+<dd><p>Utility to explore the structure of an EEGLAB file</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename</strong> (<em>str</em>) – Path to EEGLAB .set file</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>structure</strong> – Dictionary representation of EEGLAB file structure</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.utils.read_channels_from_csv">
+<span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.utils.</span></span><span class="sig-name descname"><span class="pre">read_channels_from_csv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">csv_file_path</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/utils.html#read_channels_from_csv"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.utils.read_channels_from_csv" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG.visualization">
+<span id="turtlewave-hdeeg-visualization-module"></span><h2>turtlewave_hdEEG.visualization module<a class="headerlink" href="#module-turtlewave_hdEEG.visualization" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.visualization.EventViewer">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">turtlewave_hdEEG.visualization.</span></span><span class="sig-name descname"><span class="pre">EventViewer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data_source</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">annotation_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">window_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/visualization.html#EventViewer"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.visualization.EventViewer" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Interactive viewer for EEG events in large datasets</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>data_source</strong> (<a class="reference internal" href="#turtlewave_hdEEG.dataset.LargeDataset" title="turtlewave_hdEEG.dataset.LargeDataset"><em>LargeDataset</em></a><em> or </em><em>str</em>) – Large dataset object or path to data file</p></li>
+<li><p><strong>annotation_file</strong> (<em>str</em>) – Path to annotation file with events</p></li>
+<li><p><strong>window_size</strong> (<em>float</em>) – Initial window size in seconds</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.visualization.EventViewer.update_event">
+<span class="sig-name descname"><span class="pre">update_event</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">val</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/visualization.html#EventViewer.update_event"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.visualization.EventViewer.update_event" title="Link to this definition"></a></dt>
+<dd><p>Update when event slider changes</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.visualization.EventViewer.update_display">
+<span class="sig-name descname"><span class="pre">update_display</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">val</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/visualization.html#EventViewer.update_display"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.visualization.EventViewer.update_display" title="Link to this definition"></a></dt>
+<dd><p>Update the EEG display</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.visualization.EventViewer.next_event">
+<span class="sig-name descname"><span class="pre">next_event</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">event</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/visualization.html#EventViewer.next_event"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.visualization.EventViewer.next_event" title="Link to this definition"></a></dt>
+<dd><p>Go to next event</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.visualization.EventViewer.prev_event">
+<span class="sig-name descname"><span class="pre">prev_event</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">event</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/visualization.html#EventViewer.prev_event"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.visualization.EventViewer.prev_event" title="Link to this definition"></a></dt>
+<dd><p>Go to previous event</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.visualization.EventViewer.show">
+<span class="sig-name descname"><span class="pre">show</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/visualization.html#EventViewer.show"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.visualization.EventViewer.show" title="Link to this definition"></a></dt>
+<dd><p>Display the viewer</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-turtlewave_hdEEG">
+<span id="module-contents"></span><h2>Module contents<a class="headerlink" href="#module-turtlewave_hdEEG" title="Link to this heading"></a></h2>
+<p>turtlewave_hdEEG - Extended Wonambi for large EEG datasets</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Tancy Kao.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
