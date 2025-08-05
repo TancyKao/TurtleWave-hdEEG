@@ -6,19 +6,16 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>turtlewave_hdEEG package &mdash; turtlewave 1.1.0 documentation</title>
+  <title>turtlewave_hdEEG package &mdash; TurtleWave hdEEG 2.0.2 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
-      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
 
   
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=fc837d61"></script>
+      <script src="_static/documentation_options.js?v=c2377ec0"></script>
       <script src="_static/doctools.js?v=9bcbadda"></script>
       <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
-      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
-      <script src="_static/copybutton.js?v=f281be69"></script>
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" /> 
@@ -28,12 +25,12 @@
   <div class="wy-grid-for-nav">
     <nav data-toggle="wy-nav-shift" class="wy-nav-side">
       <div class="wy-side-scroll">
-        <div class="wy-side-nav-search" >
+        <div class="wy-side-nav-search"  style="background: #2980B9" >
 
           
           
           <a href="index.html" class="icon icon-home">
-            turtlewave
+            TurtleWave hdEEG
           </a>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
@@ -56,9 +53,9 @@
       </div>
     </nav>
 
-    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2980B9" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="index.html">turtlewave</a>
+          <a href="index.html">TurtleWave hdEEG</a>
       </nav>
 
       <div class="wy-nav-content">
@@ -332,6 +329,12 @@ additional parameters</p>
 </dl>
 </dd></dl>
 
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.annotation.CustomAnnotations.__getattr__">
+<span class="sig-name descname"><span class="pre">__getattr__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/annotation.html#CustomAnnotations.__getattr__"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.annotation.CustomAnnotations.__getattr__" title="Link to this definition"></a></dt>
+<dd><p>Delegate any other method calls to the original WonambiAnnotations object</p>
+</dd></dl>
+
 </dd></dl>
 
 </section>
@@ -580,6 +583,27 @@ or just duration as float</p></li>
 </ul>
 </dd>
 </dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.extensions.ImprovedDetectSpindle.__call__">
+<span class="sig-name descname"><span class="pre">__call__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/extensions.html#ImprovedDetectSpindle.__call__"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.extensions.ImprovedDetectSpindle.__call__" title="Link to this definition"></a></dt>
+<dd><p>Detect spindles in the data with optional signal inversion.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>data</strong> (<em>instance</em><em> of </em><em>Data</em>) – The data to analyze</p></li>
+<li><p><strong>parent</strong> (<em>QWidget</em>) – For use with GUI, as parent widget for the progress bar</p></li>
+<li><p><strong>timeout</strong> (<em>int</em>) – Maximum time in seconds to allow for detection before timing out</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Detected spindles</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>instance of graphoelement.Spindles</p>
+</dd>
+</dl>
+</dd></dl>
+
 </dd></dl>
 
 <dl class="py class">
@@ -605,6 +629,23 @@ or just duration as float</p></li>
 </ul>
 </dd>
 </dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="turtlewave_hdEEG.extensions.ImprovedDetectSlowWave.__call__">
+<span class="sig-name descname"><span class="pre">__call__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/turtlewave_hdEEG/extensions.html#ImprovedDetectSlowWave.__call__"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#turtlewave_hdEEG.extensions.ImprovedDetectSlowWave.__call__" title="Link to this definition"></a></dt>
+<dd><p>Detect slow waves in the data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>instance</em><em> of </em><em>Data</em>) – The data to analyze</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Detected slow waves</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>instance of graphoelement.SlowWaves</p>
+</dd>
+</dl>
+</dd></dl>
+
 </dd></dl>
 
 </section>

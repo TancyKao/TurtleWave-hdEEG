@@ -8,9 +8,8 @@ To launch the TurtleWave GUI:
 
 .. code-block:: python
 
-   from turtlewave_hdEEG.turtlewave_gui import main
-   main()
-
+   turtlewave_gui
+   
 Basic Workflow
 -------------
 

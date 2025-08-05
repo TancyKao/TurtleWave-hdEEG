@@ -14,7 +14,7 @@ on_rtd = os.environ.get('READTHEDOCS') == 'True'
 project = 'TurtleWave hdEEG'
 copyright = '2025, Tancy Kao'
 author = 'Tancy Kao'
-release = '2.0.0'
+release = '2.0.2'
 
 # -- General configuration ---------------------------------------------------
 # Extensions

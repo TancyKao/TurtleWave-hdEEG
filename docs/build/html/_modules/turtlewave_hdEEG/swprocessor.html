@@ -5,19 +5,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>turtlewave_hdEEG.swprocessor &mdash; turtlewave 1.1.0 documentation</title>
+  <title>turtlewave_hdEEG.swprocessor &mdash; TurtleWave hdEEG 2.0.2 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
-      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
 
   
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="../../_static/documentation_options.js?v=fc837d61"></script>
+      <script src="../../_static/documentation_options.js?v=c2377ec0"></script>
       <script src="../../_static/doctools.js?v=9bcbadda"></script>
       <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
-      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
-      <script src="../../_static/copybutton.js?v=f281be69"></script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" /> 
@@ -27,12 +24,12 @@
   <div class="wy-grid-for-nav">
     <nav data-toggle="wy-nav-shift" class="wy-nav-side">
       <div class="wy-side-scroll">
-        <div class="wy-side-nav-search" >
+        <div class="wy-side-nav-search"  style="background: #2980B9" >
 
           
           
           <a href="../../index.html" class="icon icon-home">
-            turtlewave
+            TurtleWave hdEEG
           </a>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
@@ -55,9 +52,9 @@
       </div>
     </nav>
 
-    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2980B9" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="../../index.html">turtlewave</a>
+          <a href="../../index.html">TurtleWave hdEEG</a>
       </nav>
 
       <div class="wy-nav-content">
@@ -1469,27 +1466,32 @@
                     <span class="n">channels</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;Channel&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="nb">str</span><span class="p">)</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span>
                     <span class="n">start_times</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;Start time&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span>
                     
-                    <span class="c1"># Build a query to get existing events matching these combinations</span>
-                    <span class="n">query_parts</span> <span class="o">=</span> <span class="p">[]</span>
-                    <span class="n">query_params</span> <span class="o">=</span> <span class="p">[]</span>
-                    
-                    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">channels</span><span class="p">)):</span>
-                        <span class="n">freq_lower</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;freq_lower&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;freq_lower&#39;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">else</span> <span class="kc">None</span>
-                        <span class="n">freq_upper</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;freq_upper&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;freq_upper&#39;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">else</span> <span class="kc">None</span>
-                        <span class="n">stage</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;Stage&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;Stage&#39;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">else</span> <span class="kc">None</span>
+                    <span class="n">batch_size</span> <span class="o">=</span> <span class="mi">300</span>  <span class="c1"># Process in batches to avoid memory issues</span>
+                    <span class="k">for</span> <span class="n">batch_start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">channels</span><span class="p">),</span> <span class="n">batch_size</span><span class="p">):</span>
+                        <span class="n">batch_end</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">batch_start</span> <span class="o">+</span> <span class="n">batch_size</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">channels</span><span class="p">))</span>
+                        <span class="n">batch_channels</span> <span class="o">=</span> <span class="n">channels</span><span class="p">[</span><span class="n">batch_start</span><span class="p">:</span><span class="n">batch_end</span><span class="p">]</span>
+                        <span class="n">batch_start_times</span> <span class="o">=</span> <span class="n">start_times</span><span class="p">[</span><span class="n">batch_start</span><span class="p">:</span><span class="n">batch_end</span><span class="p">]</span>
+                        <span class="c1"># Build a query to get existing events matching these combinations</span>
+                        <span class="n">query_parts</span> <span class="o">=</span> <span class="p">[]</span>
+                        <span class="n">query_params</span> <span class="o">=</span> <span class="p">[]</span>
+                        
+                        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">channels</span><span class="p">)):</span>
+                            <span class="n">freq_lower</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;freq_lower&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;freq_lower&#39;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">else</span> <span class="kc">None</span>
+                            <span class="n">freq_upper</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;freq_upper&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;freq_upper&#39;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">else</span> <span class="kc">None</span>
+                            <span class="n">stage</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s1">&#39;Stage&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;Stage&#39;</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">else</span> <span class="kc">None</span>
 
-                        <span class="n">query_parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)&quot;</span><span class="p">)</span>
-                        <span class="n">query_params</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="n">event_type</span><span class="p">,</span> <span class="n">channels</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">start_times</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="n">method</span><span class="p">,</span> <span class="n">freq_lower</span><span class="p">,</span> <span class="n">freq_upper</span><span class="p">,</span> <span class="n">stage</span><span class="p">])</span>
-                    
-                    <span class="k">if</span> <span class="n">query_parts</span><span class="p">:</span>
-                        <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT event_type, channel, start_time, method, freq_lower, freq_upper, stage FROM events WHERE </span><span class="si">{</span><span class="s1">&#39; OR &#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">query_parts</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
-                        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">query_params</span><span class="p">)</span>
+                            <span class="n">query_parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)&quot;</span><span class="p">)</span>
+                            <span class="n">query_params</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="n">event_type</span><span class="p">,</span> <span class="n">batch_channels</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">batch_start_times</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="n">method</span><span class="p">,</span> <span class="n">freq_lower</span><span class="p">,</span> <span class="n">freq_upper</span><span class="p">,</span> <span class="n">stage</span><span class="p">])</span>
                         
-                        <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">():</span>
-                            <span class="c1"># Create a tuple of (event_type, channel, start_time. method) to check against</span>
-                            <span class="n">existing_events</span><span class="o">.</span><span class="n">add</span><span class="p">((</span><span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">3</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">4</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">5</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">6</span><span class="p">]))</span>
-                        
-                        <span class="bp">self</span><span class="o">.</span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Found </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">existing_events</span><span class="p">)</span><span class="si">}</span><span class="s2"> existing entries matching event type, channel, and start time&quot;</span><span class="p">)</span>
+                        <span class="k">if</span> <span class="n">query_parts</span><span class="p">:</span>
+                            <span class="n">query</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;SELECT event_type, channel, start_time, method, freq_lower, freq_upper, stage FROM events WHERE </span><span class="si">{</span><span class="s1">&#39; OR &#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">query_parts</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
+                            <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">query</span><span class="p">,</span> <span class="n">query_params</span><span class="p">)</span>
+                            
+                            <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">():</span>
+                                <span class="c1"># Create a tuple of (event_type, channel, start_time. method) to check against</span>
+                                <span class="n">existing_events</span><span class="o">.</span><span class="n">add</span><span class="p">((</span><span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">3</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">4</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">5</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="mi">6</span><span class="p">]))</span>
+                            
+                    <span class="bp">self</span><span class="o">.</span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Found </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">existing_events</span><span class="p">)</span><span class="si">}</span><span class="s2"> existing entries matching event type, channel, and start time&quot;</span><span class="p">)</span>
                 
                 <span class="c1"># Mark rows that exist in the database based on the uniqueness constraint</span>
                 <span class="n">df</span><span class="p">[</span><span class="s1">&#39;exists_in_db&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span>
