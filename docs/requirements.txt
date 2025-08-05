@@ -4,3 +4,4 @@ numpy
 pandas
 matplotlib
 PyQt5
+# Add any other packages that your documentation depends on
