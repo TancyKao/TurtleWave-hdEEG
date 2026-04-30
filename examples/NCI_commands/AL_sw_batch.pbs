@@ -1,0 +1,97 @@
+#!/bin/bash
+#PBS -P ca97
+#PBS -q normal
+#PBS -N AL_sw_batch
+#PBS -l ncpus=4,mem=16GB,walltime=14:00:00
+#PBS -l storage=gdata/ca97+scratch/ca97
+#PBS -l wd
+#PBS -o logs/$PBS_JOBNAME.o$PBS_JOBID
+#PBS -e logs/$PBS_JOBNAME.e$PBS_JOBID
+
+set -euo pipefail
+mkdir -p logs
+
+# -------- User-configurable (Don't need to edit me if submitting via .sh scripts) --------
+ROOT="${ROOT:-/scratch/ca97/MCIdata}"                       
+LIST="${LIST:-/scratch/ca97/al_code/subjects.txt}"       
+PY_SCRIPT="${PY_SCRIPT:-/scratch/ca97/al_code/hdEEG_sw_detector_GADI.py}"
+
+METHOD="${METHOD:-Staresina2015}"                          
+STAGES="${STAGES:-NREM2,NREM3}"
+FREQ="${FREQ:-0.1,4.0}"
+TROUGH_DURATION="${TROUGH_DURATION:-0.8,2.0}"
+NEG_PEAK_THRESH="${NEG_PEAK_THRESH:- -20.0}"
+P2P_THRESH="${P2P_THRESH:- 40.0}"
+POLAR="${POLAR:-normal}"                 
+
+# -------- Environment  --------
+module load python3/3.11.7
+source /scratch/ca97/python312_env/bin/activate
+
+export OMP_NUM_THREADS=${PBS_NCPUS:-4}
+export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
+export MKL_NUM_THREADS=$OMP_NUM_THREADS
+export NUMEXPR_NUM_THREADS=$OMP_NUM_THREADS
+
+echo "Host: $(hostname)"
+echo "Job:  $PBS_JOBNAME ($PBS_JOBID)"
+echo "ROOT: $ROOT"
+echo "LIST: $LIST"
+echo "Starting at: $(date)"
+echo
+
+# -------- Checks --------
+
+if [[ ! -f "$LIST" ]]; then
+  echo "ERROR: subjects list not found: $LIST" >&2
+  exit 3
+fi
+
+FAILED_LIST="logs/${PBS_JOBNAME}_${PBS_JOBID}.failures.txt"
+> "$FAILED_LIST"
+
+i=0
+total=$(wc -l < "$LIST" | tr -d ' ')
+while IFS= read -r SUBJECT || [[ -n "${SUBJECT:-}" ]]; do
+  SUBJECT="$(echo "$SUBJECT" | tr -d '\r' | xargs)"
+  [[ -z "$SUBJECT" ]] && continue
+
+  i=$((i+1))
+  SUBJ_LOG="logs/${SUBJECT}.sw.log"
+
+  echo "[$(date)] ($i/$total) >>> Starting subject: ${SUBJECT}" | tee -a "$SUBJ_LOG"
+
+  set +e
+  python -u "$PY_SCRIPT" \
+    --root "$ROOT" \
+    --subject "$SUBJECT" \
+    --method "$METHOD" \
+    --stages "$STAGES" \
+    --freq "$FREQ" \
+    --trough_duration "$TROUGH_DURATION" \
+    --neg_peak_thresh "$NEG_PEAK_THRESH" \
+    --p2p_thresh "$P2P_THRESH" \
+    --polar "$POLAR" \
+    --reject_artifacts \
+    --loglevel INFO \
+    2>&1 | tee -a "$SUBJ_LOG"
+  rc=${PIPESTATUS[0]}
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    echo "[$(date)] !!! Subject ${SUBJECT} FAILED with exit code ${rc}" | tee -a "$SUBJ_LOG"
+    echo "${SUBJECT},rc=${rc}" >> "$FAILED_LIST"
+  else
+    echo "[$(date)] <<< Subject ${SUBJECT} completed OK" | tee -a "$SUBJ_LOG"
+  fi
+
+  echo
+done < "$LIST"
+
+echo "Finished at: $(date)"
+if [[ -s "$FAILED_LIST" ]]; then
+  echo "Some subjects failed. See: $FAILED_LIST"
+  exit 10
+else
+  echo "All subjects completed successfully."
+fi

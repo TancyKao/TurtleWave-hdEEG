@@ -1,2 +1,3 @@
 [console_scripts]
+eeg_review_gui = frontend.eeg_review_gui:main
 turtlewave_gui = frontend.turtlewave_gui:main

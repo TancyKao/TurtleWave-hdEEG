@@ -107,6 +107,8 @@ class TurtleWaveGUI(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
         
+        self.setup_menu_bar()
+        
         # Create tabs
         self.tabs = QTabWidget()
         self.setup_tab = QWidget()
@@ -155,6 +157,37 @@ class TurtleWaveGUI(QMainWindow):
         self.tabs.setTabEnabled(4, False)  # PAC tab
         #self.tabs.setTabEnabled(self.tabs.indexOf(self.review_tab), False)<=================
 
+    def setup_menu_bar(self):
+        """Setup menu bar with documentation link"""
+        menubar = self.menuBar()
+        
+        # Help menu
+        help_menu = menubar.addMenu('Help')
+        
+        # Documentation action
+        doc_action = QtWidgets.QAction('Documentation', self)
+        doc_action.setShortcut('F1')
+        doc_action.triggered.connect(self.open_documentation)
+        help_menu.addAction(doc_action)
+        
+        # About action
+        about_action = QtWidgets.QAction('About', self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def open_documentation(self):
+        """Open documentation in web browser"""
+        import webbrowser
+        webbrowser.open('https://turtlewave-hdeeg.readthedocs.io/en/latest/')
+        self.write_log("Opened documentation in web browser")
+
+    def show_about(self):
+        """Show about dialog"""
+        QMessageBox.about(self, "About TurtleWave hdEEG", 
+            "TurtleWave hdEEG - Sleep Event Detection and Coupling Suite\n\n"
+            "Documentation: https://turtlewave-hdeeg.readthedocs.io/en/latest/\n\n"
+            "A comprehensive tool for hd-EEG sleep event detection and analysis.")
+
     def handle_tab_change(self, index):
         """Handle tab changes"""
         # If switching to PAC tab, make sure methods are populated
@@ -165,6 +198,20 @@ class TurtleWaveGUI(QMainWindow):
         # Main layout
         layout = QVBoxLayout(self.setup_tab)
         
+        doc_group = QGroupBox("Documentation & Help")
+        doc_layout = QHBoxLayout()
+        
+        doc_label = QLabel("📖 For detailed instructions and tutorials, visit:")
+        doc_layout.addWidget(doc_label)
+        
+        doc_link = QPushButton("TurtleWave Documentation")
+        doc_link.setStyleSheet("QPushButton { color: #2196F3; text-decoration: underline; border: none; background: none; }")
+        doc_link.clicked.connect(self.open_documentation)
+        doc_layout.addWidget(doc_link)
+        
+        doc_layout.addStretch(1)
+        doc_group.setLayout(doc_layout)
+        layout.addWidget(doc_group)
 
         # File selection group
         file_group = QGroupBox("Data Selection")
@@ -330,7 +377,6 @@ class TurtleWaveGUI(QMainWindow):
         
         # Connect method change to parameter update
         self.sw_method_combo.currentTextChanged.connect(self.update_sw_params_for_method)
-        
         
         
         # Options
@@ -2519,7 +2565,7 @@ class TurtleWaveGUI(QMainWindow):
                 self.pac_channel_list.addItem(region)
 
     def populate_pac_channels(self):
-        """Populate channel list for PAC analysis from database"""
+        """Populate channel list for PAC analysis from database with optimized query"""
         if not hasattr(self, 'database_channels'):
             # Get channels from database
             try:
@@ -2528,6 +2574,11 @@ class TurtleWaveGUI(QMainWindow):
                     import sqlite3
                     conn = sqlite3.connect(db_path)
                     cursor = conn.cursor()
+                    
+                    # Ensure indexes exist for better performance
+                    self._ensure_database_indexes(cursor)
+                    
+                    # Optimized query with index hint
                     cursor.execute("SELECT DISTINCT channel FROM events ORDER BY channel")
                     self.database_channels = [row[0] for row in cursor.fetchall()]
                     conn.close()
@@ -2551,8 +2602,52 @@ class TurtleWaveGUI(QMainWindow):
         """Filter channel list based on user input"""
         self.populate_pac_channels()
 
+    def _ensure_database_indexes(self, cursor):
+        """Create database indexes for improved query performance on large datasets"""
+        try:
+            # Create composite index for event_type + method + freq + stage queries
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_composite
+                ON events(event_type, method, freq_lower, freq_upper, stage)
+            """)
+            
+            # Create index for event_type filtering (most selective first)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_type
+                ON events(event_type)
+            """)
+            
+            # Create index for method filtering
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_method
+                ON events(method)
+            """)
+            
+            # Create index for stage filtering
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_stage
+                ON events(stage)
+            """)
+            
+            # Create index for channel queries (used in PAC analysis)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_channel
+                ON events(channel)
+            """)
+            
+            # Create composite index for PAC channel queries
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_pac_channels
+                ON events(event_type, method, stage, channel)
+            """)
+            
+            self.write_log("Database indexes created/verified for improved performance")
+            
+        except Exception as e:
+            self.write_log(f"Warning: Could not create database indexes: {str(e)}")
+
     def populate_detection_methods(self):
-        """Populate detection method lists from database"""
+        """Populate detection method lists from database with optimized queries"""
         db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
         if not os.path.exists(db_path):
             self.write_log("Database not found. Cannot load detection methods.")
@@ -2563,27 +2658,28 @@ class TurtleWaveGUI(QMainWindow):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             
+            # Create performance indexes if they don't exist
+            self._ensure_database_indexes(cursor)
             
-            # Get slow wave methods with their frequency ranges and stages
+            # Optimized single query to get both slow wave and spindle methods
+            # Using UNION ALL for better performance than separate queries
             cursor.execute("""
-                SELECT method, freq_lower, freq_upper, stage, COUNT(*) as event_count
-                FROM events 
-                WHERE event_type = 'slow_wave'
-                GROUP BY method, freq_lower, freq_upper, stage
-                ORDER BY method, freq_lower, freq_upper, stage
+                SELECT event_type, method, freq_lower, freq_upper, stage, COUNT(*) as event_count
+                FROM events
+                WHERE event_type IN ('slow_wave', 'spindle')
+                GROUP BY event_type, method, freq_lower, freq_upper, stage
+                ORDER BY event_type, method, freq_lower, freq_upper, stage
             """)
-            sw_results = cursor.fetchall()
-
-            # Get spindle methods with their frequency ranges and stages
-            cursor.execute("""
-                SELECT method, freq_lower, freq_upper, stage, COUNT(*) as event_count
-                FROM events 
-                WHERE event_type = 'spindle'
-                GROUP BY method, freq_lower, freq_upper, stage
-                ORDER BY method, freq_lower, freq_upper, stage
-            """)
-            spindle_results = cursor.fetchall()
+            all_results = cursor.fetchall()
             
+            # Separate results by event type
+            sw_results = [(method, freq_lower, freq_upper, stage, count)
+                         for event_type, method, freq_lower, freq_upper, stage, count in all_results
+                         if event_type == 'slow_wave']
+            
+            spindle_results = [(method, freq_lower, freq_upper, stage, count)
+                              for event_type, method, freq_lower, freq_upper, stage, count in all_results
+                              if event_type == 'spindle']
                 
             conn.close()
             

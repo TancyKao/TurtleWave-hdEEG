@@ -1369,27 +1369,33 @@ class ParalSWA:
                     channels = df['Channel'].astype(str).tolist()
                     start_times = df['Start time'].astype(float).tolist()
                     
-                    # Build a query to get existing events matching these combinations
-                    query_parts = []
-                    query_params = []
-                    
-                    for i in range(len(channels)):
-                        freq_lower = df['freq_lower'].iloc[i] if 'freq_lower' in df.columns else None
-                        freq_upper = df['freq_upper'].iloc[i] if 'freq_upper' in df.columns else None
-                        stage = df['Stage'].iloc[i] if 'Stage' in df.columns else None
+                    batch_size = 100  # Process in batches to avoid memory issues
+                    for batch_start in range(0, len(channels), batch_size):
+                        batch_end = min(batch_start + batch_size, len(channels))
+                        batch_channels = channels[batch_start:batch_end]
+                        batch_start_times = start_times[batch_start:batch_end]
+                        # Build a query to get existing events matching these combinations
+                        query_parts = []
+                        query_params = []
+                        
+                        for batch_idx in range(len(batch_channels)):
+                            original_idx = batch_start + batch_idx
+                            freq_lower = df['freq_lower'].iloc[original_idx] if 'freq_lower' in df.columns else None
+                            freq_upper = df['freq_upper'].iloc[original_idx] if 'freq_upper' in df.columns else None
+                            stage = df['Stage'].iloc[original_idx] if 'Stage' in df.columns else None
 
-                        query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)")
-                        query_params.extend([event_type, channels[i], start_times[i],method, freq_lower, freq_upper, stage])
-                    
-                    if query_parts:
-                        query = f"SELECT event_type, channel, start_time, method, freq_lower, freq_upper, stage FROM events WHERE {' OR '.join(query_parts)}"
-                        cursor.execute(query, query_params)
-                        
-                        for row in cursor.fetchall():
-                            # Create a tuple of (event_type, channel, start_time. method) to check against
-                            existing_events.add((row[0], row[1], row[2], row[3], row[4], row[5], row[6]))
-                        
-                        self.logger.info(f"Found {len(existing_events)} existing entries matching event type, channel, and start time")
+                            query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)")
+                            query_params.extend([event_type, batch_channels[batch_idx], batch_start_times[batch_idx], method, freq_lower, freq_upper, stage])
+
+                        if query_parts:
+                            query = f"SELECT event_type, channel, start_time, method, freq_lower, freq_upper, stage FROM events WHERE {' OR '.join(query_parts)}"
+                            cursor.execute(query, query_params)
+                            
+                            for row in cursor.fetchall():
+                                # Create a tuple of (event_type, channel, start_time. method) to check against
+                                existing_events.add((row[0], row[1], row[2], row[3], row[4], row[5], row[6]))
+                            
+                    self.logger.info(f"Found {len(existing_events)} existing entries matching event type, channel, and start time")
                 
                 # Mark rows that exist in the database based on the uniqueness constraint
                 df['exists_in_db'] = df.apply(

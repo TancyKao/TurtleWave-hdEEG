@@ -1,9 +1,13 @@
 README.md
 pyproject.toml
 setup.py
+frontend/EEGevents_review_gui.py
 frontend/__init__.py
+frontend/data_manager.py
 frontend/eeg_eventview.py
+frontend/eeg_review_gui.py
 frontend/turtlewave_gui.py
+frontend/waveform_loader.py
 tests/test dataset.py
 tests/test_turtlewave.py
 turtlewave_hdEEG/__init__.py

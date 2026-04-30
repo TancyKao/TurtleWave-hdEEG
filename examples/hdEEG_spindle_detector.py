@@ -45,16 +45,14 @@ import logging
 
 # 1. Define the file paths for the dataset and annotations
 # The root directory should contain the EEG dataset and the wonambi directory for annotations.
-root_dir = "//Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/turtleRef/MCI005_BL/"
-datafilename = "MCI005_BL_clean_rebuilt.set"
-annotfilename = "MCI005_BL_clean_rebuilt.xml"
+root_dir = "/Users/tancykao/Dropbox/05_Woolcock_DS/AnalyzeTools/turtleRef/01js/ses-1/"
+datafilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.set"
+annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 
-
-channels_csv_path = os.path.join(root_dir, "channels.csv")  # Adjust the path as needed
 
 
 #Read channels from CSV
-test_channels = read_channels_from_csv(channels_csv_path)
+# test_channels = read_channels_from_csv(channels_csv_path)
 #print(f"Channels loaded from CSV: {test_channels}")
 
 # Construct the full paths for the dataset and annotations
@@ -74,16 +72,16 @@ annot = CustomAnnotations(annot_file)
 # 3. Create ParalEvents instance
 event_processor = ParalEvents(
     dataset=data, 
-    annotations=annot
+    annotations=annot,
     #log_level=logging.warning,  # Change to DEBUG for more detailed logs
-    #log_file=os.path.join(root_dir, "wonambi", "spindle_detection.log")
+    #log_file=os.path.join(root_dir, "wonambi", "spindle_detection.log"),
     )
 
 # 4. Custom define parameters
 test_method = 'Moelle2011' # 'Moelle2011', Ferrarelli2007
-#test_channels = ['E101','E110','E111','E112','E113']  # Channels
+test_channels = ['E110','E111','E112']  # Channels
 test_stages = ['NREM2','NREM3'] # ['NREM2', 'NREM3']
-test_frequency = (9, 12)  # Frequency range for spindles
+test_frequency = (11, 13)  # Frequency range for spindles
 
 # 5. Test detect_spindles with minimal parameters
 print("Running detect_spindles...")
@@ -97,7 +95,7 @@ spindles = event_processor.detect_spindles(
     reject_artifacts     = True, 
     reject_arousals      = False,
     cat                  = (1, 1, 1, 0),# concatenate within and between stages, cycles separate
-    save_to_annotations  = False, # don't save to annotations
+    save_to_annotations  = False, # save to annotations
     json_dir             = json_dir
 )
 
@@ -117,10 +115,10 @@ stages_str = "".join(test_stages)
 file_pattern = f"spindles_{test_method}_{freq_range}_{stages_str}"
 
 # 6. Test the new SQLite parameter calculation and storage
-print("\nCalculating and storing parameters in SQLite database...")
+# print("\nCalculating and storing parameters in SQLite database...")
 
 # Initialize the database
-event_processor.initialize_sqlite_database(db_path)
+#event_processor.initialize_sqlite_database(db_path)
 
 
 
@@ -131,11 +129,6 @@ param2CSV = event_processor.export_spindle_parameters_to_csv(
 )
 
 
-csv2db = event_processor.import_parameters_csv_to_database(
-    csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
-    db_path      = db_path
-    )
-
 
 
 density2CSV = event_processor.export_spindle_density_to_csv(
@@ -144,6 +137,11 @@ density2CSV = event_processor.export_spindle_density_to_csv(
     stage        = test_stages,
     file_pattern = file_pattern
 )
+
+csv2db = event_processor.import_parameters_csv_to_database(
+    csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
+    db_path      = db_path
+    )
 
 
 print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

@@ -1,0 +1,30 @@
+#!/bin/bash
+#PBS -P ca97
+#PBS -q normal
+#PBS -N AL_annotator_batch
+#PBS -l ncpus=2,mem=8GB,walltime=03:00:00
+#PBS -l storage=gdata/ca97+scratch/ca97
+#PBS -l wd
+#PBS -o logs/
+#PBS -e logs/
+
+set -euo pipefail
+mkdir -p logs
+
+module load python3/3.11.7
+source /scratch/ca97/python312_env/bin/activate
+
+echo "Job $PBS_JOBID on $(hostname)"
+echo "ROOT=$ROOT"
+echo "LIST=$LIST"
+echo "PY_SCRIPT=$PY_SCRIPT"
+echo "Start: $(date)"
+echo
+
+while IFS= read -r SUBJECT || [[ -n "$SUBJECT" ]]; do
+  [[ -z "$SUBJECT" ]] && continue
+  echo "[$(date)] Running annotator for $SUBJECT"
+  python -u "$PY_SCRIPT" --root "$ROOT" --subject "$SUBJECT" 2>&1 | tee "logs/${SUBJECT}_annot.log"
+done < "$LIST"
+
+echo "[$(date)] Done."
