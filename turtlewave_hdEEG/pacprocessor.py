@@ -897,23 +897,31 @@ class ParalPAC:
         
         logger = self.logger
         
-         # NEED TO FIX STAGE ISN NREM2NREM3 <===============================
-        # Process stage input
+        # Process stage input - handle combined stages like "NREM2NREM3"
         if isinstance(stage, str):
-            parsed_stages = []
-            # Common stage names to look for
-            known_stages = ["NREM1", "NREM2", "NREM3", "REM", "Wake"]
-            for known_stage in known_stages:
-                if known_stage in stage:
-                    parsed_stages.append(known_stage)
-            
-            if parsed_stages:
-                logger.info(f"Parsed stage string '{stage}' into: {parsed_stages}")
-                stage = parsed_stages
+            # Handle combined stages like "NREM2NREM3"
+            if "NREM2NREM3" in stage:
+                stage = ["NREM2", "NREM3"]
+                logger.info(f"Parsed combined stage 'NREM2NREM3' into: {stage}")
+            elif "NREM" in stage and len(stage) > 5:  # Handle other combined NREM stages
+                parsed_stages = []
+                # Common stage names to look for
+                known_stages = ["NREM1", "NREM2", "NREM3", "REM", "Wake"]
+                for known_stage in known_stages:
+                    if known_stage in stage:
+                        parsed_stages.append(known_stage)
+                
+                if parsed_stages:
+                    logger.info(f"Parsed stage string '{stage}' into: {parsed_stages}")
+                    stage = parsed_stages
+                else:
+                    # If no known stages found, treat it as a single stage
+                    stage = [stage]
+                    logger.warning(f"Could not parse stage string '{stage}', treating as a single stage")
             else:
-                # If no known stages found, treat it as a single stage
-                stage = [stage]
-                logger.warning(f"Could not parse stage string '{stage}', treating as a single stage")
+                # Single stage or already properly formatted
+                stage = [stage] if isinstance(stage, str) else stage
+                logger.info(f"Using stage: {stage}")
 
             
 
@@ -972,17 +980,29 @@ class ParalPAC:
                 # Calculate comodulogram
                 logger.info("Calculating comodulogram...")
                 
-                comod = pac.filterfit(s_freq, data_array, p_freqs, a_freqs, n_perm=200, 
-                                   progress_bar=True, random_state=42)
-                
+                try:
+                    # Try with permutations first
+                    pac = Pac(idpac=idpac, verbose='ERROR')
+                    comod = pac.filterfit(s_freq, data_array, p_freqs, a_freqs, n_perm=200, verbose=False)
+                    logger.info("Comodulogram generated with statistical testing")
+                except TypeError as e:
+                    if "multiple values for argument 'n_perm'" in str(e):
+                        # Fall back without n_perm if there's a parameter conflict
+                        pac = Pac(idpac=idpac, verbose='ERROR')
+                        comod = pac.filterfit(s_freq, data_array, p_freqs, a_freqs, verbose=False)
+                        print("Warning: Statistical testing disabled due to parameter conflict")
+                    else:
+                        logger.error(f"Error in filterfit: {e}")
+                        raise e
+               
                 # Save results
                 stagename = '-'.join(stage)
                 output_file = f"{out_dir}/comodulogram_{chan}_{stagename}.npz"
                 
-                np.savez(output_file, 
-                       comod=comod, 
-                       p_freqs=p_freqs, 
-                       a_freqs=a_freqs, 
+                np.savez(output_file,
+                       comod=comod,
+                       p_freqs=p_freqs,
+                       a_freqs=a_freqs,
                        idpac=idpac,
                        chan=chan,
                        stage=stage)

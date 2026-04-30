@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="turtlewave-hdEEG",  # Use hyphen for PyPI name
-    version="2.0.0",
+    version="3.1.0",
     author="Tancy Kao",
     author_email="tancy.kao@woolcock.org.au",
     description="High-density EEG processing for sleep event detection",
@@ -21,18 +21,27 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
     ],
+    project_urls={
+        "Documentation": "https://turtlewave-hdeeg.readthedocs.io/",
+        "Source Code": "https://github.com/TancyKao/TurtleWave-hdEEG",
+    },
     python_requires=">=3.8",
     install_requires=[
-        "numpy>=1.17.0",
+        "numpy==1.26.4",  # for compatibility with wonambi 7.15
         "scipy>=1.3.0",
         "matplotlib>=3.1.0",
         "h5py>=2.10.0",
         "PyQt5>=5.12.0",
-        "wonambi>=7.15"  
+        "pyqtgraph>=0.12.0",  # for GUI plotting
+        "wonambi==7.15",
+        "pandas>=2.2.3",
+        "tensorpac>=0.6.5",
+        "mne>=1.0.0",  # TensorPAC dependency
     ],
     entry_points={
         'console_scripts': [
             'turtlewave_gui = frontend.turtlewave_gui:main',
+            'eeg_review_gui = frontend.eeg_review_gui:main',
         ],
     },
 )

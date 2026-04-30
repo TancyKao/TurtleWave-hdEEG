@@ -1,0 +1,118 @@
+site_name: TurtleWave hdEEG Documentation
+site_description: High-density EEG event detection for sleep research
+site_author: TurtleWave Development Team
+repo_url: https://github.com/your-repo/turtlewave-hdEEG
+repo_name: turtlewave-hdEEG
+
+theme:
+  name: material
+  palette:
+    # Light mode
+    - scheme: default
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - scheme: slate
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_object_full_path: false
+            show_category_heading: true
+            show_if_no_docstring: false
+            inherited_members: true
+            members_order: source
+            separate_signature: true
+            unwrap_annotated: true
+            filters: ["!^_"]
+            merge_init_into_class: true
+            docstring_section_style: table
+            signature_crossrefs: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: python
+          class: python
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+nav:
+  - Home: index.md
+  
+  - Tutorials:
+    - Getting Started: tutorials/getting-started.md
+    - EEG Review GUI Tutorial: tutorials/eeg-review-gui-tutorial.md
+  
+  - How-to Guides:
+    - Installation: how-to/installation.md
+    - Detect Slow Waves: how-to/detect-slow-waves.md
+    - Review EEG Events: how-to/review-eeg-events.md
+  
+  - Reference:
+    - API Reference: reference/api/index.md
+    - Event Processor: reference/api/eventprocessor.md
+    - Slow Wave Processor: reference/api/swprocessor.md
+    - PAC Processor: reference/api/pacprocessor.md
+    - GUI Components: reference/api/gui.md
+    - EEG Review GUI: reference/eeg-review-gui.md
+  
+  - Explanation:
+    - Overview: explanation/overview.md
+    - EEG Review GUI Architecture: explanation/eeg-review-gui-architecture.md
+    - Diátaxis Framework: DIATAXIS_FRAMEWORK.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/your-repo/turtlewave-hdEEG
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/turtlewave-hdEEG/
+
+extra_css:
+  - stylesheets/extra.css
+
+copyright: Copyright &copy; 2024 TurtleWave Development Team

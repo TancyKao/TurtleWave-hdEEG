@@ -34,8 +34,8 @@ annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 channels_csv_path = os.path.join(root_dir, "channels.csv")
 
 # Read channels from CSV
-test_channels = read_channels_from_csv(channels_csv_path)
-print(f"Channels loaded from CSV: {test_channels}")
+#test_channels = read_channels_from_csv(channels_csv_path)
+#print(f"Channels loaded from CSV: {test_channels}")
 
 # Construct the full paths
 data_file = os.path.join(root_dir, datafilename)
@@ -57,14 +57,16 @@ event_processor = ParalSWA(
 
 # 4. Custom define parameters
 test_method = 'Staresina2015'  # 'Massimini2004','AASM/Massimini2004', 'Ngo2015', 'Staresina2015'
-test_stages = ['NREM2', 'NREM3']  # Sleep stages to analyze
-#test_channels = ['E101']  # Channels
-test_frequency = (0.3, 2.0)  # Frequency range for slow waves
-test_trough_duration = (0.8, 2)  # Min and max trough duration
+test_channels = ['E110','E111','E112']  # Channels
+test_stages = ['NREM2','NREM3'] # ['NREM2', 'NREM3']
+test_frequency = (0.5, 1.25)  # Frequency range for slow waves
+test_trough_duration = (0.3, 1.5)  # Min and max trough duration
 test_amplitude = {
-    'neg_peak_threshold': -20.0,  # Negative peak threshold (μV)
-    'peak_to_peak_threshold': 40.0  # Min Peak-to-peak amplitude threshold (μV)
+     'neg_peak_threshold': -75.0,  # Negative peak threshold (μV)
+     'peak_to_peak_threshold': 75.0  # Min Peak-to-peak amplitude threshold (μV)
 }
+
+
 
 # 5. Run slow wave detection
 print("Running slow wave detection...")
@@ -79,7 +81,7 @@ slow_waves = event_processor.detect_slow_waves(
     polar='normal', # 'normal' or 'opposite'
     stage=test_stages,
     reject_artifacts=True,
-    reject_arousals=False,
+    reject_arousals=True,
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
     json_dir=json_dir,

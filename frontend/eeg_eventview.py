@@ -30,49 +30,105 @@ except ImportError as e:
     print(f"Import warning: {e}")
 
 class EventDatabase:
-    """Enhanced database handler for event review"""
+    """Enhanced database handler with automatic optimization"""
     
     def __init__(self, db_path):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
+        
+        # Auto-optimize on connection
+        self._auto_optimize()
         self.create_review_tables()
+        
+        # Import DataManager for advanced caching
+        try:
+            from frontend.data_manager import DataManager
+            self.data_manager = DataManager(db_path, None)
+        except ImportError:
+            self.data_manager = None
+            print("DataManager not available, using basic caching")
     
-    def create_review_tables(self):
-        """Create additional tables for review functionality"""
+    def _auto_optimize(self):
+        """Automatically apply performance optimizations when connecting"""
         cursor = self.conn.cursor()
         
-        # Add review columns to existing table if they don't exist
-        try:
-            cursor.execute('ALTER TABLE spindle_parameters ADD COLUMN reviewed INTEGER DEFAULT 0')
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # 1. Apply performance PRAGMAs
+        optimizations = [
+            "PRAGMA journal_mode=WAL",        # Concurrent reads during writes
+            "PRAGMA synchronous=NORMAL",      # Balance safety/speed
+            "PRAGMA cache_size=-64000",       # 64MB cache
+            "PRAGMA temp_store=MEMORY",       # Faster temp operations
+            "PRAGMA mmap_size=268435456",     # 256MB memory mapping
+        ]
         
-        try:
-            cursor.execute('ALTER TABLE spindle_parameters ADD COLUMN review_decision TEXT')
-        except sqlite3.OperationalError:
-            pass
+        for pragma in optimizations:
+            try:
+                cursor.execute(pragma)
+                print(f"Applied optimization: {pragma}")
+            except sqlite3.Error as e:
+                print(f"Warning: Could not apply {pragma}: {e}")
         
-        try:
-            cursor.execute('ALTER TABLE spindle_parameters ADD COLUMN review_comments TEXT')
-        except sqlite3.OperationalError:
-            pass
+        # 2. Create indexes if they don't exist
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_channel_starttime ON events(channel, start_time)",
+            "CREATE INDEX IF NOT EXISTS idx_stage ON events(stage)",
+            "CREATE INDEX IF NOT EXISTS idx_reviewed ON events(reviewed)",
+            "CREATE INDEX IF NOT EXISTS idx_eventtype_channel ON events(event_type, channel)",
+            "CREATE INDEX IF NOT EXISTS idx_review_decision ON events(review_decision)",
+            "CREATE INDEX IF NOT EXISTS idx_confidence ON events(confidence_score)",
+        ]
         
-        try:
-            cursor.execute('ALTER TABLE spindle_parameters ADD COLUMN reviewer TEXT')
-        except sqlite3.OperationalError:
-            pass
-        
-        try:
-            cursor.execute('ALTER TABLE spindle_parameters ADD COLUMN review_timestamp TEXT')
-        except sqlite3.OperationalError:
-            pass
+        for index_sql in indexes:
+            try:
+                cursor.execute(index_sql)
+                index_name = index_sql.split('idx_')[1].split(' ')[0]
+                print(f"Created/verified index: idx_{index_name}")
+            except sqlite3.Error as e:
+                print(f"Warning: Index creation issue: {e}")
         
         self.conn.commit()
     
-    def get_events(self, event_type='spindle', channels=None, stages=None, reviewed_only=False, unreviewed_only=False):
-        """Get events with comprehensive filtering"""
-        query = "SELECT * FROM spindle_parameters WHERE 1=1"
+    def create_review_tables(self):
+        """Create additional columns for review functionality"""
+        cursor = self.conn.cursor()
+        
+        # Enhanced review columns with new fields
+        new_columns = [
+            ('reviewed', 'INTEGER DEFAULT 0'),
+            ('review_decision', 'TEXT'),
+            ('review_comments', 'TEXT'),
+            ('reviewer', 'TEXT'),
+            ('review_timestamp', 'TEXT'),
+            ('quality_score', 'REAL'),           # NEW: User quality rating (1-5)
+            ('confidence_score', 'REAL'),        # NEW: Algorithm confidence (0-1)
+            ('eeg_file_path', 'TEXT'),          # NEW: Source file reference
+            ('sample_start', 'INTEGER'),         # NEW: Sample indices for fast loading
+            ('sample_end', 'INTEGER'),           # NEW: Sample indices for fast loading
+        ]
+        
+        for col_name, col_def in new_columns:
+            try:
+                cursor.execute(f'ALTER TABLE events ADD COLUMN {col_name} {col_def}')
+                print(f"Added column: {col_name}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        
+        self.conn.commit()
+    
+    def get_events(self, event_type=None, channels=None, stages=None, reviewed_only=False, unreviewed_only=False, confidence_threshold=0.0):
+        """Get events with comprehensive filtering using optimized indexes"""
+        query = "SELECT * FROM events WHERE 1=1"
         params = []
+        
+        # Filter by event type if specified
+        if event_type:
+            if isinstance(event_type, list):
+                placeholders = ','.join(['?' for _ in event_type])
+                query += f" AND event_type IN ({placeholders})"
+                params.extend(event_type)
+            else:
+                query += " AND event_type = ?"
+                params.append(event_type)
         
         if channels:
             placeholders = ','.join(['?' for _ in channels])
@@ -91,13 +147,19 @@ class EventDatabase:
         elif unreviewed_only:
             query += " AND (reviewed = 0 OR reviewed IS NULL)"
         
-        query += " ORDER BY start_time"
+        # NEW: Confidence threshold filtering
+        if confidence_threshold > 0:
+            query += " AND (confidence_score >= ? OR confidence_score IS NULL)"
+            params.append(confidence_threshold)
+        
+        # Order by indexed columns for better performance
+        query += " ORDER BY channel, start_time"
         
         return pd.read_sql_query(query, self.conn, params=params)
     
     def get_event_by_uuid(self, uuid):
         """Get single event by UUID"""
-        return pd.read_sql_query("SELECT * FROM spindle_parameters WHERE uuid = ?", 
+        return pd.read_sql_query("SELECT * FROM events WHERE uuid = ?",
                                self.conn, params=[uuid])
     
     def add_review(self, uuid, decision, reviewer="", comments=""):
@@ -106,8 +168,8 @@ class EventDatabase:
         timestamp = datetime.now().isoformat()
         
         cursor.execute('''
-            UPDATE spindle_parameters 
-            SET reviewed = 1, review_decision = ?, review_comments = ?, 
+            UPDATE events
+            SET reviewed = 1, review_decision = ?, review_comments = ?,
                 reviewer = ?, review_timestamp = ?
             WHERE uuid = ?
         ''', (decision, comments, reviewer, timestamp, uuid))
@@ -120,18 +182,18 @@ class EventDatabase:
         stats = {}
         
         # Total events
-        cursor.execute("SELECT COUNT(*) FROM spindle_parameters")
+        cursor.execute("SELECT COUNT(*) FROM events")
         stats['total'] = cursor.fetchone()[0]
         
         # Reviewed events
-        cursor.execute("SELECT COUNT(*) FROM spindle_parameters WHERE reviewed = 1")
+        cursor.execute("SELECT COUNT(*) FROM events WHERE reviewed = 1")
         stats['reviewed'] = cursor.fetchone()[0]
         
         # By decision
         cursor.execute("""
-            SELECT review_decision, COUNT(*) 
-            FROM spindle_parameters 
-            WHERE reviewed = 1 
+            SELECT review_decision, COUNT(*)
+            FROM events
+            WHERE reviewed = 1
             GROUP BY review_decision
         """)
         for decision, count in cursor.fetchall():
@@ -140,13 +202,13 @@ class EventDatabase:
         
         # By channel
         cursor.execute("""
-            SELECT channel, 
+            SELECT channel,
                    COUNT(*) as total,
                    SUM(CASE WHEN reviewed = 1 THEN 1 ELSE 0 END) as reviewed_count,
                    SUM(CASE WHEN review_decision = 'accept' THEN 1 ELSE 0 END) as accepted,
                    SUM(CASE WHEN review_decision = 'reject' THEN 1 ELSE 0 END) as rejected
-            FROM spindle_parameters 
-            GROUP BY channel 
+            FROM events
+            GROUP BY channel
             ORDER BY channel
         """)
         stats['by_channel'] = [
@@ -165,16 +227,64 @@ class EventDatabase:
     def export_reviewed_events(self, output_path):
         """Export all reviewed events to CSV"""
         query = """
-            SELECT * FROM spindle_parameters 
-            WHERE reviewed = 1 
+            SELECT * FROM events
+            WHERE reviewed = 1
             ORDER BY channel, start_time
         """
         df = pd.read_sql_query(query, self.conn)
         df.to_csv(output_path, index=False)
         return len(df)
 
+class EEGSnippetCache:
+    """Simple cache for EEG waveform snippets to avoid repeated disk reads"""
+    
+    def __init__(self, max_size=50):
+        self.cache = {}
+        self.max_size = max_size
+        self.access_order = []  # Track access order for LRU
+    
+    def get_snippet(self, eeg_data, start_time, end_time, channels):
+        """Get EEG snippet with caching"""
+        # Create cache key from parameters
+        cache_key = f"{start_time:.3f}:{end_time:.3f}:{hash(tuple(sorted(channels)))}"
+        
+        if cache_key in self.cache:
+            # Move to end of access order (most recently used)
+            self.access_order.remove(cache_key)
+            self.access_order.append(cache_key)
+            return self.cache[cache_key]
+        
+        # Load snippet from EEG data
+        try:
+            snippet = eeg_data.read_data(
+                chan=None,  # Read all channels, filter later
+                begtime=start_time,
+                endtime=end_time
+            )
+            
+            # Simple LRU cache management
+            if len(self.cache) >= self.max_size:
+                # Remove least recently used entry
+                oldest_key = self.access_order.pop(0)
+                del self.cache[oldest_key]
+            
+            self.cache[cache_key] = snippet
+            self.access_order.append(cache_key)
+            
+            return snippet
+            
+        except Exception as e:
+            print(f"Error loading EEG snippet: {e}")
+            return None
+    
+    def clear(self):
+        """Clear the cache"""
+        self.cache.clear()
+        self.access_order.clear()
+
+
 class EEGVisualizationWidget(FigureCanvas):
-    """Enhanced EEG visualization with multiple channel support"""
+    """Enhanced EEG visualization with multiple channel support and caching"""
     
     def __init__(self, parent=None, width=12, height=8, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
@@ -193,6 +303,9 @@ class EEGVisualizationWidget(FigureCanvas):
         self.annotations = None
         self.visible_annotations = set()
         self.sampling_rate = 500
+        
+        # NEW: EEG snippet cache for performance
+        self.eeg_cache = EEGSnippetCache(max_size=50)
         
         # Color scheme for different event types
         self.event_colors = {
@@ -242,10 +355,15 @@ class EEGVisualizationWidget(FigureCanvas):
         except:
             self.sampling_rate = 500
         
-        # Read data for the window
+        # Read data for the window using cache for better performance
         try:
-            data = eeg_data.read_data(chan=None, begtime=window_start, 
-                                    endtime=window_end)
+            # Use cached snippet loading
+            data = self.eeg_cache.get_snippet(eeg_data, window_start, window_end, channels)
+            
+            # Fallback to direct read if cache fails
+            if data is None:
+                data = eeg_data.read_data(chan=None, begtime=window_start,
+                                        endtime=window_end)
             
             # Time axis
             n_samples = data.data[0].shape[1] if hasattr(data, 'data') else 0
@@ -2003,6 +2121,14 @@ class EventReviewInterface(QMainWindow):
         # Clear existing rows
         self.details_table.setRowCount(0)
         
+        # Format frequency band
+        freq_lower = event.get('freq_lower', None)
+        freq_upper = event.get('freq_upper', None)
+        if freq_lower is not None and freq_upper is not None:
+            freq_band_str = f"{freq_lower:.1f}-{freq_upper:.1f} Hz"
+        else:
+            freq_band_str = 'N/A'
+        
         # Add event parameters
         parameters = [
             ('UUID', event.get('uuid', '')),
@@ -2011,7 +2137,8 @@ class EventReviewInterface(QMainWindow):
             ('End Time', f"{event.get('end_time', 0):.3f} s"),
             ('Duration', f"{event.get('duration', 0):.3f} s"),
             ('Stage', event.get('stage', '')),
-            ('Method', event.get('method', '')),
+            ('Method', event.get('method', 'N/A')),
+            ('Frequency Band', freq_band_str),
             ('Min Amplitude', f"{event.get('min_amp', 0):.1f} µV"),
             ('Max Amplitude', f"{event.get('max_amp', 0):.1f} µV"),
             ('Peak-to-Peak', f"{event.get('peak2peak_amp', 0):.1f} µV"),
