@@ -429,9 +429,10 @@ class ParalSWA:
  
 
 
-    def export_slow_wave_parameters_to_csv(self, json_input, csv_file, export_params='all', 
-                                         frequency=None, ref_chan=None, grp_name='eeg', 
-                                         n_fft_sec=4, file_pattern=None,skip_empty_files=True):
+    def export_slow_wave_parameters_to_csv(self, json_input, csv_file, export_params='all',
+                                         frequency=None, ref_chan=None, grp_name='eeg',
+                                         n_fft_sec=4, file_pattern=None, skip_empty_files=True,
+                                         event_type='slow_wave'):
         """
         Calculate slow wave parameters from JSON files and export to CSV.
         
@@ -594,10 +595,12 @@ class ParalSWA:
                                                     begtime=start_with_buffer, 
                                                     endtime=end_with_buffer)
                         
-                        # Create segment
+                        # Create segment. `name` flows into the CSV's
+                        # "Event type" column via Wonambi's export_event_params,
+                        # so callers can override to e.g. 'k_complex'.
                         seg = {
                             'data': data,
-                            'name': 'slow_wave',
+                            'name': event_type,
                             'start': start_time,
                             'end': end_time,
                             'n_stitch': 0,
@@ -1149,11 +1152,12 @@ class ParalSWA:
                 conn.close()
 
 
-    def import_parameters_csv_to_database(self, csv_file, db_path,  append=True):
+    def import_parameters_csv_to_database(self, csv_file, db_path, append=True,
+                                          event_type=None, method=None):
         """
         Import event parameters from an existing CSV file into SQLite database.
         Supports multiple event types and incremental updates.
-        
+
         Parameters
         ----------
         csv_file : str
@@ -1163,7 +1167,17 @@ class ParalSWA:
         append : bool
             If True, adds to existing database without replacing existing entries
             If False, replaces any existing entries with the same UUID
-                
+        event_type : str or None
+            Override the inferred event_type. The default heuristic (filename
+            substring + CSV "Event type" column) doesn't recognise files like
+            ``kc_parameters_*.csv``, so callers ingesting non-SW events
+            (e.g. ParalKC) should pass ``event_type='k_complex'`` explicitly.
+        method : str or None
+            Override the method parsed from the filename. The filename parser
+            underscore-splits and grabs ``parts[2]``, which mangles methods
+            with embedded underscores (e.g. ``AASM_Massimini2004`` → ``AASM``).
+            Pass the original method string here to bypass it.
+
         Returns
         -------
         dict
@@ -1232,24 +1246,37 @@ class ParalSWA:
             self.logger.info(f"Read {len(df)} parameter rows from CSV")
             
 
+            # Capture caller overrides (rebound inside process_csv_data).
+            event_type_override = event_type
+            method_override = method
+
             # Define database operation function
             def process_csv_data(conn):
                 cursor = conn.cursor()
-            
-                # Determine event type from CSV filename or content
-                event_type = "slow_wave"  # Default
-                filename = os.path.basename(csv_file).lower()
-                if 'slow_wave' in filename or 'slowwave' in filename or 'sw' in filename:
-                    event_type = "slow_wave"
-                elif 'spindle' in filename:
-                    event_type = "spindle"
 
-                # Override event_type if 'Event type' column exists in CSV
-                if 'Event type' in df.columns:
-                    # Use the first non-null value in the Event type column
-                    event_types = df['Event type'].dropna()
-                    if len(event_types) > 0:
-                        event_type = event_types.iloc[0]
+                # Determine event type. Caller override wins.
+                if event_type_override is not None:
+                    event_type = event_type_override
+                    # The downstream INSERT pulls the event_type value from
+                    # row['Event type'] (CSV column), not from the
+                    # df['event_type'] assignment below. Stamp the override
+                    # onto the CSV column too so the insert sees it.
+                    if 'Event type' in df.columns:
+                        df['Event type'] = event_type
+                else:
+                    event_type = "slow_wave"  # Default
+                    filename = os.path.basename(csv_file).lower()
+                    if 'slow_wave' in filename or 'slowwave' in filename or 'sw' in filename:
+                        event_type = "slow_wave"
+                    elif 'spindle' in filename:
+                        event_type = "spindle"
+
+                    # Override event_type if 'Event type' column exists in CSV
+                    if 'Event type' in df.columns:
+                        # Use the first non-null value in the Event type column
+                        event_types = df['Event type'].dropna()
+                        if len(event_types) > 0:
+                            event_type = event_types.iloc[0]
 
                 self.logger.info(f"Importing parameters for event type: {event_type}")
 
@@ -1324,14 +1351,21 @@ class ParalSWA:
                 db_columns.append('freq_lower')
                 db_columns.append('freq_upper')
                 
-                # Extract method from filename if possible
-                method = "unknown"
-                if "_" in filename:
-                    parts = filename.split('_')
-                    if len(parts) > 2:
-                        # Typically the format is sw_parameters_METHOD_freq_stages.csv
-                        method = parts[2]
-                
+                # Extract method. Caller override wins; otherwise the
+                # filename heuristic underscore-splits and grabs parts[2],
+                # which mangles methods that contain underscores in their
+                # escaped form (e.g. AASM/Massimini2004 -> AASM_Massimini2004
+                # -> 'AASM'). Pass `method=` explicitly to bypass.
+                if method_override is not None:
+                    method = method_override
+                else:
+                    method = "unknown"
+                    if "_" in filename:
+                        parts = filename.split('_')
+                        if len(parts) > 2:
+                            # Typically the format is sw_parameters_METHOD_freq_stages.csv
+                            method = parts[2]
+
                 df['method'] = method
                 existing_columns.append('method')
                 db_columns.append('method')

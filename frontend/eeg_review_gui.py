@@ -322,8 +322,9 @@ class EventTableModel(QAbstractTableModel):
             elif col == 1:  # Channel
                 return str(row['channel'])
             elif col == 2:  # Type
-                event_type = str(row['event_type'])
-                return 'Spin' if 'spindle' in event_type.lower() else 'SW'
+                event_type = str(row['event_type']).lower()
+                abbrev = {'spindle': 'Spin', 'slow_wave': 'SW', 'k_complex': 'KC'}
+                return abbrev.get(event_type, event_type[:3].upper())
             elif col == 3:  # Method
                 method = row.get('method', '')
                 return str(method) if pd.notna(method) else 'N/A'
@@ -402,6 +403,7 @@ class TimelineWidget(PlotWidget):
         self.event_colors = {
             'spindle': (0, 0, 255),      # blue
             'slow_wave': (255, 255, 0),  # yellow
+            'k_complex': (255, 128, 0),  # orange
             'artifact': (255, 0, 0)      # red
         }
         
@@ -932,7 +934,7 @@ class EventReviewGUI(QMainWindow):
         
         # UI state
         self.selected_channels = ['E112', 'E118', 'Cz']
-        self.selected_event_types = ['spindle', 'slow_wave']
+        self.selected_event_types = ['spindle', 'slow_wave', 'k_complex']
         
         # Debounce timer for channel selection
         self.channel_filter_timer = QtCore.QTimer()
@@ -1077,11 +1079,16 @@ class EventReviewGUI(QMainWindow):
         self.spindle_check.setChecked(True)
         self.spindle_check.stateChanged.connect(self.update_event_type_filter)
         layout.addWidget(self.spindle_check)
-        
+
         self.slowwave_check = QCheckBox("Slow Waves")
         self.slowwave_check.setChecked(True)
         self.slowwave_check.stateChanged.connect(self.update_event_type_filter)
         layout.addWidget(self.slowwave_check)
+
+        self.kcomplex_check = QCheckBox("K-Complexes")
+        self.kcomplex_check.setChecked(True)
+        self.kcomplex_check.stateChanged.connect(self.update_event_type_filter)
+        layout.addWidget(self.kcomplex_check)
         
         # Method filter
         layout.addWidget(QLabel("Method Filter:"))
@@ -1555,6 +1562,8 @@ class EventReviewGUI(QMainWindow):
                 event_types.append('spindle')
             if self.slowwave_check.isChecked():
                 event_types.append('slow_wave')
+            if self.kcomplex_check.isChecked():
+                event_types.append('k_complex')
             
             # Get review status
             reviewed_only = self.accepted_check.isChecked() or self.rejected_check.isChecked()
@@ -1844,6 +1853,8 @@ class EventReviewGUI(QMainWindow):
             self.selected_event_types.append('spindle')
         if self.slowwave_check.isChecked():
             self.selected_event_types.append('slow_wave')
+        if self.kcomplex_check.isChecked():
+            self.selected_event_types.append('k_complex')
         
         # Update method and freq_band filters based on selected event types
         self.populate_filter_options()
@@ -1871,7 +1882,9 @@ class EventReviewGUI(QMainWindow):
                 event_types.append('spindle')
             if self.slowwave_check.isChecked():
                 event_types.append('slow_wave')
-            
+            if self.kcomplex_check.isChecked():
+                event_types.append('k_complex')
+
             if not event_types:
                 return
             
