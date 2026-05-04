@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  install-and-smoke-test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.10']
+
+    env:
+      # Allow PyQt5 to import without a display
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Linux Qt runtime libs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xkb1 libdbus-1-3
+
+      - name: Install dependencies (locked)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Verify package import and version
+        run: |
+          python -c "import turtlewave_hdEEG; print(turtlewave_hdEEG.__version__)"
+
+      - name: Verify GUI modules import (offscreen)
+        run: |
+          python -c "import frontend.turtlewave_gui; import frontend.eeg_review_gui; print('GUI modules OK')"
+
+      - name: Run smoke tests
+        run: |
+          python tests/test_turtlewave.py

@@ -1,3 +1,75 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "turtlewave-hdEEG"
+description = "High-density EEG processing for sleep event detection"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Tancy Kao", email = "tancy.kao@woolcock.org.au" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dynamic = ["version"]
+
+# Runtime dependencies. The numpy / wonambi pins are load-bearing —
+# wonambi 7.15 requires numpy<2 and the codebase depends on Wonambi 7.15
+# internals. Don't bump these casually.
+dependencies = [
+    "numpy==1.26.4",
+    "wonambi==7.15",
+    "scipy>=1.10",
+    "matplotlib>=3.5",
+    "h5py>=3.0",
+    "pandas>=2.0",
+    "tensorpac>=0.6.5",
+    "mne>=1.0",
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "build>=1.0",
+    "twine>=4.0",
+    "uv>=0.4",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.0",
+    "mkdocstrings[python]>=0.24",
+    "pymdown-extensions>=10.0",
+]
+
+[project.urls]
+Documentation = "https://turtlewave-hdeeg.readthedocs.io/"
+Repository = "https://github.com/TancyKao/TurtleWave-hdEEG"
+Issues = "https://github.com/TancyKao/TurtleWave-hdEEG/issues"
+
+[project.scripts]
+turtlewave_gui = "frontend.turtlewave_gui:main"
+eeg_review_gui = "frontend.eeg_review_gui:main"
+
+# Both the library package and the GUI frontend are shipped in the wheel.
+[tool.setuptools.packages.find]
+include = ["turtlewave_hdEEG*", "frontend*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "turtlewave_hdEEG.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
