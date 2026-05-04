@@ -1730,7 +1730,7 @@ class TurtleWaveGUI(QMainWindow):
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel("Detection Method:"))
         self.method_combo = QComboBox()
-        self.method_combo.addItems(["Moelle2011", "Ferrarelli2007", "Lacourse2018","Ray2015","Martin2013","Wamsley2012","Nir2011"])
+        self.method_combo.addItems(["Moelle2011", "Ferrarelli2007", "Lacourse2018","Ray2015","Martin2013","Wamsley2012","Nir2011","CIRUS"])
         method_layout.addWidget(self.method_combo)
         self.method_combo.currentTextChanged.connect(self.update_spindle_params_for_method)
         self.spindle_params_form.addLayout(method_layout)
@@ -1917,7 +1917,8 @@ class TurtleWaveGUI(QMainWindow):
                 "Wamsley2012": "Uses wavelet transform for spindle detection in the 12-15 Hz range.",
                 "Martin2013": "Applies a remez filter with moving RMS and percentile thresholding.",
                 "Ray2015": "Uses complex demodulation for precise spindle frequency targeting.",
-                "Lacourse2018": "Multi-metric approach combining absolute power, relative power, covariance and correlation."
+                "Lacourse2018": "Multi-metric approach combining absolute power, relative power, covariance and correlation.",
+                "CIRUS": "Hilbert-envelope thresholding ported from the qEEG_PSG Java tool. Threshold = median + alpha * std of the envelope. Validated in D'Rozario 2022 / Lam 2021. Designed for C3-M2 in N2/N3."
             }
             
             # Add description label
@@ -2204,7 +2205,59 @@ class TurtleWaveGUI(QMainWindow):
                 window_group.setLayout(window_layout)
                 self.spindle_params_layout.addWidget(window_group)
                 self.spindle_param_widgets["window_dur"] = window_spin
-            
+
+            elif method_name == "CIRUS":
+                thresh_group = QGroupBox("CIRUS Thresholds")
+                thresh_layout = QVBoxLayout()
+
+                # Alpha (det_thresh) — multiplier on envelope std
+                alpha_layout = QHBoxLayout()
+                alpha_layout.addWidget(QLabel("Alpha (threshold sensitivity):"))
+                alpha_spin = QDoubleSpinBox()
+                alpha_spin.setRange(0.1, 5.0)
+                alpha_spin.setSingleStep(0.1)
+                alpha_spin.setValue(detector.det_thresh)
+                alpha_spin.setToolTip(
+                    "threshold = median + alpha * std of the Hilbert envelope. "
+                    "Default 1.0 from D'Rozario 2022 / Lam 2021. "
+                    "Use 1.4 for OSA cohorts (better F1 per CIRUS validation).")
+                alpha_layout.addWidget(alpha_spin)
+                thresh_layout.addLayout(alpha_layout)
+
+                # Background ratio (sel_thresh)
+                bg_layout = QHBoxLayout()
+                bg_layout.addWidget(QLabel("Background ratio:"))
+                bg_spin = QDoubleSpinBox()
+                bg_spin.setRange(0.0, 1.0)
+                bg_spin.setSingleStep(0.05)
+                bg_spin.setValue(detector.sel_thresh)
+                bg_spin.setToolTip(
+                    "Reject candidate if surrounding-window mean is not below "
+                    "this * spindle mean. Set to 0 to disable.")
+                bg_layout.addWidget(bg_spin)
+                thresh_layout.addLayout(bg_layout)
+
+                thresh_group.setLayout(thresh_layout)
+                self.spindle_params_layout.addWidget(thresh_group)
+                self.spindle_param_widgets["det_thresh"] = alpha_spin
+                self.spindle_param_widgets["sel_thresh"] = bg_spin
+
+                # Filter pipeline mode
+                filter_group = QGroupBox("Filter Pipeline")
+                filter_layout = QHBoxLayout()
+                filter_layout.addWidget(QLabel("Mode:"))
+                filter_combo = QComboBox()
+                filter_combo.addItems(["java", "wonambi"])
+                filter_combo.setCurrentText(detector.filter_mode)
+                filter_combo.setToolTip(
+                    "'java' reproduces the original CIRUS implementation "
+                    "(scipy firwin Hamming + fftconvolve + Hilbert). "
+                    "'wonambi' uses Wonambi's remez+filtfilt pipeline.")
+                filter_layout.addWidget(filter_combo)
+                filter_group.setLayout(filter_layout)
+                self.spindle_params_layout.addWidget(filter_group)
+                self.spindle_param_widgets["filter_mode"] = filter_combo
+
             else:
                 # If method not recognized
                 error_label = QLabel(f"Error: Parameters for method '{method_name}' not available.")
@@ -3846,11 +3899,15 @@ class TurtleWaveGUI(QMainWindow):
         self.min_duration = self.min_dur_spin.value()
         self.max_duration = self.max_dur_spin.value()
         
-        # Get method-specific parameters
+        # Get method-specific parameters. Spinboxes use .value(); combos
+        # (e.g. CIRUS filter_mode) use .currentText().
         method_params = {}
         if hasattr(self, 'spindle_param_widgets'):
             for param, widget in self.spindle_param_widgets.items():
-                method_params[param] = widget.value()
+                if isinstance(widget, QComboBox):
+                    method_params[param] = widget.currentText()
+                else:
+                    method_params[param] = widget.value()
         
         # Check if channels are selected
         if not self.selected_channels:
@@ -3959,11 +4016,13 @@ class TurtleWaveGUI(QMainWindow):
                     "rel_thresh": "rel_pow_thresh",
                     "covar_thresh": "covar_thresh",
                     "corr_thresh": "corr_thresh",
-                    "window_dur": {"windowing": {"dur": None}, 
+                    "window_dur": {"windowing": {"dur": None},
                                 "moving_ms": {"dur": None},
                                 "moving_power_ratio": {"dur": None},
                                 "moving_covar": {"dur": None},
-                                "moving_sd": {"dur": None}}
+                                "moving_sd": {"dur": None}},
+                    # CIRUS — det_thresh / sel_thresh already mapped above
+                    "filter_mode": "filter_mode",
                 }
                 
                 for param, value in method_params.items():
