@@ -78,7 +78,7 @@ def convert_json_to_xml(json_files, output_dir='.', existing_xml=None, event_typ
     # Process each JSON file
     for json_file in json_files:
         # Load the JSON data
-        with open(json_file, 'r') as f:
+        with open(json_file, 'r', encoding='utf-8') as f:
             events = json.load(f)
         
         if not events:
@@ -173,7 +173,7 @@ def convert_json_to_xml(json_files, output_dir='.', existing_xml=None, event_typ
     
     # Save the XML file
     output_path = os.path.join(output_dir, annotation_filename)
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(pretty_xml)
     
     return output_path

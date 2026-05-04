@@ -1,0 +1,47 @@
+# Default: detect text vs binary, force text files to LF on commit.
+# Without this, Windows clients with core.autocrlf=true would convert
+# checked-out text files to CRLF, breaking byte-exact reads and
+# producing noisy diffs.
+* text=auto eol=lf
+
+# Source / config — explicitly text + LF
+*.py        text eol=lf
+*.pyi       text eol=lf
+*.md        text eol=lf
+*.rst       text eol=lf
+*.txt       text eol=lf
+*.toml      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+*.csv       text eol=lf
+*.xml       text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.js        text eol=lf
+
+# Shell / batch scripts — keep their native line endings
+*.sh        text eol=lf
+*.pbs       text eol=lf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary — never touched by git's text filters
+*.set       binary
+*.fdt       binary
+*.dat       binary
+*.mat       binary
+*.h5        binary
+*.hdf5      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.whl       binary
+*.pdf       binary

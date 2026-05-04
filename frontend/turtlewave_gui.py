@@ -3653,7 +3653,7 @@ class TurtleWaveGUI(QMainWindow):
             if selected_file:
                 try:
                     file_path = os.path.join(pac_dir, selected_file)
-                    with open(file_path, 'r') as f:
+                    with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                     
                     text_area.setText(content)
@@ -3806,7 +3806,7 @@ class TurtleWaveGUI(QMainWindow):
             text_area.setReadOnly(True)
             layout.addWidget(text_area)
             
-            with open(self.annot_file_path, 'r') as f:
+            with open(self.annot_file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
             text_area.setText(content)
@@ -4183,7 +4183,7 @@ class TurtleWaveGUI(QMainWindow):
             if selected_file:
                 try:
                     file_path = os.path.join(json_dir, selected_file)
-                    with open(file_path, 'r') as f:
+                    with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                     
                     text_area.setText(content)
@@ -4250,7 +4250,7 @@ class TurtleWaveGUI(QMainWindow):
             if selected_file:
                 try:
                     file_path = os.path.join(json_dir, selected_file)
-                    with open(file_path, 'r') as f:
+                    with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                     
                     text_area.setText(content)
@@ -4351,7 +4351,7 @@ class TurtleWaveGUI(QMainWindow):
             log_content = self.log_text.toPlainText()
             
             # Save to file
-            with open(log_filepath, 'w') as f:
+            with open(log_filepath, 'w', encoding='utf-8') as f:
                 f.write(log_content)
             
             print(f"Log saved to {log_filepath}")

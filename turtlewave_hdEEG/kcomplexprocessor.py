@@ -182,7 +182,7 @@ class ParalKC:
                             f"No existing {self.EVENT_TYPE} events to "
                             f"remove: {e}")
                 else:
-                    with open(annotation_file_path, 'w') as f:
+                    with open(annotation_file_path, 'w', encoding='utf-8') as f:
                         f.write('<?xml version="1.0" ?>\n'
                                 '<annotations><dataset><filename>')
                         if hasattr(self.dataset, 'filename'):
@@ -274,10 +274,10 @@ class ParalKC:
                         f"{self.FILE_PREFIX}_{method_str}_{freq_str}_"
                         f"{stages_str}_{ch}.json")
                     if not channel_json_kcs and create_empty_json:
-                        with open(ch_json, 'w') as f:
+                        with open(ch_json, 'w', encoding='utf-8') as f:
                             json.dump([], f)
                     elif channel_json_kcs:
-                        with open(ch_json, 'w') as f:
+                        with open(ch_json, 'w', encoding='utf-8') as f:
                             json.dump(channel_json_kcs, f, indent=2)
                         self.logger.info(
                             f"Saved K-complex data for channel {ch} to "
@@ -291,7 +291,7 @@ class ParalKC:
                             json_dir,
                             f"{self.FILE_PREFIX}_{method_str}_{freq_str}_"
                             f"{stages_str}_{ch}.json")
-                        with open(ch_json, 'w') as f:
+                        with open(ch_json, 'w', encoding='utf-8') as f:
                             json.dump([], f)
                     except Exception as je:
                         self.logger.error(

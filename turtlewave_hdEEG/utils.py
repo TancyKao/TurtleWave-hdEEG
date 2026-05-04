@@ -118,7 +118,7 @@ def explore_eeglab_structure(filename):
 def read_channels_from_csv(csv_file_path):
     channels = []
     try:
-        with open(csv_file_path, 'r') as csvfile:
+        with open(csv_file_path, 'r', encoding='utf-8') as csvfile:
             csv_reader = csv.reader(csvfile)
             for row in csv_reader:
                 # Check if the first cell contains a channel name
