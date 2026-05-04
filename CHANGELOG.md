@@ -7,37 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-05-04
+
 ### Added
 
-- K-complex detection: `ImprovedDetectKComplex`, `ParalKC`, GUI tab in
-  `turtlewave_gui`, K-Complex visibility in `eeg_review_gui`, example script.
-- CIRUS spindle detection method (`ImprovedDetectSpindle(method='CIRUS')`),
-  ported from the qEEG_PSG Java tool. Validated in D'Rozario 2022 / Lam 2021.
-- GUI integration for CIRUS in the spindle detection tab.
-- `pyproject.toml` (PEP 621) replaces `setup.py` as the single source of truth
-  for project metadata and dependencies.
-- Pinned-lockfile workflow via `uv pip compile` (`requirements.txt`).
-- `LICENSE` file (MIT) and `CHANGELOG.md`.
-- Expanded `.gitignore` for Python build artifacts, virtual envs, IDE files,
-  and AI-assistant scratch directories.
+- Windows as a first-class supported platform (CI matrix, classifiers, README).
+- `pyproject.toml` (PEP 621) with `[dev]` and `[docs]` extras.
+- `requirements.txt` lockfile via `uv pip compile` — 250 deps pinned.
+- `LICENSE` (MIT).
+- `.gitattributes` for cross-platform line endings.
+- `.github/workflows/ci.yml` — install + smoke test on push/PR, three-OS matrix.
+- CIRUS spindle method selectable from the GUI.
 
 ### Changed
 
-- `ParalSWA.export_slow_wave_parameters_to_csv` and
-  `ParalSWA.import_parameters_csv_to_database` accept optional `event_type`
-  and `method` overrides so non-SW callers (e.g. `ParalKC`) can label their
-  events correctly. Defaults preserve existing slow-wave behaviour.
-- Minimum supported Python is now 3.10 (was 3.8). Python 3.8 / 3.9 are EOL.
-- Project moves off conda as the primary development environment toward
-  plain `pip` + `venv`. `environment.yml` retained as an optional path.
+- Minimum Python is now 3.10.
+- Project moved off conda; `pip` + `venv` is canonical.
+- Text-mode `open()` calls now pass `encoding='utf-8'`.
+- `pacprocessor.py` uses `os.path.join` instead of f-string `/`.
+- README rewritten for clone-and-run developer flow.
+- `python-package.yml` is release-only; modern action versions.
+- `tests/test_turtlewave.py` uses ASCII `[ok]`/`[FAIL]`.
+- Root test scripts moved into `tests/`.
 
 ### Removed
 
-- `setup.py` — superseded by `pyproject.toml`.
-- `.pypirc` removed from version control. Tokens still need rotating since
-  they remain in pre-fix git history.
+- `setup.py`, `environment.yml`, `USEME.zip`, `resources/Woolcock.py`, `PYQTGRAPH_CONVERSION_SUMMARY.md`.
+- `dist/`, `*.egg-info/`, `__pycache__/`, `.roo/` from version control.
+
+### Security
+
+- `.pypirc` scrubbed from git history (`git filter-repo`); PyPI tokens rotated.
+
+## [3.2.0] — 2026-05-04
+
+### Added
+
+- K-complex detection — `ImprovedDetectKComplex`, `ParalKC`, GUI tab, review-GUI integration, example script.
+- CIRUS spindle method (`ImprovedDetectSpindle(method='CIRUS')`) ported from qEEG_PSG Java.
+
+### Changed
+
+- `ParalSWA` exporter and importer accept `event_type` / `method` overrides; defaults preserved.
+- Expanded `.gitignore` for build artifacts, virtual envs, IDE files.
 
 ## [3.1.0] — 2025
 
-Initial public release on PyPI. See `git log v3.1.0` for the full history of
-this release.
+Initial PyPI release.
