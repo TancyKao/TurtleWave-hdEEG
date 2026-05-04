@@ -1,3 +1,59 @@
+# macOS
 .DS_Store
-.DS_Store
-.DS_Store
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Credentials — NEVER commit
+.pypirc
+.env.local
+*.pem
+
+# Claude Code / AI assistant working files
+CLAUDE.md
+.claude/
+.roo/
+.aider*
+
+# Local design / research scratch
+_scratch/
+
+# Misc project artifacts
+USEME.zip
