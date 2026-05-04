@@ -44,7 +44,7 @@ Full examples for spindles, K-complexes, and PAC are in [`examples/`](examples/)
 git clone https://github.com/TancyKao/TurtleWave-hdEEG.git
 cd TurtleWave-hdEEG
 
-python3 -m venv .venv
+python3 -m venv --prompt turtlewave .venv
 source .venv/bin/activate           # macOS / Linux
 # .venv\Scripts\activate            # Windows (PowerShell or cmd)
 
