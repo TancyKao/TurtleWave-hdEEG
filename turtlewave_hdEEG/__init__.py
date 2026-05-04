@@ -11,7 +11,9 @@ from .annotation import XLAnnotations, CustomAnnotations
 from .eventprocessor import ParalEvents
 from .swprocessor import ParalSWA
 from .pacprocessor import ParalPAC
-from .extensions import ImprovedDetectSpindle, ImprovedDetectSlowWave
+from .kcomplexprocessor import ParalKC
+from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
+                         ImprovedDetectKComplex)
 
 
 

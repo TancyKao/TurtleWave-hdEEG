@@ -547,12 +547,12 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
     def __call__(self, data):
         """
         Detect slow waves in the data.
-        
+
         Parameters
         ----------
         data : instance of Data
             The data to analyze
-        
+
         Returns
         -------
         instance of graphoelement.SlowWaves
@@ -561,17 +561,86 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
         # Invert signal if requested
         if self.invert:
             data.data[0][0] = -data.data[0][0]
-        
+
         # Run detection using parent class
         events = super().__call__(data)
-        
+
         # Apply additional amplitude criteria if needed
         filtered_events = []
         for evt in events:
-            if (abs(evt['trough_val']) >= self.min_neg_amp and 
+            if (abs(evt['trough_val']) >= self.min_neg_amp and
                 abs(evt['ptp']) >= self.min_ptp_amp):
                 filtered_events.append(evt)
-        
+
         # Update events
         events.events = filtered_events
+        return events
+
+
+class ImprovedDetectKComplex(ImprovedDetectSlowWave):
+    """K-complex detector built on the slow-wave detector.
+
+    K-complexes are scored using the AASM criteria, which match Wonambi's
+    `AASM/Massimini2004` configuration (≥75 µV peak-to-peak, 0.25–1.0 s
+    trough duration). What distinguishes a KC from a free-running slow
+    oscillation is **isolation**: a KC stands alone rather than being one
+    cycle of a continuous train. This class adds a `min_isolation` filter
+    on top of `ImprovedDetectSlowWave` to enforce that.
+    """
+
+    SUPPORTED_METHODS = ('Massimini2004', 'AASM/Massimini2004')
+
+    def __init__(self, method='AASM/Massimini2004', frequency=None,
+                 duration=None, neg_peak_thresh=40, p2p_thresh=75,
+                 min_dur=None, max_dur=None, polar='normal',
+                 min_isolation=1.0):
+        """
+        Parameters
+        ----------
+        method : str
+            Detection method. Only 'Massimini2004' and 'AASM/Massimini2004'
+            are supported for K-complexes (Ngo2015 / Staresina2015 are
+            slow-oscillation algorithms that do not match AASM KC criteria).
+        min_isolation : float
+            Minimum gap in seconds between consecutive KCs, measured between
+            successive trough times. KCs closer than this are dropped from
+            the result.
+
+        Other parameters are forwarded to ImprovedDetectSlowWave.
+        """
+        if method not in self.SUPPORTED_METHODS:
+            raise ValueError(
+                f"Unsupported KC method '{method}'. "
+                f"Use one of: {self.SUPPORTED_METHODS}"
+            )
+        super().__init__(method=method, frequency=frequency, duration=duration,
+                         neg_peak_thresh=neg_peak_thresh,
+                         p2p_thresh=p2p_thresh,
+                         min_dur=min_dur, max_dur=max_dur, polar=polar)
+        self.min_isolation = float(min_isolation)
+
+    def __call__(self, data):
+        """Detect K-complexes, then drop any that are not isolated.
+
+        Returns
+        -------
+        instance of graphoelement.SlowWaves
+            Detected K-complexes (as a `SlowWaves` graphoelement, so existing
+            Wonambi machinery — `to_annot`, iteration over events as dicts —
+            keeps working).
+        """
+        events = super().__call__(data)
+
+        if self.min_isolation <= 0 or not events.events:
+            return events
+
+        sorted_events = sorted(events.events, key=lambda e: e['start'])
+        isolated = []
+        last_trough = -float('inf')
+        for evt in sorted_events:
+            t = evt.get('trough_time', evt.get('start'))
+            if t - last_trough >= self.min_isolation:
+                isolated.append(evt)
+                last_trough = t
+        events.events = isolated
         return events
