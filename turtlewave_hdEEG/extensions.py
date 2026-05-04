@@ -2,9 +2,175 @@
 Custom extensions to Wonambi spindle detection
 """
 
-from numpy import mean, arange
+import numpy as np
+import scipy
 from wonambi.detect import DetectSpindle as OriginalDetectSpindle
 from wonambi.detect import DetectSlowWave as OriginalDetectSlowWave
+from wonambi.detect.spindle import transform_signal
+from wonambi.graphoelement import Spindles
+
+
+def _get_cirus_envelope_func(sfreq, filter_mode, filter_window, filter_order, transition_bw, frequency, det_remez=None):
+    if filter_mode == 'wonambi':
+        def _env(chunk):
+            dat = transform_signal(chunk, sfreq, 'remez', det_remez)
+            dat = transform_signal(dat, sfreq, 'hilbert')
+            return transform_signal(dat, sfreq, 'abs')
+        return _env
+        
+    elif filter_mode == 'java':
+        half_fs = sfreq / 2.0
+        _window_k = {
+            'hann': 3.137, 'hamming': 3.320, 'blackman': 5.582,
+            'bartlett': 3.391, 'bohman': 5.332, 'blackmanharris': 7.828,
+        }
+        if transition_bw:
+            k = _window_k.get(filter_window)
+            if k is None:
+                raise ValueError(
+                    f"transition_bw not supported for window "
+                    f"'{filter_window}'. Supported: {list(_window_k)}"
+                )
+            n = int(np.ceil(k * half_fs / transition_bw))
+            order = (n if n % 2 == 1 else n + 1) - 1
+        else:
+            order = filter_order
+            
+        bf = scipy.signal.firwin(order + 1,
+                    [frequency[0] / half_fs, frequency[1] / half_fs],
+                    window=filter_window, pass_zero='bandpass')
+                    
+        def _env(chunk):
+            dat = scipy.signal.fftconvolve(chunk, bf, mode='same')
+            n_fft = 1 << (len(dat) - 1).bit_length()
+            return np.abs(scipy.signal.hilbert(dat, N=n_fft)[:len(chunk)])
+            
+        return _env
+    else:
+        raise ValueError(f"Unknown filter_mode '{filter_mode}'.")
+
+
+def _detect_spindles_cirus(raw, sfreq, filter_mode, filter_window, filter_order, transition_bw, 
+                           frequency, det_remez, epoch_len, epoch_overlap, 
+                           alpha, duration, bg_spindle_thresh, dur_correction):
+    """
+    Core CIRUS spindle detection on a raw numpy array.
+
+    Bandpass-filters the signal, extracts the Hilbert envelope, and detects
+    threshold crossings of sufficient duration as spindle candidates.
+    Candidates are optionally rejected if background amplitude is not
+    sufficiently lower than the spindle.
+
+    Intended for C3-M2 (or C3-CRef) during N2 and N3 sleep.
+
+    Parameters
+    ----------
+    raw : np.ndarray, shape (n_samples,)
+        Single-channel EEG signal in µV.
+    sfreq : float
+        Sampling frequency in Hz.
+    filter_mode : 'java' or 'wonambi'
+        Filtering pipeline to use. 'java' applies a Hamming FIR via
+        fftconvolve (mode='same'), matching the original CIRUS implementation.
+        'wonambi' applies a Parks-McClellan (remez) FIR via filtfilt, matching
+        wonambi's filter pipeline.
+    filter_window : str
+        Window function for the FIR design when filter_mode='java'. Any window
+        accepted by scipy firwin.
+    filter_order : int
+        FIR filter order for filter_mode='java'.
+    transition_bw : float or None
+        Transition bandwidth in Hz for filter_mode='java'. When >0, overrides
+        filter_order using filter_length = ceil(K * Nyquist / transition_bw).
+    frequency : tuple of float
+        Spindle band filter range in Hz (low, high).
+    det_remez : dict or None
+        Dictionary with parameters for the remez design when filter_mode='wonambi'.
+        E.g. {'freq': (11, 16), 'rolloff': 1.1, 'dur': 2.56}
+    epoch_len : float or None
+        Length of processing epochs in seconds. The signal is split into
+        non-overlapping epochs; the Hilbert envelope is computed per epoch
+        and a single threshold is derived from all epochs pooled. Spindles
+        cannot span epoch boundaries. None or 0 processes the full signal as one block.
+    epoch_overlap : float
+        Fraction of epoch_len that consecutive epochs overlap, in [0, 1).
+        Overlapping epochs reduce missed spindles near epoch boundaries.
+        Duplicate detections from overlapping windows are removed.
+    alpha : float
+        Threshold sensitivity. Higher means fewer detections, higher amplitude required.
+        Threshold = median + alpha * std of the Hilbert envelope.
+    duration : tuple of float
+        Valid spindle length in seconds (min, max), exclusive.
+    bg_spindle_thresh : float or None
+        Rejects spindles where the surrounding signal mean is not below
+        bg_spindle_thresh * spindle mean. 0 or None disables the check.
+    dur_correction : float
+        Seconds added to each reported duration to compensate for edge
+        clipping by the threshold.
+
+    Returns
+    -------
+    list of dict
+        One entry per detected spindle, each with keys 'start' (s), 'end' (s), 'dur' (s).
+    """
+    _env = _get_cirus_envelope_func(sfreq, filter_mode, filter_window, filter_order, transition_bw, frequency, det_remez)
+
+    # --- epoch splitting ---
+    if epoch_len:
+        n_epoch = int(epoch_len * sfreq)
+        step    = max(1, int(n_epoch * (1 - epoch_overlap)))
+        starts  = list(range(0, len(raw) - n_epoch + 1, step))
+        envelopes = [_env(raw[s:s + n_epoch]) for s in starts]
+        offsets_s = [s / sfreq for s in starts]
+    else:
+        envelopes = [_env(raw)]
+        offsets_s = [0.0]
+
+    # --- threshold and detection ---
+    all_env   = np.concatenate(envelopes)
+    threshold = np.median(all_env) + alpha * np.std(all_env, ddof=1)
+    min_samp  = int(duration[0] * sfreq)
+    max_samp  = int(duration[1] * sfreq)
+
+    spindles = []
+    for envelope, epoch_offset in zip(envelopes, offsets_s):
+        n = len(envelope)
+        above = envelope > threshold
+        trans = np.diff(above.view(np.int8), prepend=0)
+        onsets = np.where(trans == 1)[0]
+        offsets = np.where(trans == -1)[0]
+        
+        n_pairs = min(len(onsets), len(offsets))
+        onsets = onsets[:n_pairs]
+        offsets = offsets[:n_pairs]
+        
+        m_arr = offsets - onsets
+        valid = (m_arr > min_samp) & (m_arr < max_samp)
+        
+        for onset, offset, m in zip(onsets[valid], offsets[valid], m_arr[valid]):
+            if bg_spindle_thresh:
+                pre  = envelope[max(0, onset - m):onset]
+                post = envelope[offset:min(n, offset + m)]
+                bg_n = len(pre) + len(post)
+                if (bg_n == 0 or
+                        (pre.sum() + post.sum()) / bg_n
+                        >= bg_spindle_thresh * envelope[onset:offset].mean()):
+                    continue
+            peak = onset + int(np.argmax(envelope[onset:offset]))
+            spindles.append({'start':     epoch_offset + onset / sfreq,
+                             'end':       epoch_offset + offset / sfreq + dur_correction,
+                             'dur':       m / sfreq + dur_correction,
+                             'peak_time': epoch_offset + peak / sfreq})
+
+    if epoch_overlap > 0.0:
+        spindles.sort(key=lambda s: s['start'])
+        deduped = []
+        for s in spindles:
+            if not deduped or s['start'] >= deduped[-1]['end']:
+                deduped.append(s)
+        spindles = deduped
+
+    return spindles
 
 
 
@@ -46,8 +212,19 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         **kwargs : dict
             Additional method-specific parameters
         """
-        # Call parent constructor
-        super().__init__(method, frequency, duration, merge)
+        if method == 'CIRUS':
+            # Set the same base attributes as OriginalDetectSpindle.__init__
+            # without going through wonambi's method validation
+            self.method       = 'CIRUS'
+            self.frequency    = frequency if frequency is not None else (11, 16)
+            self.duration     = duration  if duration  is not None else (0.5, 3.0)
+            self.merge        = merge
+            self.tolerance    = 0
+            self.min_interval = 0
+            self.power_peaks  = 'interval'
+            self.rolloff      = None
+        else:
+            super().__init__(method, frequency, duration, merge)
         
         # Store signal inversion
         if polar == 'normal':
@@ -125,7 +302,7 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             if not hasattr(self, 'duration') or self.duration is None:
                 self.duration = (0.3, 3)
                 
-            self.det_wavelet = {'f0': mean(self.frequency),
+            self.det_wavelet = {'f0': np.mean(self.frequency),
                                 'sd': .8,
                                 'dur': 1.,
                                 'output': 'complex',
@@ -156,7 +333,7 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             if not hasattr(self, 'duration') or self.duration is None:
                 self.duration = (.49, None)
                 
-            self.cdemod = {'freq': mean(self.frequency)}
+            self.cdemod = {'freq': np.mean(self.frequency)}
             self.det_butter = {'freq': (0.3, 35),
                                'order': 4,
                                'step': None}
@@ -208,6 +385,25 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             self.covar_thresh = 1.3
             self.corr_thresh = 0.69
   
+        elif self.method == 'CIRUS':
+            # GUI default matches published papers 
+            # (D'Rozario et al. 2022 SLEEP, Lam et al. 2021 Cereb Cortex). 
+            # alpha=1.4 performs better for OSA specifically (F1 0.72 vs 0.65, 
+            # validation PDF table 6) and can be passed via det_thresh if needed
+            self.det_thresh    = 1.0
+            # background ratio threshold hardcoded at 0.5 in qEEG_PSG CIRUS
+            self.sel_thresh    = 0.5
+            # duration correction hardcoded at 0.08s in qEEG_PSG CIRUS GUI
+            self.dur_correction = 0.08
+            # 'wonambi' mode defaults from Martin2013 (rolloff=1.1, dur=2.56)
+            self.det_remez     = {'freq': self.frequency, 'rolloff': 1.1, 'dur': 2.56, 'step': None}
+            # 30s epochs match the GUI's per-epoch processing and the scoring methodology
+            self.epoch_len     = 30.0
+            self.filter_mode   = 'java'
+            self.filter_order  = 128
+            self.filter_window = 'hamming'
+            self.transition_bw = 0
+            self.epoch_overlap = 0.0
         else:
             raise ValueError(f'Unknown method: {self.method}')
 
@@ -225,6 +421,10 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         """
         Ensure all required parameters exist in method dictionaries with comprehensive check.
         """
+        # CIRUS bypasses wonambi's detection pipeline entirely, so its params
+        # don't follow wonambi's dict conventions and need no safety-filling.
+        if self.method == 'CIRUS':
+            return
         # Get all attributes of self that are dictionaries
         for attr_name in dir(self):
             # Skip private attributes and non-data attributes
@@ -276,7 +476,7 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         
         if self.method == 'Wamsley2012' and hasattr(self, 'det_wavelet'):
             if 'f0' not in self.det_wavelet:
-                self.det_wavelet['f0'] = mean(self.frequency)
+                self.det_wavelet['f0'] = np.mean(self.frequency)
             if 'output' not in self.det_wavelet:
                 self.det_wavelet['output'] = 'complex'
         
@@ -365,7 +565,7 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             
             # Always ensure f0 is present for Wamsley2012
             if hasattr(self, 'det_wavelet'):
-                self.det_wavelet['f0'] = mean(self.frequency)
+                self.det_wavelet['f0'] = np.mean(self.frequency)
                 # Always ensure step is present
                 if 'step' not in self.det_wavelet:
                     self.det_wavelet['step'] = None
@@ -374,8 +574,53 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         for key, value in self._custom_params.items():
             if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
-        
+
         self._ensure_step_parameters()
+
+
+    def _detect_cirus(self, data):
+        sfreq  = data.s_freq
+        chan   = data.axis['chan'][0][0]
+        t_axis = np.concatenate([data.axis['time'][i] for i in range(len(data.data))])
+        # wonambi preserves absolute recording times in the time axis even
+        # after discontinuous concatenation 
+        # index into t_axis by sample to get correct absolute times
+        raw = np.concatenate([d[0] for d in data.data])
+
+        def to_abs(t_s):
+            idx = min(int(round(t_s * sfreq)), len(t_axis) - 1)
+            return float(t_axis[idx])
+
+        spindles = _detect_spindles_cirus(
+            raw=raw,
+            sfreq=sfreq,
+            filter_mode=self.filter_mode,
+            filter_window=self.filter_window,
+            filter_order=self.filter_order,
+            transition_bw=self.transition_bw,
+            frequency=self.frequency,
+            det_remez=self.det_remez,
+            epoch_len=self.epoch_len,
+            epoch_overlap=self.epoch_overlap,
+            alpha=self.det_thresh,
+            duration=self.duration,
+            bg_spindle_thresh=self.sel_thresh,
+            dur_correction=self.dur_correction
+        )
+
+        sp = Spindles()
+        sp.events.clear()
+        sp.chan_name = [chan]
+        for s in spindles:
+            sp.events.append({
+                'start':     to_abs(s['start']),
+                'end':       to_abs(s['end']),
+                'peak_time': to_abs(s['peak_time']),
+                'peak_val':  None,
+                'chan':       chan,
+            })
+        return sp
+
 
     def __call__(self, data, parent=None): # 5 minutes timeout
         """
@@ -398,6 +643,9 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             Detected spindles
         """
 
+        
+        if self.method == 'CIRUS':
+            return self._detect_cirus(data)
         
         # Add comprehensive check for step parameters right before detection
         self._ensure_step_parameters()
