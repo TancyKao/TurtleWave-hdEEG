@@ -2,7 +2,7 @@
 turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 """
 
-__version__ = '3.1.0'
+__version__ = '3.3.0'
 
 # Import important classes to expose at the package level
 from .dataset import LargeDataset
