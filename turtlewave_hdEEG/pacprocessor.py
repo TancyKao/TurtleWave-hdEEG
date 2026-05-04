@@ -331,9 +331,9 @@ class ParalPAC:
 
             # Create output filenames using the method-specific directory
             if pair_with_spindles and event_type == 'slow_wave':
-                outputfile = f'{method_out_dir}/{ch}_slowwave_spindle_coupling_{freqs}_pac_parameters.csv' 
+                outputfile = os.path.join(method_out_dir, f'{ch}_slowwave_spindle_coupling_{freqs}_pac_parameters.csv')
             else:
-                outputfile = f'{method_out_dir}/{ch}_{event_type}_{freqs}_pac_parameters.csv'
+                outputfile = os.path.join(method_out_dir, f'{ch}_{event_type}_{freqs}_pac_parameters.csv')
 
             
             # 6. Fetch data segments
@@ -1140,7 +1140,7 @@ class ParalPAC:
                     cond1_name = condition1.get('name', 'Condition1')
                     cond2_name = condition2.get('name', 'Condition2')
                     
-                    output_file = f"{out_dir}/pac_comparison_{cond1_name}_vs_{cond2_name}.csv"
+                    output_file = os.path.join(out_dir, f"pac_comparison_{cond1_name}_vs_{cond2_name}.csv")
                     
                     results_df = pd.DataFrame({
                         'Condition1': [cond1_name],

@@ -260,7 +260,7 @@ class ParalSWA:
                             self.logger.error(f"Note: No existing slow wave events to remove: {e}")
                     else:
                         # Create new annotations file from scratch
-                        with open(annotation_file_path, 'w') as f:
+                        with open(annotation_file_path, 'w', encoding='utf-8') as f:
                             f.write('<?xml version="1.0" ?>\n<annotations><dataset><filename>')
                             if hasattr(self.dataset, 'filename'):
                                 f.write(self.dataset.filename)
@@ -392,10 +392,10 @@ class ParalSWA:
                             # Create empty JSON if no waves found but flag is set
                             if not channel_json_slow_waves and create_empty_json:
                                 self.logger.info(f"Creating empty JSON file for channel {ch} (no slow waves detected)")
-                                with open(ch_json_file, 'w') as f:
+                                with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump([], f)
                             elif channel_json_slow_waves:
-                                with open(ch_json_file, 'w') as f:
+                                with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump(channel_json_slow_waves, f, indent=2)
                                 self.logger.info(f"Saved slow wave data for channel {ch} to {ch_json_file}")
                         except Exception as e:
@@ -408,7 +408,7 @@ class ParalSWA:
                                 stages_str = "".join(stage) if stage else "all"
                                 ch_json_file = os.path.join(json_dir, 
                                                         f"slowwaves_{method_str}_{freq_str}_{stages_str}_{ch}.json")
-                                with open(ch_json_file, 'w') as f:
+                                with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump([], f)
                                 self.logger.info(f"Created empty JSON file for channel {ch} after error")
                             except Exception as json_e:
@@ -478,7 +478,7 @@ class ParalSWA:
         empty_channels = [] 
         for file in json_files:
             try:
-                with open(file, 'r') as f:
+                with open(file, 'r', encoding='utf-8') as f:
                     slow_waves = json.load(f)
                     
                 if isinstance(slow_waves, list):
@@ -505,7 +505,7 @@ class ParalSWA:
              # Create an empty CSV file with header to indicate processing was done
             if empty_channels and not skip_empty_files:
                 try:
-                    with open(csv_file, 'w', newline='') as outfile:
+                    with open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                         writer = csv.writer(outfile)
                         writer.writerow(["No slow waves were detected in the following channels:"])
                         for chan in empty_channels:
@@ -652,7 +652,7 @@ class ParalSWA:
 
             # Process CSV
             self.logger.info("Processing CSV to remove summary rows and add HH:MM:SS format")
-            with open(temp_csv, 'r', newline='') as infile, open(csv_file, 'w', newline='') as outfile:
+            with open(temp_csv, 'r', newline='', encoding='utf-8') as infile, open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                 reader = csv.reader(infile)
                 writer = csv.writer(outfile)
 
@@ -670,7 +670,7 @@ class ParalSWA:
                 
                 if header_row_index is None or start_time_index is None:
                     self.logger.error("Could not find 'Start time' column in CSV")
-                    with open(temp_csv, 'r') as src, open(csv_file, 'w') as dst:
+                    with open(temp_csv, 'r', encoding='utf-8') as src, open(csv_file, 'w', encoding='utf-8') as dst:
                         dst.write(src.read())
                     return params
             
@@ -783,7 +783,7 @@ class ParalSWA:
 
         if not json_files:
             try:
-                with open(csv_file, 'w', newline='') as outfile:
+                with open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                     writer = csv.writer(outfile)
                     writer.writerow(["No JSON files found matching pattern:", file_pattern])
                 self.logger.info(f"Created empty CSV file at {csv_file}")
@@ -813,7 +813,7 @@ class ParalSWA:
         all_slow_waves = []
         for file in json_files:
             try:
-                with open(file, 'r') as f:
+                with open(file, 'r', encoding='utf-8') as f:
                     waves = json.load(f)
                     all_slow_waves.extend(waves if isinstance(waves, list) else [])
             except Exception as e:
@@ -938,7 +938,7 @@ class ParalSWA:
                 }
         
         # Export to CSV
-        with open(csv_file, 'w', newline='') as f:
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             
             # Add summary sections
@@ -1018,7 +1018,7 @@ class ParalSWA:
                 'software_version': 'TurtleWave hdEEG GUI'
             }
             
-            with open(summary_file, 'w') as f:
+            with open(summary_file, 'w', encoding='utf-8') as f:
                 json.dump(summary_data, f, indent=2)
             
             self.logger.info(f"Saved detection summary to: {summary_file}")
@@ -1211,7 +1211,7 @@ class ParalSWA:
         self.logger.info(f"Reading parameters from CSV: {csv_file}")
         try:
             # First determine how many rows to skip (header plus statistics)
-            with open(csv_file, 'r') as f:
+            with open(csv_file, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 
             # Find the header row (contains 'Start time')
@@ -1588,7 +1588,7 @@ class ParalSWA:
                                     continue
                                 
                                 # Read JSON file to check if it's empty
-                                with open(file, 'r') as f:
+                                with open(file, 'r', encoding='utf-8') as f:
                                     content = json.load(f)
                                     
                                 # If JSON file contains an empty array, add to empty_channels

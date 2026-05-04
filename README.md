@@ -14,7 +14,7 @@ turtlewave_gui          # detection GUI
 eeg_review_gui          # event review GUI
 ```
 
-Requires Python ≥ 3.10. Tested on macOS and Linux.
+Requires Python ≥ 3.10. Tested on macOS, Linux, and Windows.
 
 ## Develop (cloning the repo)
 

@@ -239,7 +239,7 @@ class ParalEvents:
                     else:
                         # If we can't copy, create a new annotations file from scratch
                         # Create minimal XML structure
-                        with open(annotation_file_path, 'w') as f:
+                        with open(annotation_file_path, 'w', encoding='utf-8') as f:
                             f.write('<?xml version="1.0" ?>\n<annotations><dataset><filename>')
                             if hasattr(self.dataset, 'filename'):
                                 f.write(self.dataset.filename)
@@ -345,10 +345,10 @@ class ParalEvents:
                             # Create empty JSON if no spindles found but flag is set
                             if not channel_json_spindles and create_empty_json:
                                 self.logger.info(f"Creating empty JSON file for channel {ch} (no spindles detected)")
-                                with open(ch_json_file, 'w') as f:
+                                with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump([], f)
                             elif channel_json_spindles:
-                                with open(ch_json_file, 'w') as f:
+                                with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump(channel_json_spindles, f, indent=2)
                                 self.logger.info(f"Saved spindle data for channel {ch} to {ch_json_file}")
                         except Exception as e:
@@ -361,7 +361,7 @@ class ParalEvents:
                             try:
                                 stages_str = "".join(stage) if stage else "all"
                                 ch_json_file = os.path.join(json_dir, f"spindles_{method_str}_{freq_str}_{stages_str}_{ch}.json")
-                                with open(ch_json_file, 'w') as f:
+                                with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump([], f)
                                 self.logger.info(f"Created empty JSON file for channel {ch} after error")
                             except Exception as json_e:
@@ -450,7 +450,7 @@ class ParalEvents:
         
         if not json_files:
             self.logger.warning(f"No JSON files found matching pattern: {file_pattern}")
-            with open(csv_file, 'w', newline='') as outfile:
+            with open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                 writer = csv.writer(outfile)
                 writer.writerow(["No JSON files found matching pattern:", file_pattern])
             return None
@@ -461,7 +461,7 @@ class ParalEvents:
         empty_channels = []
         for file in json_files:
             try:
-                with open(file, 'r') as f:
+                with open(file, 'r', encoding='utf-8') as f:
                     spindles = json.load(f)
                     
                 if isinstance(spindles, list):
@@ -487,7 +487,7 @@ class ParalEvents:
             # Create an empty CSV file with header to indicate processing was done
             if empty_channels and not skip_empty_files:
                 try:
-                    with open(csv_file, 'w', newline='') as outfile:
+                    with open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                         writer = csv.writer(outfile)
                         writer.writerow(["No spindles were detected in the following channels:"])
                         for chan in empty_channels:
@@ -640,7 +640,7 @@ class ParalEvents:
 
             # Now read the temporary CSV and process it
             self.logger.info(f"Processing CSV to remove summary rows and add HH:MM:SS format")
-            with open(temp_csv, 'r', newline='') as infile, open(csv_file, 'w', newline='') as outfile:
+            with open(temp_csv, 'r', newline='', encoding='utf-8') as infile, open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                 reader = csv.reader(infile)
                 writer = csv.writer(outfile)
 
@@ -659,7 +659,7 @@ class ParalEvents:
                 if header_row_index is None or start_time_index is None:
                     self.logger.info("Error: Could not find 'Start time' column in CSV")
                     # Copy the original file as fallback
-                    with open(temp_csv, 'r') as src, open(csv_file, 'w') as dst:
+                    with open(temp_csv, 'r', encoding='utf-8') as src, open(csv_file, 'w', encoding='utf-8') as dst:
                         dst.write(src.read())
                     return params
             
@@ -795,7 +795,7 @@ class ParalEvents:
             
             # Create an empty CSV file with a message
             try:
-                with open(csv_file, 'w', newline='') as outfile:
+                with open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                     writer = csv.writer(outfile)
                     writer.writerow(["No JSON files found matching pattern:", file_pattern])
                 self.logger.info(f"Created empty CSV file at {csv_file}")
@@ -829,7 +829,7 @@ class ParalEvents:
         all_spindles = []
         for file in json_files:
             try:
-                with open(file, 'r') as f:
+                with open(file, 'r', encoding='utf-8') as f:
                     spindles = json.load(f)
                     all_spindles.extend(spindles if isinstance(spindles, list) else [])
             except Exception as e:
@@ -981,7 +981,7 @@ class ParalEvents:
                 }
         
         # Export to CSV - each stage gets its own section
-        with open(csv_file, 'w', newline='') as f:
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             
             # Add whole night summary
@@ -1067,7 +1067,7 @@ class ParalEvents:
                 'software_version': 'TurtleWave hdEEG GUI'
             }
             
-            with open(summary_file, 'w') as f:
+            with open(summary_file, 'w', encoding='utf-8') as f:
                 json.dump(summary_data, f, indent=2)
             
             self.logger.info(f"Saved detection summary to: {summary_file}")
@@ -1241,7 +1241,7 @@ class ParalEvents:
         self.logger.info(f"Reading parameters from CSV: {csv_file}")
         try:
             # First determine how many rows to skip (header plus statistics)
-            with open(csv_file, 'r') as f:
+            with open(csv_file, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 
             # Find the header row (contains 'Start time')
@@ -1597,7 +1597,7 @@ class ParalEvents:
                                     continue
                                 
                                 # Read JSON file to check if it's empty
-                                with open(file, 'r') as f:
+                                with open(file, 'r', encoding='utf-8') as f:
                                     content = json.load(f)
                                     
                                 # If JSON file contains an empty array, add to empty_channels

@@ -33,7 +33,7 @@ def add_spindles_to_annotations(json_file, xml_file, channels, output_xml=None):
     # Load JSON data
     print(f"Loading spindle data from {json_file}")
     try:
-        with open(json_file, 'r') as f:
+        with open(json_file, 'r', encoding='utf-8') as f:
             spindles = json.load(f)
         print(f"Loaded {len(spindles)} spindles from JSON")
     except Exception as e:

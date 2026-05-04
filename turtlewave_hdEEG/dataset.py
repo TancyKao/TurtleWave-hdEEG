@@ -567,7 +567,7 @@ class LargeDataset:
         }
         
         # Save for later use
-        with open(info_path, 'w') as f:
+        with open(info_path, 'w', encoding='utf-8') as f:
             json.dump(self.memmap_info, f)
         
         print(f"Memory map created at {memmap_path}")
