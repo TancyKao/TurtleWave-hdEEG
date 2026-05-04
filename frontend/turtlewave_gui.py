@@ -22,8 +22,8 @@ import logging
 
 # Try importing the required packages
 try:
-    from turtlewave_hdEEG import LargeDataset, XLAnnotations, ParalEvents, ParalSWA, CustomAnnotations
-    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave, ImprovedDetectSpindle
+    from turtlewave_hdEEG import LargeDataset, XLAnnotations, ParalEvents, ParalSWA, ParalKC, CustomAnnotations
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave, ImprovedDetectSpindle, ImprovedDetectKComplex
     
     #from wonambi.dataset import Dataset as WonambiDataset
 except ImportError as e:
@@ -116,7 +116,8 @@ class TurtleWaveGUI(QMainWindow):
         self.spindle_tab = QWidget()
         self.pac_tab = QWidget()  # Add PAC tab
         self.log_tab = QWidget()
-        self.sw_tab = QWidget()  
+        self.sw_tab = QWidget()
+        self.kcomplex_tab = QWidget()
         #self.review_tab = EventReviewTab(self) <================
 
         # Add tabs to widget
@@ -124,17 +125,19 @@ class TurtleWaveGUI(QMainWindow):
         self.tabs.addTab(self.annotation_tab, "Annotation")
         self.tabs.addTab(self.spindle_tab, "Spindle Detection")
         self.tabs.addTab(self.sw_tab, "Slow Wave Detection")
-        self.tabs.addTab(self.pac_tab, "PAC Analysis") 
+        self.tabs.addTab(self.kcomplex_tab, "K-Complex Detection")
+        self.tabs.addTab(self.pac_tab, "PAC Analysis")
         #self.tabs.addTab(self.review_tab, "Event Review") <================
         self.tabs.addTab(self.log_tab, "Log")
         # Connect tab change signal
         self.tabs.currentChanged.connect(self.handle_tab_change)
-        
+
         # Setup tab contents
         self.setup_setup_tab()
         self.setup_annotation_tab()
         self.setup_spindle_tab()
-        self.setup_sw_tab()  
+        self.setup_sw_tab()
+        self.setup_kcomplex_tab()
         self.setup_pac_tab()  # Add setup for PAC tab
         self.setup_log_tab()
         
@@ -154,7 +157,8 @@ class TurtleWaveGUI(QMainWindow):
         self.tabs.setTabEnabled(1, False)  # Annotation tab
         self.tabs.setTabEnabled(2, False)  # Spindle tab
         self.tabs.setTabEnabled(3, False)  # Slow Wave tab
-        self.tabs.setTabEnabled(4, False)  # PAC tab
+        self.tabs.setTabEnabled(4, False)  # K-Complex tab
+        self.tabs.setTabEnabled(5, False)  # PAC tab
         #self.tabs.setTabEnabled(self.tabs.indexOf(self.review_tab), False)<=================
 
     def setup_menu_bar(self):
@@ -191,7 +195,7 @@ class TurtleWaveGUI(QMainWindow):
     def handle_tab_change(self, index):
         """Handle tab changes"""
         # If switching to PAC tab, make sure methods are populated
-        if index == 4:  # PAC tab index
+        if index == 5:  # PAC tab index
             self.populate_detection_methods()
 
     def setup_setup_tab(self):
@@ -1142,10 +1146,570 @@ class TurtleWaveGUI(QMainWindow):
             )
             
             QtCore.QMetaObject.invokeMethod(
-                self.progress, "setVisible", 
+                self.progress, "setVisible",
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(bool, False)
             )
+
+    # ============================================================
+    # K-Complex Detection
+    # ============================================================
+    # KCs share the slow-wave detection pipeline (Wonambi's
+    # AASM/Massimini2004 thresholds match AASM KC criteria), with one
+    # extra knob: `min_isolation` enforces a gap between successive KCs
+    # so a KC can't just be one cycle of an N3 slow-oscillation train.
+    # The method combo is restricted to Massimini2004 / AASM/Massimini2004;
+    # Ngo2015 and Staresina2015 target slow oscillations and are not
+    # appropriate for KC scoring.
+
+    def setup_kcomplex_tab(self):
+        """Setup the K-complex detection tab"""
+        layout = QVBoxLayout(self.kcomplex_tab)
+
+        top_splitter = QSplitter(QtCore.Qt.Horizontal)
+
+        # Left column - parameters
+        params_widget = QWidget()
+        params_layout = QVBoxLayout(params_widget)
+
+        params_group = QGroupBox("K-Complex Detection Parameters")
+        params_form = QVBoxLayout()
+
+        # Method selection (KC-appropriate methods only)
+        method_layout = QHBoxLayout()
+        method_layout.addWidget(QLabel("Detection Method:"))
+        self.kc_method_combo = QComboBox()
+        self.kc_method_combo.addItems(["AASM/Massimini2004", "Massimini2004"])
+        method_layout.addWidget(self.kc_method_combo)
+        params_form.addLayout(method_layout)
+
+        # Method-specific parameter container
+        self.kc_method_params_container = QGroupBox("Method-Specific Parameters")
+        self.kc_method_params_layout = QVBoxLayout(self.kc_method_params_container)
+        params_form.addWidget(self.kc_method_params_container)
+        self.kc_method_combo.currentTextChanged.connect(self.update_kc_params_for_method)
+
+        # Isolation criterion (KC-only)
+        iso_group = QGroupBox("Isolation")
+        iso_layout = QHBoxLayout()
+        iso_layout.addWidget(QLabel("Min isolation (s):"))
+        self.kc_min_isolation_spin = QDoubleSpinBox()
+        self.kc_min_isolation_spin.setRange(0.0, 5.0)
+        self.kc_min_isolation_spin.setSingleStep(0.1)
+        self.kc_min_isolation_spin.setValue(1.0)
+        self.kc_min_isolation_spin.setToolTip(
+            "Minimum gap between successive K-complex troughs. KCs closer "
+            "than this are dropped — distinguishes a KC from one cycle of "
+            "a continuous slow-oscillation train. Set to 0 to disable.")
+        iso_layout.addWidget(self.kc_min_isolation_spin)
+        iso_group.setLayout(iso_layout)
+        params_form.addWidget(iso_group)
+
+        # Reject options
+        self.kc_reject_artifacts_check = QCheckBox("Reject Artifacts")
+        self.kc_reject_artifacts_check.setChecked(True)
+        params_form.addWidget(self.kc_reject_artifacts_check)
+
+        self.kc_reject_arousals_check = QCheckBox("Reject Arousals")
+        self.kc_reject_arousals_check.setChecked(True)
+        params_form.addWidget(self.kc_reject_arousals_check)
+
+        params_group.setLayout(params_form)
+        params_layout.addWidget(params_group)
+
+        # Stage selection — N2 only by default
+        stages_group = QGroupBox("Sleep Stage Selection")
+        stages_layout = QHBoxLayout()
+        self.kc_stage_checks = {}
+        stages = ["NREM1", "NREM2", "NREM3", "REM", "Wake"]
+        default_selected = ["NREM2"]
+        for stage in stages:
+            check = QCheckBox(stage)
+            check.setChecked(stage in default_selected)
+            stages_layout.addWidget(check)
+            self.kc_stage_checks[stage] = check
+        stages_group.setLayout(stages_layout)
+        params_layout.addWidget(stages_group)
+
+        params_layout.addStretch(1)
+        top_splitter.addWidget(params_widget)
+
+        # Right column - channel selection
+        channels_widget = QWidget()
+        channels_layout = QVBoxLayout(channels_widget)
+
+        channels_group = QGroupBox("Channel Selection")
+        channels_content = QHBoxLayout()
+
+        avail_layout = QVBoxLayout()
+        avail_layout.addWidget(QLabel("Available Channels:"))
+        self.kc_available_list = QListWidget()
+        self.kc_available_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        avail_layout.addWidget(self.kc_available_list)
+        channels_content.addLayout(avail_layout)
+
+        btn_layout = QVBoxLayout()
+        btn_layout.addStretch(1)
+        self.kc_add_btn = QPushButton("Add >")
+        self.kc_add_btn.clicked.connect(self.add_kc_channels)
+        btn_layout.addWidget(self.kc_add_btn)
+        self.kc_remove_btn = QPushButton("< Remove")
+        self.kc_remove_btn.clicked.connect(self.remove_kc_channels)
+        btn_layout.addWidget(self.kc_remove_btn)
+        self.kc_add_all_btn = QPushButton("Add All >>")
+        self.kc_add_all_btn.clicked.connect(self.add_all_kc_channels)
+        btn_layout.addWidget(self.kc_add_all_btn)
+        self.kc_remove_all_btn = QPushButton("<< Remove All")
+        self.kc_remove_all_btn.clicked.connect(self.remove_all_kc_channels)
+        btn_layout.addWidget(self.kc_remove_all_btn)
+        btn_layout.addStretch(1)
+        channels_content.addLayout(btn_layout)
+
+        sel_layout = QVBoxLayout()
+        sel_layout.addWidget(QLabel("Selected Channels:"))
+        self.kc_selected_list = QListWidget()
+        self.kc_selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        sel_layout.addWidget(self.kc_selected_list)
+        channels_content.addLayout(sel_layout)
+
+        channels_group.setLayout(channels_content)
+        channels_layout.addWidget(channels_group)
+        top_splitter.addWidget(channels_widget)
+
+        layout.addWidget(top_splitter)
+
+        action_layout = QHBoxLayout()
+        self.detect_kc_btn = QPushButton("Detect K-Complexes")
+        self.detect_kc_btn.clicked.connect(self.detect_kc_thread)
+        self.detect_kc_btn.setStyleSheet("font-weight: bold;")
+        action_layout.addWidget(self.detect_kc_btn)
+
+        self.view_kc_results_btn = QPushButton("View Results")
+        self.view_kc_results_btn.clicked.connect(self.view_kc_results)
+        self.view_kc_results_btn.setEnabled(False)
+        action_layout.addWidget(self.view_kc_results_btn)
+        layout.addLayout(action_layout)
+
+        self.update_kc_params_for_method(self.kc_method_combo.currentText())
+
+    def update_kc_params_for_method(self, method_name):
+        """Populate KC method-specific parameter widgets."""
+        self.clear_layout(self.kc_method_params_layout)
+        try:
+            detector = ImprovedDetectKComplex(method=method_name)
+
+            method_descriptions = {
+                "AASM/Massimini2004":
+                    "AASM K-complex criteria applied via the Massimini "
+                    "method: ≥75 µV peak-to-peak, 0.25–1.0 s trough "
+                    "duration. Recommended default for KC detection.",
+                "Massimini2004":
+                    "Original Massimini slow-wave thresholds — stricter "
+                    "than AASM. Useful if you want to favour high-amplitude "
+                    "KCs only.",
+            }
+            if method_name in method_descriptions:
+                desc = QLabel(method_descriptions[method_name])
+                desc.setWordWrap(True)
+                desc.setStyleSheet(
+                    "color: #333; font-style: italic; "
+                    "background-color: #f0f4f7; padding: 8px; "
+                    "border-radius: 4px;")
+                self.kc_method_params_layout.addWidget(desc)
+                self.kc_method_params_layout.addSpacing(10)
+
+            info_label = QLabel(f"<b>Parameters for {method_name}:</b>")
+            info_label.setAlignment(QtCore.Qt.AlignCenter)
+            self.kc_method_params_layout.addWidget(info_label)
+
+            self.kc_param_widgets = {}
+
+            # Filter
+            filter_group = QGroupBox("Filter Settings")
+            filter_layout = QVBoxLayout()
+            order_layout = QHBoxLayout()
+            order_layout.addWidget(QLabel("Filter Order:"))
+            order_spin = QSpinBox()
+            order_spin.setRange(1, 10)
+            order_spin.setValue(detector.det_filt.get('order', 2))
+            order_layout.addWidget(order_spin)
+            filter_layout.addLayout(order_layout)
+
+            freq_range = detector.det_filt.get('freq', (0.1, 4.0))
+            freq_layout = QHBoxLayout()
+            freq_layout.addWidget(QLabel("Frequency Range (Hz):"))
+            freq_layout.addWidget(QLabel("Min:"))
+            min_freq_spin = QDoubleSpinBox()
+            min_freq_spin.setRange(0.01, 10.0)
+            min_freq_spin.setSingleStep(0.1)
+            min_freq_spin.setValue(freq_range[0])
+            freq_layout.addWidget(min_freq_spin)
+            freq_layout.addWidget(QLabel("Max:"))
+            max_freq_spin = QDoubleSpinBox()
+            max_freq_spin.setRange(0.1, 20.0)
+            max_freq_spin.setSingleStep(0.1)
+            max_freq_spin.setValue(freq_range[1])
+            freq_layout.addWidget(max_freq_spin)
+            filter_layout.addLayout(freq_layout)
+            filter_group.setLayout(filter_layout)
+            self.kc_method_params_layout.addWidget(filter_group)
+
+            self.kc_param_widgets["filter"] = {
+                "order": order_spin,
+                "min_freq": min_freq_spin,
+                "max_freq": max_freq_spin,
+            }
+
+            # Trough duration
+            trough_group = QGroupBox("Trough Duration (Negative Half-Wave)")
+            trough_layout = QHBoxLayout()
+            trough_duration = detector.trough_duration
+            trough_layout.addWidget(QLabel("Min (s):"))
+            min_trough_spin = QDoubleSpinBox()
+            min_trough_spin.setRange(0.01, 5.0)
+            min_trough_spin.setSingleStep(0.05)
+            min_trough_spin.setValue(trough_duration[0])
+            trough_layout.addWidget(min_trough_spin)
+            trough_layout.addWidget(QLabel("Max (s):"))
+            max_trough_spin = QDoubleSpinBox()
+            max_trough_spin.setRange(0.1, 10.0)
+            max_trough_spin.setSingleStep(0.1)
+            max_trough_spin.setValue(trough_duration[1])
+            trough_layout.addWidget(max_trough_spin)
+            trough_group.setLayout(trough_layout)
+            self.kc_method_params_layout.addWidget(trough_group)
+
+            self.kc_param_widgets["trough_duration"] = {
+                "min": min_trough_spin,
+                "max": max_trough_spin,
+            }
+
+            # Amplitude thresholds
+            threshold_group = QGroupBox("Amplitude Thresholds")
+            threshold_layout = QVBoxLayout()
+            neg_layout = QHBoxLayout()
+            neg_layout.addWidget(QLabel("Negative Peak Threshold (μV):"))
+            neg_peak_spin = QDoubleSpinBox()
+            neg_peak_spin.setRange(-200, 0)
+            neg_peak_spin.setValue(detector.max_trough_amp)
+            neg_layout.addWidget(neg_peak_spin)
+            threshold_layout.addLayout(neg_layout)
+            p2p_layout = QHBoxLayout()
+            p2p_layout.addWidget(QLabel("Peak-to-Peak Threshold (μV):"))
+            p2p_spin = QDoubleSpinBox()
+            p2p_spin.setRange(0, 300)
+            p2p_spin.setValue(detector.min_ptp)
+            p2p_layout.addWidget(p2p_spin)
+            threshold_layout.addLayout(p2p_layout)
+            threshold_group.setLayout(threshold_layout)
+            self.kc_method_params_layout.addWidget(threshold_group)
+            self.kc_param_widgets["max_trough_amp"] = neg_peak_spin
+            self.kc_param_widgets["min_ptp"] = p2p_spin
+
+            options_group = QGroupBox("Signal Processing Options")
+            options_layout = QHBoxLayout()
+            invert_check = QCheckBox("Invert Signal")
+            invert_check.setChecked(False)
+            options_layout.addWidget(invert_check)
+            options_group.setLayout(options_layout)
+            self.kc_method_params_layout.addWidget(options_group)
+            self.kc_param_widgets["invert"] = invert_check
+
+            self.kc_method_params_layout.addStretch(1)
+        except Exception as e:
+            self.write_log(
+                f"Error loading parameters from ImprovedDetectKComplex: {e}")
+            import traceback
+            traceback.print_exc()
+            error_label = QLabel(f"Error loading parameters: {e}")
+            error_label.setStyleSheet("color: red;")
+            error_label.setWordWrap(True)
+            self.kc_method_params_layout.addWidget(error_label)
+
+    def detect_kc_thread(self):
+        """Start K-complex detection in a separate thread."""
+        if not self.dataset:
+            QMessageBox.critical(self, "Error", "No dataset loaded. Please load a dataset first.")
+            return
+
+        if not os.path.isfile(self.annot_file_path):
+            response = QMessageBox.question(
+                self, "Annotation File Missing",
+                "No annotation file found. Would you like to generate annotations first?",
+                QMessageBox.Yes | QMessageBox.No)
+            if response == QMessageBox.Yes:
+                self.tabs.setCurrentIndex(1)
+                return
+            return
+
+        self.kc_method = self.kc_method_combo.currentText()
+
+        if not self.selected_channels:
+            QMessageBox.critical(self, "Error", "No channels selected. Please select at least one channel.")
+            return
+
+        self.kc_selected_stages = [s for s, c in self.kc_stage_checks.items() if c.isChecked()]
+        if not self.kc_selected_stages:
+            QMessageBox.critical(self, "Error", "No sleep stages selected. Please select at least one stage.")
+            return
+
+        try:
+            polar = 'opposite' if self.kc_param_widgets.get(
+                "invert", QCheckBox()).isChecked() else 'normal'
+
+            filter_widgets = self.kc_param_widgets["filter"]
+            frequency = (filter_widgets["min_freq"].value(),
+                         filter_widgets["max_freq"].value())
+            trough_widgets = self.kc_param_widgets["trough_duration"]
+            trough_duration = (trough_widgets["min"].value(),
+                               trough_widgets["max"].value())
+            neg_peak_thresh = self.kc_param_widgets["max_trough_amp"].value()
+            p2p_thresh = self.kc_param_widgets["min_ptp"].value()
+            min_isolation = self.kc_min_isolation_spin.value()
+
+            self.write_log(f"Using method: {self.kc_method}")
+            self.write_log(f"Frequency range: {frequency} Hz")
+            self.write_log(
+                f"Trough duration: {trough_duration[0]:.2f}-{trough_duration[1]:.2f} s")
+            self.write_log(f"Negative peak threshold: {neg_peak_thresh} μV")
+            self.write_log(f"Peak-to-peak threshold: {p2p_thresh} μV")
+            self.write_log(f"Min isolation: {min_isolation} s")
+            self.write_log(f"Signal polarity: {polar}")
+        except Exception as e:
+            self.write_log(f"Error processing parameters: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Error processing parameters: {e}")
+            return
+
+        self.kc_detection_params = {
+            'method': self.kc_method,
+            'chan': self.selected_channels,
+            'frequency': frequency,
+            'trough_duration': trough_duration,
+            'neg_peak_thresh': neg_peak_thresh,
+            'p2p_thresh': p2p_thresh,
+            'min_isolation': min_isolation,
+            'polar': polar,
+            'reject_artifacts': self.kc_reject_artifacts_check.isChecked(),
+            'reject_arousals': self.kc_reject_arousals_check.isChecked(),
+            'stage': self.kc_selected_stages,
+        }
+
+        self.statusBar().showMessage("Detecting K-complexes...")
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.detect_kc_btn.setEnabled(False)
+        self.write_log("Starting K-complex detection...")
+
+        self.kc_thread = threading.Thread(target=self.detect_kc)
+        self.kc_thread.daemon = True
+        self.kc_thread.start()
+
+    def detect_kc(self):
+        """Detect K-complexes (runs in a thread)."""
+        try:
+            gui_log_handler = GUILogHandler(self.write_log)
+            data = self.dataset
+            if self.annotations and os.path.isfile(self.annot_file_path):
+                annot = self.annotations
+                self.write_log("Using existing loaded annotations")
+            else:
+                annot = CustomAnnotations(self.annot_file_path)
+                self.annotations = annot
+                self.write_log(f"Loaded annotation file: {self.annot_file_path}")
+
+            json_dir = os.path.join(self.output_dir, "wonambi", "kc_results")
+            if not os.path.exists(json_dir):
+                os.makedirs(json_dir)
+                self.write_log(f"Created directory: {json_dir}")
+
+            event_processor = ParalKC(dataset=data, annotations=annot,
+                                      log_level=logging.INFO, log_file=None)
+            event_processor.logger.addHandler(gui_log_handler)
+
+            params = self.kc_detection_params.copy()
+
+            self.write_log(
+                f"Calling detect_kcomplexes with method={params['method']}")
+            self.write_log(f"Using {len(params['chan'])} channels")
+            self.write_log(f"Sleep stages: {', '.join(params['stage'])}")
+
+            detect_kwargs = dict(params)
+            detect_kwargs['cat'] = (1, 1, 1, 0)
+            detect_kwargs['json_dir'] = json_dir
+            detect_kwargs['save_to_annotations'] = False
+
+            kcomplexes = event_processor.detect_kcomplexes(**detect_kwargs)
+
+            method_str = str(params['method']).replace('/', '_')
+            freq_range_str = f"{params['frequency'][0]}-{params['frequency'][1]}Hz"
+            stages_str = "".join(params['stage'])
+            file_pattern = f"kcomplex_{method_str}_{freq_range_str}_{stages_str}"
+
+            param_csv = os.path.join(
+                json_dir,
+                f'kc_parameters_{method_str}_{freq_range_str}_{stages_str}.csv')
+            self.write_log(f"Exporting parameters to {param_csv}")
+            event_processor.export_kc_parameters_to_csv(
+                json_input=json_dir, csv_file=param_csv,
+                frequency=params['frequency'], file_pattern=file_pattern)
+
+            db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
+            self.write_log(f"Initializing/updating database at {db_path}")
+            event_processor.initialize_sqlite_database(db_path)
+            self.write_log("Importing K-complex parameters to database")
+            # Pass the original (unescaped) method so the importer doesn't
+            # mangle 'AASM/Massimini2004' down to 'AASM' via filename parsing.
+            stats = event_processor.import_parameters_csv_to_database(
+                param_csv, db_path, method=params['method'])
+            self.write_log(
+                f"Database update complete: {stats['added']} added, "
+                f"{stats['updated']} updated, {stats['skipped']} skipped")
+
+            density_csv = os.path.join(
+                json_dir,
+                f'kc_density_{method_str}_{freq_range_str}_{stages_str}.csv')
+            self.write_log(f"Exporting density to {density_csv}")
+            event_processor.export_kc_density_to_csv(
+                json_input=json_dir, csv_file=density_csv,
+                stage=params['stage'], file_pattern=file_pattern)
+
+            self.write_log(f"K-complex parameters saved to {param_csv}")
+            self.write_log(f"K-complex parameters saved to {db_path}")
+            self.write_log(f"K-complex density saved to {density_csv}")
+            self.write_log("K-complex detection completed successfully")
+
+            try:
+                parameters_summary = {
+                    'method': params['method'],
+                    'frequency_range': params['frequency'],
+                    'channels': params['chan'],
+                    'stages': params['stage'],
+                    'polar': params['polar'],
+                    'reject_artifacts': params['reject_artifacts'],
+                    'reject_arousals': params['reject_arousals'],
+                    'trough_duration': params.get('trough_duration'),
+                    'min_isolation': params.get('min_isolation'),
+                }
+                results_summary = {
+                    'total_kcomplexes_detected': len(kcomplexes) if 'kcomplexes' in locals() else 0,
+                    'channels_processed': len(params['chan']),
+                    'csv_file': param_csv,
+                    'density_file': density_csv,
+                    'database_file': db_path,
+                }
+                event_processor.save_detection_summary(
+                    output_dir=json_dir, method=params['method'],
+                    parameters=parameters_summary,
+                    results_summary=results_summary)
+            except Exception as e:
+                self.write_log(f"Note: Could not save detection summary: {e}")
+
+            QtCore.QMetaObject.invokeMethod(
+                self, "finish_kc_detection",
+                QtCore.Qt.QueuedConnection)
+        except Exception as e:
+            self.write_log(f"Error detecting K-complexes: {e}")
+            import traceback
+            traceback.print_exc()
+            QtCore.QMetaObject.invokeMethod(
+                self, "show_error", QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, f"Failed to detect K-complexes: {e}"))
+            QtCore.QMetaObject.invokeMethod(
+                self.detect_kc_btn, "setEnabled",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, True))
+            QtCore.QMetaObject.invokeMethod(
+                self.progress, "setVisible",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, False))
+
+    @QtCore.pyqtSlot()
+    def finish_kc_detection(self):
+        """Finish K-complex detection."""
+        self.detect_kc_btn.setEnabled(True)
+        self.view_kc_results_btn.setEnabled(True)
+        self.progress.setVisible(False)
+        self.statusBar().showMessage("K-complex detection completed")
+        QMessageBox.information(
+            self, "Success", "K-complex detection completed successfully.")
+        self.populate_detection_methods()
+
+    def view_kc_results(self):
+        """View K-complex detection results."""
+        json_dir = os.path.join(self.output_dir, "wonambi", "kc_results")
+        if not os.path.isdir(json_dir):
+            QMessageBox.critical(
+                self, "Error", "K-complex results directory doesn't exist.")
+            return
+
+        csv_files = [f for f in os.listdir(json_dir) if f.endswith('.csv')]
+        if not csv_files:
+            QMessageBox.critical(self, "Error", "No CSV result files found.")
+            return
+
+        viewer = QtWidgets.QDialog(self)
+        viewer.setWindowTitle("K-Complex Detection Results")
+        viewer.resize(800, 600)
+        layout = QVBoxLayout(viewer)
+
+        file_layout = QHBoxLayout()
+        file_layout.addWidget(QLabel("Select Result File:"))
+        file_combo = QComboBox()
+        file_combo.addItems(csv_files)
+        file_layout.addWidget(file_combo, 1)
+        layout.addLayout(file_layout)
+
+        text_area = QTextEdit()
+        text_area.setReadOnly(True)
+        layout.addWidget(text_area)
+
+        def load_file():
+            selected = file_combo.currentText()
+            if selected:
+                try:
+                    with open(os.path.join(json_dir, selected), 'r') as f:
+                        text_area.setText(f.read())
+                except Exception as e:
+                    QMessageBox.critical(viewer, "Error", f"Failed to load: {e}")
+
+        load_btn = QPushButton("Load")
+        load_btn.clicked.connect(load_file)
+        file_layout.addWidget(load_btn)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(viewer.close)
+        layout.addWidget(close_btn, alignment=QtCore.Qt.AlignRight)
+
+        file_combo.setCurrentIndex(0)
+        load_file()
+        viewer.exec_()
+
+    def add_kc_channels(self):
+        selected_items = self.kc_available_list.selectedItems()
+        if not selected_items:
+            return
+        for ch in [item.text() for item in selected_items]:
+            if ch not in self.selected_channels:
+                self.selected_channels.append(ch)
+        self.update_channel_lists()
+
+    def remove_kc_channels(self):
+        selected_items = self.kc_selected_list.selectedItems()
+        if not selected_items:
+            return
+        selected = [item.text() for item in selected_items]
+        self.selected_channels = [c for c in self.selected_channels if c not in selected]
+        self.update_channel_lists()
+
+    def add_all_kc_channels(self):
+        self.selected_channels = list(self.available_channels)
+        self.update_channel_lists()
+
+    def remove_all_kc_channels(self):
+        self.selected_channels = []
+        self.update_channel_lists()
 
     def setup_spindle_tab(self):
         # Main layout
@@ -2073,7 +2637,8 @@ class TurtleWaveGUI(QMainWindow):
         self.tabs.setTabEnabled(1, True)  # Annotation tab
         self.tabs.setTabEnabled(2, True)  # Spindle tab
         self.tabs.setTabEnabled(3, True)  # SW tab
-        self.tabs.setTabEnabled(4, True)  # PAC ta
+        self.tabs.setTabEnabled(4, True)  # K-Complex tab
+        self.tabs.setTabEnabled(5, True)  # PAC tab
 
         # Enable review button
         if hasattr(self, 'review_btn'):
@@ -2151,6 +2716,12 @@ class TurtleWaveGUI(QMainWindow):
         if hasattr(self, 'sw_selected_list') and self.sw_selected_list is not None:
             self.sw_selected_list.clear()
 
+        # Clear K-Complex tab listboxes if they exist
+        if hasattr(self, 'kc_available_list') and self.kc_available_list is not None:
+            self.kc_available_list.clear()
+        if hasattr(self, 'kc_selected_list') and self.kc_selected_list is not None:
+            self.kc_selected_list.clear()
+
         # eeg_channels = []
         # for channel in self.available_channels:
         #     if (channel.startswith('E') and len(channel) > 1 and channel[1:].isdigit()) or channel == 'Cz':
@@ -2172,13 +2743,19 @@ class TurtleWaveGUI(QMainWindow):
                 # Also add to SW tab if it exists
                 if hasattr(self, 'sw_available_list') and self.sw_available_list is not None:
                     self.sw_available_list.addItem(channel)
-        
+                # Also add to K-Complex tab if it exists
+                if hasattr(self, 'kc_available_list') and self.kc_available_list is not None:
+                    self.kc_available_list.addItem(channel)
+
         # Add selected channels to spindle tab
         for channel in self.selected_channels:
             self.selected_list.addItem(channel)
             # Also add to SW tab if it exists
             if hasattr(self, 'sw_selected_list') and self.sw_selected_list is not None:
                 self.sw_selected_list.addItem(channel)
+            # Also add to K-Complex tab if it exists
+            if hasattr(self, 'kc_selected_list') and self.kc_selected_list is not None:
+                self.kc_selected_list.addItem(channel)
     
     def add_channels(self):
         """Add selected channels to the selected list"""
