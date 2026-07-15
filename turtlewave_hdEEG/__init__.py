@@ -12,8 +12,20 @@ from .eventprocessor import ParalEvents
 from .swprocessor import ParalSWA
 from .pacprocessor import ParalPAC
 from .kcomplexprocessor import ParalKC
+from .cycleprocessor import (ParalCycles, detect_cycles,
+                             compute_stage_durations,
+                             finalize_cycles_and_durations)
 from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
                          ImprovedDetectKComplex)
+
+# Cycle plotting pulls in matplotlib; keep the import defensive so a missing or
+# broken matplotlib never breaks `import turtlewave_hdEEG` (mirrors the optional
+# GUI import below).
+try:
+    from .cycleplot import plot_hypnogram_cycles, plot_from_annotations
+except ImportError:
+    plot_hypnogram_cycles = None
+    plot_from_annotations = None
 
 
 
