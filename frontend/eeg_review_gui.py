@@ -1014,11 +1014,17 @@ _FLAG_BG = {
     'dead': QtGui.QColor(40, 44, 52),
 }
 _QC_COLS = [
-    ('channel', 'Channel'), ('region', 'Region'), ('n', 'n'),
-    ('mean_amp', 'mean µV*'), ('p95_amp', 'p95 µV*'),
+    ('channel', 'Channel'), ('state', 'State'), ('region', 'Region'),
+    ('n', 'n'), ('mean_amp', 'mean µV*'), ('p95_amp', 'p95 µV*'),
     ('mean_p2p', 'mean p2p*'), ('max_p2p', 'max p2p*'),
     ('flag', 'flag'),
 ]
+
+# Selection-state glyph vocabulary, shared by the State column + the tray.
+_STATE_ART_COLOR = '#f85149'   # ⚑ channel artefact (verdict drop/channel_artefact)
+_STATE_RD_COLOR = '#5a8fce'    # ↻ queued for re-detection
+_STATE_ART_GLYPH = '⚑ artefact'
+_STATE_RD_GLYPH = '↻ re-detect'
 # Note: density / pct_in_artefact / verdict are still computed and used —
 # verdict still shades rows (BackgroundRole) and drives Drop/Keep; density
 # still appears in the Epochs-tab title — they're just hidden from the table.
@@ -1134,9 +1140,13 @@ class ChannelQCModel(QAbstractTableModel):
         super().__init__(parent)
         self.df = pd.DataFrame(columns=[c[0] for c in _QC_COLS])
         self._records = []   # list[dict] — O(1) cell access (no pandas .iloc)
+        self._redetect = set()   # channels queued for re-detection
+        self._event_type = ''    # active event type (for State tooltip)
 
-    def set_data(self, qc_df, verdicts=None):
+    def set_data(self, qc_df, verdicts=None, redetect=None, event_type=''):
         self.beginResetModel()
+        self._redetect = {str(c) for c in (redetect or ())}
+        self._event_type = str(event_type or '')
         df = qc_df.copy() if qc_df is not None else pd.DataFrame()
         if 'verdict' not in df.columns:
             df['verdict'] = ''
@@ -1166,6 +1176,34 @@ class ChannelQCModel(QAbstractTableModel):
         rec = self._records[index.row()]
         key = _QC_COLS[index.column()][0]
         val = rec.get(key, '')
+        if key == 'state':
+            # Selection state from active-event-type verdict + re-detect set.
+            art = str(rec.get('verdict', '')) in ('drop', 'channel_artefact')
+            rd = str(rec.get('channel', '')) in self._redetect
+            if role == Qt.DisplayRole:
+                parts = []
+                if art:
+                    parts.append(_STATE_ART_GLYPH)
+                if rd:
+                    parts.append(_STATE_RD_GLYPH)
+                return '  '.join(parts)
+            if role == Qt.UserRole:               # both=3, art=2, rd=1, none=0
+                return (2 if art else 0) + (1 if rd else 0)
+            if role == Qt.ForegroundRole:
+                return QtGui.QColor(_STATE_ART_COLOR if art else _STATE_RD_COLOR)
+            if role == Qt.ToolTipRole:
+                tips = []
+                if art:
+                    tips.append(
+                        f"Marked as channel artefact for {self._event_type}. "
+                        "Excluded from export. Unmark from the button or the "
+                        "Selection tray.")
+                if rd:
+                    tips.append(
+                        "Queued for re-detection. Build the re-detect request "
+                        "to export the channel list.")
+                return '\n'.join(tips)
+            # BackgroundRole falls through to the shared verdict/heat wash.
         if role == Qt.DisplayRole:
             if key == 'verdict':
                 return _STATUS_TEXT.get(str(val or ''), str(val))
@@ -1199,7 +1237,8 @@ class ChannelQCModel(QAbstractTableModel):
                 if c is not None:
                     return c
             if str(rec.get('verdict', '')) in ('drop', 'channel_artefact'):
-                return QtGui.QColor(40, 44, 52)
+                # muted RED wash — distinct from dead's neutral (40,44,52)
+                return QtGui.QColor(48, 34, 36)
             flag = str(rec.get('flag', ''))
             if key in ('flag', 'verdict') and flag in _FLAG_BG:
                 return _FLAG_BG[flag]
@@ -1615,9 +1654,71 @@ class ChannelDetailDock(QWidget):
             self._colorbar = None
 
 
+class FlowLayout(QtWidgets.QLayout):
+    """Left-to-right layout that wraps its items onto new rows (Qt's standard
+    flow-layout pattern). Used for the Selection-tray chip rows."""
+
+    def __init__(self, parent=None, margin=0, spacing=6):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QtCore.QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        size += QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        x, y, line_h = rect.x(), rect.y(), 0
+        sp = self.spacing()
+        for it in self._items:
+            w, h = it.sizeHint().width(), it.sizeHint().height()
+            nx = x + w + sp
+            if nx - sp > rect.right() and line_h > 0:
+                x, y = rect.x(), y + line_h + sp
+                nx, line_h = x + w + sp, 0
+            if not test_only:
+                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), it.sizeHint()))
+            x, line_h = nx, max(line_h, h)
+        return y + line_h - rect.y()
+
+
 class ChannelQCWidget(QWidget):
     """Tab 0 — primary QC surface: sortable per-channel table + verdict
-    actions + the selected-channel detail dock."""
+    actions + a Selection tray for artefact / re-detect channels."""
 
     channelSelected = pyqtSignal(str)
     requestDrill = pyqtSignal(str)
@@ -1626,6 +1727,8 @@ class ChannelQCWidget(QWidget):
     requestQueueAllHard = pyqtSignal()
     requestBuildRedetect = pyqtSignal()
     loadMontageRequested = pyqtSignal()
+    unmarkArtefact = pyqtSignal(str)       # tray chip ✕ → clear artefact verdict
+    removeFromRedetect = pyqtSignal(str)   # tray chip ✕ → un-queue channel
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1684,6 +1787,35 @@ class ChannelQCWidget(QWidget):
         btns.addWidget(self.btn_build)
         ll.addLayout(btns)
 
+        # --- Selection tray (collapsible): artefact + re-detect chips ------
+        self._tray_open = True
+        tray_hdr = QHBoxLayout()
+        tlbl = QLabel("Selection")
+        tlbl.setStyleSheet("color:#9ba6b5;font-weight:600;")
+        tray_hdr.addWidget(tlbl)
+        tray_hdr.addStretch()
+        self.tray_toggle = QPushButton("▾")
+        self.tray_toggle.setFlat(True)
+        self.tray_toggle.setMaximumWidth(28)
+        self.tray_toggle.setCursor(Qt.PointingHandCursor)
+        self.tray_toggle.clicked.connect(self._toggle_tray)
+        tray_hdr.addWidget(self.tray_toggle)
+        ll.addLayout(tray_hdr)
+
+        self.tray_body = QWidget()
+        tb = QVBoxLayout(self.tray_body)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.setSpacing(2)
+        self.art_hdr = _h_label("CHANNEL ARTEFACTS (0)")
+        tb.addWidget(self.art_hdr)
+        self.art_scroll, self.art_flow = self._make_chip_area()
+        tb.addWidget(self.art_scroll)
+        self.rd_hdr = _h_label("RE-DETECT QUEUE (0)")
+        tb.addWidget(self.rd_hdr)
+        self.rd_scroll, self.rd_flow = self._make_chip_area()
+        tb.addWidget(self.rd_scroll)
+        ll.addWidget(self.tray_body)
+
         self._qc_full = None      # full computed df for current event type
         self._events_slice = None  # montage-wide events df (current event type)
         self._verdicts = {}
@@ -1707,6 +1839,7 @@ class ChannelQCWidget(QWidget):
         if self.table.model().rowCount() and not self.table.currentIndex().isValid():
             self.table.selectRow(0)
         self._update_action_state()
+        self._rebuild_tray()
 
     def _update_counts(self):
         df = self._qc_full
@@ -1733,7 +1866,7 @@ class ChannelQCWidget(QWidget):
         if ch is not None:
             v = self._verdicts.get(ch, '')
             self.btn_mark.setText(
-                "Unmark channel" if v in ('drop', 'channel_artefact')
+                "Unmark channel artefact" if v in ('drop', 'channel_artefact')
                 else "Mark channel artefact")
             self.btn_redetect.setText(
                 "Remove from re-detect queue" if ch in self._redetect_ref
@@ -1755,7 +1888,8 @@ class ChannelQCWidget(QWidget):
             df = df[df['flag'] == '']
         elif mode in ('hard', 'soft', 'dead'):
             df = df[df['flag'] == mode]
-        self.model.set_data(df, self._verdicts)
+        self.model.set_data(df, self._verdicts, self._redetect_ref,
+                            self.current_event_type())
 
     def _current_channel(self):
         idx = self.table.currentIndex()
@@ -1776,8 +1910,9 @@ class ChannelQCWidget(QWidget):
         if not ch:
             return
         cur = self._verdicts.get(ch, '')
-        self._verdict('keep' if cur in ('drop', 'channel_artefact')
-                      else 'drop')
+        # Unmark returns to '' (untriaged), NOT 'keep' — a '' channel is still
+        # included in export; only drop/channel_artefact are excluded.
+        self._verdict('' if cur in ('drop', 'channel_artefact') else 'drop')
 
     def events_slice_for(self, ch):
         if self._events_slice is not None and len(self._events_slice):
@@ -1810,6 +1945,90 @@ class ChannelQCWidget(QWidget):
         ch = self._current_channel()
         if ch:
             self.addToRedetect.emit(ch)
+
+    # ---- Selection tray ----------------------------------------------
+    def _make_chip_area(self):
+        """A scrollable (~2 rows) wrapping chip area. Returns (scroll, flow)."""
+        wrap = QWidget()
+        flow = FlowLayout(wrap, margin=2, spacing=6)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(wrap)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setMaximumHeight(64)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return scroll, flow
+
+    def _toggle_tray(self):
+        self._tray_open = not self._tray_open
+        self.tray_body.setVisible(self._tray_open)
+        self.tray_toggle.setText("▾" if self._tray_open else "▸")
+
+    def _clear_flow(self, flow):
+        while flow.count():
+            it = flow.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _empty_label(self, text):
+        q = QLabel(text)
+        q.setStyleSheet("color:#6b7585;font-style:italic;font-size:11px;")
+        return q
+
+    def _make_chip(self, ch, color, on_remove):
+        """A [ label ✕ ] chip: body click selects the channel, ✕ removes it."""
+        chip = QWidget()
+        chip.setStyleSheet(
+            f"background:#161b22;border:1px solid {color};border-radius:9px;")
+        h = QHBoxLayout(chip)
+        h.setContentsMargins(7, 1, 3, 1)
+        h.setSpacing(2)
+        body = QPushButton(str(ch))
+        body.setFlat(True)
+        body.setCursor(Qt.PointingHandCursor)
+        body.setStyleSheet(
+            f"border:0;background:transparent;color:{color};"
+            "font-family:'IBM Plex Mono',monospace;font-size:11px;")
+        body.clicked.connect(lambda _=False, c=str(ch): self.select_channel(c))
+        x = QPushButton("✕")
+        x.setFlat(True)
+        x.setMaximumWidth(16)
+        x.setCursor(Qt.PointingHandCursor)
+        x.setStyleSheet(f"border:0;background:transparent;color:{color};"
+                        "font-size:10px;")
+        x.clicked.connect(lambda _=False: on_remove())
+        h.addWidget(body)
+        h.addWidget(x)
+        return chip
+
+    def _rebuild_tray(self):
+        """Rebuild both chip sections from the current verdicts + queue.
+        Artefact chips reflect the ACTIVE event type; re-detect is channel-level.
+        """
+        self._clear_flow(self.art_flow)
+        self._clear_flow(self.rd_flow)
+        evt = self.current_event_type()
+        art = sorted(ch for ch, v in self._verdicts.items()
+                     if v in ('drop', 'channel_artefact'))
+        rd = sorted(str(c) for c in self._redetect_ref)
+        self.art_hdr.setText(f"CHANNEL ARTEFACTS ({len(art)})")
+        self.rd_hdr.setText(f"RE-DETECT QUEUE ({len(rd)})")
+        if art:
+            for ch in art:
+                self.art_flow.addWidget(self._make_chip(
+                    ch, _STATE_ART_COLOR,
+                    lambda c=ch: self.unmarkArtefact.emit(str(c))))
+        else:
+            self.art_flow.addWidget(self._empty_label(
+                f"No channels marked as artefact for {evt}."))
+        if rd:
+            for ch in rd:
+                self.rd_flow.addWidget(self._make_chip(
+                    ch, _STATE_RD_COLOR,
+                    lambda c=ch: self.removeFromRedetect.emit(str(c))))
+        else:
+            self.rd_flow.addWidget(self._empty_label("Re-detect queue empty."))
 
 
 DEFAULT_BAND = {'slow_wave': (0.5, 2.0), 'k_complex': (0.5, 1.5),
@@ -3370,6 +3589,8 @@ class EventReviewGUI(QMainWindow):
         self.qc_widget.requestDrill.connect(self.on_qc_drill)
         self.qc_widget.verdictChanged.connect(self.on_qc_verdict_changed)
         self.qc_widget.addToRedetect.connect(self.on_qc_add_redetect)
+        self.qc_widget.unmarkArtefact.connect(self._qc_unmark_artefact)
+        self.qc_widget.removeFromRedetect.connect(self._qc_remove_redetect)
         self.qc_widget.requestQueueAllHard.connect(self.on_qc_queue_all_hard)
         self.qc_widget.requestBuildRedetect.connect(self.open_redetect_modal)
         self.qc_widget.loadMontageRequested.connect(self.on_load_montage)
@@ -3793,7 +4014,25 @@ class EventReviewGUI(QMainWindow):
             return
         evt = self.qc_widget.current_event_type()
         self.db.set_channel_verdict(ch, evt, v, self.reviewer_name)
-        self.status_bar.showMessage(f"{ch} → {v} ({evt})")
+        self.status_bar.showMessage(
+            f"{ch}: {'artefact cleared' if v == '' else v} ({evt})")
+        self.refresh_qc_dashboard()
+
+    def _qc_unmark_artefact(self, ch):
+        """Tray chip ✕ (or button): clear the channel-artefact verdict back to
+        '' (untriaged). No sidecar XML is written for channel marks, so there
+        is nothing in XML to reverse. Single refresh updates State + tray +
+        counts + filter-dock glyphs."""
+        evt = self.qc_widget.current_event_type()
+        self.db.set_channel_verdict(str(ch), evt, '', self.reviewer_name)
+        self.status_bar.showMessage(f"{ch}: artefact cleared ({evt})")
+        self.refresh_qc_dashboard()
+
+    def _qc_remove_redetect(self, ch):
+        """Tray chip ✕: drop the channel from the re-detect queue."""
+        self._redetect_queue.discard(str(ch))
+        self.status_bar.showMessage(
+            f"Re-detect queue: {len(self._redetect_queue)} channel(s)")
         self.refresh_qc_dashboard()
 
     def on_qc_add_redetect(self, ch):
@@ -4088,7 +4327,8 @@ class EventReviewGUI(QMainWindow):
         self.btn_build_redetect.setEnabled(False)
         self.btn_build_redetect.clicked.connect(self.open_redetect_modal)
         self.status_bar.addPermanentWidget(self.btn_build_redetect)
-        self.seg_reviewer = _seg(f"reviewer: {self.reviewer_name}")
+        # (reviewer name is provenance-only — still written to the DB, never
+        # surfaced in the UI.)
         # legacy sinks (open_database / review_event still call .setText on
         # these; keep them off the bar so the text is harmlessly absorbed)
         self.db_size_label = QLabel()
@@ -4119,7 +4359,6 @@ class EventReviewGUI(QMainWindow):
         nq = len(self._redetect_queue)
         self.seg_queue.setText(f"re-detect queue: {nq}")
         self.btn_build_redetect.setEnabled(nq > 0 or nranges > 0)
-        self.seg_reviewer.setText(f"reviewer: {self.reviewer_name}")
 
     def setup_keyboard_shortcuts(self):
         """F flags the selected QC channel for re-detect."""
