@@ -406,9 +406,11 @@ class EventDatabase:
 # ============================================================================
 
 def _region_for(channel):
-    """Coarse scalp region from an EGI-style ``E<idx>`` label. Used only for
-    colouring / grouping before montage coords are loaded (mirrors the
-    mockup's index-bucketed ``region()``). Non-E labels → 'other'."""
+    """Coarse scalp region from an EGI-style ``E<idx>`` label. INDEX-based
+    fallback used only when real electrode coordinates are unavailable — EGI
+    numbering spirals around the head, so these buckets are approximate and do
+    NOT track true scalp position (that's what ``_region_from_xy`` is for).
+    Non-E labels → 'other'."""
     s = str(channel)
     if not s.startswith('E') or not s[1:].isdigit():
         return 'other'
@@ -428,8 +430,43 @@ def _region_for(channel):
     return 'occipital'
 
 
+def _region_from_xy(x, y):
+    """Scalp region from the topo 2-D projection (nose-up: +y front, −y back,
+    ±x right/left, radius 0 = vertex). Same coordinates the topography paints,
+    so a channel's region matches where its dot sits on the map.
+
+    Thresholds (validated against real EGI-256 coords): vertex/near-centre →
+    ``central``; far-lateral (|x| large) → ``temporal``; strongly anterior →
+    ``frontal``; strongly posterior → ``occipital``; the mild-posterior /
+    central belt → ``parietal``.
+    """
+    r = (x * x + y * y) ** 0.5
+    if r < 0.20:
+        return 'central'
+    if abs(x) > 0.45:
+        return 'temporal'
+    if y > 0.30:
+        return 'frontal'
+    if y < -0.35:
+        return 'occipital'
+    return 'parietal'
+
+
+def _region_for_channel(channel, coords=None):
+    """Region for one channel: coordinate-based when ``coords`` (a
+    ``{label: (x, y)}`` map) carries this channel, else the index fallback."""
+    if coords:
+        xy = coords.get(str(channel))
+        if xy is not None:
+            try:
+                return _region_from_xy(float(xy[0]), float(xy[1]))
+            except (TypeError, ValueError):
+                pass
+    return _region_for(channel)
+
+
 def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
-                        hard_z=3.5, soft_z=2.0, dead_frac=0.15):
+                        hard_z=3.5, soft_z=2.0, dead_frac=0.15, coords=None):
     """Per-channel QC metrics + tri-state outlier flag for ONE event type.
 
     Parameters
@@ -445,6 +482,10 @@ def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
         Whole-montage artefact windows for the %-in-global-artefact column.
     hard_z, soft_z, dead_frac : float
         Tunable thresholds (View -> Outlier threshold...).
+    coords : dict or None
+        ``{channel_label: (x, y)}`` topo projection. When given, the ``region``
+        column is derived from real scalp position (so it agrees with the
+        topography); otherwise it falls back to the EGI index heuristic.
 
     Returns
     -------
@@ -546,7 +587,10 @@ def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
     agg['z_max_p2p'] = zmap['max_p2p']
     agg['outlier_score'] = np.maximum.reduce(
         [zmap['mean_amp'], zmap['p95_amp'], zmap['max_p2p']])
-    agg['region'] = agg['channel'].map(_region_for)
+    # Region: coordinate-based when a montage is loaded (matches the topo),
+    # else the EGI index-bucket fallback.
+    agg['region'] = agg['channel'].map(
+        lambda ch: _region_for_channel(ch, coords))
 
     return agg[cols]
 
@@ -3341,21 +3385,13 @@ class EventReviewGUI(QMainWindow):
         self.epochs_panel.read_window = self._read_eeg_window
         self._review_qc_sidecar = None
 
-        try:
-            st = QtCore.QSettings("TurtleWave", "eeg_review_gui")
-            self.tabs.setCurrentIndex(int(st.value("last_tab", 0)))
-        except Exception:
-            pass
-        self.tabs.currentChanged.connect(self._remember_tab)
+        # Always land on the Channels (QC) dashboard — it is the triage entry
+        # point; the last-used tab is deliberately NOT restored.
+        self.tabs.setCurrentIndex(0)
 
     # ------------------------------------------------------------------
     # QC dashboard wiring
     # ------------------------------------------------------------------
-    def _remember_tab(self, idx):
-        try:
-            QtCore.QSettings("TurtleWave", "eeg_review_gui").setValue("last_tab", int(idx))
-        except Exception:
-            pass
 
     _SCORED_STAGES = {'NREM1', 'NREM2', 'NREM3', 'REM',
                       'N1', 'N2', 'N3', 'Stage1', 'Stage2', 'Stage3'}
@@ -3445,6 +3481,7 @@ class EventReviewGUI(QMainWindow):
             if len(intervals) else None
         qc = compute_channel_qc(df, scored_minutes=self._scored_minutes(),
                                 artefact_intervals=ivs,
+                                coords=self.detail_dock_w._coords,
                                 **self._qc_thresholds)
         self._qc_events_df = df
         self._qc_df = qc
@@ -3812,6 +3849,9 @@ class EventReviewGUI(QMainWindow):
         coords = self._coords_from_set()
         if coords:
             self.detail_dock_w.set_coords(coords)
+            # Region column is coordinate-based once a montage is loaded.
+            if self.db is not None:
+                self.refresh_qc_dashboard()
             self.status_bar.showMessage(
                 f"Topography live: {len(coords)} channel coordinates from .set")
 
@@ -3841,6 +3881,9 @@ class EventReviewGUI(QMainWindow):
                 self, "Montage", "No channel coordinates found in the .set.")
             return
         self.detail_dock_w.set_coords(coords)
+        # Region column is coordinate-based once a montage is loaded.
+        if self.db is not None:
+            self.refresh_qc_dashboard()
         self.status_bar.showMessage(
             f"Coordinates loaded from {source}: {len(coords)} channels")
 
@@ -4569,8 +4612,8 @@ def main():
     """Main function"""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    # Pin QSettings org/app once so persisted keys (e.g. last_tab) land
-    # consistently across launches and platforms.
+    # Pin QSettings org/app once so persisted keys land consistently across
+    # launches and platforms.
     if not QtCore.QCoreApplication.organizationName():
         QtCore.QCoreApplication.setOrganizationName("turtlewave")
     if not QtCore.QCoreApplication.applicationName():
