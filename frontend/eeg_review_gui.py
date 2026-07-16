@@ -1185,6 +1185,7 @@ class ChannelDetailDock(QWidget):
     loadMontageRequested = pyqtSignal()
     gotoEpochRequested = pyqtSignal(int)          # epoch idx on current channel
     gotoChannelEpochRequested = pyqtSignal(str, float)  # channel, event start_t
+    channelPicked = pyqtSignal(str)             # topo electrode clicked -> select
     unmarkArtefactRequested = pyqtSignal(int)   # interval id (× button)
 
     def __init__(self, parent=None):
@@ -1482,6 +1483,15 @@ class ChannelDetailDock(QWidget):
             ch, t0 = data
             self.gotoChannelEpochRequested.emit(str(ch), float(t0))
 
+    def _on_topo_click(self, _scatter, points):
+        """Topo electrode clicked -> select that channel (no drill, no
+        recompute). Empty-space clicks don't fire sigClicked; guard anyway."""
+        if not len(points):
+            return
+        data = points[0].data()          # (channel, metric_value)
+        if data:
+            self.channelPicked.emit(str(data[0]))
+
     def update_topo(self, qc_df):
         self._qc_df = qc_df
         if self._coords is None or qc_df is None or len(qc_df) == 0:
@@ -1493,11 +1503,12 @@ class ChannelDetailDock(QWidget):
             self._render_topo_empty()
             return
         metric = self.topo_metric
-        pts, vals = [], []
+        pts, vals, chans = [], [], []
         for _, r in qc_df.iterrows():
             ch = str(r['channel'])
             if ch in self._coords and pd.notna(r.get(metric)):
                 pts.append(self._coords[ch]); vals.append(float(r[metric]))
+                chans.append(ch)
         # Interpolate only channels present in BOTH coords and the QC frame.
         if len(pts) < 4:
             self._render_topo_empty()
@@ -1530,10 +1541,25 @@ class ChannelDetailDock(QWidget):
         if vmax > vmin:
             img.setLevels((vmin, vmax))
         self.topo.addItem(img)
+        # Per-electrode scatter: each spot carries its channel label (data=)
+        # so hover shows the label + metric value and a click selects it.
+        # density is sub-1 ev/min -> 2 decimals; µV metrics -> integer.
+        _is_uv = metric in ('mean_amp', 'p95_amp', 'max_p2p')
+        unit = 'µV' if _is_uv else 'ev/min'
+        vfmt = '.0f' if _is_uv else '.2f'
+
+        def _tip(x, y, data, _vl=label, _u=unit, _f=vfmt):
+            ch, v = data
+            return f"{ch}\n{_vl.split(' (')[0]} {v:{_f}} {_u}"
+
         sp = pg.ScatterPlotItem(
             x=(pts[:, 0] - pts[:, 0].min()) / max(np.ptp(pts[:, 0]), 1e-9) * 80,
             y=(pts[:, 1] - pts[:, 1].min()) / max(np.ptp(pts[:, 1]), 1e-9) * 80,
-            size=5, brush=(20, 20, 20))
+            size=5, brush=(20, 20, 20),
+            data=list(zip(chans, (float(v) for v in vals))),
+            hoverable=True, hoverSize=9,
+            hoverPen=pg.mkPen('#e7eef7', width=1.5), tip=_tip)
+        sp.sigClicked.connect(self._on_topo_click)
         self.topo.addItem(sp)
         # Colorbar / legend with numeric min/max endpoints.
         try:
@@ -3288,6 +3314,8 @@ class EventReviewGUI(QMainWindow):
         # Global worst-events row click -> switch channel AND epoch
         self.detail_dock_w.gotoChannelEpochRequested.connect(
             self._on_global_worst_goto)
+        # Topo electrode click -> select that channel (no drill / no tab switch)
+        self.detail_dock_w.channelPicked.connect(self._on_topo_channel_picked)
         # × in the dock's compact marked-artefact list -> unmark
         self.detail_dock_w.unmarkArtefactRequested.connect(
             self._unmark_artefact)
@@ -3532,6 +3560,15 @@ class EventReviewGUI(QMainWindow):
             self.epochs_panel._goto_epoch(int(float(t0) // 30))
             self.qc_widget.select_channel(str(ch))
             self.tabs.setCurrentIndex(1)
+        except Exception:
+            pass
+
+    def _on_topo_channel_picked(self, ch):
+        """Topo electrode click: SELECT that channel in the QC table (fires
+        channelSelected -> on_qc_channel_selected, populating the per-channel
+        detail). No drill, no tab switch, no topo recompute."""
+        try:
+            self.qc_widget.select_channel(str(ch))
         except Exception:
             pass
 
