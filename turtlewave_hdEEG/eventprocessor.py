@@ -57,10 +57,20 @@ class ParalEvents:
         # Create a logger
         logger = logging.getLogger('turtlewave_hdEEG.eventprocessor')
         logger.setLevel(log_level)
-        
+
+        # This logger name is a process-wide singleton. Clear any handlers left
+        # by a previous instance so batch loops don't duplicate log lines or
+        # leak file handles.
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        
+
         # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
@@ -277,8 +287,8 @@ class ParalEvents:
                     for m, meth in enumerate(method):
                         self.logger.info(f"Applying method: {meth}")
                         ### define detection
-                        detection = DetectSpindle(meth, frequency=frequency, duration=duration, 
-                        **detector_params)
+                        detection = DetectSpindle(meth, frequency=frequency, duration=duration,
+                        polar=polar, **detector_params)
                         
                         self.logger.debug(f"Detector parameters for {meth}: frequency={frequency}, duration={duration}")
                         if hasattr(detection, 'det_thresh'):
@@ -290,11 +300,8 @@ class ParalEvents:
                         for i, seg in enumerate(segments):
                             self.logger.info(f'Detecting events, segment {i + 1} of {len(segments)}')
 
-                            # Apply polarity adjustment if needed
-                            if polar == 'normal':
-                                pass # No change needed
-                            elif polar == 'opposite':
-                                seg['data'].data[0][0] = seg['data'].data[0][0]*-1
+                            # Polarity is handled inside the detector (polar=...),
+                            # which inverts on a copy. Do NOT invert here as well.
                             # Run detection
                             spindles = detection(seg['data'])
 
@@ -337,7 +344,7 @@ class ParalEvents:
                                     channel_json_spindles.append(sp_data)
                     all_spindles.extend(channel_spindles)
                     self.logger.info(f"Found {len(channel_spindles)} spindles in channel {ch}")
-                    stages_str = "".join(stage)
+                    stages_str = "".join(stage) if stage else "all"
                     if json_dir:
                         try:
                             ch_json_file = os.path.join(json_dir, f"spindles_{method_str}_{freq_str}_{stages_str}_{ch}.json")
@@ -353,19 +360,24 @@ class ParalEvents:
                                 self.logger.info(f"Saved spindle data for channel {ch} to {ch_json_file}")
                         except Exception as e:
                             self.logger.error(f"Error saving channel JSON: {e}")
-                except Exception as e:        
-                        self.logger.warning(f'WARNING: No spin channel {ch}: {e}')
-                        
-                        # Create empty JSON file even in case of error
+                except Exception as e:
+                        # A real read/detection failure is logged as an error with
+                        # a traceback so it is not mistaken for a channel that
+                        # legitimately had no spindles.
+                        self.logger.error(f'Failed to process channel {ch}: {e}', exc_info=True)
+
+                        # Write an error sentinel (not an empty list) so downstream
+                        # import can tell a failed channel apart from one that
+                        # legitimately had no spindles and re-run it.
                         if json_dir and create_empty_json:
                             try:
                                 stages_str = "".join(stage) if stage else "all"
                                 ch_json_file = os.path.join(json_dir, f"spindles_{method_str}_{freq_str}_{stages_str}_{ch}.json")
                                 with open(ch_json_file, 'w', encoding='utf-8') as f:
-                                    json.dump([], f)
-                                self.logger.info(f"Created empty JSON file for channel {ch} after error")
+                                    json.dump({"error": str(e), "channel": ch}, f)
+                                self.logger.info(f"Wrote error-sentinel JSON for channel {ch} after failure")
                             except Exception as json_e:
-                                self.logger.error(f"Error creating empty JSON for channel {ch}: {json_e}")
+                                self.logger.error(f"Error creating sentinel JSON for channel {ch}: {json_e}")
         
         # Save the new annotation file if needed
         if save_to_annotations and new_annotations is not None and all_spindles:
@@ -851,7 +863,32 @@ class ParalEvents:
 
         # Calculate durations in minutes
         stage_durations = {stg: count * epoch_duration_sec / 60 for stg, count in stage_counts.items()}
-         
+
+        # Build an epoch time->stage lookup so an event detected over a
+        # multi-stage span can be attributed to the single stage of the epoch
+        # it actually falls in. Without this, an event tagged ['NREM2','NREM3']
+        # is counted under BOTH stages, inflating per-stage density.
+        try:
+            _epochs = sorted(
+                ((float(e['start']), float(e['end']), str(e['stage']))
+                 for e in self.annotations.get_epochs()),
+                key=lambda x: x[0]
+            )
+        except Exception as e:
+            self.logger.warning(f"Could not build epoch stage lookup: {e}")
+            _epochs = []
+        _epoch_starts = [e[0] for e in _epochs]
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _epochs:
+                return None
+            import bisect
+            idx = bisect.bisect_right(_epoch_starts, t) - 1
+            if 0 <= idx < len(_epochs) and _epochs[idx][0] <= t < _epochs[idx][1]:
+                return _epochs[idx][2]
+            return None
+
         total_duration_min = sum(stage_durations.values())
     
         # Extract stages from spindles if stage is None
@@ -899,11 +936,20 @@ class ParalEvents:
             
             if not combined_stages:
                 # Process stage info, handling multiple stages per spindle
+                sp_stages = []
                 if 'stage' in sp:
                     sp_stages = sp['stage'] if isinstance(sp['stage'], list) else [sp['stage']]
-            
+                sp_stages = [str(s) for s in sp_stages]
+
+                # If the event spans multiple requested stages, attribute it to
+                # the single stage of the epoch it actually occurred in, so it is
+                # not double-counted across stages.
+                if len(sp_stages) > 1:
+                    actual = _stage_at(sp.get('start_time', sp.get('start')))
+                    if actual in sp_stages:
+                        sp_stages = [actual]
+
                 for sp_stage in sp_stages:
-                    sp_stage = str(sp_stage)  # Convert to string for consistency
                     # Add to stage-specific spindle count
                     spindles_by_chan_stage[chan][sp_stage].append(sp)
                 
@@ -1137,7 +1183,14 @@ class ParalEvents:
 
                 peak2peak_amp REAL,    -- peak-to-peak amplitude
 
-                -- Processing metadata         
+                -- Spectral / RMS metrics (from Wonambi event_params)
+                rms REAL,              -- RMS (uV)
+                power REAL,            -- band power (uV^2)
+                peak_power_freq REAL,  -- peak power frequency (Hz)
+                energy REAL,           -- energy (uV^2s)
+                peak_energy_freq REAL, -- peak energy frequency (Hz)
+
+                -- Processing metadata
                 processing_timestamp TEXT,
                 n_fft_sec INTEGER,
                 
@@ -1155,8 +1208,41 @@ class ParalEvents:
                 last_attempt_time TEXT,
                 success BOOLEAN DEFAULT 0,
                 error_message TEXT,
-                        
+
                 PRIMARY KEY (channel, event_type)
+            )''')
+
+            # Per-cycle sleep-cycle structure (populated by ParalCycles).
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS sleep_cycles (
+                subject TEXT,
+                method TEXT,               -- cycle definition ('2022' or '1979')
+                cycle_number INTEGER,      -- 1-based
+                nrem_start REAL,           -- seconds from recording start
+                nrem_end REAL,
+                rem_start REAL,            -- inter-NREM (REM) segment start
+                rem_end REAL,              -- cycle end
+                nrem_dur_min REAL,         -- full period (N1+N2+N3+absorbed wake)
+                nrem_n23_dur_min REAL,     -- N2+N3 only, within the period
+                rem_dur_min REAL,
+                cycle_dur_min REAL,
+                PRIMARY KEY (subject, method, cycle_number)
+            )''')
+
+            # Per-subject sleep-stage durations (populated by ParalCycles).
+            # DDL kept identical to ParalCycles._ensure_stage_durations_table.
+            conn.execute('''
+            CREATE TABLE IF NOT EXISTS stage_durations (
+                subject TEXT,
+                epoch_length REAL,
+                wake_min REAL,
+                n1_min REAL,
+                n2_min REAL,
+                n3_min REAL,
+                rem_min REAL,
+                artefact_min REAL,
+                total_min REAL,
+                PRIMARY KEY (subject)
             )''')
 
             # Create indexes for efficient querying
@@ -1164,17 +1250,69 @@ class ParalEvents:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_channel ON events(channel)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_timerange ON events(start_time, end_time)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_stage ON events(stage)')
-            
-            
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_cycle ON events(cycle)')
+
+            # Bring an existing events table up to the current column set.
+            self._ensure_event_param_columns(conn)
+
             conn.commit()
 
             # If database didn't exist, log creation
             if not db_exists:
                 self.logger.info(f"Created new database at: {db_path}")
-                
+
             return db_path
         # Use the safe database operation
         return self._safe_database_operation(db_path, init_db)
+
+    # Spectral / RMS parameter columns added to the events table after the
+    # amplitude columns. Kept in sync with the CREATE TABLE definition above and
+    # with swprocessor.ParalSWA (the k_complex path delegates to that exporter).
+    _EVENT_PARAM_COLUMNS = (
+        ('rms', 'REAL'),
+        ('power', 'REAL'),
+        ('peak_power_freq', 'REAL'),
+        ('energy', 'REAL'),
+        ('peak_energy_freq', 'REAL'),
+    )
+
+    def _ensure_event_param_columns(self, conn):
+        """Additively migrate the ``events`` table to hold spectral/RMS columns.
+
+        SQLite has no ``ADD COLUMN IF NOT EXISTS``, so existing columns are read
+        from ``PRAGMA table_info(events)`` and only absent ones are added. The
+        operation is idempotent and touches no existing rows (new columns are
+        ``NULL`` on legacy rows) or other tables.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            Open connection to the target database. The caller is responsible
+            for committing; this method commits only when it actually alters the
+            schema so a no-op run leaves the connection state unchanged.
+
+        Returns
+        -------
+        list of str
+            Names of the columns that were added (empty when already current).
+        """
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(events)")
+        existing = {row[1] for row in cursor.fetchall()}
+        # No events table yet (fresh DB before CREATE TABLE): nothing to migrate.
+        if not existing:
+            return []
+        added = []
+        for col, col_type in self._EVENT_PARAM_COLUMNS:
+            if col not in existing:
+                cursor.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type}")
+                added.append(col)
+        if added:
+            conn.commit()
+            self.logger.info(
+                f"Migrated events table: added spectral/RMS columns {added}"
+            )
+        return added
 
     
     def _safe_database_operation(self, db_path, operation_func):
@@ -1236,7 +1374,26 @@ class ParalEvents:
             "updated": 0,
             "skipped": 0
         }
-        
+
+        def _norm_stage(val):
+            """Normalize a Stage cell to the joined form stored in the DB.
+
+            The duplicate check and the INSERT must agree on this, otherwise
+            re-importing a multi-stage CSV never matches existing rows and
+            append mode silently overwrites instead of skipping.
+            """
+            import ast
+            if isinstance(val, list):
+                return "".join(str(s) for s in val)
+            if isinstance(val, str) and '[' in val:
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, list):
+                        return "".join(str(s) for s in parsed)
+                except Exception:
+                    pass
+            return str(val)
+
         # Read the CSV file
         self.logger.info(f"Reading parameters from CSV: {csv_file}")
         try:
@@ -1278,6 +1435,9 @@ class ParalEvents:
             # Define database operation function
             def process_csv_data(conn):
                 cursor = conn.cursor()
+                # Auto-upgrade an existing DB (initialize_sqlite_database is only
+                # called when the file is absent, so migrate here for old DBs).
+                self._ensure_event_param_columns(conn)
                 # Determine event type from CSV filename or content
                 event_type = "spindle"  # Default
                 filename = os.path.basename(csv_file).lower()
@@ -1308,11 +1468,11 @@ class ParalEvents:
                     'Min. amplitude (uV)':'min_amp',
                     'Max. amplitude (uV)': 'max_amp',
                     'Peak-to-peak amplitude (uV)': 'peak2peak_amp',
-                    #'RMS (uV)': 'rms',
-                    #'Power (uV^2)': 'power',
-                    #'Peak power frequency (Hz)': 'peak_power_freq',
-                    #'Energy (uV^2s)': 'energy',
-                    #'Peak energy frequency': 'peak_energy_freq',
+                    'RMS (uV)': 'rms',
+                    'Power (uV^2)': 'power',
+                    'Peak power frequency (Hz)': 'peak_power_freq',
+                    'Energy (uV^2s)': 'energy',
+                    'Peak energy frequency (Hz)': 'peak_energy_freq',
                     'UUID': 'uuid'
                 }
                 
@@ -1425,9 +1585,10 @@ class ParalEvents:
                             original_idx = batch_start + batch_idx
                             freq_lower = df['freq_lower'].iloc[original_idx] if 'freq_lower' in df.columns else None
                             freq_upper = df['freq_upper'].iloc[original_idx] if 'freq_upper' in df.columns else None
-                            stage = df['Stage'].iloc[original_idx] if 'Stage' in df.columns else None
+                            stage = _norm_stage(df['Stage'].iloc[original_idx]) if 'Stage' in df.columns else None
 
-                            query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)")
+                            # `IS` (not `=`) so NULL freq bounds match NULL, since `x = NULL` is never true in SQL.
+                            query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower IS ? AND freq_upper IS ? AND stage = ?)")
                             query_params.extend([event_type, batch_channels[batch_idx], batch_start_times[batch_idx], method, freq_lower, freq_upper, stage])
         
                         
@@ -1450,8 +1611,8 @@ class ParalEvents:
                         method,
                         row.get('freq_lower', None),
                         row.get('freq_upper', None),
-                        str(row.get('Stage',''))
-                        ) in existing_events, 
+                        _norm_stage(row.get('Stage',''))
+                        ) in existing_events,
                     axis=1
                 )
 
@@ -1478,20 +1639,8 @@ class ParalEvents:
                 
                 # Process each row based on whether it exists and append mode
                 for _, row in df.iterrows():
-                    if isinstance(row['Stage'], list):
-                        row['Stage'] = '+'.join(row['Stage'])
-                    elif isinstance(row['Stage'], str) and '[' in row['Stage']:
-                        # Sometimes stage might be a string representation of a list like "['NREM2', 'NREM3']"
-                        # Try to convert it to a proper list then join
-                        try:
-                            import ast
-                            stage_list = ast.literal_eval(row['Stage'])
-                            if isinstance(stage_list, list):
-                                row['Stage'] = ''.join(stage_list)
-                        except:
-                            # If conversion fails, keep as is
-                            pass
-                    
+                    row['Stage'] = _norm_stage(row['Stage'])
+
                     # Skip existing rows when in append mode
                     if append and row['exists_in_db']:
                         stats["skipped"] += 1
@@ -1506,25 +1655,22 @@ class ParalEvents:
                             values[i] = None  # Convert NaN to None (which becomes NULL in SQLite)
 
                     try:
-                        if append and row['exists_in_db']:
-                            # Skip existing rows when in append mode
-                            stats["skipped"] += 1
-                            continue
                         if not append and row['exists_in_db']:
                             # Update existing row when not in append mode
                             update_columns = [col for col in db_columns if col != 'uuid']
                             update_values = [val for i, val in enumerate(values) if db_columns[i] != 'uuid']
-                            
-                            # Update based on the unique constraint, not just UUID
+
+                            # Update based on the unique constraint, not just UUID.
+                            # `IS` on freq bounds so NULL matches NULL; stage is already normalized above.
                             cursor.execute(f"""
                             UPDATE events
                             SET {', '.join([f'{col} = ?' for col in update_columns])}
                             WHERE event_type = ? AND channel = ? AND start_time = ? AND method = ?
-                                AND freq_lower = ? AND freq_upper = ? AND stage = ?
+                                AND freq_lower IS ? AND freq_upper IS ? AND stage = ?
                             """, update_values + [
-                                event_type, 
-                                row.get('Channel', ''), 
-                                row.get('Start time', 0), 
+                                event_type,
+                                row.get('Channel', ''),
+                                row.get('Start time', 0),
                                 method,
                                 row.get('freq_lower', None),
                                 row.get('freq_upper', None),
@@ -1587,6 +1733,7 @@ class ParalEvents:
 
                         # Extract channel names from JSON files
                         empty_channels = set()
+                        failed_channels = {}
                         for file in all_json_files:
                             try:
                                 # Extract channel name from filename
@@ -1595,19 +1742,24 @@ class ParalEvents:
                                 # Skip if channel already in processed_channels
                                 if channel_name in processed_channels:
                                     continue
-                                
-                                # Read JSON file to check if it's empty
+
+                                # Read JSON file to check its contents
                                 with open(file, 'r', encoding='utf-8') as f:
                                     content = json.load(f)
-                                    
-                                # If JSON file contains an empty array, add to empty_channels
-                                if isinstance(content, list) and len(content) == 0:
+
+                                # An empty array means the channel had no events;
+                                # an error-sentinel dict means detection failed and
+                                # must be re-run, so record it as unsuccessful.
+                                if isinstance(content, dict) and 'error' in content:
+                                    failed_channels[channel_name] = str(content.get('error', 'unknown error'))
+                                    self.logger.warning(f"Found error-sentinel JSON for channel: {channel_name}")
+                                elif isinstance(content, list) and len(content) == 0:
                                     empty_channels.add(channel_name)
                                     self.logger.info(f"Found empty JSON file for channel: {channel_name}")
                             except Exception as e:
                                 self.logger.warning(f"Error checking JSON file {file}: {e}")
-    
-                        
+
+
                         # Add empty channels to processing_status
                         for channel in empty_channels:
                             cursor.execute('''
@@ -1615,11 +1767,22 @@ class ParalEvents:
                             (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
                             VALUES (?, ?, 1, 1, 1, datetime('now'), 'No events detected')
                             ''', (channel,event_type))
-            
+
+                        # Record failed channels as unsuccessful so a resume re-runs them
+                        for channel, err in failed_channels.items():
+                            cursor.execute('''
+                            INSERT OR REPLACE INTO processing_status
+                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
+                            VALUES (?, ?, 1, 0, 1, datetime('now'), ?)
+                            ''', (channel, event_type, err[:500]))
+
                         if empty_channels:
                             self.logger.info(f"Recorded {len(empty_channels)} channels with no events: {', '.join(empty_channels)}")
+                        if failed_channels:
+                            self.logger.warning(f"Recorded {len(failed_channels)} failed channels: {', '.join(failed_channels)}")
                         # Add empty channels count to stats
                         stats["empty_channels"] = len(empty_channels)
+                        stats["failed_channels"] = len(failed_channels)
                     
                     conn.commit()
 
