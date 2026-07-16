@@ -3324,7 +3324,7 @@ class EventReviewGUI(QMainWindow):
         self.db = None
         self.eeg_data = None
         self.annotations = None
-        self.reviewer_name = "Reviewer1"
+        self.reviewer_name = ""   # provenance field; intentionally unset
         self.recording_start_time = None
 
         # Chrome / QC state
@@ -4235,8 +4235,8 @@ class EventReviewGUI(QMainWindow):
         }
 
     def open_redetect_modal(self):
-        """Full JSON-preview modal: write redetect_request.json beside the
-        XML, optionally open turtlewave_gui (one-directional hand-off; this
+        """Full JSON-preview modal: Save writes redetect_request.json beside
+        the XML for turtlewave_gui to pick up (one-directional hand-off; this
         GUI never runs detection)."""
         if self.db is None:
             QtWidgets.QMessageBox.warning(
@@ -4270,20 +4270,19 @@ class EventReviewGUI(QMainWindow):
         lay.addWidget(te)
         bb = QtWidgets.QDialogButtonBox()
         cancel = bb.addButton("Cancel", QtWidgets.QDialogButtonBox.RejectRole)
-        save = bb.addButton("Save request only",
+        save = bb.addButton("Save request",
                             QtWidgets.QDialogButtonBox.AcceptRole)
-        save_open = bb.addButton("Save & open in turtlewave_gui",
-                                 QtWidgets.QDialogButtonBox.AcceptRole)
-        save_open.setObjectName("primary")
+        save.setObjectName("primary")
         cancel.clicked.connect(dlg.reject)
         save.clicked.connect(
-            lambda: (self._write_redetect_json(req, False), dlg.accept()))
-        save_open.clicked.connect(
-            lambda: (self._write_redetect_json(req, True), dlg.accept()))
+            lambda: (self._write_redetect_json(req), dlg.accept()))
         lay.addWidget(bb)
         dlg.exec_()
 
-    def _write_redetect_json(self, req, open_gui):
+    def _write_redetect_json(self, req):
+        """Write redetect_request.json beside the XML (or the DB). Purely a
+        one-directional hand-off — turtlewave_gui picks the file up; this GUI
+        never launches it."""
         import json
         base = (os.path.dirname(self.annot_file_path)
                 if getattr(self, 'annot_file_path', None)
@@ -4297,19 +4296,12 @@ class EventReviewGUI(QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Re-detect", str(ex))
             return
         self.status_bar.showMessage(f"Re-detect request written: {out}")
-        if open_gui:
-            try:
-                from PyQt5.QtGui import QDesktopServices
-                from PyQt5.QtCore import QUrl
-                QDesktopServices.openUrl(QUrl.fromLocalFile(out))
-            except Exception:
-                pass
-    
+
     
     
     def setup_status_bar(self):
         """Segmented status bar: subject · hard · marked · ranges · queue ·
-        build re-detect · reviewer."""
+        build re-detect."""
         self.status_bar = self.statusBar()
 
         def _seg(text):
