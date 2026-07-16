@@ -633,5 +633,160 @@ class LargeDataset:
         output.axis['chan'] = [self.channels[i] for i in chan_indices] if isinstance(chan_indices, list) else self.channels
         output.axis['time'] = np.arange(start_idx, end_idx) / self.sampling_rate
         output.s_freq = self.sampling_rate
-        
+
         return output
+
+
+def _as_chanloc(label, theta, radius):
+    """Coerce one raw EEGLAB channel record into a clean chanloc dict.
+
+    Parameters
+    ----------
+    label : object
+        Channel label (any type coercible to ``str``).
+    theta, radius : object
+        EEGLAB polar coordinates (any type coercible to ``float``).
+
+    Returns
+    -------
+    dict or None
+        ``{'label', 'theta', 'radius'}`` when the label is non-empty and both
+        angles are finite, otherwise ``None``.
+    """
+    try:
+        lab = str(label).strip()
+        th = float(theta)
+        rd = float(radius)
+    except (TypeError, ValueError):
+        return None
+    if not lab or not (np.isfinite(th) and np.isfinite(rd)):
+        return None
+    return {'label': lab, 'theta': th, 'radius': rd}
+
+
+def _chanlocs_from_scipy(eeg):
+    """Extract chanlocs from a scipy-loaded ``EEG`` struct (classic .set)."""
+    if eeg is None or not hasattr(eeg, 'chanlocs'):
+        return []
+    cl = eeg.chanlocs
+    if not isinstance(cl, np.ndarray):
+        cl = np.array([cl])
+    out = []
+    for ch in np.ravel(cl):
+        d = _as_chanloc(getattr(ch, 'labels', None),
+                        getattr(ch, 'theta', None),
+                        getattr(ch, 'radius', None))
+        if d:
+            out.append(d)
+    return out
+
+
+def _deref_label_h5(f, ref):
+    """Decode an EEGLAB channel label (uint16 char codes) from an HDF5 ref."""
+    try:
+        obj = f[ref] if isinstance(ref, h5py.Reference) else ref
+        if isinstance(ref, h5py.Reference) and not ref:
+            return None
+        return ''.join(chr(int(c)) for c in np.ravel(np.asarray(obj))
+                       if int(c) != 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _deref_scalar_h5(f, ref):
+    """Resolve a scalar coordinate (theta/radius) from an HDF5 ref.
+
+    Returns ``None`` for MATLAB canonical-empty arrays — which EEGLAB writes
+    for non-scalp channels (ECG, EOG, respiration, …). Those carry a
+    ``MATLAB_empty`` attr and a non-``(1,1)`` shape (typically ``(2,)``),
+    whereas a genuine scalar (including ``Cz`` at ``radius=0``) is ``(1,1)``.
+    Coercing an empty to ``float(arr[0])`` would yield a bogus finite ``0.0``.
+    """
+    try:
+        if isinstance(ref, h5py.Reference):
+            if not ref:
+                return None
+            obj = f[ref]
+        else:
+            obj = ref
+        # canonical-empty marker (present on the dataset, not on a bare array)
+        if getattr(obj, 'attrs', None) is not None and \
+                obj.attrs.get('MATLAB_empty', 0):
+            return None
+        arr = np.ravel(np.asarray(obj))
+        if arr.size != 1:          # empties are (2,); real scalars are (1,1)
+            return None
+        return float(arr[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _chanlocs_from_h5py(filename):
+    """Extract chanlocs from a MATLAB v7.3 / HDF5 ``.set`` file.
+
+    Reads only ``EEG.chanlocs`` (labels + polar theta/radius); the bulk
+    ``EEG.data`` array is never touched. Channels whose theta/radius are
+    MATLAB canonical-empty (non-scalp sensors) are skipped.
+    """
+    out = []
+    with h5py.File(filename, 'r') as f:
+        eeg = f.get('EEG')
+        if eeg is None or 'chanlocs' not in eeg:
+            return []
+        cl = eeg['chanlocs']
+        if not all(k in cl for k in ('labels', 'theta', 'radius')):
+            return []
+        labels = np.ravel(np.asarray(cl['labels']))
+        thetas = np.ravel(np.asarray(cl['theta']))
+        radii = np.ravel(np.asarray(cl['radius']))
+        n = min(len(labels), len(thetas), len(radii))
+        for i in range(n):
+            d = _as_chanloc(_deref_label_h5(f, labels[i]),
+                            _deref_scalar_h5(f, thetas[i]),
+                            _deref_scalar_h5(f, radii[i]))
+            if d:
+                out.append(d)
+    return out
+
+
+def read_eeglab_chanlocs(filename):
+    """Read EEGLAB channel locations from a ``.set`` / ``.mat`` file.
+
+    Parameters
+    ----------
+    filename : str
+        Path to an EEGLAB ``.set`` (or its ``.mat`` metadata file).
+
+    Returns
+    -------
+    list of dict
+        One dict per channel carrying ``label`` (str), ``theta`` (float,
+        degrees) and ``radius`` (float, normalised) — the EEGLAB polar
+        coordinates used by ``topoplot``. Channels lacking a finite
+        theta/radius are skipped. Returns an empty list when the file has no
+        ``EEG.chanlocs`` structure or cannot be read.
+
+    Notes
+    -----
+    Only ``EEG.chanlocs`` is read (the HDF5 path never touches ``EEG.data``).
+    The scipy path materialises the whole ``EEG`` struct, which is safe here
+    only because EEGLAB keeps the signal in a sidecar ``.fdt`` (``EEG.data``
+    is a filename pointer) and v7.3 files route to the HDF5 path. Both classic
+    (scipy-readable) and MATLAB v7.3 / HDF5 ``.set`` files are supported,
+    mirroring :class:`LargeDataset`'s dual-path reader.
+    """
+    try:
+        loaded = scipy.io.loadmat(filename, struct_as_record=False,
+                                  squeeze_me=True, variable_names=['EEG'])
+        return _chanlocs_from_scipy(loaded.get('EEG'))
+    except NotImplementedError:
+        try:
+            return _chanlocs_from_h5py(filename)
+        except Exception:
+            return []
+    except Exception:
+        # Some v7.3 files raise before NotImplementedError; try HDF5 anyway.
+        try:
+            return _chanlocs_from_h5py(filename)
+        except Exception:
+            return []
