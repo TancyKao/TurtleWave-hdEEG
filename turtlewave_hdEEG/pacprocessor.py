@@ -9,6 +9,8 @@ Based on the OCTOPUS method from the seapipe package.
 
 import os
 import sys
+import re
+import math
 import numpy as np
 import time
 import json
@@ -22,6 +24,36 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import pandas as pd
 from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Canonical PAC metric columns and their aliases.
+#
+# There are three naming conventions in this codebase for the same quantities:
+#   1. the in-memory per-channel results dict (``self.tracking['event_pac']``):
+#      ``mi_norm``, ``pval``, ``preferred_phase_rad``, ``n_segments`` ...
+#   2. the file-based per-channel ``*_pac_parameters.csv`` written by
+#      :meth:`ParalPAC.analyze_pac`: ``mi_norm``, ``median_mi_pval``,
+#      ``preferred_phase_rad`` ... (no event-count column; recovered from the
+#      sibling ``*_mean_amps.npy``).
+#   3. the tracking-derived ``pac_summary_*.csv``: ``MI``, ``MI_pval``,
+#      ``PP_rad``, ``Mean_vector_length``, ``N_Segments`` ...
+#
+# BOTH ingest paths (live write and CSV back-fill) route every metric through
+# this single alias map so no metric is silently dropped when a column happens
+# to be named differently. This is the one choke point; add new aliases here.
+PAC_COLUMN_ALIASES = {
+    'mi_raw':              ('mi_raw',),
+    'mi_norm':             ('mi_norm', 'MI'),
+    'median_mi_pval':      ('median_mi_pval', 'MI_pval', 'pval'),
+    'preferred_phase_rad': ('preferred_phase_rad', 'PP_rad'),
+    'preferred_phase_deg': ('preferred_phase_deg', 'PP_degrees', 'PP_deg'),
+    'mean_vector_length':  ('mean_vector_length', 'Mean_vector_length', 'MVL'),
+    'rho':                 ('rho',),
+    'rayleigh_z':          ('rayleigh_z', 'Rayleigh_z'),
+    'rayleigh_p':          ('rayleigh_p', 'Rayleigh_p'),
+    'n_events':            ('n_events', 'N_Segments', 'n_segments'),
+}
 
 
 class ParalPAC:
@@ -62,10 +94,20 @@ class ParalPAC:
         # Create a logger
         logger = logging.getLogger('turtlewave_hdEEG.pacprocessor')
         logger.setLevel(log_level)
-        
+
+        # This logger name is a process-wide singleton. Clear any handlers left
+        # by a previous instance so batch loops don't duplicate log lines or
+        # leak file handles.
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        
+
         # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
@@ -131,7 +173,8 @@ class ParalPAC:
                 filter_opts=None, event_opts=None, invert=False,
                 use_detected_events=True, event_type='slow_wave',
                 pair_with_spindles=False, time_window=0.5,
-                db_path=None, out_dir=None, progress=False):
+                db_path=None, out_dir=None, progress=False,
+                subject=None, write_db=False):
         """
         Analyze phase-amplitude coupling (PAC) in the dataset.
         
@@ -187,7 +230,16 @@ class ParalPAC:
             Output directory for results
         progress : bool
             Whether to show progress bar
-            
+        subject : str or None
+            Subject identifier written into the ``pac_coupling`` table when
+            ``write_db`` is True. If None, it is derived from the root path
+            basename (with a warning); prefer passing it explicitly.
+        write_db : bool
+            If True, persist the in-memory per-channel PAC results directly to
+            the ``pac_coupling`` table in ``db_path`` after analysis (see
+            :meth:`store_pac_to_database`). Default False, so existing callers
+            are unaffected.
+
         Returns
         -------
         dict
@@ -345,6 +397,7 @@ class ParalPAC:
                     logger.info(f"Using detected {event_type} events from database")
                     
                     # Connect to database
+                    conn = None
                     try:
                         conn = sqlite3.connect(db_path)
                         cursor = conn.cursor()
@@ -591,21 +644,23 @@ class ParalPAC:
                         else:
                             logger.error(f"Unknown event type: {event_type}")
                             continue
-                        
-                        # Close database connection
-                        conn.close()
-                        
+
                         if not segments or len(segments) == 0:
                             logger.warning(f"No valid segments created from database events for {ch}")
                             continue
-                        
+
                         logger.info(f"Created {len(segments)} segments for PAC analysis")
-                        
+
                     except Exception as e:
                         logger.error(f"Error accessing database: {e}")
                         import traceback
                         traceback.print_exc()
                         continue
+                    finally:
+                        # Always release the DB handle, including on the
+                        # early-continue paths above.
+                        if conn is not None:
+                            conn.close()
                 else:
                     # Use standard fetch for continuous data
                     # NEED TO FIX STAGE ISN NREM2NREM3 <===============================
@@ -718,11 +773,13 @@ class ParalPAC:
                 ampbin = ampbin[~np.isnan(ampbin[:, 0]), :]
                 ab = ampbin
                 
-                # Create bins for preferred phase
+                # Create bins for preferred phase. Centres must match the
+                # [-pi, pi] edges used in _mean_amp (np.linspace(-pi, pi, ...)),
+                # otherwise the preferred phase is reported 180 deg off.
                 vecbin = np.zeros(nbins)
                 width = 2 * np.pi / nbins
                 for n in range(nbins):
-                    vecbin[n] = n * width + width / 2
+                    vecbin[n] = -np.pi + (n + 0.5) * width
                 
                 # Calculate circular statistics
                 from scipy.stats import circmean, circvar
@@ -733,12 +790,13 @@ class ParalPAC:
                 # Convert to angles
                 angles = vecbin[ab_pk]
                 
-                # Calculate mean direction (theta) & mean vector length (rad)
-                theta = circmean(angles)
+                # Calculate mean direction (theta) & mean vector length (rad).
+                # Wrap into [-pi, pi] to match the vecbin / ppha convention so
+                # up-state (~0) vs down-state (~+/-pi) coupling reads correctly;
+                # scipy's default [0, 2pi) would silently disagree with it.
+                theta = circmean(angles, low=-np.pi, high=np.pi)
                 theta_deg = np.degrees(theta)
-                if theta_deg < 0:
-                    theta_deg += 360
-                    
+
                 # Calculate circular variance (1 - R)
                 circ_var = circvar(angles)
                 rad = 1 - circ_var  # Mean resultant length
@@ -766,10 +824,14 @@ class ParalPAC:
                 amp_file = outputfile.split('_pac_parameters.csv')[0] + '_mean_amps'
                 np.save(amp_file, ab)
                 
-                # Save CFC metrics to dataframe
+                # Save CFC metrics to dataframe.
+                # NOTE: `pac.pac` only holds the LAST block from the loop above,
+                # so average the per-block values in `mi` instead (mi_raw used to
+                # report just the final block). With idpac normalization enabled,
+                # mi_raw and mi_norm are now the same quantity.
                 d = pd.DataFrame([
-                    np.mean(pac.pac), 
-                    np.mean(mi), 
+                    np.mean(mi),
+                    np.mean(mi),
                     np.median(mi_pv), 
                     theta, 
                     theta_deg, 
@@ -792,7 +854,7 @@ class ParalPAC:
                 
                 # Store results in channel_results
                 chan_results = {
-                    'mi_raw': float(np.mean(pac.pac)),
+                    'mi_raw': float(np.mean(mi)),
                     'mi_norm': float(np.mean(mi)),
                     'pval': float(np.median(mi_pv)),
                     'preferred_phase_rad': float(theta),
@@ -827,7 +889,39 @@ class ParalPAC:
             logger.info("Phase-amplitude coupling analysis finished without errors")
         else:
             logger.warning(f"Phase-amplitude coupling analysis finished with {flag} warnings/errors")
-        
+
+        # Optional direct-to-DB write of the in-memory per-channel results.
+        if write_db:
+            # Resolve the stored event type and the method/stage tokens exactly
+            # as used for the on-disk directory names, so the DB columns mirror
+            # the {event_type}_{method}_{freq}_{stages} naming convention.
+            sw_method = event_opts.get('sw_method', 'unknown') if event_opts else 'unknown'
+            spindle_method = event_opts.get('spindle_method', 'unknown') if event_opts else 'unknown'
+            if pair_with_spindles and event_type == 'slow_wave':
+                stored_event_type = 'sw_spindle'
+                method_name = f"{sw_method}_paired_{spindle_method}"
+            else:
+                stored_event_type = event_type
+                method_name = sw_method if event_type == 'slow_wave' else spindle_method
+            stage_str = ''.join(stage) if isinstance(stage, list) else str(stage)
+
+            if subject is None:
+                subject = os.path.basename(os.path.normpath(self.rootpath))
+                logger.warning(
+                    f"write_db=True but no subject given; derived subject "
+                    f"'{subject}' from rootpath. Pass subject= explicitly to be safe.")
+
+            try:
+                db_stats = self.store_pac_to_database(
+                    db_path=db_path, subject=subject,
+                    event_type=stored_event_type, method=method_name,
+                    stage=stage_str, phase_freq=phase_freq, amp_freq=amp_freq,
+                    idpac=idpac, ref_chan=ref_chan, invert=invert,
+                    results=tracking['event_pac'])
+                logger.info(f"PAC results written to database: {db_stats}")
+            except Exception as e:
+                logger.error(f"Failed to write PAC results to database: {e}")
+
         return tracking['event_pac']
     
     def _mean_amp(self, pha, amp, nbins=18):
@@ -1102,12 +1196,14 @@ class ParalPAC:
             # Get number of bins
             nbins = amp1.shape[1]
             
-            # Create bins for preferred phase
+            # Create bins for preferred phase. Centres must match the
+            # [-pi, pi] edges used in _mean_amp, otherwise the reported
+            # preferred phase is 180 deg off (the F/p test is unaffected).
             vecbin = np.zeros(nbins)
             width = 2 * np.pi / nbins
             for n in range(nbins):
-                vecbin[n] = n * width + width / 2
-            
+                vecbin[n] = -np.pi + (n + 0.5) * width
+
             # Find preferred phase for each trial
             ab_pk1 = np.argmax(amp1, axis=1)
             ab_pk2 = np.argmax(amp2, axis=1)
@@ -1121,9 +1217,11 @@ class ParalPAC:
                 from scipy.stats import circmean
                 from pingouin import circ_r
                 
-                # Calculate mean direction for each condition
-                theta1 = circmean(angles1)
-                theta2 = circmean(angles2)
+                # Calculate mean direction for each condition. Wrap into [-pi, pi]
+                # to match the vecbin / up-down-state convention (scipy defaults
+                # to [0, 2pi), which would disagree with analyze_pac).
+                theta1 = circmean(angles1, low=-np.pi, high=np.pi)
+                theta2 = circmean(angles2, low=-np.pi, high=np.pi)
                 
                 # Calculate mean vector length for each condition
                 r1 = circ_r(vecbin, np.histogram(ab_pk1, bins=nbins)[0], d=width)
@@ -1588,4 +1686,711 @@ class ParalPAC:
         else:
             logger.warning("No PAC results in tracking dictionary or individual files")
             return None
+
+    # ------------------------------------------------------------------ #
+    # PAC -> SQLite (pac_coupling table)
+    # ------------------------------------------------------------------ #
+
+    # Natural-key primary key (subject included to future-proof a merged DB).
+    _PAC_PK_COLS = ['subject', 'channel', 'event_type', 'method', 'stage',
+                    'phase_freq_lower', 'phase_freq_upper',
+                    'amp_freq_lower', 'amp_freq_upper']
+    _PAC_METRIC_COLS = ['mi_raw', 'mi_norm', 'median_mi_pval',
+                        'preferred_phase_rad', 'preferred_phase_deg',
+                        'mean_vector_length', 'rho', 'rayleigh_z', 'rayleigh_p']
+    _PAC_PROV_COLS = ['n_events', 'idpac', 'ref_chan', 'invert',
+                      'turtlewave_version', 'processing_timestamp', 'source_path']
+    _PAC_ALL_COLS = _PAC_PK_COLS + _PAC_METRIC_COLS + _PAC_PROV_COLS
+    _PAC_COLUMN_ALIASES = PAC_COLUMN_ALIASES
+
+    def _init_pac_table(self, conn):
+        """
+        Create the ``pac_coupling`` table and its indexes if absent.
+
+        This is purely additive: it never touches ``events``,
+        ``processing_status``, ``sleep_cycles`` or ``stage_durations``. The
+        primary key is the natural key of a PAC result (subject, channel,
+        event type, method, stage, and the phase/amplitude frequency bounds),
+        so a re-run with identical parameters replaces its own row rather than
+        inserting a duplicate.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            Open connection to the target database. The caller owns the
+            connection lifecycle (commit and close).
+
+        Returns
+        -------
+        None
+        """
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS pac_coupling (
+            -- Natural key
+            subject TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            event_type TEXT NOT NULL,       -- 'slow_wave', 'spindle', 'sw_spindle'
+            method TEXT NOT NULL,           -- detector / pairing method token
+            stage TEXT NOT NULL,            -- combined stage string (e.g. 'NREM2NREM3')
+            phase_freq_lower REAL NOT NULL,
+            phase_freq_upper REAL NOT NULL,
+            amp_freq_lower REAL NOT NULL,
+            amp_freq_upper REAL NOT NULL,
+
+            -- Coupling metrics (NaN stored as NULL)
+            mi_raw REAL,
+            mi_norm REAL,
+            median_mi_pval REAL,
+            preferred_phase_rad REAL,
+            preferred_phase_deg REAL,
+            mean_vector_length REAL,
+            rho REAL,
+            rayleigh_z REAL,
+            rayleigh_p REAL,
+
+            -- Number of artefact-free segments/events actually coupled.
+            -- NOT NULL by design: a row with an unrecoverable event count is
+            -- rejected upstream and flagged for re-run, never stored as 0/NULL.
+            n_events INTEGER NOT NULL,
+
+            -- Provenance
+            idpac TEXT,                     -- str(tuple) of (method, surrogate, correction)
+            ref_chan TEXT,
+            invert INTEGER,                 -- 0/1 polarity flag actually used
+            turtlewave_version TEXT,
+            processing_timestamp TEXT,
+            source_path TEXT,
+
+            PRIMARY KEY (subject, channel, event_type, method, stage,
+                         phase_freq_lower, phase_freq_upper,
+                         amp_freq_lower, amp_freq_upper)
+        )''')
+
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_subject ON pac_coupling(subject)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_channel ON pac_coupling(channel)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_method_stage ON pac_coupling(method, stage)')
+        conn.commit()
+
+    def _pac_version(self):
+        """
+        Return the installed ``turtlewave_hdEEG`` version string.
+
+        Returns
+        -------
+        str
+            The package ``__version__``, or ``'unknown'`` if it cannot be read.
+        """
+        try:
+            import turtlewave_hdEEG
+            return getattr(turtlewave_hdEEG, '__version__', 'unknown')
+        except Exception:
+            return 'unknown'
+
+    @staticmethod
+    def _fmt_ref_chan(ref_chan):
+        """
+        Normalise a reference-channel specification to a text value for storage.
+
+        Parameters
+        ----------
+        ref_chan : None, str, or list
+            Reference channel(s).
+
+        Returns
+        -------
+        str or None
+            Comma-joined channel list, the string itself, or None.
+        """
+        if ref_chan is None:
+            return None
+        if isinstance(ref_chan, (list, tuple)):
+            if len(ref_chan) == 0:
+                return None
+            return ','.join(str(c) for c in ref_chan)
+        return str(ref_chan)
+
+    @staticmethod
+    def _nan_to_none(v):
+        """
+        Coerce a value to a Python float, mapping NaN/inf/None to None.
+
+        Ensures numpy scalar types are converted to native Python types that
+        the ``sqlite3`` driver can bind, and that NaN becomes SQL NULL.
+
+        Parameters
+        ----------
+        v : Any
+            Candidate metric value.
+
+        Returns
+        -------
+        float or None
+            Finite Python float, or None for NaN/inf/None/non-numeric.
+        """
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(f):
+            return None
+        return f
+
+    def _resolve_pac_row(self, row):
+        """
+        Map a source row onto the canonical PAC metric column set.
+
+        Both ingest paths (live tracking dict and file-based CSV, in either the
+        per-channel or the ``pac_summary`` layout) go through this single
+        resolver so no metric is silently dropped when its column name differs.
+
+        Parameters
+        ----------
+        row : dict
+            A row keyed by any of the recognised aliases in
+            :data:`PAC_COLUMN_ALIASES`.
+
+        Returns
+        -------
+        dict
+            Canonical column name -> value (or None if no alias present/finite).
+        """
+        out = {}
+        for canon, aliases in self._PAC_COLUMN_ALIASES.items():
+            val = None
+            for a in aliases:
+                if a not in row:
+                    continue
+                v = row[a]
+                if v is None:
+                    continue
+                # Skip NaN (both Python and numpy floats).
+                try:
+                    if isinstance(v, float) and math.isnan(v):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    if isinstance(v, np.floating) and np.isnan(v):
+                        continue
+                except Exception:
+                    pass
+                val = v
+                break
+            out[canon] = val
+        return out
+
+    def _upsert_pac_row(self, conn, row):
+        """
+        Insert or replace a single row in ``pac_coupling`` on the natural key.
+
+        Metric columns are passed through :meth:`_nan_to_none` (NaN -> SQL
+        NULL). Existence is checked first so the caller can distinguish an
+        insert from a replace for its added/updated tally.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            Open connection (caller commits).
+        row : dict
+            Dict providing every column in ``_PAC_ALL_COLS``.
+
+        Returns
+        -------
+        str
+            ``'updated'`` if a row with this natural key already existed,
+            else ``'added'``.
+        """
+        cursor = conn.cursor()
+        pk_vals = [row[c] for c in self._PAC_PK_COLS]
+        cursor.execute(
+            "SELECT 1 FROM pac_coupling WHERE " +
+            " AND ".join(f"{c} = ?" for c in self._PAC_PK_COLS),
+            pk_vals)
+        exists = cursor.fetchone() is not None
+
+        vals = []
+        for c in self._PAC_ALL_COLS:
+            v = row.get(c)
+            if c in self._PAC_METRIC_COLS:
+                v = self._nan_to_none(v)
+            vals.append(v)
+
+        cursor.execute(
+            f"INSERT OR REPLACE INTO pac_coupling "
+            f"({', '.join(self._PAC_ALL_COLS)}) "
+            f"VALUES ({', '.join(['?'] * len(self._PAC_ALL_COLS))})",
+            vals)
+        return 'updated' if exists else 'added'
+
+    def store_pac_to_database(self, db_path, subject, event_type, method, stage,
+                              phase_freq, amp_freq, idpac, ref_chan=None,
+                              invert=False, results=None):
+        """
+        Write in-memory per-channel PAC results directly to ``pac_coupling``.
+
+        This is the live path used by :meth:`analyze_pac` (``write_db=True``).
+        ``n_events`` is taken from the in-memory ``n_segments`` (always present
+        on the live path); a channel whose event count is missing or
+        non-positive is rejected and flagged for re-run rather than stored as
+        0/NULL. Writes are idempotent (``INSERT OR REPLACE`` on the natural
+        key).
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the SQLite database.
+        subject : str
+            Subject identifier (part of the primary key).
+        event_type : str
+            Stored event type ('slow_wave', 'spindle', or 'sw_spindle').
+        method : str
+            Method / pairing token (mirrors the results directory name).
+        stage : str
+            Combined stage string (e.g. 'NREM2NREM3').
+        phase_freq : tuple of float
+            (lower, upper) phase frequency bounds in Hz.
+        amp_freq : tuple of float
+            (lower, upper) amplitude frequency bounds in Hz.
+        idpac : tuple
+            Tensorpac (method, surrogate, correction) triple, stored as text.
+        ref_chan : None, str, or list, optional
+            Reference channel(s) actually used.
+        invert : bool, optional
+            Polarity-inversion flag actually used.
+        results : dict or None, optional
+            Nested ``{channel: {freq_key: metrics}}`` mapping. Defaults to
+            ``self.tracking['event_pac']``.
+
+        Returns
+        -------
+        dict
+            ``{'added': int, 'updated': int, 'skipped': int}``.
+        """
+        import sqlite3
+        logger = self.logger
+
+        if results is None:
+            results = self.tracking.get('event_pac', {})
+
+        stats = {'added': 0, 'updated': 0, 'skipped': 0}
+        if not results:
+            logger.warning("store_pac_to_database: no in-memory PAC results to store")
+            return stats
+
+        key = f"{phase_freq[0]}-{phase_freq[1]}Hz_{amp_freq[0]}-{amp_freq[1]}Hz"
+        version = self._pac_version()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            self._init_pac_table(conn)
+
+            for ch, ch_results in results.items():
+                if not isinstance(ch_results, dict):
+                    continue
+
+                if key in ch_results:
+                    entry = ch_results[key]
+                elif len(ch_results) == 1:
+                    entry = next(iter(ch_results.values()))
+                else:
+                    logger.warning(
+                        f"store_pac_to_database: channel {ch} has no entry for "
+                        f"{key} and multiple freq entries; skipping")
+                    stats['skipped'] += 1
+                    continue
+
+                if not isinstance(entry, dict):
+                    stats['skipped'] += 1
+                    continue
+
+                n_events = entry.get('n_segments')
+                if (n_events is None or
+                        not np.isfinite(float(n_events)) or float(n_events) <= 0):
+                    logger.error(
+                        f"store_pac_to_database: channel {ch} has unrecoverable "
+                        f"n_events ({n_events}); rejecting row and flagging for "
+                        f"re-run (NOT stored as 0/NULL)")
+                    stats['skipped'] += 1
+                    continue
+
+                row = {
+                    'subject': str(subject),
+                    'channel': str(ch),
+                    'event_type': str(event_type),
+                    'method': str(method),
+                    'stage': str(stage),
+                    'phase_freq_lower': float(phase_freq[0]),
+                    'phase_freq_upper': float(phase_freq[1]),
+                    'amp_freq_lower': float(amp_freq[0]),
+                    'amp_freq_upper': float(amp_freq[1]),
+                    'mi_raw': entry.get('mi_raw'),
+                    'mi_norm': entry.get('mi_norm'),
+                    'median_mi_pval': entry.get('pval'),
+                    'preferred_phase_rad': entry.get('preferred_phase_rad'),
+                    'preferred_phase_deg': entry.get('preferred_phase_deg'),
+                    'mean_vector_length': entry.get('mean_vector_length'),
+                    'rho': entry.get('rho'),
+                    'rayleigh_z': entry.get('rayleigh_z'),
+                    'rayleigh_p': entry.get('rayleigh_p'),
+                    'n_events': int(n_events),
+                    'idpac': str(tuple(idpac)) if idpac is not None else None,
+                    'ref_chan': self._fmt_ref_chan(ref_chan),
+                    'invert': int(bool(invert)) if invert is not None else None,
+                    'turtlewave_version': version,
+                    'processing_timestamp': timestamp,
+                    'source_path': entry.get('outputfile'),
+                }
+
+                outcome = self._upsert_pac_row(conn, row)
+                stats[outcome] += 1
+
+            conn.commit()
+            logger.info(
+                f"store_pac_to_database: {stats['added']} added, "
+                f"{stats['updated']} updated, {stats['skipped']} skipped")
+        except Exception as e:
+            logger.error(f"store_pac_to_database failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if conn is not None:
+                conn.close()
+
+        return stats
+
+    def _infer_pac_context_from_path(self, csv_path):
+        """
+        Infer PAC context (method, stage, event type, channel, freqs) from path.
+
+        Uses the results directory layout
+        ``.../<method_dir>/<stage_str>/<channel>_<event>_pha-..-..Hz_amp-..-..Hz_pac_parameters.csv``
+        rather than a lossy ``split('_')``: the method and stage come from the
+        parent directory names, the event type from the filename token
+        (``slowwave_spindle_coupling`` -> 'sw_spindle'), and the frequency
+        bounds from the ``pha-``/``amp-`` tokens via regex.
+
+        Parameters
+        ----------
+        csv_path : str
+            Path to a per-channel PAC parameters CSV.
+
+        Returns
+        -------
+        dict
+            Keys: ``method``, ``stage``, ``event_type``, ``channel``,
+            ``phase_freq`` (tuple or None), ``amp_freq`` (tuple or None).
+        """
+        fname = os.path.basename(csv_path)
+        stage = os.path.basename(os.path.dirname(csv_path)) or None
+        method = os.path.basename(os.path.dirname(os.path.dirname(csv_path))) or None
+
+        # Split the channel off at the FIRST recognized event-type token, not
+        # the first underscore: channel labels may themselves contain
+        # underscores (e.g. 'E_101'), so `fname.split('_')[0]` would truncate
+        # 'E_101' to 'E' and collide the natural keys of distinct channels.
+        # The coupling token is checked first because it embeds 'spindle'.
+        event_type = None
+        channel = None
+        for token, etype in (('slowwave_spindle_coupling', 'sw_spindle'),
+                             ('slow_wave', 'slow_wave'),
+                             ('spindle', 'spindle')):
+            idx = fname.find(f'_{token}_')
+            if idx > 0:
+                event_type = etype
+                channel = fname[:idx]
+                break
+
+        phase_freq = amp_freq = None
+        m = re.search(r'pha-([0-9.]+)-([0-9.]+)Hz.*?amp-([0-9.]+)-([0-9.]+)Hz', fname)
+        if m:
+            phase_freq = (float(m.group(1)), float(m.group(2)))
+            amp_freq = (float(m.group(3)), float(m.group(4)))
+
+        return {'method': method, 'stage': stage, 'event_type': event_type,
+                'channel': channel, 'phase_freq': phase_freq, 'amp_freq': amp_freq}
+
+    def import_pac_csv_to_database(self, csv_path, db_path, subject,
+                                   event_type=None, method=None, stage=None,
+                                   phase_freq=None, amp_freq=None, idpac=None,
+                                   ref_chan=None, invert=None, channel=None):
+        """
+        Back-fill one existing PAC CSV into ``pac_coupling``.
+
+        Context (method, stage, event type, frequency bounds) is inferred from
+        the path components (see :meth:`_infer_pac_context_from_path`); explicit
+        caller arguments override the inference. ``n_events`` is recovered from
+        the sibling ``*_mean_amps.npy`` (``shape[0]``) for per-channel CSVs, or
+        from an ``N_Segments``/``n_events`` column for ``pac_summary`` CSVs. A
+        row whose event count cannot be recovered is rejected, counted under
+        ``n_events_missing`` and logged as flag-for-re-run; it is NOT inserted.
+
+        The preferred-phase value stored is exactly what the CSV holds; the
+        historical pre-180-degree-fix migration of old cluster outputs is a
+        separate concern.
+
+        Parameters
+        ----------
+        csv_path : str
+            Path to the PAC CSV (per-channel ``*_pac_parameters.csv`` preferred).
+        db_path : str
+            Path to the SQLite database.
+        subject : str
+            Subject identifier (part of the primary key).
+        event_type, method, stage : str, optional
+            Override the path-inferred values.
+        phase_freq, amp_freq : tuple of float, optional
+            Override the path-inferred (lower, upper) frequency bounds.
+        idpac : tuple, optional
+            Tensorpac (method, surrogate, correction) triple, stored as text.
+        ref_chan : None, str, or list, optional
+            Reference channel(s) used.
+        invert : bool or None, optional
+            Polarity-inversion flag used (None -> stored NULL).
+        channel : str or None, optional
+            Explicit channel label for a per-channel CSV, overriding the
+            filename-inferred value (ignored for ``pac_summary`` CSVs, which
+            carry a per-row Channel column). Provide this when the channel
+            cannot be unambiguously parsed from the filename.
+
+        Returns
+        -------
+        dict
+            ``{'added': int, 'updated': int, 'skipped': int,
+            'n_events_missing': int}``. A row whose channel cannot be
+            unambiguously resolved is counted under ``skipped`` and logged,
+            never stored with a truncated/ambiguous channel.
+        """
+        import sqlite3
+        logger = self.logger
+
+        stats = {'added': 0, 'updated': 0, 'skipped': 0, 'n_events_missing': 0}
+
+        if not os.path.exists(csv_path):
+            logger.error(f"PAC CSV not found: {csv_path}")
+            stats['skipped'] += 1
+            return stats
+
+        inferred = self._infer_pac_context_from_path(csv_path)
+        method = method or inferred['method']
+        stage = stage or inferred['stage']
+        event_type = event_type or inferred['event_type']
+        if phase_freq is None:
+            phase_freq = inferred['phase_freq']
+        if amp_freq is None:
+            amp_freq = inferred['amp_freq']
+
+        fname = os.path.basename(csv_path)
+        is_summary = fname.startswith('pac_summary')
+
+        if phase_freq is None or amp_freq is None:
+            logger.error(
+                f"Cannot resolve phase/amp frequency for {fname}; skipping. "
+                f"Pass phase_freq=/amp_freq= explicitly.")
+            stats['skipped'] += 1
+            return stats
+        if event_type is None or method is None or stage is None:
+            logger.error(
+                f"Cannot resolve event_type/method/stage for {fname} "
+                f"(event_type={event_type}, method={method}, stage={stage}); "
+                f"skipping. Pass them explicitly.")
+            stats['skipped'] += 1
+            return stats
+
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            logger.error(f"Failed to read {csv_path}: {e}")
+            stats['skipped'] += 1
+            return stats
+
+        if df.empty:
+            logger.warning(f"Empty PAC CSV: {csv_path}")
+            return stats
+
+        # Recover event count from the sibling mean-amplitude array (per-channel).
+        npy_n_events = None
+        npy_path = csv_path.replace('_pac_parameters.csv', '_mean_amps.npy')
+        if not is_summary and os.path.exists(npy_path):
+            try:
+                npy_n_events = int(np.load(npy_path, mmap_mode='r').shape[0])
+            except Exception as e:
+                logger.warning(f"Could not read event count from {npy_path}: {e}")
+
+        # Channel column present only in the tracking-derived summary layout.
+        chan_col = None
+        for cand in ('Channel', 'channel'):
+            if cand in df.columns:
+                chan_col = cand
+                break
+
+        version = self._pac_version()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            self._init_pac_table(conn)
+
+            for _, r in df.iterrows():
+                row_dict = r.to_dict()
+                metrics = self._resolve_pac_row(row_dict)
+
+                # Resolve the channel label. Summary CSVs carry a per-row
+                # Channel column (authoritative). Per-channel CSVs use the
+                # explicit `channel` arg if given, else the token-boundary
+                # parse. A missing/blank channel is ambiguous -> skip-with-log
+                # rather than store a truncated/colliding key.
+                if chan_col:
+                    row_channel = row_dict[chan_col]
+                elif channel is not None:
+                    row_channel = channel
+                else:
+                    row_channel = inferred['channel']
+
+                if row_channel is None or str(row_channel).strip() == '':
+                    logger.warning(
+                        f"Cannot infer channel from filename {fname}; pass "
+                        f"channel= explicitly or add a Channel column. Skipping "
+                        f"row (NOT stored to avoid an ambiguous/colliding key).")
+                    stats['skipped'] += 1
+                    continue
+                row_channel = str(row_channel)
+
+                # n_events: prefer explicit column, else sibling npy.
+                n_events = metrics.get('n_events')
+                if n_events is None and npy_n_events is not None:
+                    n_events = npy_n_events
+
+                try:
+                    n_ok = (n_events is not None and
+                            np.isfinite(float(n_events)) and float(n_events) > 0)
+                except (TypeError, ValueError):
+                    n_ok = False
+                if not n_ok:
+                    logger.error(
+                        f"n_events unrecoverable for {fname} (channel {row_channel}); "
+                        f"rejecting row and flagging for re-run "
+                        f"(need sibling {os.path.basename(npy_path)} or an "
+                        f"N_Segments column). NOT stored as 0/NULL.")
+                    stats['n_events_missing'] += 1
+                    continue
+
+                row = {
+                    'subject': str(subject),
+                    'channel': row_channel,
+                    'event_type': str(event_type),
+                    'method': str(method),
+                    'stage': str(stage),
+                    'phase_freq_lower': float(phase_freq[0]),
+                    'phase_freq_upper': float(phase_freq[1]),
+                    'amp_freq_lower': float(amp_freq[0]),
+                    'amp_freq_upper': float(amp_freq[1]),
+                    'mi_raw': metrics.get('mi_raw'),
+                    'mi_norm': metrics.get('mi_norm'),
+                    'median_mi_pval': metrics.get('median_mi_pval'),
+                    'preferred_phase_rad': metrics.get('preferred_phase_rad'),
+                    'preferred_phase_deg': metrics.get('preferred_phase_deg'),
+                    'mean_vector_length': metrics.get('mean_vector_length'),
+                    'rho': metrics.get('rho'),
+                    'rayleigh_z': metrics.get('rayleigh_z'),
+                    'rayleigh_p': metrics.get('rayleigh_p'),
+                    'n_events': int(float(n_events)),
+                    'idpac': str(tuple(idpac)) if idpac is not None else None,
+                    'ref_chan': self._fmt_ref_chan(ref_chan),
+                    'invert': int(bool(invert)) if invert is not None else None,
+                    'turtlewave_version': version,
+                    'processing_timestamp': timestamp,
+                    'source_path': csv_path,
+                }
+
+                outcome = self._upsert_pac_row(conn, row)
+                stats[outcome] += 1
+
+            conn.commit()
+            logger.info(
+                f"import_pac_csv_to_database [{fname}]: {stats['added']} added, "
+                f"{stats['updated']} updated, {stats['skipped']} skipped, "
+                f"{stats['n_events_missing']} rejected (n_events missing)")
+        except Exception as e:
+            logger.error(f"import_pac_csv_to_database failed for {csv_path}: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if conn is not None:
+                conn.close()
+
+        return stats
+
+    def backfill_pac_directory(self, root_dir, db_path, subject_from='folder'):
+        """
+        Walk a PAC results directory and back-fill every per-channel CSV.
+
+        The subject is the basename of ``root_dir`` when ``subject_from ==
+        'folder'`` (logged), otherwise the literal ``subject_from`` value.
+        ``pac_summary_*`` files are skipped whenever per-channel CSVs are
+        present in the same directory (the per-channel files are the source of
+        truth). Idempotent: re-running reports ``added=0`` for rows already
+        stored.
+
+        Parameters
+        ----------
+        root_dir : str
+            Root of a subject's PAC results tree.
+        db_path : str
+            Path to the SQLite database.
+        subject_from : str, optional
+            ``'folder'`` (default) to use the ``root_dir`` basename as subject,
+            or any other string to use it literally as the subject id.
+
+        Returns
+        -------
+        dict
+            ``{'files': int, 'added': int, 'updated': int, 'skipped': int,
+            'n_events_missing': int}``.
+        """
+        logger = self.logger
+
+        if subject_from == 'folder':
+            subject = os.path.basename(os.path.normpath(root_dir))
+        else:
+            subject = str(subject_from)
+        logger.info(f"Back-filling PAC results under {root_dir} for subject '{subject}'")
+
+        totals = {'files': 0, 'added': 0, 'updated': 0,
+                  'skipped': 0, 'n_events_missing': 0}
+
+        for dirpath, _dirs, filenames in os.walk(root_dir):
+            per_chan = sorted(
+                f for f in filenames
+                if f.endswith('_pac_parameters.csv') and not f.startswith('pac_summary'))
+            summaries = [f for f in filenames if f.startswith('pac_summary')]
+
+            if per_chan and summaries:
+                logger.info(
+                    f"Skipping {len(summaries)} pac_summary file(s) in {dirpath}; "
+                    f"using {len(per_chan)} per-channel CSV(s)")
+            if not per_chan and summaries:
+                logger.warning(
+                    f"No per-channel CSVs in {dirpath}; {len(summaries)} "
+                    f"pac_summary file(s) present but not back-filled "
+                    f"(per-channel files are the source of truth)")
+
+            for f in per_chan:
+                csv_path = os.path.join(dirpath, f)
+                # Defensive: resolve the channel here too (token-boundary parse)
+                # and pass it explicitly, so the importer is not the sole line
+                # of defense against underscore-containing channel labels.
+                ctx = self._infer_pac_context_from_path(csv_path)
+                r = self.import_pac_csv_to_database(
+                    csv_path, db_path, subject, channel=ctx['channel'])
+                totals['files'] += 1
+                for k in ('added', 'updated', 'skipped', 'n_events_missing'):
+                    totals[k] += r.get(k, 0)
+
+        logger.info(f"PAC back-fill complete: {totals}")
+        return totals
 
