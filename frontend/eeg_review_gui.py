@@ -3617,9 +3617,22 @@ class EventReviewGUI(QMainWindow):
     _SCORED_STAGES = {'NREM1', 'NREM2', 'NREM3', 'REM',
                       'N1', 'N2', 'N3', 'Stage1', 'Stage2', 'Stage3'}
 
+    # Fallback stage set for the QC density denominator (N2 + N3 + REM per the
+    # redesign spec) used only when the run's scope can't be inferred from the
+    # loaded events; Wake and N1 are excluded. Label variants are matched by
+    # exact stage label in the annotation, so both Wonambi ('NREM2') and short
+    # ('N2') forms are listed.
+    _QC_DENSITY_STAGES = {'NREM2', 'NREM3', 'REM',
+                          'N2', 'N3', 'Stage2', 'Stage3'}
+
+    # Wake-like labels are never a detection stage, so they are dropped from the
+    # event-derived scope before it becomes the density time base.
+    _WAKE_STAGES = {'Wake', 'W', 'Undefined', 'Unknown', 'None', ''}
+
     def _scored_minutes(self):
-        """Total minutes in scored sleep stages (shared density denominator).
-        None when annotations are absent (density is then greyed)."""
+        """Total minutes in scored sleep stages (total sleep time, TST).
+        None when annotations are absent. Used for the toolbar TST readout —
+        NOT the density denominator (see :meth:`_qc_density_minutes`)."""
         if self.annotations is None:
             return None
         try:
@@ -3630,6 +3643,82 @@ class EventReviewGUI(QMainWindow):
             return None
         n = sum(1 for s in stages if str(s) in self._SCORED_STAGES)
         return (n * 30.0) / 60.0 if n else None
+
+    def _qc_density_minutes(self, extra_intervals=None, event_stages=None):
+        """Artefact-free analysed minutes over the detection run's stage scope —
+        the density denominator for the QC dashboard.
+
+        This is the GUI counterpart of the library's density exporters: it
+        reuses :func:`turtlewave_hdEEG.utils.build_density_denominators` over the
+        SAME stages the run was scoped to, so the number a reviewer sees equals
+        what ``export_*_density_to_csv`` writes for ANY run scope (a spindles-on-
+        N2+N3 run is denominated against N2+N3, not a fixed N2+N3+REM). The run
+        scope is inferred from the distinct stages of the loaded events — the
+        same "detected stages" logic the exporter uses — with Wake dropped
+        (never a detection stage). When no event stages are available, it falls
+        back to the fixed N2+N3+REM set present in the annotation so density
+        greys out gracefully rather than erroring.
+
+        The denominator subtracts BOTH (a) the annotation's Artefact/Arousal
+        spans and (b) the reviewer's LIVE marks in ``qc_artefact_intervals``
+        (passed as ``extra_intervals``), so marking an epoch shrinks the
+        denominator and raises that stage's density on the next refresh.
+
+        Channel-global by design (the export's reviewed denominator): the
+        numerator is per-channel event counts, the denominator is shared.
+
+        Parameters
+        ----------
+        extra_intervals : list of (float, float) or None
+            The reviewer's live artefact spans in seconds (from
+            ``qc_artefact_intervals``). ``None`` reproduces the annotation-only
+            denominator.
+        event_stages : iterable of str or None
+            Stages of the loaded events; their distinct non-Wake values define
+            the density time base (the run's scope). ``None``/empty falls back
+            to the fixed N2+N3+REM set.
+
+        Returns
+        -------
+        float or None
+            Artefact-free minutes over the run's stage scope, or ``None`` when
+            annotations are absent or none of the scope stages are scored
+            (density greyed).
+        """
+        if self.annotations is None:
+            return None
+        # Density time base = the stages the run actually detected on, inferred
+        # from the loaded events (Wake dropped). Matches the exporter's
+        # detected-stage logic so GUI and export agree for any run scope.
+        stage_list = None
+        if event_stages is not None:
+            scope = sorted({str(s) for s in event_stages
+                            if str(s) not in self._WAKE_STAGES})
+            if scope:
+                stage_list = scope
+        if stage_list is None:
+            # Fallback: no event scope available -> fixed N2+N3+REM present.
+            try:
+                stages_present = {str(s) for s in self.annotations.get_stages()}
+            except Exception:
+                return None
+            stage_list = sorted(s for s in stages_present
+                                if s in self._QC_DENSITY_STAGES)
+        if not stage_list:
+            return None
+        # Lazy import keeps GUI imports headless-safe; utils is Qt-free and the
+        # single source of truth for the artefact-free subtraction.
+        from turtlewave_hdEEG.utils import build_density_denominators
+        try:
+            dens = build_density_denominators(
+                self.annotations, self.eeg_data,
+                reject_artifacts=True, reject_arousals=True,
+                stage_list=stage_list, stages_present=stage_list,
+                logger=None,  # avoid a reject-assumption WARNING every refresh
+                extra_artefact_intervals=extra_intervals)
+        except Exception:
+            return None
+        return dens.whole_night_analysed_min or None
 
     def _current_method_freq(self):
         """Read the method + frequency-band filter combos. Returns
@@ -3700,7 +3789,17 @@ class EventReviewGUI(QMainWindow):
         intervals = self.db.get_qc_artefact_intervals()
         ivs = list(zip(intervals['start_time'], intervals['end_time'])) \
             if len(intervals) else None
-        qc = compute_channel_qc(df, scored_minutes=self._scored_minutes(),
+        # Density denominator = artefact-free analysed minutes over the run's
+        # stage scope (inferred from the loaded events, matching the export),
+        # subtracting the annotation artefacts AND the live marks in `ivs`, so
+        # it matches the library export and shrinks when a mark is added.
+        # Computed once per refresh (per-stage cache inside the helper), so the
+        # 256-channel table costs one build, not one per row.
+        evt_stages = (df['stage'].dropna().unique()
+                      if 'stage' in df.columns and len(df) else None)
+        density_min = self._qc_density_minutes(extra_intervals=ivs,
+                                               event_stages=evt_stages)
+        qc = compute_channel_qc(df, scored_minutes=density_min,
                                 artefact_intervals=ivs,
                                 coords=self.detail_dock_w._coords,
                                 **self._qc_thresholds)

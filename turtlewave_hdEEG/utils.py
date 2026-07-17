@@ -114,9 +114,90 @@ def explore_eeglab_structure(filename):
         print(f"Error exploring EEGLAB file: {e}")
         return None
 
+def _merge_intervals(intervals):
+    """Merge overlapping/adjacent ``(start, end)`` spans into disjoint sorted spans.
+
+    Parameters
+    ----------
+    intervals : iterable of (float, float)
+        Spans in seconds. Zero-length or inverted spans (``end <= start``) are
+        dropped.
+
+    Returns
+    -------
+    list of (float, float)
+        Sorted, non-overlapping spans. Touching spans (``start == prev_end``)
+        are merged so adjacent reviewer marks are never double-counted.
+    """
+    spans = []
+    for s, e in intervals:
+        s = float(s)
+        e = float(e)
+        if e > s:
+            spans.append((s, e))
+    if not spans:
+        return []
+    spans.sort()
+    merged = [spans[0]]
+    for s, e in spans[1:]:
+        ls, le = merged[-1]
+        if s <= le:
+            merged[-1] = (ls, max(le, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _subtract_spans(segments, cut_spans, min_dur):
+    """Remove ``cut_spans`` from ``segments``, dropping sub-``min_dur`` remnants.
+
+    Interval difference that mirrors :func:`wonambi.trans.reject.remove_artf_evts`:
+    a fragment surviving a cut is kept only if it is at least ``min_dur`` long, so
+    the extra-interval denominator obeys the same minimum-segment floor as the
+    detector's own artefact subtraction.
+
+    Parameters
+    ----------
+    segments : list of (float, float)
+        Clean sub-spans (already in-stage, in-epoch, annotation-artefact-free).
+    cut_spans : list of (float, float)
+        Merged, sorted spans to remove (from :func:`_merge_intervals`).
+    min_dur : float
+        Minimum surviving fragment length in seconds; shorter fragments are
+        dropped, matching ``remove_artf_evts``.
+
+    Returns
+    -------
+    list of (float, float)
+        Segments with ``cut_spans`` removed. Portions of a cut span lying
+        outside every segment (e.g. outside the stage/epoch) subtract nothing,
+        because only the overlap with a segment is ever removed.
+    """
+    if not cut_spans:
+        return segments
+    result = []
+    for s, e in segments:
+        s = float(s)
+        e = float(e)
+        cursor = s
+        for cs, ce in cut_spans:
+            if ce <= cursor or cs >= e:
+                continue
+            lo = max(cs, cursor)
+            if lo - cursor >= min_dur:
+                result.append((cursor, lo))
+            cursor = min(ce, e)
+            if cursor >= e:
+                break
+        if e - cursor >= min_dur:
+            result.append((cursor, e))
+    return result
+
+
 def compute_analysed_seconds(annotations, stage, chan=None,
                              reject_types=('Artefact', 'Arousal'),
-                             s_freq=None, epoch_len=30):
+                             s_freq=None, epoch_len=30,
+                             extra_artefact_intervals=None):
     """Compute the artefact-free in-stage time actually fed to a detector.
 
     This reproduces the segmentation that Wonambi's :func:`wonambi.trans.select.fetch`
@@ -168,6 +249,21 @@ def compute_analysed_seconds(annotations, stage, chan=None,
         Nominal epoch length in seconds. Accepted for signature symmetry with
         callers/GUI; epoch spans are taken from the annotations directly, so
         this value is not used to fabricate durations. Default ``30``.
+    extra_artefact_intervals : iterable of (float, float) or None, optional
+        Additional artefact spans in seconds (``(start_sec, end_sec)``) to treat
+        as artefact on top of the annotation's ``reject_types`` events. Intended
+        for the review GUI, which must subtract the reviewer's LIVE artefact
+        marks (held in the ``qc_artefact_intervals`` DB table, not yet exported
+        to the annotation) so marking an epoch immediately shrinks that stage's
+        analysed time. The spans are unioned with the annotation's reject spans
+        before subtraction (overlaps with an existing annotation artefact are NOT
+        double-subtracted), clipped to the in-stage, in-epoch time (a span
+        straddling an epoch boundary removes only its in-stage portion; a span
+        outside every scored epoch of ``stage`` removes nothing), and merged with
+        one another so overlapping/adjacent marks are not double-counted. The
+        same ``min_dur`` floor as the annotation subtraction is applied to
+        surviving fragments. ``None`` or empty reproduces the export-path
+        behaviour exactly (no extra subtraction). Default ``None``.
 
     Returns
     -------
@@ -224,6 +320,15 @@ def compute_analysed_seconds(annotations, stage, chan=None,
 
     reject_list = [str(r) for r in reject_types] if reject_types else None
 
+    # Reviewer's LIVE artefact marks: merge into disjoint spans once, then remove
+    # from each bundle's already-artefact-free segments. Subtracting from the
+    # post-`remove_artf_evts` segments (rather than the raw epoch times) makes the
+    # union with annotation artefacts implicit: a region an annotation artefact
+    # already removed is absent from `kept`, so an overlapping extra span removes
+    # nothing there -- no double subtraction.
+    extra_spans = _merge_intervals(extra_artefact_intervals) \
+        if extra_artefact_intervals else []
+
     in_stage_seconds = 0.0
     clean_seconds = 0.0
     for bund in bundles:
@@ -237,6 +342,8 @@ def compute_analysed_seconds(annotations, stage, chan=None,
                                     name=reject_list, min_dur=min_dur)
         else:
             kept = times
+        if extra_spans:
+            kept = _subtract_spans(kept, extra_spans, min_dur)
         clean_seconds += sum(float(e) - float(s) for s, e in kept)
 
     artefact_seconds_excluded = max(in_stage_seconds - clean_seconds, 0.0)
@@ -283,6 +390,13 @@ class DensityDenominators:
     epoch_len : float, optional
         Nominal epoch length in seconds, forwarded to
         :func:`compute_analysed_seconds`. Default ``30``.
+    extra_artefact_intervals : iterable of (float, float) or None, optional
+        Extra artefact spans in seconds forwarded unchanged to
+        :func:`compute_analysed_seconds` for every stage (per-stage and
+        whole-night), so the review GUI's live artefact marks shrink both the
+        per-stage and whole-night denominators consistently. ``None`` (the
+        export-path default) reproduces the annotation-only denominators.
+        Default ``None``.
 
     Attributes
     ----------
@@ -295,11 +409,14 @@ class DensityDenominators:
     """
 
     def __init__(self, annotations, s_freq, reject_types, stage_list,
-                 stages_present, epoch_len=30):
+                 stages_present, epoch_len=30, extra_artefact_intervals=None):
         self._annot = annotations
         self._s_freq = s_freq
         self._epoch_len = epoch_len
         self.reject_types = list(reject_types) if reject_types else []
+        # Fixed for this instance, so the per-stage cache stays valid.
+        self._extra_artefact_intervals = (list(extra_artefact_intervals)
+                                          if extra_artefact_intervals else None)
         self._cache = {}
 
         # Detected stages define the density time base. Prefer the requested
@@ -335,7 +452,8 @@ class DensityDenominators:
         if key not in self._cache:
             self._cache[key] = compute_analysed_seconds(
                 self._annot, key, chan=None, reject_types=self.reject_types,
-                s_freq=self._s_freq, epoch_len=self._epoch_len)
+                s_freq=self._s_freq, epoch_len=self._epoch_len,
+                extra_artefact_intervals=self._extra_artefact_intervals)
         return self._cache[key]
 
     def whole_night_count(self, chan_events):
@@ -366,7 +484,8 @@ class DensityDenominators:
 
 def build_density_denominators(annotations, dataset, reject_artifacts,
                                reject_arousals, stage_list, stages_present,
-                               logger=None, epoch_len=30):
+                               logger=None, epoch_len=30,
+                               extra_artefact_intervals=None):
     """Build a :class:`DensityDenominators` and warn about the reject assumption.
 
     Factors the shared setup out of the density exporters: it derives the
@@ -394,6 +513,12 @@ def build_density_denominators(annotations, dataset, reject_artifacts,
         is emitted (still recorded in the returned object's ``reject_types``).
     epoch_len : float, optional
         Nominal epoch length in seconds. Default ``30``.
+    extra_artefact_intervals : iterable of (float, float) or None, optional
+        Extra artefact spans in seconds forwarded to the
+        :class:`DensityDenominators`, so the review GUI's live artefact marks
+        subtract from every per-stage and whole-night denominator. ``None`` (the
+        export-path default) leaves the denominators annotation-only. Default
+        ``None``.
 
     Returns
     -------
@@ -432,7 +557,8 @@ def build_density_denominators(annotations, dataset, reject_artifacts,
             reject_artifacts, reject_arousals)
 
     return DensityDenominators(annotations, s_freq, reject_types, stage_list,
-                               stages_present, epoch_len=epoch_len)
+                               stages_present, epoch_len=epoch_len,
+                               extra_artefact_intervals=extra_artefact_intervals)
 
 
 # Function to read channels from CSV file
