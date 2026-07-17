@@ -215,9 +215,9 @@ class ParalKC:
                     self.logger.info(f"Applying method: {meth}")
                     for i, seg in enumerate(segments):
                         processed_seg = seg.copy()
-                        if polar == 'opposite':
-                            processed_seg['data'].data[0][0] = (
-                                -processed_seg['data'].data[0][0])
+                        # Polarity is handled inside the detector (polar=...),
+                        # which inverts on a copy. Do NOT invert here as well —
+                        # a second inversion cancels the first.
                         if detrend:
                             try:
                                 processed_seg['data'] = math(
@@ -283,8 +283,14 @@ class ParalKC:
                             f"Saved K-complex data for channel {ch} to "
                             f"{ch_json}")
             except Exception as e:
-                self.logger.warning(
-                    f"No K-complexes in channel {ch}: {e}")
+                # A real read/detection failure is logged as an error with a
+                # traceback so it is not mistaken for a channel that legitimately
+                # had no K-complexes.
+                self.logger.error(
+                    f"Failed to process channel {ch}: {e}", exc_info=True)
+                # Write an error sentinel (not an empty list) so downstream import
+                # can tell a failed channel apart from one that legitimately had no
+                # K-complexes and re-run it.
                 if json_dir and create_empty_json:
                     try:
                         ch_json = os.path.join(
@@ -292,10 +298,10 @@ class ParalKC:
                             f"{self.FILE_PREFIX}_{method_str}_{freq_str}_"
                             f"{stages_str}_{ch}.json")
                         with open(ch_json, 'w', encoding='utf-8') as f:
-                            json.dump([], f)
+                            json.dump({"error": str(e), "channel": ch}, f)
                     except Exception as je:
                         self.logger.error(
-                            f"Could not write empty JSON for {ch}: {je}")
+                            f"Could not write sentinel JSON for {ch}: {je}")
 
         if save_to_annotations and new_annotations is not None and all_kcs:
             try:
@@ -332,10 +338,12 @@ class ParalKC:
             event_type=self.EVENT_TYPE)
 
     def export_kc_density_to_csv(self, json_input, csv_file, stage=None,
-                                 file_pattern=None):
+                                 file_pattern=None, reject_artifacts=True,
+                                 reject_arousals=True):
         return self._sw_proxy.export_slow_wave_density_to_csv(
             json_input=json_input, csv_file=csv_file, stage=stage,
-            file_pattern=file_pattern)
+            file_pattern=file_pattern, reject_artifacts=reject_artifacts,
+            reject_arousals=reject_arousals)
 
     def initialize_sqlite_database(self, db_path='neural_events.db'):
         return self._sw_proxy.initialize_sqlite_database(db_path)

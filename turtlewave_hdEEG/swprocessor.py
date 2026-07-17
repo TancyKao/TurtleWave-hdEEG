@@ -799,10 +799,18 @@ class ParalSWA:
             traceback.print_exc()
             return None
 
-    def export_slow_wave_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None):
+    def export_slow_wave_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None,
+                                        reject_artifacts=True, reject_arousals=True):
         """
         Export slow wave statistics to CSV with both whole night and stage-specific densities.
-        
+
+        The stage-specific density denominator is the artefact-free in-stage time
+        actually fed to the detector (per channel), computed with
+        :func:`turtlewave_hdEEG.utils.compute_analysed_seconds`, not the sum of
+        all scored epochs of the stage. Detection rejects artefact/arousal epochs,
+        so using all scored epochs as the denominator systematically
+        under-estimates density in proportion to each recording's artefact load.
+
         Parameters
         ----------
         json_input : str or list
@@ -813,10 +821,17 @@ class ParalSWA:
             Sleep stage(s) to include
         file_pattern : str or None
             Pattern to filter JSON files
+        reject_artifacts : bool, optional
+            Subtract time overlapped by 'Artefact' events from the density
+            denominator. Should match the detection run's setting. Default True.
+        reject_arousals : bool, optional
+            Subtract time overlapped by 'Arousal' events from the density
+            denominator. Should match the detection run's setting. Default True.
         """
         import glob
         from collections import defaultdict
-        
+        from turtlewave_hdEEG.utils import build_density_denominators
+
         # Load slow waves from JSON file(s)
         json_files = []
         if file_pattern:
@@ -927,6 +942,19 @@ class ParalSWA:
         else:
             stages_to_process = stage_list
 
+        # Build the artefact-free density denominators (per-stage analysed time,
+        # detected-stage whole-night time, per-channel whole-night count). This
+        # shared helper matches what the detector pooled and logs the reject-type
+        # assumption so it is never silent. See utils.build_density_denominators.
+        dd = build_density_denominators(
+            self.annotations, self.dataset,
+            reject_artifacts=reject_artifacts, reject_arousals=reject_arousals,
+            stage_list=stage_list, stages_present=wave_stages,
+            logger=self.logger)
+        reject_types = dd.reject_types
+        detected_stage_set = dd.detected_stage_set
+        whole_night_analysed_min = dd.whole_night_analysed_min
+
         # Group slow waves by channel and stage
         waves_by_chan_stage = defaultdict(lambda: defaultdict(list))
         waves_by_chan = defaultdict(list)
@@ -962,7 +990,14 @@ class ParalSWA:
         stage_channel_stats = defaultdict(dict)
         for chan in set(waves_by_chan.keys()):
             all_chan_waves = waves_by_chan[chan]
-        
+
+            # Whole-night count is stage-independent: compute once per channel,
+            # restricted to the detected stages so it shares the same time base
+            # as whole_night_analysed_min.
+            whole_night_count = dd.whole_night_count(all_chan_waves)
+            whole_night_density = (whole_night_count / whole_night_analysed_min
+                                   if whole_night_analysed_min > 0 else 0)
+
             for process_stage in stages_to_process:
                 stage_waves = []
                 if combined_stages or (isinstance(process_stage, list) and len(process_stage) > 1):
@@ -982,23 +1017,32 @@ class ParalSWA:
                             stage_waves.append(sw)
                             seen_waves.add(id(sw))
 
-                    stage_duration_min = sum(stage_durations.get(s, 0) for s in stages_to_include)
-        
+                    # Artefact-free analysed time is per-stage then summed, so
+                    # a span shared across stages is not double-counted.
+                    analysed_sec = 0.0
+                    artefact_sec = 0.0
+                    for s in stages_to_include:
+                        a, ar = dd.analysed_seconds(s)
+                        analysed_sec += a
+                        artefact_sec += ar
+                    stage_duration_min = analysed_sec / 60.0
+
                 else:
                     s_str = str(process_stage)
                     stage_waves = waves_by_chan_stage[chan].get(s_str, [])
                     stage_name_display = process_stage
-                    stage_duration_min = stage_durations.get(s_str, 0)
-            
+                    analysed_sec, artefact_sec = dd.analysed_seconds(s_str)
+                    stage_duration_min = analysed_sec / 60.0
+
                 if len(stage_waves) == 0:
                     continue
-            
+
                 # Calculate statistics
                 stage_count = len(stage_waves)
-                whole_night_count = len(all_chan_waves)
-                
+
+                # whole_night_density is computed once per channel above
+                # (stage-independent).
                 stage_density = stage_count / stage_duration_min if stage_duration_min > 0 else 0
-                whole_night_density = whole_night_count / total_duration_min if total_duration_min > 0 else 0
                 
                 # Calculate mean duration
                 durations = []
@@ -1017,6 +1061,8 @@ class ParalSWA:
                     'mean_duration': mean_duration,
                     'stage_name_display': stage_name_display,
                     'stage_duration_min': stage_duration_min,
+                    'analysed_minutes': stage_duration_min,
+                    'artefact_seconds_excluded': artefact_sec,
                 }
         
         # Export to CSV
@@ -1026,8 +1072,18 @@ class ParalSWA:
             # Add summary sections
             writer.writerow(['Whole Night Summary'])
             writer.writerow(['Total Recording Duration (min)', f'{total_duration_min:.2f}'])
+            writer.writerow(['Detected stages (density time base)',
+                             ', '.join(sorted(detected_stage_set)) if detected_stage_set else 'none'])
+            writer.writerow(['Whole-night analysed minutes (artefact-free, detected stages)',
+                             f'{whole_night_analysed_min:.2f}'])
+            writer.writerow(['Stage density denominator',
+                             'artefact-free in-stage time fed to detector (per channel)'])
+            writer.writerow(['Whole-night density denominator',
+                             'artefact-free minutes summed over detected stages (Wake excluded unless detected)'])
+            writer.writerow(['Reject types subtracted',
+                             ', '.join(reject_types) if reject_types else 'none'])
             writer.writerow([])
-            
+
             writer.writerow(['Stage Duration Summary'])
             writer.writerow(['Stage', 'Duration (min)'])
             for stg in sorted(set(stage_durations.keys())):
@@ -1049,21 +1105,25 @@ class ParalSWA:
 
                 writer.writerow([f"Sleep Stage: {stage_name_display}"])
                 writer.writerow([
-                    'Channel', 
+                    'Channel',
                     'Count',
-                    f'Density in {stage_name_display} (events/min)', 
+                    f'Density in {stage_name_display} (events/min)',
                     'Whole Night Density (events/min)',
-                    'Mean Duration (s)'
+                    'Mean Duration (s)',
+                    'Analysed Minutes (artefact-free)',
+                    'Artefact Seconds Excluded'
                 ])
 
                 for chan in sorted(stage_channel_stats[key].keys()):
                     stats = stage_channel_stats[key][chan]
                     writer.writerow([
-                        chan, 
+                        chan,
                         stats['count'],
                         f"{stats['stage_density']:.4f}",
                         f"{stats['whole_night_density']:.4f}",
-                        f"{stats['mean_duration']:.4f}"
+                        f"{stats['mean_duration']:.4f}",
+                        f"{stats['analysed_minutes']:.4f}",
+                        f"{stats['artefact_seconds_excluded']:.4f}"
                     ])
                 
                 writer.writerow([])

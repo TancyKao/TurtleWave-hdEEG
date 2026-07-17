@@ -114,6 +114,327 @@ def explore_eeglab_structure(filename):
         print(f"Error exploring EEGLAB file: {e}")
         return None
 
+def compute_analysed_seconds(annotations, stage, chan=None,
+                             reject_types=('Artefact', 'Arousal'),
+                             s_freq=None, epoch_len=30):
+    """Compute the artefact-free in-stage time actually fed to a detector.
+
+    This reproduces the segmentation that Wonambi's :func:`wonambi.trans.select.fetch`
+    performs during detection, so that an event-density denominator equals the
+    exact clean time the detector pooled rather than the (larger) sum of all
+    scored epochs of the stage.
+
+    The computation is two steps, mirroring ``fetch`` with
+    ``reject_epoch=True, reject_artf=reject_types``:
+
+    1. Select the in-stage epoch spans, dropping epochs whose quality is not
+       ``'Good'`` (i.e. ``'Poor'`` / staged ``'Artefact'``). This uses
+       :func:`wonambi.trans.select.get_times` with ``exclude=True``.
+    2. Subtract, at sample resolution, the seconds overlapped by any event whose
+       type is in ``reject_types`` (default ``Artefact``/``Arousal``), using
+       :func:`wonambi.trans.reject.remove_artf_evts`. A 2 s artefact inside a
+       30 s epoch removes 2 s, not the whole epoch.
+
+    Parameters
+    ----------
+    annotations : instance of wonambi Annotations (or XLAnnotations/CustomAnnotations)
+        Scoring source. Must expose ``get_epochs``, ``get_events`` and
+        ``last_second`` (the same object handed to ``fetch`` during detection).
+    stage : str
+        A single sleep stage label (e.g. ``'NREM2'``). For combined stages,
+        call this helper once per stage and sum the returned clean seconds;
+        summing per-stage clean time avoids double-counting shared spans.
+    chan : str or None, optional
+        Channel scope for artefact subtraction, passed straight to
+        ``remove_artf_evts``. **Leave this ``None`` (the default) to match the
+        detector**, which calls ``fetch`` with no ``chan_full`` and therefore
+        subtracts artefacts marked on any channel. Passing a channel name does
+        NOT give a clean per-channel denominator with Wonambi's current
+        matching (see Notes) and will silently under-subtract, so it is exposed
+        only for a future per-channel detection path.
+    reject_types : sequence of str or None, optional
+        Event types to subtract. Must match what the detection run excluded
+        (built from ``reject_artifacts`` / ``reject_arousals``). Default
+        ``('Artefact', 'Arousal')``. If ``None`` or empty, no artefact seconds
+        are subtracted (only epoch-quality exclusion is applied).
+    s_freq : float or None, optional
+        Sampling frequency, used only to set the two-sample minimum-segment
+        floor (``2 / s_freq``) exactly as ``fetch`` does, so sub-segments too
+        short to yield a valid window are dropped identically. If ``None``,
+        Wonambi's ``remove_artf_evts`` default floor of ``0.1`` s is used
+        (matching the function's own default) rather than 0, so parity holds
+        when the sampling rate is unavailable.
+    epoch_len : float, optional
+        Nominal epoch length in seconds. Accepted for signature symmetry with
+        callers/GUI; epoch spans are taken from the annotations directly, so
+        this value is not used to fabricate durations. Default ``30``.
+
+    Returns
+    -------
+    analysed_seconds : float
+        Artefact-free in-stage time in seconds (the density denominator, ×60
+        for minutes). ``0.0`` when the stage has no Good epochs or is fully
+        covered by artefact.
+    artefact_seconds_excluded : float
+        In-stage Good seconds removed by artefact/arousal subtraction
+        (``in_stage_good_seconds - analysed_seconds``). Emitted for provenance.
+
+    Notes
+    -----
+    With ``chan=None`` this returns exactly the seconds the detector pooled
+    (verified against :func:`wonambi.trans.select.fetch` with
+    ``reject_epoch=True, reject_artf=reject_types``), because detection also
+    passes no ``chan_full`` and so removes artefacts channel-globally. The
+    resulting density is per-channel only through its numerator (per-channel
+    event counts); the denominator is shared across channels, which is correct
+    since the detector fed every channel the same channel-global clean time.
+
+    A true per-channel denominator is not available from Wonambi's
+    ``remove_artf_evts`` as-is: it joins ``(chan, '')`` into the string
+    ``'chan, '`` and matches only events whose ``event_chan`` equals that
+    literal string, so a channel-global (``''``) artefact is skipped and a
+    single-channel mark (``'chan'``) does not match either. Making per-channel
+    denominators meaningful requires detection to fetch per channel
+    (``chan_full=[chan]``) and a matching artefact-marking convention; that is
+    out of scope here and tracked as a follow-up.
+
+    This never raises on empty input and never divides; callers guard the
+    division (``analysed_seconds == 0`` -> density 0).
+    """
+    from wonambi.trans.select import get_times
+    from wonambi.trans.reject import remove_artf_evts
+
+    # Step 1: in-stage Good epochs (exclude=True mirrors reject_epoch=True).
+    try:
+        bundles = get_times(annotations, evt_type=None, stage=[stage],
+                            cycle=None, chan=None, exclude=True)
+    except Exception:
+        return 0.0, 0.0
+
+    if not bundles:
+        return 0.0, 0.0
+
+    # Two-sample floor, identical to fetch()'s two_sample_dur. When s_freq is
+    # unknown, fall back to remove_artf_evts's own default (0.1 s), not 0, so
+    # byte-parity with a fetch()/remove_artf_evts run using that default holds.
+    if s_freq and s_freq > 0:
+        min_dur = 2.0 / float(s_freq)
+    else:
+        min_dur = 0.1
+
+    reject_list = [str(r) for r in reject_types] if reject_types else None
+
+    in_stage_seconds = 0.0
+    clean_seconds = 0.0
+    for bund in bundles:
+        times = bund.get('times') or []
+        if not times:
+            continue
+        in_stage_seconds += sum(float(e) - float(s) for s, e in times)
+
+        if reject_list:
+            kept = remove_artf_evts(times, annotations, chan=chan,
+                                    name=reject_list, min_dur=min_dur)
+        else:
+            kept = times
+        clean_seconds += sum(float(e) - float(s) for s, e in kept)
+
+    artefact_seconds_excluded = max(in_stage_seconds - clean_seconds, 0.0)
+    return clean_seconds, artefact_seconds_excluded
+
+
+class DensityDenominators:
+    """Artefact-free density denominators shared by the event-density exporters.
+
+    Bundles everything the spindle and slow-wave density exporters need to turn
+    artefact-free time into density, so the computation lives in one place and
+    cannot drift between processors:
+
+    * per-stage artefact-free seconds/minutes (cached, channel-global);
+    * the set of stages actually detected on (the density time base);
+    * the whole-night artefact-free minutes summed over those detected stages
+      (Wake excluded unless Wake was itself a detection stage);
+    * a per-channel whole-night event count restricted to the detected stages.
+
+    The denominator is channel-global (``chan=None``) on purpose: detection's
+    ``fetch`` passes no ``chan_full`` and removes artefacts channel-globally, so
+    this equals the exact clean time the detector pooled. Density is per-channel
+    only through its numerator (per-channel event counts). See
+    :func:`compute_analysed_seconds` for the parity details.
+
+    Prefer :func:`build_density_denominators` to construct instances; it also
+    resolves ``s_freq`` and emits the reject-type assumption warning.
+
+    Parameters
+    ----------
+    annotations : instance of wonambi Annotations (or XLAnnotations/CustomAnnotations)
+        Scoring source handed to the detector.
+    s_freq : float or None
+        Sampling frequency for the two-sample minimum-segment floor.
+    reject_types : list of str
+        Event types subtracted from the denominator (e.g. ``['Artefact', 'Arousal']``).
+        Must mirror what the detection run excluded.
+    stage_list : list of str or None
+        The requested detection stage(s). When ``None``, the detected stages are
+        taken from ``stages_present`` instead.
+    stages_present : iterable of str
+        Stages present in the loaded events; used as the detected-stage fallback
+        when ``stage_list`` is ``None``.
+    epoch_len : float, optional
+        Nominal epoch length in seconds, forwarded to
+        :func:`compute_analysed_seconds`. Default ``30``.
+
+    Attributes
+    ----------
+    reject_types : list of str
+        The reject types used (for provenance).
+    detected_stage_set : set of str
+        Individual stages that define the whole-night time base.
+    whole_night_analysed_min : float
+        Artefact-free minutes summed over ``detected_stage_set``.
+    """
+
+    def __init__(self, annotations, s_freq, reject_types, stage_list,
+                 stages_present, epoch_len=30):
+        self._annot = annotations
+        self._s_freq = s_freq
+        self._epoch_len = epoch_len
+        self.reject_types = list(reject_types) if reject_types else []
+        self._cache = {}
+
+        # Detected stages define the density time base. Prefer the requested
+        # stage(s); else fall back to the stages present in the events. Wake
+        # appears here only if it was itself a detection stage, so it is
+        # excluded from whole-night unless detected (no special-casing needed).
+        if stage_list is None:
+            self.detected_stage_set = set(str(s) for s in stages_present)
+        else:
+            self.detected_stage_set = set(str(s) for s in stage_list)
+
+        wn_sec = 0.0
+        for stg in self.detected_stage_set:
+            wn_sec += self.analysed_seconds(stg)[0]
+        self.whole_night_analysed_min = wn_sec / 60.0
+
+    def analysed_seconds(self, stage):
+        """Return ``(clean_seconds, artefact_seconds_excluded)`` for one stage.
+
+        Cached per stage; the denominator is channel-global by design.
+
+        Parameters
+        ----------
+        stage : str
+            A single sleep stage label.
+
+        Returns
+        -------
+        tuple of float
+            ``(clean_seconds, artefact_seconds_excluded)``.
+        """
+        key = str(stage)
+        if key not in self._cache:
+            self._cache[key] = compute_analysed_seconds(
+                self._annot, key, chan=None, reject_types=self.reject_types,
+                s_freq=self._s_freq, epoch_len=self._epoch_len)
+        return self._cache[key]
+
+    def whole_night_count(self, chan_events):
+        """Count a channel's events that fall in the detected stages.
+
+        Restricting to the detected stages keeps the whole-night numerator on
+        the same time base as :attr:`whole_night_analysed_min`.
+
+        Parameters
+        ----------
+        chan_events : list of dict
+            Detected events for one channel; each has a ``'stage'`` (str or
+            list of str).
+
+        Returns
+        -------
+        int
+            Number of events whose stage(s) intersect the detected stages.
+        """
+        n = 0
+        for ev in chan_events:
+            st = ev.get('stage')
+            st = st if isinstance(st, list) else [st]
+            if self.detected_stage_set.intersection(str(s) for s in st):
+                n += 1
+        return n
+
+
+def build_density_denominators(annotations, dataset, reject_artifacts,
+                               reject_arousals, stage_list, stages_present,
+                               logger=None, epoch_len=30):
+    """Build a :class:`DensityDenominators` and warn about the reject assumption.
+
+    Factors the shared setup out of the density exporters: it derives the
+    reject-type list from the two booleans, resolves ``s_freq`` from the
+    dataset header, and logs a WARNING recording the assumed reject types so the
+    denominator's artefact-subtraction assumption is never silent.
+
+    Parameters
+    ----------
+    annotations : instance of wonambi Annotations (or wrapper)
+        Scoring source handed to the detector.
+    dataset : instance of Dataset
+        Used only to read ``header['s_freq']``; missing/failed lookups fall back
+        to Wonambi's default minimum-segment floor.
+    reject_artifacts : bool
+        Subtract 'Artefact' time from the denominator. Must match the run.
+    reject_arousals : bool
+        Subtract 'Arousal' time from the denominator. Must match the run.
+    stage_list : list of str or None
+        Requested detection stage(s); ``None`` means "use stages_present".
+    stages_present : iterable of str
+        Stages present in the loaded events (detected-stage fallback).
+    logger : logging.Logger or None, optional
+        Logger for the reject-type assumption warning. If ``None``, no warning
+        is emitted (still recorded in the returned object's ``reject_types``).
+    epoch_len : float, optional
+        Nominal epoch length in seconds. Default ``30``.
+
+    Returns
+    -------
+    DensityDenominators
+        Configured denominator helper.
+
+    Notes
+    -----
+    The reject types default to the detector defaults but are NOT authoritatively
+    linked to the detection run's actual settings in P1. If a run overrode
+    ``reject_arousals``/``reject_artifacts``, the caller must pass matching
+    values or the denominator will subtract the wrong time. Authoritative linking
+    to each run's recorded settings arrives with the detection-run provenance
+    work (P2).
+    """
+    reject_types = []
+    if reject_artifacts:
+        reject_types.append('Artefact')
+    if reject_arousals:
+        reject_types.append('Arousal')
+
+    s_freq = None
+    try:
+        s_freq = dataset.header['s_freq']
+    except Exception:
+        if logger is not None:
+            logger.debug("Could not read s_freq from dataset header; artefact-free "
+                         "time uses Wonambi's default 0.1 s min-segment floor.")
+
+    if logger is not None:
+        logger.warning(
+            "Density denominator assumes reject_artifacts=%s, reject_arousals=%s -- "
+            "these MUST match the detection run; pass them explicitly if the run "
+            "overrode the defaults. Authoritative linking to the run's recorded "
+            "settings arrives with the provenance work (P2).",
+            reject_artifacts, reject_arousals)
+
+    return DensityDenominators(annotations, s_freq, reject_types, stage_list,
+                               stages_present, epoch_len=epoch_len)
+
+
 # Function to read channels from CSV file
 def read_channels_from_csv(csv_file_path):
     channels = []
