@@ -7,9 +7,11 @@ import csv
 from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSpindle as DetectSpindle
+from turtlewave_hdEEG import dbwrite
 import json
 import datetime
 import logging
+import uuid as _uuid_mod
 
 
 class ParalEvents:
@@ -115,13 +117,15 @@ class ParalEvents:
 
 
     def detect_spindles(self, method='Ferrarelli2007', chan=None, ref_chan=[], grp_name='eeg',
-                       frequency=(11, 16), duration=(0.5, 3), polar='normal', 
+                       frequency=(11, 16), duration=(0.5, 3), polar='normal',
                        reject_artifacts=True, reject_arousals=True,stage=None, cat=None,
                        save_to_annotations=False, json_dir=None, create_empty_json=True,
+                       *, write_db=False, db_path=None, resume=False, run_params=None,
+                       replace_channels=None,
                        **detector_params):
         """
         Detect spindles in the dataset while considering artifacts and arousals.
-        
+
         Parameters
         ----------
         method : str or list
@@ -146,6 +150,26 @@ class ParalEvents:
             Directory to save individual channel JSON files (one per channel)
         create_empty_json : bool
             Whether to create empty JSON files when no spindles are found
+        write_db : bool, keyword-only, default False
+            When True, write detected events straight into a SQLite database
+            (``db_path``) in addition to the JSON output, using the direct-write
+            path (deterministic uuid5 rows, batched morphology, per-scope
+            ``processing_status`` tracking and a ``detection_runs`` provenance
+            row). When False the behaviour is byte-identical to the legacy
+            JSON-only path.
+        db_path : str or None, keyword-only
+            Target SQLite database (or directory, in which case
+            ``neural_events.db`` is used). Required when ``write_db`` is True.
+        resume : bool, keyword-only, default False
+            When True (and ``write_db``), channels already recorded as
+            ``success = 1`` for the *same* scope (method, band, stage set) are
+            skipped instead of re-detected.
+        run_params : dict or None, keyword-only
+            Extra parameters merged into the ``detection_runs.params_json``
+            provenance record.
+        replace_channels : optional, keyword-only
+            Reserved for P3 (scoped channel re-detection); accepted but not yet
+            wired.
         **detector_params : dict
         Additional parameters to pass to the detector. These are method-specific
         and can include parameters like det_thresh, sel_thresh, etc.
@@ -153,8 +177,15 @@ class ParalEvents:
         -------
         list
             List of all detected spindles
+
+        Notes
+        -----
+        In the direct-write path each spindle's ``stage`` is resolved to the
+        single scored epoch it falls in (via ``_stage_at``), matching the
+        slow-wave/K-complex convention. This differs from the legacy spindle CSV
+        path, which tags each event with the whole requested stage list.
         """
-        import uuid 
+        import uuid
         
         self.logger.info(r"""Whaling it... (searching for spindles)
                               .
@@ -214,7 +245,92 @@ class ParalEvents:
         if detector_params:
             self.logger.info(f"Method-specific parameters: {detector_params}")
 
+        # ------------------------------------------------------------------
+        # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
+        # ------------------------------------------------------------------
+        stages_key = "".join(stage) if stage else "all"
+        db_conn = None
+        run_id = None
+        db_skip = set()
+        db_n_fft_sec = 4  # matches the CSV exporter's default FFT window
+        rec_start = None
+        s_freq = None
+        if write_db:
+            if db_path is None:
+                self.logger.error("write_db=True but db_path is None; skipping DB writes")
+                write_db = False
+            else:
+                try:
+                    if os.path.isdir(db_path):
+                        db_path = os.path.join(db_path, 'neural_events.db')
+                    # Create base tables (events/processing_status/...) if absent.
+                    self.initialize_sqlite_database(db_path)
+                    db_conn = dbwrite.open_write_connection(db_path)
+                    dbwrite.ensure_direct_write_schema(db_conn, self.logger)
+                    try:
+                        s_freq = self.dataset.header['s_freq']
+                    except Exception:
+                        s_freq = None
+                    try:
+                        rec_start = self.dataset.header.get('start_time')
+                    except Exception:
+                        rec_start = None
+                    run_id = str(_uuid_mod.uuid4())
+                    params_dict = {
+                        'frequency': list(frequency), 'duration': list(duration),
+                        'polar': polar, 'method': method_str,
+                        'detector_params': detector_params,
+                        'reject_artifacts': reject_artifacts,
+                        'reject_arousals': reject_arousals,
+                        'n_fft_sec': db_n_fft_sec,
+                    }
+                    if run_params:
+                        params_dict.update(run_params)
+                    dbwrite.record_run(
+                        db_conn, run_id, 'spindle', method_str,
+                        dbwrite.method_citation(method_str),
+                        json.dumps(params_dict, default=str),
+                        ref_chan, polar, stage, reject_artifacts, reject_arousals)
+                    if resume:
+                        db_skip = dbwrite.resume_skip_channels(
+                            db_conn, 'spindle', method_str,
+                            frequency[0], frequency[1], stages_key)
+                        if db_skip:
+                            self.logger.info(
+                                f"Resume: skipping {len(db_skip)} already-completed "
+                                f"channels for this scope")
+                except Exception as e:
+                    self.logger.error(f"Could not set up direct-DB write: {e}", exc_info=True)
+                    write_db = False
+                    if db_conn is not None:
+                        try:
+                            db_conn.close()
+                        except Exception:
+                            pass
+                        db_conn = None
 
+        # Epoch -> stage lookup so each event is attributed to the single scored
+        # epoch it falls in (matches the SW/KC convention).
+        try:
+            import bisect as _bisect
+            _det_epochs = sorted(
+                ((float(e['start']), float(e['end']), str(e['stage']))
+                 for e in self.annotations.get_epochs()),
+                key=lambda x: x[0]
+            ) if self.annotations is not None else []
+        except Exception as e:
+            self.logger.warning(f"Could not build epoch stage lookup: {e}")
+            _det_epochs = []
+        _det_epoch_starts = [e[0] for e in _det_epochs]
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _det_epochs:
+                return None
+            idx = _bisect.bisect_right(_det_epoch_starts, t) - 1
+            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
+                return _det_epochs[idx][2]
+            return None
 
         # Create a custom annotation file name if saving to annotations
         if save_to_annotations:
@@ -271,18 +387,24 @@ class ParalEvents:
         all_spindles = []
 
         for ch in chan:
+                if write_db and resume and ch in db_skip:
+                    self.logger.info(f"Resume: channel {ch} already complete for this scope; skipping")
+                    continue
                 try:
                     self.logger.info(f'Reading data for channel {ch}')
-                    
+
                     # Fetch segments, filtering based on stage and artifacts
-                    segments = fetch(self.dataset, self.annotations, cat=cat, stage=stage, cycle=None, 
+                    segments = fetch(self.dataset, self.annotations, cat=cat, stage=stage, cycle=None,
                                     reject_epoch=True, reject_artf=reject_types)
                     segments.read_data(ch, ref_chan, grp_name=grp_name)
 
-                    
+
                     # Process each detection method
                     channel_spindles = []
                     channel_json_spindles = []
+                    # Direct-write accumulators (populated only when write_db).
+                    channel_db_events = []
+                    channel_param_segments = []
                     ## Loop through methods (i.e. WHALE IT!)
                     for m, meth in enumerate(method):
                         self.logger.info(f"Applying method: {meth}")
@@ -316,8 +438,35 @@ class ParalEvents:
                                 # Add channel information
                                 sp['chan'] = ch
                                 channel_spindles.append(sp)
-                                
-                                # Add to JSON 
+
+                                # Assemble the direct-DB event (independent of the
+                                # JSON uuid above): deterministic uuid5, single
+                                # resolved stage, detector-own morphology, and an
+                                # in-memory window for batched re-measurement.
+                                if write_db:
+                                    sp_start = float(sp.get('start', 0))
+                                    sp_end = float(sp.get('end', 0))
+                                    sp_dur = float(sp.get('dur', sp_end - sp_start))
+                                    single_stage = _stage_at(sp_start)
+                                    if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
+                                        single_stage = stage[0]
+                                    morph = dbwrite.event_det_morphology(sp)
+                                    ev = {
+                                        'uuid': dbwrite.event_uuid5(
+                                            'spindle', ch, sp_start, meth,
+                                            frequency[0], frequency[1], single_stage),
+                                        'start_time': sp_start, 'end_time': sp_end,
+                                        'duration': sp_dur, 'stage': single_stage,
+                                        'method': meth,
+                                    }
+                                    ev.update(morph)
+                                    channel_db_events.append(ev)
+                                    channel_param_segments.append(
+                                        dbwrite.make_param_segment(
+                                            seg['data'], sp_start, sp_end,
+                                            'spindle', single_stage, ch))
+
+                                # Add to JSON
                                 if json_dir:
                                     # Extract key properties in a serializable format
                                     sp_data = {
@@ -344,6 +493,22 @@ class ParalEvents:
                                     channel_json_spindles.append(sp_data)
                     all_spindles.extend(channel_spindles)
                     self.logger.info(f"Found {len(channel_spindles)} spindles in channel {ch}")
+
+                    # Direct-DB write: one batched re-measurement + one
+                    # transaction per channel, BEFORE the JSON write.
+                    if write_db and db_conn is not None:
+                        batched = dbwrite.compute_batched_params(
+                            channel_param_segments, frequency, s_freq,
+                            db_n_fft_sec, self.logger)
+                        dbwrite.write_channel_events(
+                            db_conn, run_id, 'spindle', ch, method_str,
+                            frequency[0], frequency[1], stages_key,
+                            channel_db_events, batched, rec_start,
+                            db_n_fft_sec, self.logger)
+                        self.logger.info(
+                            f"Wrote {len(channel_db_events)} spindle rows for "
+                            f"channel {ch} to the database")
+
                     stages_str = "".join(stage) if stage else "all"
                     if json_dir:
                         try:
@@ -366,10 +531,17 @@ class ParalEvents:
                         # legitimately had no spindles.
                         self.logger.error(f'Failed to process channel {ch}: {e}', exc_info=True)
 
+                        # In the direct-DB path, record the failure in
+                        # processing_status (success=0) instead of an error
+                        # sentinel JSON, so a resume re-runs only this channel.
+                        if write_db and db_conn is not None:
+                            dbwrite.record_channel_failure(
+                                db_conn, 'spindle', ch, method_str,
+                                frequency[0], frequency[1], stages_key, e)
                         # Write an error sentinel (not an empty list) so downstream
                         # import can tell a failed channel apart from one that
                         # legitimately had no spindles and re-run it.
-                        if json_dir and create_empty_json:
+                        elif json_dir and create_empty_json:
                             try:
                                 stages_str = "".join(stage) if stage else "all"
                                 ch_json_file = os.path.join(json_dir, f"spindles_{method_str}_{freq_str}_{stages_str}_{ch}.json")
@@ -378,7 +550,13 @@ class ParalEvents:
                                 self.logger.info(f"Wrote error-sentinel JSON for channel {ch} after failure")
                             except Exception as json_e:
                                 self.logger.error(f"Error creating sentinel JSON for channel {ch}: {json_e}")
-        
+
+        if write_db and db_conn is not None:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+
         # Save the new annotation file if needed
         if save_to_annotations and new_annotations is not None and all_spindles:
             try:
@@ -1168,7 +1346,7 @@ class ParalEvents:
                 'parameters': parameters,
                 'results': results_summary,
                 'timestamp': datetime.datetime.now().isoformat(),
-                'software_version': 'TurtleWave hdEEG GUI'
+                'software_version': dbwrite.provenance().get('turtlewave_version'),
             }
             
             with open(summary_file, 'w', encoding='utf-8') as f:
@@ -1255,11 +1433,20 @@ class ParalEvents:
                 CONSTRAINT event_chan_time UNIQUE (event_type, channel, start_time, method, freq_lower, freq_upper, stage)
             )''')
 
-            # Create tracking table for batch processing
+            # Create tracking table for batch processing. The primary key is the
+            # full detection scope so a resume can skip only channels completed
+            # for the same method/band/stage set; the scope columns default so
+            # the legacy (channel, event_type)-only CSV-import markers stay
+            # idempotent. Existing narrow-PK DBs are migrated in place by
+            # dbwrite.ensure_direct_write_schema.
             conn.execute('''
             CREATE TABLE IF NOT EXISTS processing_status (
-                channel TEXT,
-                event_type TEXT,
+                channel TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                method TEXT NOT NULL DEFAULT '',
+                freq_lower REAL NOT NULL DEFAULT 0,
+                freq_upper REAL NOT NULL DEFAULT 0,
+                stage TEXT NOT NULL DEFAULT '',
                 json_file TEXT,
                 processed BOOLEAN DEFAULT 0,
                 attempts INTEGER DEFAULT 0,
@@ -1267,7 +1454,7 @@ class ParalEvents:
                 success BOOLEAN DEFAULT 0,
                 error_message TEXT,
 
-                PRIMARY KEY (channel, event_type)
+                PRIMARY KEY (channel, event_type, method, freq_lower, freq_upper, stage)
             )''')
 
             # Per-cycle sleep-cycle structure (populated by ParalCycles).

@@ -6,9 +6,11 @@ import csv
 from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave as DetectSlowWave
+from turtlewave_hdEEG import dbwrite
 import json
 import datetime
 import logging
+import uuid as _uuid_mod
 
 
 class ParalSWA:
@@ -122,10 +124,13 @@ class ParalSWA:
                      reject_artifacts=True, reject_arousals=True, 
                      stage=None, 
                      cat=None,
-                     peak_thresh_sigma=None, 
+                     peak_thresh_sigma=None,
                      ptp_thresh_sigma=None,
                      save_to_annotations=False, json_dir=None,
-                     create_empty_json=True):
+                     create_empty_json=True,
+                     *, write_db=False, db_path=None, resume=False,
+                     run_params=None, replace_channels=None,
+                     event_type='slow_wave', citation=None, n_fft_sec=4):
         """
         Detect slow waves in the dataset while considering artifacts and arousals.
         
@@ -165,13 +170,38 @@ class ParalSWA:
             Whether to save detected slow waves to annotations
         json_dir : str or None
             Directory to save individual channel JSON files
-        
+        write_db : bool, keyword-only, default False
+            When True, write detected events straight into a SQLite database
+            (``db_path``) in addition to the JSON output, via the direct-write
+            path (deterministic uuid5 rows, detector-own morphology in the
+            ``det_*`` columns, batched re-measured amplitude/spectral columns,
+            per-scope ``processing_status`` tracking and a ``detection_runs``
+            provenance row). When False the behaviour is byte-identical to the
+            legacy JSON-only path.
+        db_path : str or None, keyword-only
+            Target SQLite database (or directory -> ``neural_events.db``).
+        resume : bool, keyword-only, default False
+            When True (and ``write_db``), channels already recorded as
+            ``success = 1`` for the same scope are skipped.
+        run_params : dict or None, keyword-only
+            Extra parameters merged into ``detection_runs.params_json``.
+        replace_channels : optional, keyword-only
+            Reserved for P3 (scoped re-detection); accepted, not yet wired.
+        event_type : str, keyword-only, default 'slow_wave'
+            Event type label used for DB rows / scope (``'k_complex'`` when a KC
+            caller delegates here).
+        citation : str or None, keyword-only
+            Literature citation for the provenance row; auto-resolved from the
+            method when None.
+        n_fft_sec : int, keyword-only, default 4
+            FFT window (seconds) for the batched spectral re-measurement.
+
         Returns
         -------
         list
             List of all detected slow waves
         """
-        import uuid    
+        import uuid
        
         self.logger.info(r"""
                ___    __,__,__,__, 
@@ -236,6 +266,75 @@ class ParalSWA:
         first_method = method[0] if isinstance(method, list) and len(method) > 0 else method
         if first_method == 'Ngo2015' and peak_thresh_sigma is not None and ptp_thresh_sigma is not None:
             self.logger.info(f"Using adaptive thresholds: peak_thresh_sigma={peak_thresh_sigma}, ptp_thresh_sigma={ptp_thresh_sigma}")
+
+        # ------------------------------------------------------------------
+        # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
+        # ------------------------------------------------------------------
+        stages_key = "".join(stage) if stage else "all"
+        db_conn = None
+        run_id = None
+        db_skip = set()
+        rec_start = None
+        s_freq = None
+        if write_db:
+            if db_path is None:
+                self.logger.error("write_db=True but db_path is None; skipping DB writes")
+                write_db = False
+            else:
+                try:
+                    if os.path.isdir(db_path):
+                        db_path = os.path.join(db_path, 'neural_events.db')
+                    self.initialize_sqlite_database(db_path)
+                    db_conn = dbwrite.open_write_connection(db_path)
+                    dbwrite.ensure_direct_write_schema(db_conn, self.logger)
+                    try:
+                        s_freq = self.dataset.header['s_freq']
+                    except Exception:
+                        s_freq = None
+                    try:
+                        rec_start = self.dataset.header.get('start_time')
+                    except Exception:
+                        rec_start = None
+                    run_id = str(_uuid_mod.uuid4())
+                    params_dict = {
+                        'frequency': list(frequency),
+                        'trough_duration': list(trough_duration),
+                        'neg_peak_thresh': neg_peak_thresh,
+                        'p2p_thresh': p2p_thresh,
+                        'min_dur': min_dur, 'max_dur': max_dur,
+                        'detrend': detrend, 'polar': polar,
+                        'peak_thresh_sigma': peak_thresh_sigma,
+                        'ptp_thresh_sigma': ptp_thresh_sigma,
+                        'method': method_str,
+                        'reject_artifacts': reject_artifacts,
+                        'reject_arousals': reject_arousals,
+                        'n_fft_sec': n_fft_sec,
+                    }
+                    if run_params:
+                        params_dict.update(run_params)
+                    run_citation = citation or dbwrite.method_citation(
+                        "_".join(method) if isinstance(method, list) else str(method))
+                    dbwrite.record_run(
+                        db_conn, run_id, event_type, method_str, run_citation,
+                        json.dumps(params_dict, default=str),
+                        ref_chan, polar, stage, reject_artifacts, reject_arousals)
+                    if resume:
+                        db_skip = dbwrite.resume_skip_channels(
+                            db_conn, event_type, method_str,
+                            frequency[0], frequency[1], stages_key)
+                        if db_skip:
+                            self.logger.info(
+                                f"Resume: skipping {len(db_skip)} already-completed "
+                                f"channels for this scope")
+                except Exception as e:
+                    self.logger.error(f"Could not set up direct-DB write: {e}", exc_info=True)
+                    write_db = False
+                    if db_conn is not None:
+                        try:
+                            db_conn.close()
+                        except Exception:
+                            pass
+                        db_conn = None
 
 
         # Create custom annotation file name if saving to annotations
@@ -319,18 +418,24 @@ class ParalSWA:
             return None
 
         for ch in chan:
+                if write_db and resume and ch in db_skip:
+                    self.logger.info(f"Resume: channel {ch} already complete for this scope; skipping")
+                    continue
                 try:
                     self.logger.info(f'Reading data for channel {ch}')
-                    
+
                     # Fetch segments, filtering based on stage and artifacts
-                    segments = fetch(self.dataset, self.annotations, cat=cat, stage=stage, cycle=None, 
+                    segments = fetch(self.dataset, self.annotations, cat=cat, stage=stage, cycle=None,
                                   reject_epoch=True, reject_artf=reject_types)
                     segments.read_data(ch, ref_chan, grp_name=grp_name)
 
                     # Process each detection method
                     channel_slow_waves = []
                     channel_json_slow_waves = []
-                    
+                    # Direct-write accumulators (populated only when write_db).
+                    channel_db_events = []
+                    channel_param_segments = []
+
                     ## Loop through methods
                     for m, meth in enumerate(method):
                         self.logger.info(f"Applying method: {meth}")
@@ -389,8 +494,36 @@ class ParalSWA:
                                 # Add channel information
                                 sw['chan'] = ch
                                 channel_slow_waves.append(sw)
-                                
-                                # Add to JSON 
+
+                                # Assemble the direct-DB event: deterministic
+                                # uuid5, single resolved stage, detector-own
+                                # morphology, and an in-memory window (from the
+                                # data the detector saw, i.e. processed_seg) for
+                                # batched re-measurement.
+                                if write_db:
+                                    sw_start = float(sw.get('start', 0))
+                                    sw_end = float(sw.get('end', 0))
+                                    sw_dur = float(sw.get('dur', sw_end - sw_start))
+                                    single_stage = _stage_at(sw_start)
+                                    if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
+                                        single_stage = stage[0]
+                                    morph = dbwrite.event_det_morphology(sw)
+                                    ev = {
+                                        'uuid': dbwrite.event_uuid5(
+                                            event_type, ch, sw_start, meth,
+                                            frequency[0], frequency[1], single_stage),
+                                        'start_time': sw_start, 'end_time': sw_end,
+                                        'duration': sw_dur, 'stage': single_stage,
+                                        'method': meth,
+                                    }
+                                    ev.update(morph)
+                                    channel_db_events.append(ev)
+                                    channel_param_segments.append(
+                                        dbwrite.make_param_segment(
+                                            processed_seg['data'], sw_start, sw_end,
+                                            event_type, single_stage, ch))
+
+                                # Add to JSON
                                 if json_dir:
                                     # Extract key properties in a serializable format
                                     sw_data = {
@@ -425,7 +558,22 @@ class ParalSWA:
                                     
                     all_slow_waves.extend(channel_slow_waves)
                     self.logger.info(f"Found {len(channel_slow_waves)} slow waves in channel {ch}")
-                    
+
+                    # Direct-DB write: one batched re-measurement + one
+                    # transaction per channel, BEFORE the JSON write.
+                    if write_db and db_conn is not None:
+                        batched = dbwrite.compute_batched_params(
+                            channel_param_segments, frequency, s_freq,
+                            n_fft_sec, self.logger)
+                        dbwrite.write_channel_events(
+                            db_conn, run_id, event_type, ch, method_str,
+                            frequency[0], frequency[1], stages_key,
+                            channel_db_events, batched, rec_start,
+                            n_fft_sec, self.logger)
+                        self.logger.info(
+                            f"Wrote {len(channel_db_events)} {event_type} rows for "
+                            f"channel {ch} to the database")
+
                     stages_str = "".join(stage) if stage else "all"
                     if json_dir :
                         try:
@@ -448,10 +596,17 @@ class ParalSWA:
                         # a traceback so it is not mistaken for a channel that
                         # legitimately had no slow waves.
                         self.logger.error(f'Failed to process channel {ch}: {e}', exc_info=True)
+                        # In the direct-DB path, record the failure in
+                        # processing_status (success=0) instead of an error
+                        # sentinel JSON, so a resume re-runs only this channel.
+                        if write_db and db_conn is not None:
+                            dbwrite.record_channel_failure(
+                                db_conn, event_type, ch, method_str,
+                                frequency[0], frequency[1], stages_key, e)
                         # Write an error sentinel (not an empty list) so downstream
                         # import can tell a failed channel apart from one that
                         # legitimately had no slow waves and re-run it.
-                        if json_dir and create_empty_json:
+                        elif json_dir and create_empty_json:
                             try:
                                 stages_str = "".join(stage) if stage else "all"
                                 ch_json_file = os.path.join(json_dir,
@@ -461,7 +616,13 @@ class ParalSWA:
                                 self.logger.info(f"Wrote error-sentinel JSON for channel {ch} after failure")
                             except Exception as json_e:
                                 self.logger.error(f"Error creating sentinel JSON for channel {ch}: {json_e}")
-        
+
+        if write_db and db_conn is not None:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+
         # Save the new annotation file if needed
         if save_to_annotations and new_annotations is not None and all_slow_waves:
             try:
@@ -1157,7 +1318,7 @@ class ParalSWA:
                 'parameters': parameters,
                 'results': results_summary,
                 'timestamp': datetime.datetime.now().isoformat(),
-                'software_version': 'TurtleWave hdEEG GUI'
+                'software_version': dbwrite.provenance().get('turtlewave_version'),
             }
             
             with open(summary_file, 'w', encoding='utf-8') as f:
@@ -1249,11 +1410,18 @@ class ParalSWA:
                     CONSTRAINT event_chan_time UNIQUE (event_type, channel, start_time, method, freq_lower, freq_upper, stage)
                 )''')
 
-                # Create tracking table for batch processing
+                # Create tracking table for batch processing. Primary key is the
+                # full detection scope (see dbwrite.ensure_direct_write_schema);
+                # scope columns default so legacy narrow CSV-import markers stay
+                # idempotent, and existing narrow-PK DBs migrate in place.
                 conn.execute('''
                 CREATE TABLE IF NOT EXISTS processing_status (
-                    channel TEXT,
-                    event_type TEXT,
+                    channel TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT '',
+                    freq_lower REAL NOT NULL DEFAULT 0,
+                    freq_upper REAL NOT NULL DEFAULT 0,
+                    stage TEXT NOT NULL DEFAULT '',
                     json_file TEXT,
                     processed BOOLEAN DEFAULT 0,
                     attempts INTEGER DEFAULT 0,
@@ -1261,7 +1429,7 @@ class ParalSWA:
                     success BOOLEAN DEFAULT 0,
                     error_message TEXT,
 
-                    PRIMARY KEY (channel, event_type)
+                    PRIMARY KEY (channel, event_type, method, freq_lower, freq_upper, stage)
                 )''')
 
                 # Per-cycle sleep-cycle structure (populated by ParalCycles).
