@@ -17,6 +17,7 @@ from .cycleprocessor import (ParalCycles, detect_cycles,
                              finalize_cycles_and_durations)
 from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
                          ImprovedDetectKComplex)
+from .dbwrite import export_events_to_csv, default_csv_path
 
 # Cycle plotting pulls in matplotlib; keep the import defensive so a missing or
 # broken matplotlib never breaks `import turtlewave_hdEEG` (mirrors the optional

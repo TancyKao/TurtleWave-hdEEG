@@ -35,6 +35,7 @@ JSON + CSV pipeline is unaffected.
 """
 
 import os
+import csv
 import uuid
 import sqlite3
 import subprocess
@@ -795,3 +796,398 @@ def record_channel_failure(conn, event_type, channel, method, freq_lower,
         conn.commit()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# DB -> CSV export (P2, stage 2)
+# ---------------------------------------------------------------------------
+
+# CSV filename prefix per event type. These MATCH the prefixes the example
+# driver scripts pass to ``export_*_parameters_to_csv`` / ``import_parameters_
+# csv_to_database`` so a DB-exported CSV re-imports through the *existing*
+# importer without a naming mismatch. The importer parses ``method`` from
+# ``filename.split('_')[2]``, so the prefix must occupy exactly ``parts[0:2]``.
+_CSV_PREFIX = {
+    'spindle': 'spindle_parameters',
+    'slow_wave': 'sw_parameters',
+    'k_complex': 'kc_parameters',
+}
+
+# Single source of truth for the DB -> CSV column layout. Header order, the
+# SELECT column list and per-row emission are ALL driven from this one list so
+# they can never drift out of alignment. Each entry is
+# ``(csv_header, source)`` where ``source`` is one of:
+#
+# * ``('seq',)``                 -- synthesised 1-based segment index.
+# * ``('const', value)``         -- a literal constant (e.g. Stitches = 0).
+# * ``('db', db_column, gated)`` -- value from the ``events`` row; ``gated``
+#   columns are only selected when present in the table (older DBs may predate
+#   ``det_*``) and export '' when absent. NULL always exports '' (blank cell ->
+#   pandas NaN -> importer NULL).
+#
+# The first block (through 'UUID') reproduces the legacy JSON->CSV header
+# byte-for-byte EXCEPT for the added 'Method' column, which carries the truthful
+# ``events.method`` (incl. slash-methods) so a re-import never has to fall back
+# to the lossy ``filename.split('_')[2]`` parse. The importer reads 'Method' by
+# name; legacy JSON-exported CSVs (which lack it) are unaffected. The trailing
+# ``det_*`` columns are additive detector-own morphology, ignored by the
+# importer.
+_EXPORT_COLUMNS = [
+    ('Segment index', ('seq',)),
+    ('Start time', ('db', 'start_time', False)),
+    ('Start time (HH:MM:SS)', ('db', 'start_time_hms', False)),
+    ('End time', ('db', 'end_time', False)),
+    ('Stitches', ('const', 0)),
+    ('Stage', ('db', 'stage', False)),
+    ('Cycle', ('db', 'cycle', False)),
+    ('Event type', ('db', 'event_type', False)),
+    ('Method', ('db', 'method', False)),
+    ('Channel', ('db', 'channel', False)),
+    ('Duration (s)', ('db', 'duration', False)),
+    ('Min. amplitude (uV)', ('db', 'min_amp', False)),
+    ('Max. amplitude (uV)', ('db', 'max_amp', False)),
+    ('Peak-to-peak amplitude (uV)', ('db', 'peak2peak_amp', False)),
+    ('RMS (uV)', ('db', 'rms', False)),
+    ('Power (uV^2)', ('db', 'power', False)),
+    ('Peak power frequency (Hz)', ('db', 'peak_power_freq', False)),
+    ('Energy (uV^2s)', ('db', 'energy', False)),
+    ('Peak energy frequency (Hz)', ('db', 'peak_energy_freq', False)),
+    ('UUID', ('db', 'uuid', False)),
+    ('det_trough (uV)', ('db', 'det_trough', True)),
+    ('det_peak (uV)', ('db', 'det_peak', True)),
+    ('det_ptp (uV)', ('db', 'det_ptp', True)),
+    ('det_trough_time (s)', ('db', 'det_trough_time', True)),
+    ('det_peak_time (s)', ('db', 'det_peak_time', True)),
+]
+
+# Canonical sleep-stage vocabulary, matching the rest of the codebase
+# (eventprocessor / swprocessor density counts). Longest-first so a greedy split
+# of a joined scope token is unambiguous (all NREM* start with 'N', 'REM' with
+# 'R', 'Wake' with 'W' -- no stage is a prefix of another under this order).
+_STAGE_VOCAB = ['NREM1', 'NREM2', 'NREM3', 'Wake', 'REM']
+
+
+def split_stage_token(stage):
+    """Normalise a stage scope argument into a list of constituent stages.
+
+    Accepts the three forms the pipeline uses for a run's stage set:
+
+    * a list/tuple (returned as a list of strings),
+    * a single stage string (e.g. ``'NREM2'``),
+    * a joined scope token (e.g. ``'NREM2NREM3'``, the ``''.join(stages)`` form
+      used in filenames and ``processing_status``), which is greedily split
+      against :data:`_STAGE_VOCAB`.
+
+    Parameters
+    ----------
+    stage : list or tuple or str or None
+        Stage set in any of the accepted forms. ``None`` returns ``None``.
+
+    Returns
+    -------
+    list of str or None
+        Constituent stage labels, or ``None`` when ``stage`` is ``None``.
+
+    Raises
+    ------
+    ValueError
+        When a string cannot be fully decomposed into known stages (so a
+        malformed token fails loudly rather than silently matching nothing).
+    """
+    if stage is None:
+        return None
+    if isinstance(stage, (list, tuple)):
+        return [str(s) for s in stage]
+    s = str(stage)
+    if s in _STAGE_VOCAB:
+        return [s]
+    # Greedy longest-first decomposition of a joined token.
+    remaining = s
+    out = []
+    while remaining:
+        for tok in _STAGE_VOCAB:
+            if remaining.startswith(tok):
+                out.append(tok)
+                remaining = remaining[len(tok):]
+                break
+        else:
+            raise ValueError(
+                f"Cannot split stage token {s!r} into known stages "
+                f"{_STAGE_VOCAB}; pass an explicit list of stages instead.")
+    return out
+
+
+def _fmt_freq_component(value):
+    """Format one band bound for a CSV filename (integral floats drop ``.0``).
+
+    Parameters
+    ----------
+    value : float or int
+        Band bound in Hz.
+
+    Returns
+    -------
+    str
+        ``'11'`` for ``11.0``, ``'0.5'`` for ``0.5``.
+    """
+    v = float(value)
+    return str(int(v)) if v.is_integer() else repr(v)
+
+
+def _fmt_freq_component(value):
+    """Format one band bound for a CSV filename (integral floats drop ``.0``).
+
+    Parameters
+    ----------
+    value : float or int
+        Band bound in Hz.
+
+    Returns
+    -------
+    str
+        ``'11'`` for ``11.0``, ``'0.5'`` for ``0.5``.
+    """
+    v = float(value)
+    return str(int(v)) if v.is_integer() else repr(v)
+
+
+def default_csv_path(output_dir, event_type, method, frequency, stage):
+    """Build the standard parameter-CSV path for a detection scope.
+
+    Reproduces the exact filename the example driver scripts pass to the legacy
+    exporter, so the file re-imports through
+    ``import_parameters_csv_to_database`` unchanged:
+    ``{prefix}_{method}_{lo}-{hi}Hz_{stages_joined}.csv``.
+
+    Parameters
+    ----------
+    output_dir : str
+        Directory to place the CSV in.
+    event_type : str
+        Event type (``'spindle'`` / ``'slow_wave'`` / ``'k_complex'``); selects
+        the filename prefix.
+    method : str
+        Detection method (``'/'`` is replaced with ``'_'`` for filesystem
+        safety, matching the driver scripts).
+    frequency : tuple of float
+        Detection band ``(lo, hi)`` in Hz.
+    stage : list of str or str
+        Stage set of the run; joined with no separator (``['NREM2','NREM3']``
+        -> ``'NREM2NREM3'``).
+
+    Returns
+    -------
+    str
+        Absolute or relative path following the naming convention.
+    """
+    prefix = _CSV_PREFIX.get(str(event_type), f"{event_type}_parameters")
+    method_token = str(method).replace('/', '_')
+    lo, hi = frequency
+    freq_token = f"{_fmt_freq_component(lo)}-{_fmt_freq_component(hi)}Hz"
+    # Normalise any accepted stage form (list, single, or joined token) to the
+    # canonical joined token, so the filename is identical whichever form the
+    # caller passes.
+    stages = split_stage_token(stage)
+    stage_token = "".join(stages) if stages else ''
+    fname = f"{prefix}_{method_token}_{freq_token}_{stage_token}.csv"
+    return os.path.join(output_dir, fname)
+
+
+def export_events_to_csv(db_path, event_type, method, frequency, stage,
+                         csv_file=None, output_dir=None, append=False,
+                         logger=None):
+    """Export events for one detection scope from the DB to a parameter CSV.
+
+    On-demand DB -> CSV export for the direct-write path (``write_db=True``).
+    SELECTs the rows for one run scope (``event_type`` / ``method`` / band /
+    ``stage`` set) and writes them in the SAME shape and column names the legacy
+    JSON -> CSV exporters produce, so downstream stats keep a flat-file option
+    and the file round-trips back through
+    ``import_parameters_csv_to_database`` with ``added = 0`` when the DB was
+    populated by the direct path.
+
+    The legacy amplitude/spectral columns (``Min. amplitude (uV)`` ...
+    ``Peak energy frequency (Hz)``) carry the **re-measured** values
+    (``events.min_amp`` etc., computed once per channel by
+    :func:`compute_batched_params`) -- the same quantity the legacy exporter's
+    ``event_params`` re-read produced, so column semantics are unchanged. The
+    detector's OWN morphology is exported additionally in the trailing
+    ``det_*`` columns; those are ignored by the importer and never overwrite the
+    legacy columns.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database populated by the direct-write path.
+    event_type : str
+        Event type to export (``'spindle'`` / ``'slow_wave'`` / ``'k_complex'``).
+    method : str
+        Detection method of the run scope. Matched against ``events.method``
+        (the per-event method stored by the direct path). ``'/'`` is preserved
+        for the DB match but replaced with ``'_'`` in the default filename.
+    frequency : tuple of float or None
+        Band ``(lo, hi)`` in Hz used to filter and to name the file. When
+        ``None`` the band filter is skipped and the band is inferred from the
+        matched rows for the filename.
+    stage : list of str or str or None
+        Stage set of the run. Filters ``events.stage IN (...)`` (each row holds
+        its single resolved stage) and names the file. Accepts a list
+        (``['NREM2','NREM3']``), a single stage (``'NREM2'``) or the joined
+        scope token (``'NREM2NREM3'``) used in filenames -- the latter is split
+        via :func:`split_stage_token`. When ``None`` no stage filter is applied.
+    csv_file : str or None
+        Explicit output path. When ``None`` a path is built with
+        :func:`default_csv_path` under ``output_dir``.
+    output_dir : str or None
+        Directory for the default filename when ``csv_file`` is ``None``.
+        Defaults to the directory of ``db_path``.
+    append : bool
+        When ``True`` and ``csv_file`` already exists, append data rows without
+        rewriting the header (for accumulating multiple scopes into one file).
+        Default ``False`` (overwrite).
+    logger : logging.Logger or None
+        Optional logger for progress/warnings.
+
+    Returns
+    -------
+    str or None
+        Path to the written CSV, or ``None`` when the scope is genuinely empty
+        (no events of this type/method/band exist at all). No file is written in
+        that case.
+
+    Raises
+    ------
+    ValueError
+        When the stage filter excludes every row but the same type/method/band
+        DOES have events under other stages -- i.e. a stage-token mismatch,
+        surfaced loudly instead of silently writing nothing. Also propagates
+        :func:`split_stage_token`'s error for a malformed stage token.
+
+    Notes
+    -----
+    This is an ADDITION to, not a replacement for, the JSON-based
+    ``export_*_parameters_to_csv`` methods, which remain the path for
+    ``write_db=False`` runs. A density export from the DB is intentionally out
+    of scope here; density stays on its dedicated path.
+
+    Header order, the SELECT column list and per-row values are all driven from
+    the single :data:`_EXPORT_COLUMNS` layout, so they cannot drift apart.
+    """
+    stage_list = split_stage_token(stage)  # may raise on a malformed token
+
+    conn = sqlite3.connect(db_path)
+    try:
+        present = _table_columns(conn, 'events')
+        if not present:
+            if logger is not None:
+                logger.warning(f"No events table in {db_path}; nothing to export")
+            return None
+
+        # Resolve which DB columns to SELECT from the single-source layout,
+        # dropping presence-gated columns an older DB predates.
+        db_columns = []
+        for _header, source in _EXPORT_COLUMNS:
+            if source[0] != 'db':
+                continue
+            db_col, gated = source[1], source[2]
+            if (not gated) or (db_col in present):
+                if db_col not in db_columns:
+                    db_columns.append(db_col)
+
+        where = ["event_type = ?", "method = ?"]
+        params = [str(event_type), str(method)]
+        if frequency is not None:
+            where.append("freq_lower = ? AND freq_upper = ?")
+            params.extend([float(frequency[0]), float(frequency[1])])
+        if stage_list is not None:
+            placeholders = ", ".join(["?"] * len(stage_list))
+            where.append(f"stage IN ({placeholders})")
+            params.extend(stage_list)
+
+        sql = (f"SELECT {', '.join(db_columns)} FROM events "
+               f"WHERE {' AND '.join(where)} ORDER BY channel, start_time")
+        col_index = {name: i for i, name in enumerate(db_columns)}
+        rows = conn.execute(sql, params).fetchall()
+
+        # Distinguish a genuinely-empty scope (return None) from a stage-token
+        # mismatch that would otherwise write nothing silently (raise).
+        if not rows and stage_list is not None:
+            noscope_where = ["event_type = ?", "method = ?"]
+            noscope_params = [str(event_type), str(method)]
+            if frequency is not None:
+                noscope_where.append("freq_lower = ? AND freq_upper = ?")
+                noscope_params.extend([float(frequency[0]), float(frequency[1])])
+            n_without_stage = conn.execute(
+                f"SELECT COUNT(*) FROM events WHERE {' AND '.join(noscope_where)}",
+                noscope_params).fetchone()[0]
+            if n_without_stage > 0:
+                avail = [r[0] for r in conn.execute(
+                    f"SELECT DISTINCT stage FROM events "
+                    f"WHERE {' AND '.join(noscope_where)}", noscope_params)]
+                raise ValueError(
+                    f"Stage filter {stage_list} matched 0 of {n_without_stage} "
+                    f"{event_type}/{method} events; available stages in this "
+                    f"scope are {sorted(str(s) for s in avail)}. Pass a stage "
+                    f"set that intersects them (a list is accepted).")
+    finally:
+        conn.close()
+
+    if not rows:
+        if logger is not None:
+            logger.info(
+                f"No {event_type} rows for method={method}, freq={frequency}, "
+                f"stage={stage} in {db_path}; scope is empty, no CSV written")
+        return None
+
+    # Resolve the output path.
+    if csv_file is None:
+        out_dir = output_dir or os.path.dirname(os.path.abspath(db_path))
+        freq_for_name = frequency
+        if freq_for_name is None:
+            # Infer band from the first row for the filename.
+            fl = rows[0][col_index['freq_lower']] if 'freq_lower' in col_index else None
+            fu = rows[0][col_index['freq_upper']] if 'freq_upper' in col_index else None
+            freq_for_name = (fl if fl is not None else 0,
+                             fu if fu is not None else 0)
+        csv_file = default_csv_path(out_dir, event_type, method,
+                                    freq_for_name, stage_list)
+
+    csv_dir = os.path.dirname(csv_file)
+    if csv_dir and not os.path.exists(csv_dir):
+        os.makedirs(csv_dir, exist_ok=True)
+
+    write_header = not (append and os.path.exists(csv_file))
+    mode = 'a' if (append and os.path.exists(csv_file)) else 'w'
+
+    def _value(source, row, seq):
+        """Resolve one column's value from its single-source spec."""
+        kind = source[0]
+        if kind == 'seq':
+            return seq
+        if kind == 'const':
+            return source[1]
+        # ('db', db_col, gated): '' for absent (old DB) or NULL.
+        db_col = source[1]
+        if db_col not in col_index:
+            return ''
+        val = row[col_index[db_col]]
+        return '' if val is None else val
+
+    header = [h for h, _ in _EXPORT_COLUMNS]
+    with open(csv_file, mode, newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if write_header:
+            # Single provenance prefix line, mirroring the legacy 'Wonambi vX'
+            # line. Skipped by the importer (which locates the header by the
+            # 'Start time' cell) and must not itself contain 'Start time'.
+            prov = provenance()
+            writer.writerow([
+                f"turtlewave_hdEEG DB export v{prov['turtlewave_version']}"])
+            writer.writerow(header)
+        for i, row in enumerate(rows, start=1):
+            writer.writerow([_value(source, row, i)
+                             for _header, source in _EXPORT_COLUMNS])
+
+    if logger is not None:
+        logger.info(f"Exported {len(rows)} {event_type} rows to {csv_file}")
+    return csv_file

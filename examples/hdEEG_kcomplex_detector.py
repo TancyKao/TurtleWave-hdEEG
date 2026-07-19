@@ -10,9 +10,25 @@ Override `test_stages` to also include N3 if needed.
 """
 
 import os
+import argparse as _ap
 
 from wonambi.dataset import Dataset as WonambiDataset
 from turtlewave_hdEEG import ParalKC, CustomAnnotations
+
+# Optional CLI overrides (backward-compatible: no args => unchanged behaviour).
+# Used by the eeg_review_gui "Export Re-run Package" QC handoff.
+_p = _ap.ArgumentParser(add_help=False)
+_p.add_argument('--annot', default=None,
+                help='override annotation XML (e.g. QC sidecar)')
+_p.add_argument('--channels', default=None,
+                help='CSV of channels to detect (no header, one per row)')
+_p.add_argument('--write-db', dest='write_db', action='store_true',
+                help='write events straight to neural_events.db and skip the '
+                     'JSON->CSV->import steps (default: legacy JSON+CSV path)')
+_p.add_argument('--resume', dest='resume', action='store_true',
+                help='with --write-db, skip channels already completed for this '
+                     'exact method/band/stage scope in the database')
+_cli, _ = _p.parse_known_args()
 
 
 # 1. Paths --------------------------------------------------------------
@@ -21,7 +37,7 @@ datafilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.set"
 annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 
 data_file = os.path.join(root_dir, datafilename)
-annot_file = os.path.join(root_dir, "wonambi", annotfilename)
+annot_file = _cli.annot if _cli.annot else os.path.join(root_dir, "wonambi", annotfilename)
 json_dir = os.path.join(root_dir, "wonambi", "kc_results")
 db_path = os.path.join(root_dir, "wonambi", "neural_events.db")
 
@@ -39,6 +55,10 @@ event_processor = ParalKC(dataset=data, annotations=annot)
 # 4. Parameters --------------------------------------------------------
 test_method = 'AASM/Massimini2004'        # or 'Massimini2004'
 test_channels = ['E110', 'E111', 'E112']
+if _cli.channels:
+    from turtlewave_hdEEG.utils import read_channels_from_csv
+    test_channels = read_channels_from_csv(_cli.channels)
+    print(f"Channels from --channels: {len(test_channels)}")
 test_stages = ['NREM2']                   # default; add 'NREM3' if needed
 test_frequency = (0.1, 4.0)
 test_trough_duration = (0.25, 1.0)
@@ -65,6 +85,10 @@ kcomplexes = event_processor.detect_kcomplexes(
     save_to_annotations=False,
     json_dir=json_dir,
     create_empty_json=True,
+    # Direct-to-DB path (opt-in). Off by default -> legacy behaviour unchanged.
+    write_db=_cli.write_db,
+    db_path=db_path if _cli.write_db else None,
+    resume=_cli.resume,
 )
 
 
@@ -79,21 +103,31 @@ param_csv = os.path.join(
 density_csv = os.path.join(
     json_dir, f'kc_density_{method_str}_{freq_range}_{stages_str}.csv')
 
-event_processor.export_kc_parameters_to_csv(
-    json_input=json_dir, csv_file=param_csv, file_pattern=file_pattern,
-    frequency=test_frequency,
-)
-event_processor.export_kc_density_to_csv(
-    json_input=json_dir, csv_file=density_csv, stage=test_stages,
-    file_pattern=file_pattern,
-)
-event_processor.initialize_sqlite_database(db_path)
-event_processor.import_parameters_csv_to_database(
-    csv_file=param_csv, db_path=db_path, method=test_method)
+if _cli.write_db:
+    # Direct-to-DB run: K-complexes are already in neural_events.db. Skip the
+    # JSON->CSV->import steps. A flat CSV can be produced on demand from the DB:
+    #   from turtlewave_hdEEG import export_events_to_csv
+    #   export_events_to_csv(db_path, 'k_complex', test_method, test_frequency,
+    #                        test_stages, output_dir=json_dir)
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+    print(f"K-complex events written directly to DB: {db_path}")
+    print(f"ALL DONE (direct-to-DB)")
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+else:
+    event_processor.export_kc_parameters_to_csv(
+        json_input=json_dir, csv_file=param_csv, file_pattern=file_pattern,
+        frequency=test_frequency,
+    )
+    event_processor.export_kc_density_to_csv(
+        json_input=json_dir, csv_file=density_csv, stage=test_stages,
+        file_pattern=file_pattern,
+    )
+    event_processor.initialize_sqlite_database(db_path)
+    event_processor.import_parameters_csv_to_database(
+        csv_file=param_csv, db_path=db_path, method=test_method)
 
-
-print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
-print(f"K-complex parameters saved: {param_csv}")
-print(f"K-complex density saved:    {density_csv}")
-print(f"Imported into database:     {db_path}")
-print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+    print(f"K-complex parameters saved: {param_csv}")
+    print(f"K-complex density saved:    {density_csv}")
+    print(f"Imported into database:     {db_path}")
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

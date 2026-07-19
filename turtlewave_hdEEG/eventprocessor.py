@@ -1773,14 +1773,26 @@ class ParalEvents:
                 db_columns.append('freq_lower')
                 db_columns.append('freq_upper')
                 
-                # Extract method from filename if possible
-                method = "unknown"
-                if "_" in filename:
-                    parts = filename.split('_')
-                    if len(parts) > 2:
-                        # Typically the format is spindle_parameters_METHOD_freq_stages.csv
-                        method = parts[2]
-                
+                # Resolve method with precedence: a truthful 'Method' CSV column
+                # (written by the DB export; preserves slash-methods like
+                # 'AASM/Massimini2004') over the lossy filename parse
+                # (filename.split('_')[2] mangles slash-methods to 'AASM' and
+                # would corrupt events.method on an INSERT OR REPLACE re-import).
+                # Legacy JSON-exported CSVs have no 'Method' column, so they keep
+                # the historical filename-parse behaviour unchanged.
+                method = None
+                if 'Method' in df.columns:
+                    method_vals = df['Method'].dropna()
+                    if len(method_vals) > 0:
+                        method = str(method_vals.iloc[0])
+                if method is None:
+                    method = "unknown"
+                    if "_" in filename:
+                        parts = filename.split('_')
+                        if len(parts) > 2:
+                            # Typically the format is spindle_parameters_METHOD_freq_stages.csv
+                            method = parts[2]
+
                 df['method'] = method
                 existing_columns.append('method')
                 db_columns.append('method')

@@ -42,6 +42,22 @@ from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
 from turtlewave_hdEEG import ParalEvents, CustomAnnotations
 import logging
+import argparse as _ap
+
+# Optional CLI overrides (backward-compatible: no args => unchanged behaviour).
+# Used by the eeg_review_gui "Export Re-run Package" QC handoff.
+_p = _ap.ArgumentParser(add_help=False)
+_p.add_argument('--annot', default=None,
+                help='override annotation XML (e.g. QC sidecar)')
+_p.add_argument('--channels', default=None,
+                help='CSV of channels to detect (no header, one per row)')
+_p.add_argument('--write-db', dest='write_db', action='store_true',
+                help='write events straight to neural_events.db and skip the '
+                     'JSON->CSV->import steps (default: legacy JSON+CSV path)')
+_p.add_argument('--resume', dest='resume', action='store_true',
+                help='with --write-db, skip channels already completed for this '
+                     'exact method/band/stage scope in the database')
+_cli, _ = _p.parse_known_args()
 
 # 1. Define the file paths for the dataset and annotations
 # The root directory should contain the EEG dataset and the wonambi directory for annotations.
@@ -60,7 +76,7 @@ annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 # The annotations are in the 'wonambi' subdirectory.
 # The JSON files are in the 'wonambi'/'spindle_results' subdirectory.
 data_file = os.path.join(root_dir, datafilename)
-annot_file = os.path.join(root_dir, "wonambi",annotfilename)
+annot_file = _cli.annot if _cli.annot else os.path.join(root_dir, "wonambi",annotfilename)
 json_dir = os.path.join(root_dir, "wonambi", "spindle_results")
 db_path = os.path.join(root_dir, "wonambi",'neural_events.db')
 
@@ -80,6 +96,9 @@ event_processor = ParalEvents(
 # 4. Custom define parameters
 test_method = 'Moelle2011' # 'Moelle2011', Ferrarelli2007
 test_channels = ['E110','E111','E112']  # Channels
+if _cli.channels:
+    test_channels = read_channels_from_csv(_cli.channels)
+    print(f"Channels from --channels: {len(test_channels)}")
 test_stages = ['NREM2','NREM3'] # ['NREM2', 'NREM3']
 test_frequency = (11, 13)  # Frequency range for spindles
 
@@ -92,11 +111,16 @@ spindles = event_processor.detect_spindles(
     frequency            = test_frequency,
     duration             = (0.5, 3),
     stage                = test_stages,
-    reject_artifacts     = True, 
+    reject_artifacts     = True,
     reject_arousals      = False,
     cat                  = (1, 1, 1, 0),# concatenate within and between stages, cycles separate
     save_to_annotations  = False, # save to annotations
-    json_dir             = json_dir
+    json_dir             = json_dir,
+    # Direct-to-DB path (opt-in). When --write-db is not passed these are
+    # write_db=False / resume=False, so behaviour is byte-identical to before.
+    write_db             = _cli.write_db,
+    db_path              = db_path if _cli.write_db else None,
+    resume               = _cli.resume,
 )
 
 """ 0 means no concatenation, 1 means concatenation
@@ -114,38 +138,44 @@ stages_str = "".join(test_stages)
 # for selecting proper json files
 file_pattern = f"spindles_{test_method}_{freq_range}_{stages_str}"
 
-# 6. Test the new SQLite parameter calculation and storage
-# print("\nCalculating and storing parameters in SQLite database...")
+if _cli.write_db:
+    # Direct-to-DB run: events are already in neural_events.db (with det_* and
+    # spectral columns and provenance). The JSON->CSV->import steps are not
+    # needed. A flat CSV can still be produced on demand from the DB:
+    #   from turtlewave_hdEEG import export_events_to_csv
+    #   export_events_to_csv(db_path, 'spindle', test_method, test_frequency,
+    #                        test_stages, output_dir=json_dir)
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+    print(f"Spindle events written directly to DB: {db_path}")
+    print(f"ALL DONE (direct-to-DB)")
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+else:
+    # 6. Test the new SQLite parameter calculation and storage
+    # print("\nCalculating and storing parameters in SQLite database...")
 
-# Initialize the database
-#event_processor.initialize_sqlite_database(db_path)
+    # Initialize the database
+    #event_processor.initialize_sqlite_database(db_path)
 
-
-
-param2CSV = event_processor.export_spindle_parameters_to_csv(
-    json_input   = json_dir,  
-    csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
-    file_pattern = file_pattern  # Pattern to match JSON files
-)
-
-
-
-
-density2CSV = event_processor.export_spindle_density_to_csv(
-    json_input   = json_dir,  
-    csv_file     = os.path.join(json_dir, f'spindle_density_{test_method}_{freq_range}_{stages_str}.csv'),
-    stage        = test_stages,
-    file_pattern = file_pattern
-)
-
-csv2db = event_processor.import_parameters_csv_to_database(
-    csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
-    db_path      = db_path
+    param2CSV = event_processor.export_spindle_parameters_to_csv(
+        json_input   = json_dir,
+        csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
+        file_pattern = file_pattern  # Pattern to match JSON files
     )
 
+    density2CSV = event_processor.export_spindle_density_to_csv(
+        json_input   = json_dir,
+        csv_file     = os.path.join(json_dir, f'spindle_density_{test_method}_{freq_range}_{stages_str}.csv'),
+        stage        = test_stages,
+        file_pattern = file_pattern
+    )
 
-print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
-print(f"Spindle parameters saved")
-print(f"Spindle density saved")
-print(f"ALL DONE")
-print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+    csv2db = event_processor.import_parameters_csv_to_database(
+        csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
+        db_path      = db_path
+        )
+
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+    print(f"Spindle parameters saved")
+    print(f"Spindle density saved")
+    print(f"ALL DONE")
+    print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

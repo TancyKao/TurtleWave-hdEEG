@@ -40,6 +40,12 @@ def main():
     ap.add_argument("--polar", default="normal", choices=["normal", "opposite"])
     ap.add_argument("--reject_artifacts", action="store_true", default=True)
     ap.add_argument("--reject_arousals", action="store_true", default=False)
+    ap.add_argument("--write-db", dest="write_db", action="store_true", default=False,
+                    help="write events straight to neural_events.db and skip the "
+                         "JSON->CSV->import steps (default off: legacy JSON+CSV path)")
+    ap.add_argument("--resume", action="store_true", default=False,
+                    help="with --write-db, skip channels already completed for this "
+                         "exact method/band/stage scope in the database")
     ap.add_argument("--loglevel", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     args = ap.parse_args()
 
@@ -124,13 +130,25 @@ def main():
         cat=(1, 1, 1, 0),
         save_to_annotations=False,
         json_dir=json_dir,
-        create_empty_json=True
+        create_empty_json=True,
+        # Direct-to-DB path (opt-in). Off by default -> legacy behaviour intact.
+        write_db=args.write_db,
+        db_path=db_path if args.write_db else None,
+        resume=args.resume,
     )
 
     # Filenames
     freq_range = f"{f_lo}-{f_hi}Hz"
     stages_str = "".join(test_stages)
     file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
+
+    if args.write_db:
+        # Slow waves are already in neural_events.db. Skip JSON->CSV->import.
+        # A flat CSV can be produced on demand from the DB with
+        # export_events_to_csv (pass the exact method= for slash-methods).
+        logger.info(f"Direct-to-DB run complete; events written to {db_path}")
+        logger.info("All done (direct-to-DB)")
+        return
 
     # Exporting
     logger.info("Exporting parameters CSV...")

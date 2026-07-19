@@ -27,6 +27,12 @@ def main():
     ap.add_argument("--duration", default="0.5,3")
     ap.add_argument("--reject_artifacts", action="store_true", default=True)
     ap.add_argument("--reject_arousals", action="store_true", default=False)
+    ap.add_argument("--write-db", dest="write_db", action="store_true", default=False,
+                    help="write events straight to neural_events.db and skip the "
+                         "JSON->CSV->import steps (default off: legacy JSON+CSV path)")
+    ap.add_argument("--resume", action="store_true", default=False,
+                    help="with --write-db, skip channels already completed for this "
+                         "exact method/band/stage scope in the database")
     ap.add_argument("--loglevel", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     args = ap.parse_args()
 
@@ -111,14 +117,26 @@ def main():
         stage               = test_stages,
         reject_artifacts    = args.reject_artifacts,
         reject_arousals     = args.reject_arousals,
-        cat                 = (1, 1, 1, 0),  
+        cat                 = (1, 1, 1, 0),
         save_to_annotations = False,
-        json_dir            = json_dir
+        json_dir            = json_dir,
+        # Direct-to-DB path (opt-in). Off by default -> legacy behaviour intact.
+        write_db            = args.write_db,
+        db_path             = db_path if args.write_db else None,
+        resume              = args.resume,
     )
 
     freq_range = f"{f_lo:.1f}-{f_hi:.1f}Hz"
     stages_str = "".join(test_stages)
     file_pattern = f"spindles_{test_method}_{freq_range}_{stages_str}"
+
+    if args.write_db:
+        # Events are already in neural_events.db (with det_* + spectral columns
+        # and provenance). The JSON->CSV->import steps are not needed. A flat CSV
+        # can be produced on demand from the DB with export_events_to_csv.
+        logger.info(f"Direct-to-DB run complete; events written to {db_path}")
+        logger.info("All done (direct-to-DB)")
+        return
 
     logger.info("Initializing SQLite database...")
     event_processor.initialize_sqlite_database(db_path)

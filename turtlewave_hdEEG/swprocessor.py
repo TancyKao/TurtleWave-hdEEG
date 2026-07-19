@@ -1786,12 +1786,24 @@ class ParalSWA:
                 if method_override is not None:
                     method = method_override
                 else:
-                    method = "unknown"
-                    if "_" in filename:
-                        parts = filename.split('_')
-                        if len(parts) > 2:
-                            # Typically the format is sw_parameters_METHOD_freq_stages.csv
-                            method = parts[2]
+                    # Prefer a truthful 'Method' CSV column (written by the DB
+                    # export; preserves slash-methods) over the lossy filename
+                    # parse, so a DB-exported CSV re-imports without corrupting
+                    # events.method even when no method= arg is passed. Legacy
+                    # JSON-exported CSVs lack this column and keep the historical
+                    # filename-parse behaviour.
+                    method = None
+                    if 'Method' in df.columns:
+                        method_vals = df['Method'].dropna()
+                        if len(method_vals) > 0:
+                            method = str(method_vals.iloc[0])
+                    if method is None:
+                        method = "unknown"
+                        if "_" in filename:
+                            parts = filename.split('_')
+                            if len(parts) > 2:
+                                # Typically the format is sw_parameters_METHOD_freq_stages.csv
+                                method = parts[2]
 
                 df['method'] = method
                 existing_columns.append('method')
