@@ -167,9 +167,14 @@ class ParalEvents:
         run_params : dict or None, keyword-only
             Extra parameters merged into the ``detection_runs.params_json``
             provenance record.
-        replace_channels : optional, keyword-only
-            Reserved for P3 (scoped channel re-detection); accepted but not yet
-            wired.
+        replace_channels : iterable of str or None, keyword-only
+            Scoped channel re-detection (P3). Channels in this set have their
+            existing rows for this exact scope (event_type, method, band)
+            DELETE-then-INSERT replaced in one transaction, so a clean re-run
+            that yields fewer events leaves no stale surplus rows. Channels NOT
+            in the set keep the append/upsert behaviour and are never touched.
+            Only meaningful with ``write_db=True``. ``None`` (default) disables
+            replacement entirely.
         **detector_params : dict
         Additional parameters to pass to the detector. These are method-specific
         and can include parameters like det_thresh, sel_thresh, etc.
@@ -279,6 +284,7 @@ class ParalEvents:
                     params_dict = {
                         'frequency': list(frequency), 'duration': list(duration),
                         'polar': polar, 'method': method_str,
+                        'ref_chan': ref_chan, 'cat': cat,
                         'detector_params': detector_params,
                         'reject_artifacts': reject_artifacts,
                         'reject_arousals': reject_arousals,
@@ -382,6 +388,11 @@ class ParalEvents:
                 self.logger.error("Spindles will not be saved to annotations.")
                 save_to_annotations = False
                 new_annotations = None
+
+        # Scoped channel re-detection (P3): the set of channels whose existing
+        # rows are DELETE-then-INSERT replaced for this scope. Every channel not
+        # in this set keeps P2's append/upsert behaviour and is never touched.
+        replace_set = {str(c) for c in replace_channels} if replace_channels else set()
 
         # Store all detected spindles
         all_spindles = []
@@ -504,7 +515,8 @@ class ParalEvents:
                             db_conn, run_id, 'spindle', ch, method_str,
                             frequency[0], frequency[1], stages_key,
                             channel_db_events, batched, rec_start,
-                            db_n_fft_sec, self.logger)
+                            db_n_fft_sec, self.logger,
+                            replace=(ch in replace_set), replace_methods=method)
                         self.logger.info(
                             f"Wrote {len(channel_db_events)} spindle rows for "
                             f"channel {ch} to the database")

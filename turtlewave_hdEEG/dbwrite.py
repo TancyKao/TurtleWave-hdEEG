@@ -322,6 +322,25 @@ def ensure_direct_write_schema(conn, logger=None):
         timestamp TEXT
     )''')
 
+    # (2b) rerun_log: one row per scoped channel re-detection (P3) ---------
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS rerun_log (
+        rerun_id TEXT PRIMARY KEY,
+        run_id TEXT,               -- detection_runs row of THIS re-run
+        event_type TEXT,
+        method TEXT,
+        freq_lower REAL,
+        freq_upper REAL,
+        stages TEXT,
+        replace_channels TEXT,     -- JSON list: channels handed to the re-run
+        redetected_channels TEXT,  -- JSON list: actually re-detected
+        dropped_channels TEXT,     -- JSON list: forced-drop by the clean gate
+        sidecar_path TEXT,         -- reviewer artefact sidecar XML
+        backup_path TEXT,          -- qc_backup snapshot dir (the rollback)
+        requested_by TEXT,
+        timestamp TEXT
+    )''')
+
     # (3) widen processing_status PK --------------------------------------
     ps_cols = _table_columns(conn, 'processing_status')
     if ps_cols and 'method' not in ps_cols:
@@ -400,6 +419,181 @@ def record_run(conn, run_id, event_type, method, citation, params_json,
         prov['numpy_version'], git_sha(), datetime.datetime.now().isoformat(),
     ))
     conn.commit()
+
+
+def record_rerun(conn, rerun_id, run_id, event_type, method, freq_lower,
+                 freq_upper, stages, replace_channels, redetected_channels,
+                 dropped_channels, sidecar_path, backup_path, requested_by):
+    """Write one ``rerun_log`` provenance row for a scoped channel re-detection.
+
+    Makes a scoped re-run self-describing: which channels were requested, which
+    were actually re-detected vs forced-drop by the clean gate, and the sidecar
+    and ``qc_backup`` snapshot paths that constitute the rollback.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection (schema already ensured).
+    rerun_id : str
+        Unique id for this re-run invocation (a fresh ``uuid4``).
+    run_id : str
+        The ``detection_runs`` row id written for this re-run's detection.
+    event_type, method : str
+        Detection scope.
+    freq_lower, freq_upper : float
+        Band bounds.
+    stages : str
+        Requested stage set, serialized.
+    replace_channels : sequence of str
+        Channels handed to the re-run as the replace scope.
+    redetected_channels : sequence of str
+        Channels actually re-detected (passed the clean gate).
+    dropped_channels : sequence of str
+        Channels the clean gate forced to drop (not re-detected).
+    sidecar_path : str or None
+        Path to the reviewer artefact sidecar XML.
+    backup_path : str or None
+        Path to the ``qc_backup`` snapshot directory (the rollback point).
+    requested_by : str or None
+        Reviewer name, for provenance.
+    """
+    import json as _json
+    conn.execute('''
+    INSERT OR REPLACE INTO rerun_log
+        (rerun_id, run_id, event_type, method, freq_lower, freq_upper, stages,
+         replace_channels, redetected_channels, dropped_channels,
+         sidecar_path, backup_path, requested_by, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        rerun_id, run_id, event_type, method,
+        float(freq_lower) if freq_lower is not None else None,
+        float(freq_upper) if freq_upper is not None else None,
+        str(stages),
+        _json.dumps(sorted(str(c) for c in (replace_channels or []))),
+        _json.dumps(sorted(str(c) for c in (redetected_channels or []))),
+        _json.dumps(sorted(str(c) for c in (dropped_channels or []))),
+        sidecar_path, backup_path, requested_by,
+        datetime.datetime.now().isoformat(),
+    ))
+    conn.commit()
+
+
+def recover_run_scope(db_path, event_type, method, freq_lower=None,
+                      freq_upper=None):
+    """Read the reference/polarity/cat of the most recent matching run.
+
+    Used by the re-run guard to reuse the ORIGINAL run's invariant parameters
+    (``ref_chan``, ``polar``, ``cat``) rather than a driver/GUI default -- a
+    wrong ``polar`` inverts trough polarity (the same failure axis as the PAC
+    180 degree bug), and a different ``ref_chan`` makes every amplitude
+    threshold incomparable. Returns ``None`` when no matching run is on record,
+    so the caller can REFUSE to re-detect rather than guess.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database.
+    event_type : str
+        Event type of the scope to recover (e.g. ``'spindle'``).
+    method : str
+        Method string to match against ``detection_runs.method``.
+    freq_lower, freq_upper : float or None, optional
+        Band bounds. When both are given the params dict is checked for a
+        matching band before accepting the row, so a same-method run at a
+        different band is not mistaken for this scope. When ``None`` the band is
+        not used to disambiguate.
+
+    Returns
+    -------
+    dict or None
+        ``{'ref_chan', 'polar', 'cat', 'cat_recorded', 'reject_artifacts',
+        'reject_arousals', 'stages', 'run_id', 'params'}`` from the most recent
+        matching ``detection_runs`` row, or ``None`` if no such row exists.
+        ``params`` is the full recorded parameter dict (thresholds/band/
+        durations) so a re-run can reuse the original detector thresholds, not
+        just the invariants.
+
+        ``ref_chan`` and ``polar`` are returned as real Python objects: preferred
+        from the typed ``params_json`` when present (P3+ runs), otherwise parsed
+        back from the ``detection_runs`` column, which ``record_run`` stored as
+        ``str(...)``. The column is parsed with :func:`ast.literal_eval` so
+        ``"['M1', 'M2']"`` becomes the list ``['M1', 'M2']`` and ``'[]'`` becomes
+        ``[]`` (NOT the repr strings) and ``polar`` ``'None'`` maps to ``None``.
+        This matters because the primary re-run target -- databases written by the
+        committed P2 path -- has NO ``ref_chan``/``cat`` in ``params_json`` and
+        would otherwise recover a string that ``read_data`` cannot use.
+
+        ``cat`` is read only from ``params_json`` (it was never stored in a
+        column). ``cat_recorded`` is ``True`` only when the ``cat`` key was
+        actually present, so the caller can tell a genuine ``cat=None`` (no
+        concatenation) apart from a pre-P3 run that simply never recorded it and
+        REFUSE in the latter case (production runs use ``cat=(1, 1, 1, 0)``, so a
+        silently-assumed ``None`` would pool differently and shift thresholds).
+    """
+    import ast as _ast
+    import json as _json
+
+    def _parse_ref_col(col):
+        """Parse a ``str(ref_chan)`` column back to a Python object."""
+        if col is None:
+            return None
+        s = str(col)
+        try:
+            return _ast.literal_eval(s)  # "['M1','M2']"->list, '[]'->[], 'None'->None
+        except (ValueError, SyntaxError):
+            return col  # a bare channel label stored as a plain string
+
+    def _parse_polar_col(col):
+        """Parse a ``str(polar)`` column: 'None'->None, else the string."""
+        if col is None:
+            return None
+        s = str(col)
+        return None if s == 'None' else s
+
+    conn = sqlite3.connect(db_path)
+    try:
+        try:
+            cur = conn.execute('''
+            SELECT run_id, params_json, ref_chan, polar, stages,
+                   reject_artifacts, reject_arousals
+            FROM detection_runs
+            WHERE event_type = ? AND method = ?
+            ORDER BY timestamp DESC
+            ''', (str(event_type), str(method)))
+        except sqlite3.OperationalError:
+            return None
+        for row in cur.fetchall():
+            run_id, params_json, ref_chan, polar, stages, rj_a, rj_r = row
+            params = {}
+            if params_json:
+                try:
+                    params = _json.loads(params_json)
+                except Exception:
+                    params = {}
+            if freq_lower is not None and freq_upper is not None:
+                band = params.get('frequency')
+                if band is not None and len(band) == 2:
+                    if (abs(float(band[0]) - float(freq_lower)) > 1e-6 or
+                            abs(float(band[1]) - float(freq_upper)) > 1e-6):
+                        continue  # same method, different band -- keep looking
+            return {
+                'run_id': run_id,
+                # Prefer the typed params_json value; else parse the stringified
+                # column back to a real object (P2 runs lack it in params_json).
+                'ref_chan': (params['ref_chan'] if 'ref_chan' in params
+                             else _parse_ref_col(ref_chan)),
+                'polar': (params['polar'] if 'polar' in params
+                          else _parse_polar_col(polar)),
+                'cat': params.get('cat'),
+                'cat_recorded': 'cat' in params,
+                'reject_artifacts': bool(rj_a),
+                'reject_arousals': bool(rj_r),
+                'stages': stages,
+                'params': params,
+            }
+        return None
+    finally:
+        conn.close()
 
 
 def resume_skip_channels(conn, event_type, method, freq_lower, freq_upper,
@@ -677,7 +871,8 @@ def upsert_processing_status(conn, event_type, channel, method, freq_lower,
 
 def write_channel_events(conn, run_id, event_type, channel, method,
                          freq_lower, freq_upper, stage_key, events, batched,
-                         recording_start_time, n_fft_sec, logger=None):
+                         recording_start_time, n_fft_sec, logger=None,
+                         replace=False, replace_methods=None):
     """Write one channel's events + status in a single transaction.
 
     Opens an explicit transaction, ``INSERT OR REPLACE`` s every event row
@@ -687,6 +882,23 @@ def write_channel_events(conn, run_id, event_type, channel, method,
     with ``error_message = 'No events detected'`` to preserve the
     empty-vs-failed distinction. On any error the transaction is rolled back and
     the exception re-raised for the caller to record as a failure.
+
+    Scoped channel re-detection (P3)
+    --------------------------------
+    When ``replace`` is True, a scoped ``DELETE`` runs FIRST, inside the same
+    transaction as the inserts, so this channel's stale rows for the run scope
+    are cleared before the fresh set is written. This is required because a clean
+    re-run (with more artefact epochs excluded) generally yields *fewer* events
+    than the original: a blind ``INSERT OR REPLACE`` would leave the surplus
+    original rows behind. The delete is scoped to
+    ``(event_type, channel, freq_lower, freq_upper, method IN replace_methods)``
+    and is deliberately NOT scoped by stage -- a re-run may re-resolve an event's
+    epoch stage, so a stage-scoped delete could orphan a row that moved stages.
+    ``freq_lower``/``freq_upper`` are matched with ``IS`` (NULL-safe) so a NULL
+    band still deletes. Only channels the caller flags are ever touched; every
+    other channel's rows are untouched. Because delete + insert share one
+    ``BEGIN``/``commit``, a concurrent reader never sees the channel with zero
+    rows.
 
     Parameters
     ----------
@@ -717,6 +929,17 @@ def write_channel_events(conn, run_id, event_type, channel, method,
         Stored in the ``n_fft_sec`` column for provenance.
     logger : logging.Logger or None
         Optional logger.
+    replace : bool, optional
+        When True, delete this channel's existing rows for the run scope before
+        inserting (scoped channel re-detection). Default False, which is the P2
+        append/upsert behaviour (no delete). See the class-level note above.
+    replace_methods : sequence of str or None, optional
+        The constituent per-event methods to delete when ``replace`` is True.
+        Pass the run's method *list* (e.g. ``['Wamsley2012']`` or
+        ``['AASM/Massimini2004']``), NOT the ``'_'``-joined ``method`` string,
+        because events store their per-event method and a joined string would
+        never match them (leaving stale rows). Defaults to ``[method]`` when
+        ``None``. Ignored unless ``replace`` is True.
 
     Returns
     -------
@@ -731,6 +954,27 @@ def write_channel_events(conn, run_id, event_type, channel, method,
 
     conn.execute('BEGIN')
     try:
+        if replace:
+            # Scoped DELETE-then-INSERT for channel re-detection. Delete by the
+            # constituent per-event methods so a multi-method run clears every
+            # method's rows (the joined method_str never matches a stored
+            # per-event method). NOT stage-scoped; freq matched NULL-safe.
+            del_methods = [str(m) for m in (replace_methods or [method])]
+            m_placeholders = ', '.join(['?'] * len(del_methods))
+            del_sql = (
+                f"DELETE FROM events WHERE event_type = ? AND channel = ? "
+                f"AND freq_lower IS ? AND freq_upper IS ? "
+                f"AND method IN ({m_placeholders})")
+            cur = conn.execute(
+                del_sql,
+                [event_type, channel, freq_lower, freq_upper] + del_methods)
+            if logger is not None:
+                logger.info(
+                    f"Scoped replace: deleted {cur.rowcount} existing "
+                    f"{event_type} rows for channel {channel} "
+                    f"(methods={del_methods}, band={freq_lower}-{freq_upper}Hz) "
+                    f"before re-insert")
+
         for i, ev in enumerate(events):
             b = batched[i] if i < len(batched) else {}
             # Store the PER-EVENT detecting method (the same value hashed into

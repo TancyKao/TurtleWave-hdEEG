@@ -116,8 +116,12 @@ class ParalKC:
             ``success = 1`` for the same scope are skipped.
         run_params : dict or None, keyword-only
             Extra parameters merged into ``detection_runs.params_json``.
-        replace_channels : optional, keyword-only
-            Reserved for P3 (scoped re-detection); accepted, not yet wired.
+        replace_channels : iterable of str or None, keyword-only
+            Scoped channel re-detection (P3). Channels in this set have their
+            existing rows for this exact scope (event_type, method, band)
+            DELETE-then-INSERT replaced in one transaction; channels not in the
+            set keep the append/upsert path and are never touched. Only
+            meaningful with ``write_db=True``. ``None`` (default) disables it.
         n_fft_sec : int, keyword-only, default 4
             FFT window (seconds) for the batched spectral re-measurement.
 
@@ -257,6 +261,7 @@ class ParalKC:
                         'min_isolation': min_isolation,
                         'detrend': detrend, 'polar': polar,
                         'method': method_str,
+                        'ref_chan': ref_chan, 'cat': cat,
                         'reject_artifacts': reject_artifacts,
                         'reject_arousals': reject_arousals,
                         'n_fft_sec': n_fft_sec,
@@ -311,6 +316,11 @@ class ParalKC:
             return None
 
         all_kcs = []
+
+        # Scoped channel re-detection (P3): channels whose existing rows are
+        # DELETE-then-INSERT replaced for this scope; all others stay on P2's
+        # append/upsert path untouched.
+        replace_set = {str(c) for c in replace_channels} if replace_channels else set()
 
         for ch in chan:
             if write_db and resume and ch in db_skip:
@@ -419,7 +429,8 @@ class ParalKC:
                         db_conn, run_id, self.EVENT_TYPE, ch, method_str,
                         frequency[0], frequency[1], stages_key,
                         channel_db_events, batched, rec_start,
-                        n_fft_sec, self.logger)
+                        n_fft_sec, self.logger,
+                        replace=(ch in replace_set), replace_methods=methods)
                     self.logger.info(
                         f"Wrote {len(channel_db_events)} K-complex rows for "
                         f"channel {ch} to the database")

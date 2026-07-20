@@ -185,8 +185,12 @@ class ParalSWA:
             ``success = 1`` for the same scope are skipped.
         run_params : dict or None, keyword-only
             Extra parameters merged into ``detection_runs.params_json``.
-        replace_channels : optional, keyword-only
-            Reserved for P3 (scoped re-detection); accepted, not yet wired.
+        replace_channels : iterable of str or None, keyword-only
+            Scoped channel re-detection (P3). Channels in this set have their
+            existing rows for this exact scope (event_type, method, band)
+            DELETE-then-INSERT replaced in one transaction; channels not in the
+            set keep the append/upsert path and are never touched. Only
+            meaningful with ``write_db=True``. ``None`` (default) disables it.
         event_type : str, keyword-only, default 'slow_wave'
             Event type label used for DB rows / scope (``'k_complex'`` when a KC
             caller delegates here).
@@ -306,6 +310,7 @@ class ParalSWA:
                         'peak_thresh_sigma': peak_thresh_sigma,
                         'ptp_thresh_sigma': ptp_thresh_sigma,
                         'method': method_str,
+                        'ref_chan': ref_chan, 'cat': cat,
                         'reject_artifacts': reject_artifacts,
                         'reject_arousals': reject_arousals,
                         'n_fft_sec': n_fft_sec,
@@ -416,6 +421,11 @@ class ParalSWA:
             if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
                 return _det_epochs[idx][2]
             return None
+
+        # Scoped channel re-detection (P3): channels whose existing rows are
+        # DELETE-then-INSERT replaced for this scope; all others stay on P2's
+        # append/upsert path untouched.
+        replace_set = {str(c) for c in replace_channels} if replace_channels else set()
 
         for ch in chan:
                 if write_db and resume and ch in db_skip:
@@ -569,7 +579,8 @@ class ParalSWA:
                             db_conn, run_id, event_type, ch, method_str,
                             frequency[0], frequency[1], stages_key,
                             channel_db_events, batched, rec_start,
-                            n_fft_sec, self.logger)
+                            n_fft_sec, self.logger,
+                            replace=(ch in replace_set), replace_methods=method)
                         self.logger.info(
                             f"Wrote {len(channel_db_events)} {event_type} rows for "
                             f"channel {ch} to the database")
