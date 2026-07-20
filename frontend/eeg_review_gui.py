@@ -4292,12 +4292,31 @@ class EventReviewGUI(QMainWindow):
         lay.addWidget(bb)
         dlg.exec_()
 
+    def _dropped_channels(self, verdicts=None):
+        """Channels excluded from analysis entirely (drop / channel_artefact
+        verdict, any event type)."""
+        if verdicts is None:
+            verdicts = self.db.get_channel_verdicts() if self.db else {}
+        return {str(c) for (c, _e), v in verdicts.items()
+                if v in ('drop', 'channel_artefact')}
+
+    def _redetect_queue_channels(self, verdicts=None):
+        """The reviewer-selected re-detect queue as a sorted, deduped list,
+        MINUS any dropped channel. A dropped channel is excluded from analysis
+        entirely, so it must never land in the re-detect list even if it was
+        also queued — the P3 driver's --channels consumes exactly this list to
+        replace only these channels' events."""
+        dropped = self._dropped_channels(verdicts)
+        return sorted(set(map(str, self._redetect_queue)) - dropped)
+
     def _build_redetect_request(self):
         """Assemble the schema-v1 re-detect request dict."""
         verdicts = self.db.get_channel_verdicts() if self.db else {}
+        # Queue-minus-dropped: what the driver actually re-detects.
+        redetect = self._redetect_queue_channels(verdicts)
+        # exclude_channels stays queue ∪ drops (dropped channels ARE excluded).
         excl = sorted(set(map(str, self._redetect_queue)) |
-                      {str(c) for (c, _e), v in verdicts.items()
-                       if v in ('drop', 'channel_artefact')})
+                      self._dropped_channels(verdicts))
         epochs = []
         if self.db is not None:
             try:
@@ -4328,6 +4347,7 @@ class EventReviewGUI(QMainWindow):
             'stages': ['NREM2', 'NREM3'],
             'event_types': [evt],
             'exclude_channels': excl,
+            'redetect_channels': redetect,
             'exclude_epochs': epochs,
             'requested_at': datetime.now().isoformat(timespec='seconds'),
             'requested_by': self.reviewer_name,
@@ -4358,6 +4378,14 @@ class EventReviewGUI(QMainWindow):
         chips.setStyleSheet("font-family:'IBM Plex Mono',monospace;"
                             "color:#d6dee8;")
         lay.addWidget(chips)
+        lay.addWidget(_h_label(
+            f"SELECTED FOR RE-DETECT ({len(req['redetect_channels'])})"))
+        rd_chips = QLabel(", ".join(req['redetect_channels'])
+                          or "(nothing queued)")
+        rd_chips.setWordWrap(True)
+        rd_chips.setStyleSheet("font-family:'IBM Plex Mono',monospace;"
+                               "color:#d6dee8;")
+        lay.addWidget(rd_chips)
         lay.addWidget(_h_label(
             f"ARTEFACT EPOCH RANGES ({len(req['exclude_epochs'])})"))
         lay.addWidget(_h_label("JSON PREVIEW"))
@@ -4787,6 +4815,10 @@ class EventReviewGUI(QMainWindow):
         verdicts = self.db.get_channel_verdicts()
         dropped = sorted({ch for (ch, _et), v in verdicts.items() if v == 'drop'})
         kept = [c for c in self._all_db_channels() if c not in dropped]
+        # re-detect queue MINUS any dropped/channel_artefact channel — a dropped
+        # channel is excluded from analysis, never re-detected (matches the JSON
+        # field so the two hand-off artefacts can't disagree).
+        redetect = self._redetect_queue_channels(verdicts)
         intervals = self.db.get_qc_artefact_intervals(unexported_only=True)
 
         # ---- snapshot originals BEFORE anything can overwrite them --------
@@ -4850,11 +4882,35 @@ class EventReviewGUI(QMainWindow):
             QtWidgets.QMessageBox.critical(self, "channels.csv failed", str(ex))
             return
 
+        # ---- redetect_channels.csv (only the reviewer-selected re-detect
+        # queue; the P3 re-run driver's --channels points straight at this).
+        # Skip the file entirely when nothing is queued.
+        redetect_csv = None
+        if redetect:
+            redetect_csv = os.path.join(backup, "redetect_channels.csv")
+            try:
+                with open(redetect_csv, 'w', newline='', encoding='utf-8') as fh:
+                    w = _csv.writer(fh)
+                    for c in redetect:
+                        w.writerow([c])
+            except Exception as ex:
+                QtWidgets.QMessageBox.critical(
+                    self, "redetect_channels.csv failed", str(ex))
+                return
+
         # ---- confirm + record ---------------------------------------------
+        # Point the re-run driver's --channels at the re-detect list when the
+        # reviewer queued any; otherwise fall back to the kept channels.csv.
+        driver_channels = redetect_csv or chan_csv
         cmd = (f"python examples/hdEEG_sw_detector.py "
-               f"--annot {sidecar} --channels {chan_csv}")
+               f"--annot {sidecar} --channels {driver_channels}")
+        redetect_line = (
+            f"redetect_channels.csv: {len(redetect)} channel(s) queued for "
+            f"re-detect\n"
+            if redetect else "redetect_channels.csv: none queued (not written)\n")
         msg = (f"Snapshot: {backup}\n  ({', '.join(snapped) or 'nothing found to snapshot'})\n\n"
                f"channels.csv: {len(kept)} kept, {len(dropped)} dropped\n"
+               f"{redetect_line}"
                f"Sidecar artefacts appended (whole-montage): {n_iv}\n\n"
                f"Re-running detection OVERWRITES wonambi/*_results + the DB — "
                f"the snapshot above is your rollback.\n\n"
