@@ -33,6 +33,28 @@ TurtleWave handles the complexities of high-density EEG data:
 - Sleep stage annotation support
 - Arousal detection
 
+### Event Density is Artefact-Free
+
+Event density (events per minute) is computed by dividing the event count by
+the **artefact-free** in-stage time the detector actually pooled — the same
+clean time `fetch` used during detection — not by the sum of all scored
+epochs of a stage. Detection already excludes artefact/arousal epochs before
+threshold estimation, so dividing by all scored epochs systematically
+under-counted density in proportion to a recording's artefact load.
+
+This means density values computed with the current exporters are **higher**
+than densities computed before this fix, for the same detection run. The two
+are not comparable: if you have older density CSVs, regenerate them from the
+underlying detection JSON/database rather than mixing old and new values in
+the same analysis. Whole-night density additionally restricts to the stages
+that were actually detected on, excluding Wake unless Wake was itself a
+detection stage.
+
+The shared calculation lives in
+[`compute_analysed_seconds` / `build_density_denominators`](../reference/api/utils.md),
+which reproduce Wonambi's `fetch(reject_epoch=True, reject_artf=...)`
+segmentation so the denominator matches the detector's input exactly.
+
 ### Analysis Workflow
 
 The package supports a complete analysis pipeline from raw data to results, integrating:

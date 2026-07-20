@@ -91,12 +91,18 @@ nav:
     - Installation: how-to/installation.md
     - Detect Slow Waves: how-to/detect-slow-waves.md
     - Review EEG Events: how-to/review-eeg-events.md
-  
+    - Write Detection Results Directly to the Database: how-to/direct-to-database-detection.md
+    - Re-run Detection on Reviewer-Selected Channels: how-to/rerun-detection-on-channels.md
+    - Back-fill PAC Results into the Database: how-to/backfill-pac-to-database.md
+
   - Reference:
     - API Reference: reference/api/index.md
     - Event Processor: reference/api/eventprocessor.md
     - Slow Wave Processor: reference/api/swprocessor.md
     - PAC Processor: reference/api/pacprocessor.md
+    - Direct-to-Database Write: reference/api/dbwrite.md
+    - Re-run Guards: reference/api/rerun.md
+    - Utilities: reference/api/utils.md
     - GUI Components: reference/api/gui.md
     - EEG Review GUI: reference/eeg-review-gui.md
   
