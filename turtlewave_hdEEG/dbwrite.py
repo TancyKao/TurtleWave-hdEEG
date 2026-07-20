@@ -1178,23 +1178,6 @@ def _fmt_freq_component(value):
     return str(int(v)) if v.is_integer() else repr(v)
 
 
-def _fmt_freq_component(value):
-    """Format one band bound for a CSV filename (integral floats drop ``.0``).
-
-    Parameters
-    ----------
-    value : float or int
-        Band bound in Hz.
-
-    Returns
-    -------
-    str
-        ``'11'`` for ``11.0``, ``'0.5'`` for ``0.5``.
-    """
-    v = float(value)
-    return str(int(v)) if v.is_integer() else repr(v)
-
-
 def default_csv_path(output_dir, event_type, method, frequency, stage):
     """Build the standard parameter-CSV path for a detection scope.
 
