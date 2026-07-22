@@ -6,9 +6,11 @@ import csv
 from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave as DetectSlowWave
+from turtlewave_hdEEG import dbwrite
 import json
 import datetime
 import logging
+import uuid as _uuid_mod
 
 
 class ParalSWA:
@@ -56,10 +58,20 @@ class ParalSWA:
         # Create a logger
         logger = logging.getLogger('turtlewave_hdEEG.swaprocessor')
         logger.setLevel(log_level)
-        
+
+        # This logger name is a process-wide singleton. Clear any handlers left
+        # by a previous instance so batch loops don't duplicate log lines or
+        # leak file handles.
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        
+
         # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
@@ -112,10 +124,13 @@ class ParalSWA:
                      reject_artifacts=True, reject_arousals=True, 
                      stage=None, 
                      cat=None,
-                     peak_thresh_sigma=None, 
+                     peak_thresh_sigma=None,
                      ptp_thresh_sigma=None,
                      save_to_annotations=False, json_dir=None,
-                     create_empty_json=True):
+                     create_empty_json=True,
+                     *, write_db=False, db_path=None, resume=False,
+                     run_params=None, replace_channels=None,
+                     event_type='slow_wave', citation=None, n_fft_sec=4):
         """
         Detect slow waves in the dataset while considering artifacts and arousals.
         
@@ -155,13 +170,42 @@ class ParalSWA:
             Whether to save detected slow waves to annotations
         json_dir : str or None
             Directory to save individual channel JSON files
-        
+        write_db : bool, keyword-only, default False
+            When True, write detected events straight into a SQLite database
+            (``db_path``) in addition to the JSON output, via the direct-write
+            path (deterministic uuid5 rows, detector-own morphology in the
+            ``det_*`` columns, batched re-measured amplitude/spectral columns,
+            per-scope ``processing_status`` tracking and a ``detection_runs``
+            provenance row). When False the behaviour is byte-identical to the
+            legacy JSON-only path.
+        db_path : str or None, keyword-only
+            Target SQLite database (or directory -> ``neural_events.db``).
+        resume : bool, keyword-only, default False
+            When True (and ``write_db``), channels already recorded as
+            ``success = 1`` for the same scope are skipped.
+        run_params : dict or None, keyword-only
+            Extra parameters merged into ``detection_runs.params_json``.
+        replace_channels : iterable of str or None, keyword-only
+            Scoped channel re-detection (P3). Channels in this set have their
+            existing rows for this exact scope (event_type, method, band)
+            DELETE-then-INSERT replaced in one transaction; channels not in the
+            set keep the append/upsert path and are never touched. Only
+            meaningful with ``write_db=True``. ``None`` (default) disables it.
+        event_type : str, keyword-only, default 'slow_wave'
+            Event type label used for DB rows / scope (``'k_complex'`` when a KC
+            caller delegates here).
+        citation : str or None, keyword-only
+            Literature citation for the provenance row; auto-resolved from the
+            method when None.
+        n_fft_sec : int, keyword-only, default 4
+            FFT window (seconds) for the batched spectral re-measurement.
+
         Returns
         -------
         list
             List of all detected slow waves
         """
-        import uuid    
+        import uuid
        
         self.logger.info(r"""
                ___    __,__,__,__, 
@@ -227,6 +271,76 @@ class ParalSWA:
         if first_method == 'Ngo2015' and peak_thresh_sigma is not None and ptp_thresh_sigma is not None:
             self.logger.info(f"Using adaptive thresholds: peak_thresh_sigma={peak_thresh_sigma}, ptp_thresh_sigma={ptp_thresh_sigma}")
 
+        # ------------------------------------------------------------------
+        # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
+        # ------------------------------------------------------------------
+        stages_key = "".join(stage) if stage else "all"
+        db_conn = None
+        run_id = None
+        db_skip = set()
+        rec_start = None
+        s_freq = None
+        if write_db:
+            if db_path is None:
+                self.logger.error("write_db=True but db_path is None; skipping DB writes")
+                write_db = False
+            else:
+                try:
+                    if os.path.isdir(db_path):
+                        db_path = os.path.join(db_path, 'neural_events.db')
+                    self.initialize_sqlite_database(db_path)
+                    db_conn = dbwrite.open_write_connection(db_path)
+                    dbwrite.ensure_direct_write_schema(db_conn, self.logger)
+                    try:
+                        s_freq = self.dataset.header['s_freq']
+                    except Exception:
+                        s_freq = None
+                    try:
+                        rec_start = self.dataset.header.get('start_time')
+                    except Exception:
+                        rec_start = None
+                    run_id = str(_uuid_mod.uuid4())
+                    params_dict = {
+                        'frequency': list(frequency),
+                        'trough_duration': list(trough_duration),
+                        'neg_peak_thresh': neg_peak_thresh,
+                        'p2p_thresh': p2p_thresh,
+                        'min_dur': min_dur, 'max_dur': max_dur,
+                        'detrend': detrend, 'polar': polar,
+                        'peak_thresh_sigma': peak_thresh_sigma,
+                        'ptp_thresh_sigma': ptp_thresh_sigma,
+                        'method': method_str,
+                        'ref_chan': ref_chan, 'cat': cat,
+                        'reject_artifacts': reject_artifacts,
+                        'reject_arousals': reject_arousals,
+                        'n_fft_sec': n_fft_sec,
+                    }
+                    if run_params:
+                        params_dict.update(run_params)
+                    run_citation = citation or dbwrite.method_citation(
+                        "_".join(method) if isinstance(method, list) else str(method))
+                    dbwrite.record_run(
+                        db_conn, run_id, event_type, method_str, run_citation,
+                        json.dumps(params_dict, default=str),
+                        ref_chan, polar, stage, reject_artifacts, reject_arousals)
+                    if resume:
+                        db_skip = dbwrite.resume_skip_channels(
+                            db_conn, event_type, method_str,
+                            frequency[0], frequency[1], stages_key)
+                        if db_skip:
+                            self.logger.info(
+                                f"Resume: skipping {len(db_skip)} already-completed "
+                                f"channels for this scope")
+                except Exception as e:
+                    self.logger.error(f"Could not set up direct-DB write: {e}", exc_info=True)
+                    write_db = False
+                    if db_conn is not None:
+                        try:
+                            db_conn.close()
+                        except Exception:
+                            pass
+                        db_conn = None
+
 
         # Create custom annotation file name if saving to annotations
         if save_to_annotations:
@@ -283,19 +397,55 @@ class ParalSWA:
         # Store all detected slow waves
         all_slow_waves = []
 
+        # Build an epoch time->stage lookup so each detected wave can be tagged
+        # with the single stage of the epoch it actually falls in. Detecting over
+        # a multi-stage request (e.g. ['NREM2','NREM3']) otherwise tags every wave
+        # with the whole list, which double-counts events across stages downstream.
+        try:
+            import bisect as _bisect
+            _det_epochs = sorted(
+                ((float(e['start']), float(e['end']), str(e['stage']))
+                 for e in self.annotations.get_epochs()),
+                key=lambda x: x[0]
+            ) if self.annotations is not None else []
+        except Exception as e:
+            self.logger.warning(f"Could not build epoch stage lookup: {e}")
+            _det_epochs = []
+        _det_epoch_starts = [e[0] for e in _det_epochs]
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _det_epochs:
+                return None
+            idx = _bisect.bisect_right(_det_epoch_starts, t) - 1
+            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
+                return _det_epochs[idx][2]
+            return None
+
+        # Scoped channel re-detection (P3): channels whose existing rows are
+        # DELETE-then-INSERT replaced for this scope; all others stay on P2's
+        # append/upsert path untouched.
+        replace_set = {str(c) for c in replace_channels} if replace_channels else set()
+
         for ch in chan:
+                if write_db and resume and ch in db_skip:
+                    self.logger.info(f"Resume: channel {ch} already complete for this scope; skipping")
+                    continue
                 try:
                     self.logger.info(f'Reading data for channel {ch}')
-                    
+
                     # Fetch segments, filtering based on stage and artifacts
-                    segments = fetch(self.dataset, self.annotations, cat=cat, stage=stage, cycle=None, 
+                    segments = fetch(self.dataset, self.annotations, cat=cat, stage=stage, cycle=None,
                                   reject_epoch=True, reject_artf=reject_types)
                     segments.read_data(ch, ref_chan, grp_name=grp_name)
 
                     # Process each detection method
                     channel_slow_waves = []
                     channel_json_slow_waves = []
-                    
+                    # Direct-write accumulators (populated only when write_db).
+                    channel_db_events = []
+                    channel_param_segments = []
+
                     ## Loop through methods
                     for m, meth in enumerate(method):
                         self.logger.info(f"Applying method: {meth}")
@@ -305,12 +455,20 @@ class ParalSWA:
                             # Create a copy of the segment for processing
                             processed_seg = seg.copy()
 
-                            # Apply polarity adjustment if needed
-                            if polar == 'opposite':
-                                processed_seg['data'].data[0][0] = -processed_seg['data'].data[0][0]
-                            elif polar == 'normal':
-                                pass
-                            self.logger.debug(f'Applied polarity inversion to segment {i + 1}')
+                            # Do NOT invert here. `polar` is passed to
+                            # DetectSlowWave below, which forwards it as
+                            # Wonambi's own `opts.invert`; each slow-wave
+                            # method then negates its local copy of the signal
+                            # exactly once (wonambi/detect/slowwave.py:192,
+                            # :256, :322). Any inversion added here would
+                            # cancel that and make polar='opposite' identical
+                            # to polar='normal'. Note `seg.copy()` above is a
+                            # shallow dict copy, so processed_seg['data'] is
+                            # still the caller's ChanTime until detrend
+                            # replaces it — an in-place negation here would
+                            # also leak across methods.
+                            # Locked down by test_slow_wave_polarity in
+                            # tests/test_turtlewave.py.
 
                             if detrend:
                                 self.logger.debug(f'Applying detrend to segment {i + 1}')
@@ -357,8 +515,36 @@ class ParalSWA:
                                 # Add channel information
                                 sw['chan'] = ch
                                 channel_slow_waves.append(sw)
-                                
-                                # Add to JSON 
+
+                                # Assemble the direct-DB event: deterministic
+                                # uuid5, single resolved stage, detector-own
+                                # morphology, and an in-memory window (from the
+                                # data the detector saw, i.e. processed_seg) for
+                                # batched re-measurement.
+                                if write_db:
+                                    sw_start = float(sw.get('start', 0))
+                                    sw_end = float(sw.get('end', 0))
+                                    sw_dur = float(sw.get('dur', sw_end - sw_start))
+                                    single_stage = _stage_at(sw_start)
+                                    if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
+                                        single_stage = stage[0]
+                                    morph = dbwrite.event_det_morphology(sw)
+                                    ev = {
+                                        'uuid': dbwrite.event_uuid5(
+                                            event_type, ch, sw_start, meth,
+                                            frequency[0], frequency[1], single_stage),
+                                        'start_time': sw_start, 'end_time': sw_end,
+                                        'duration': sw_dur, 'stage': single_stage,
+                                        'method': meth,
+                                    }
+                                    ev.update(morph)
+                                    channel_db_events.append(ev)
+                                    channel_param_segments.append(
+                                        dbwrite.make_param_segment(
+                                            processed_seg['data'], sw_start, sw_end,
+                                            event_type, single_stage, ch))
+
+                                # Add to JSON
                                 if json_dir:
                                     # Extract key properties in a serializable format
                                     sw_data = {
@@ -375,14 +561,41 @@ class ParalSWA:
                                         'method': meth
                                     }
                                     
-                                    sw_data['stage'] = stage
+                                    # Attribute the wave to the single stage of
+                                    # the epoch it actually occurred in. Fall back
+                                    # to the requested stage only if the epoch
+                                    # lookup is unavailable, so behaviour degrades
+                                    # to the old (list) form rather than crashing.
+                                    actual_stage = _stage_at(sw_data['start_time'])
+                                    if actual_stage is not None:
+                                        sw_data['stage'] = actual_stage
+                                    elif isinstance(stage, (list, tuple)) and len(stage) == 1:
+                                        sw_data['stage'] = stage[0]
+                                    else:
+                                        sw_data['stage'] = stage
                                     sw_data['freq_range'] = frequency
                                     
                                     channel_json_slow_waves.append(sw_data)
                                     
                     all_slow_waves.extend(channel_slow_waves)
                     self.logger.info(f"Found {len(channel_slow_waves)} slow waves in channel {ch}")
-                    
+
+                    # Direct-DB write: one batched re-measurement + one
+                    # transaction per channel, BEFORE the JSON write.
+                    if write_db and db_conn is not None:
+                        batched = dbwrite.compute_batched_params(
+                            channel_param_segments, frequency, s_freq,
+                            n_fft_sec, self.logger)
+                        dbwrite.write_channel_events(
+                            db_conn, run_id, event_type, ch, method_str,
+                            frequency[0], frequency[1], stages_key,
+                            channel_db_events, batched, rec_start,
+                            n_fft_sec, self.logger,
+                            replace=(ch in replace_set), replace_methods=method)
+                        self.logger.info(
+                            f"Wrote {len(channel_db_events)} {event_type} rows for "
+                            f"channel {ch} to the database")
+
                     stages_str = "".join(stage) if stage else "all"
                     if json_dir :
                         try:
@@ -400,20 +613,38 @@ class ParalSWA:
                                 self.logger.info(f"Saved slow wave data for channel {ch} to {ch_json_file}")
                         except Exception as e:
                             self.logger.error(f"Error saving channel JSON: {e}")
-                except Exception as e:        
-                        self.logger.warning(f'WARNING: No slow waves in channel {ch}: {e}')
-                        # Create empty JSON file even in case of error
-                        if json_dir and create_empty_json:
+                except Exception as e:
+                        # A real read/detection failure is logged as an error with
+                        # a traceback so it is not mistaken for a channel that
+                        # legitimately had no slow waves.
+                        self.logger.error(f'Failed to process channel {ch}: {e}', exc_info=True)
+                        # In the direct-DB path, record the failure in
+                        # processing_status (success=0) instead of an error
+                        # sentinel JSON, so a resume re-runs only this channel.
+                        if write_db and db_conn is not None:
+                            dbwrite.record_channel_failure(
+                                db_conn, event_type, ch, method_str,
+                                frequency[0], frequency[1], stages_key, e)
+                        # Write an error sentinel (not an empty list) so downstream
+                        # import can tell a failed channel apart from one that
+                        # legitimately had no slow waves and re-run it.
+                        elif json_dir and create_empty_json:
                             try:
                                 stages_str = "".join(stage) if stage else "all"
-                                ch_json_file = os.path.join(json_dir, 
+                                ch_json_file = os.path.join(json_dir,
                                                         f"slowwaves_{method_str}_{freq_str}_{stages_str}_{ch}.json")
                                 with open(ch_json_file, 'w', encoding='utf-8') as f:
-                                    json.dump([], f)
-                                self.logger.info(f"Created empty JSON file for channel {ch} after error")
+                                    json.dump({"error": str(e), "channel": ch}, f)
+                                self.logger.info(f"Wrote error-sentinel JSON for channel {ch} after failure")
                             except Exception as json_e:
-                                self.logger.error(f"Error creating empty JSON for channel {ch}: {json_e}")
-        
+                                self.logger.error(f"Error creating sentinel JSON for channel {ch}: {json_e}")
+
+        if write_db and db_conn is not None:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+
         # Save the new annotation file if needed
         if save_to_annotations and new_annotations is not None and all_slow_waves:
             try:
@@ -751,10 +982,18 @@ class ParalSWA:
             traceback.print_exc()
             return None
 
-    def export_slow_wave_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None):
+    def export_slow_wave_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None,
+                                        reject_artifacts=True, reject_arousals=True):
         """
         Export slow wave statistics to CSV with both whole night and stage-specific densities.
-        
+
+        The stage-specific density denominator is the artefact-free in-stage time
+        actually fed to the detector (per channel), computed with
+        :func:`turtlewave_hdEEG.utils.compute_analysed_seconds`, not the sum of
+        all scored epochs of the stage. Detection rejects artefact/arousal epochs,
+        so using all scored epochs as the denominator systematically
+        under-estimates density in proportion to each recording's artefact load.
+
         Parameters
         ----------
         json_input : str or list
@@ -765,10 +1004,17 @@ class ParalSWA:
             Sleep stage(s) to include
         file_pattern : str or None
             Pattern to filter JSON files
+        reject_artifacts : bool, optional
+            Subtract time overlapped by 'Artefact' events from the density
+            denominator. Should match the detection run's setting. Default True.
+        reject_arousals : bool, optional
+            Subtract time overlapped by 'Arousal' events from the density
+            denominator. Should match the detection run's setting. Default True.
         """
         import glob
         from collections import defaultdict
-        
+        from turtlewave_hdEEG.utils import build_density_denominators
+
         # Load slow waves from JSON file(s)
         json_files = []
         if file_pattern:
@@ -832,6 +1078,31 @@ class ParalSWA:
         # Calculate durations
         stage_durations = {stg: count * epoch_duration_sec / 60 for stg, count in stage_counts.items()}
         total_duration_min = sum(stage_durations.values())
+
+        # Build an epoch time->stage lookup so an event detected over a
+        # multi-stage span can be attributed to the single stage of the epoch
+        # it actually falls in. Without this, an event tagged ['NREM2','NREM3']
+        # is counted under BOTH stages, inflating per-stage density.
+        try:
+            _epochs = sorted(
+                ((float(e['start']), float(e['end']), str(e['stage']))
+                 for e in self.annotations.get_epochs()),
+                key=lambda x: x[0]
+            )
+        except Exception as e:
+            self.logger.warning(f"Could not build epoch stage lookup: {e}")
+            _epochs = []
+        _epoch_starts = [e[0] for e in _epochs]
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _epochs:
+                return None
+            import bisect
+            idx = bisect.bisect_right(_epoch_starts, t) - 1
+            if 0 <= idx < len(_epochs) and _epochs[idx][0] <= t < _epochs[idx][1]:
+                return _epochs[idx][2]
+            return None
     
         # Extract stages from slow waves if needed
         wave_stages = set()
@@ -854,6 +1125,19 @@ class ParalSWA:
         else:
             stages_to_process = stage_list
 
+        # Build the artefact-free density denominators (per-stage analysed time,
+        # detected-stage whole-night time, per-channel whole-night count). This
+        # shared helper matches what the detector pooled and logs the reject-type
+        # assumption so it is never silent. See utils.build_density_denominators.
+        dd = build_density_denominators(
+            self.annotations, self.dataset,
+            reject_artifacts=reject_artifacts, reject_arousals=reject_arousals,
+            stage_list=stage_list, stages_present=wave_stages,
+            logger=self.logger)
+        reject_types = dd.reject_types
+        detected_stage_set = dd.detected_stage_set
+        whole_night_analysed_min = dd.whole_night_analysed_min
+
         # Group slow waves by channel and stage
         waves_by_chan_stage = defaultdict(lambda: defaultdict(list))
         waves_by_chan = defaultdict(list)
@@ -869,18 +1153,34 @@ class ParalSWA:
             waves_by_chan[chan].append(sw)
             
             if not combined_stages:
+                sw_stages = []
                 if 'stage' in sw:
                     sw_stages = sw['stage'] if isinstance(sw['stage'], list) else [sw['stage']]
-            
-                    for sw_stage in sw_stages:
-                        sw_stage = str(sw_stage)
-                        waves_by_chan_stage[chan][sw_stage].append(sw)
+                sw_stages = [str(s) for s in sw_stages]
+
+                # If the event spans multiple requested stages, attribute it to
+                # the single stage of the epoch it actually occurred in, so it is
+                # not double-counted across stages.
+                if len(sw_stages) > 1:
+                    actual = _stage_at(sw.get('start_time', sw.get('start')))
+                    if actual in sw_stages:
+                        sw_stages = [actual]
+
+                for sw_stage in sw_stages:
+                    waves_by_chan_stage[chan][sw_stage].append(sw)
 
         # Calculate statistics
         stage_channel_stats = defaultdict(dict)
         for chan in set(waves_by_chan.keys()):
             all_chan_waves = waves_by_chan[chan]
-        
+
+            # Whole-night count is stage-independent: compute once per channel,
+            # restricted to the detected stages so it shares the same time base
+            # as whole_night_analysed_min.
+            whole_night_count = dd.whole_night_count(all_chan_waves)
+            whole_night_density = (whole_night_count / whole_night_analysed_min
+                                   if whole_night_analysed_min > 0 else 0)
+
             for process_stage in stages_to_process:
                 stage_waves = []
                 if combined_stages or (isinstance(process_stage, list) and len(process_stage) > 1):
@@ -900,23 +1200,32 @@ class ParalSWA:
                             stage_waves.append(sw)
                             seen_waves.add(id(sw))
 
-                    stage_duration_min = sum(stage_durations.get(s, 0) for s in stages_to_include)
-        
+                    # Artefact-free analysed time is per-stage then summed, so
+                    # a span shared across stages is not double-counted.
+                    analysed_sec = 0.0
+                    artefact_sec = 0.0
+                    for s in stages_to_include:
+                        a, ar = dd.analysed_seconds(s)
+                        analysed_sec += a
+                        artefact_sec += ar
+                    stage_duration_min = analysed_sec / 60.0
+
                 else:
                     s_str = str(process_stage)
                     stage_waves = waves_by_chan_stage[chan].get(s_str, [])
                     stage_name_display = process_stage
-                    stage_duration_min = stage_durations.get(s_str, 0)
-            
+                    analysed_sec, artefact_sec = dd.analysed_seconds(s_str)
+                    stage_duration_min = analysed_sec / 60.0
+
                 if len(stage_waves) == 0:
                     continue
-            
+
                 # Calculate statistics
                 stage_count = len(stage_waves)
-                whole_night_count = len(all_chan_waves)
-                
+
+                # whole_night_density is computed once per channel above
+                # (stage-independent).
                 stage_density = stage_count / stage_duration_min if stage_duration_min > 0 else 0
-                whole_night_density = whole_night_count / total_duration_min if total_duration_min > 0 else 0
                 
                 # Calculate mean duration
                 durations = []
@@ -935,6 +1244,8 @@ class ParalSWA:
                     'mean_duration': mean_duration,
                     'stage_name_display': stage_name_display,
                     'stage_duration_min': stage_duration_min,
+                    'analysed_minutes': stage_duration_min,
+                    'artefact_seconds_excluded': artefact_sec,
                 }
         
         # Export to CSV
@@ -944,8 +1255,18 @@ class ParalSWA:
             # Add summary sections
             writer.writerow(['Whole Night Summary'])
             writer.writerow(['Total Recording Duration (min)', f'{total_duration_min:.2f}'])
+            writer.writerow(['Detected stages (density time base)',
+                             ', '.join(sorted(detected_stage_set)) if detected_stage_set else 'none'])
+            writer.writerow(['Whole-night analysed minutes (artefact-free, detected stages)',
+                             f'{whole_night_analysed_min:.2f}'])
+            writer.writerow(['Stage density denominator',
+                             'artefact-free in-stage time fed to detector (per channel)'])
+            writer.writerow(['Whole-night density denominator',
+                             'artefact-free minutes summed over detected stages (Wake excluded unless detected)'])
+            writer.writerow(['Reject types subtracted',
+                             ', '.join(reject_types) if reject_types else 'none'])
             writer.writerow([])
-            
+
             writer.writerow(['Stage Duration Summary'])
             writer.writerow(['Stage', 'Duration (min)'])
             for stg in sorted(set(stage_durations.keys())):
@@ -967,21 +1288,25 @@ class ParalSWA:
 
                 writer.writerow([f"Sleep Stage: {stage_name_display}"])
                 writer.writerow([
-                    'Channel', 
+                    'Channel',
                     'Count',
-                    f'Density in {stage_name_display} (events/min)', 
+                    f'Density in {stage_name_display} (events/min)',
                     'Whole Night Density (events/min)',
-                    'Mean Duration (s)'
+                    'Mean Duration (s)',
+                    'Analysed Minutes (artefact-free)',
+                    'Artefact Seconds Excluded'
                 ])
 
                 for chan in sorted(stage_channel_stats[key].keys()):
                     stats = stage_channel_stats[key][chan]
                     writer.writerow([
-                        chan, 
+                        chan,
                         stats['count'],
                         f"{stats['stage_density']:.4f}",
                         f"{stats['whole_night_density']:.4f}",
-                        f"{stats['mean_duration']:.4f}"
+                        f"{stats['mean_duration']:.4f}",
+                        f"{stats['analysed_minutes']:.4f}",
+                        f"{stats['artefact_seconds_excluded']:.4f}"
                     ])
                 
                 writer.writerow([])
@@ -1015,7 +1340,7 @@ class ParalSWA:
                 'parameters': parameters,
                 'results': results_summary,
                 'timestamp': datetime.datetime.now().isoformat(),
-                'software_version': 'TurtleWave hdEEG GUI'
+                'software_version': dbwrite.provenance().get('turtlewave_version'),
             }
             
             with open(summary_file, 'w', encoding='utf-8') as f:
@@ -1093,26 +1418,73 @@ class ParalSWA:
 
                     peak2peak_amp REAL,    -- peak-to-peak amplitude
 
-                    -- Processing metadata         
+                    -- Spectral / RMS metrics (from Wonambi event_params)
+                    rms REAL,              -- RMS (uV)
+                    power REAL,            -- band power (uV^2)
+                    peak_power_freq REAL,  -- peak power frequency (Hz)
+                    energy REAL,           -- energy (uV^2s)
+                    peak_energy_freq REAL, -- peak energy frequency (Hz)
+
+                    -- Processing metadata
                     processing_timestamp TEXT,
                     n_fft_sec INTEGER,
                     
                     CONSTRAINT event_chan_time UNIQUE (event_type, channel, start_time, method, freq_lower, freq_upper, stage)
                 )''')
 
-                # Create tracking table for batch processing
+                # Create tracking table for batch processing. Primary key is the
+                # full detection scope (see dbwrite.ensure_direct_write_schema);
+                # scope columns default so legacy narrow CSV-import markers stay
+                # idempotent, and existing narrow-PK DBs migrate in place.
                 conn.execute('''
                 CREATE TABLE IF NOT EXISTS processing_status (
-                    channel TEXT,
-                    event_type TEXT,
+                    channel TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT '',
+                    freq_lower REAL NOT NULL DEFAULT 0,
+                    freq_upper REAL NOT NULL DEFAULT 0,
+                    stage TEXT NOT NULL DEFAULT '',
                     json_file TEXT,
                     processed BOOLEAN DEFAULT 0,
                     attempts INTEGER DEFAULT 0,
                     last_attempt_time TEXT,
                     success BOOLEAN DEFAULT 0,
                     error_message TEXT,
-                            
-                    PRIMARY KEY (channel, event_type)
+
+                    PRIMARY KEY (channel, event_type, method, freq_lower, freq_upper, stage)
+                )''')
+
+                # Per-cycle sleep-cycle structure (populated by ParalCycles).
+                conn.execute('''
+                CREATE TABLE IF NOT EXISTS sleep_cycles (
+                    subject TEXT,
+                    method TEXT,               -- cycle definition ('2022' or '1979')
+                    cycle_number INTEGER,      -- 1-based
+                    nrem_start REAL,           -- seconds from recording start
+                    nrem_end REAL,
+                    rem_start REAL,            -- inter-NREM (REM) segment start
+                    rem_end REAL,              -- cycle end
+                    nrem_dur_min REAL,         -- full period (N1+N2+N3+absorbed wake)
+                    nrem_n23_dur_min REAL,     -- N2+N3 only, within the period
+                    rem_dur_min REAL,
+                    cycle_dur_min REAL,
+                    PRIMARY KEY (subject, method, cycle_number)
+                )''')
+
+                # Per-subject sleep-stage durations (populated by ParalCycles).
+                # DDL kept identical to ParalCycles._ensure_stage_durations_table.
+                conn.execute('''
+                CREATE TABLE IF NOT EXISTS stage_durations (
+                    subject TEXT,
+                    epoch_length REAL,
+                    wake_min REAL,
+                    n1_min REAL,
+                    n2_min REAL,
+                    n3_min REAL,
+                    rem_min REAL,
+                    artefact_min REAL,
+                    total_min REAL,
+                    PRIMARY KEY (subject)
                 )''')
 
                 # Create indexes for efficient querying
@@ -1120,19 +1492,72 @@ class ParalSWA:
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_channel ON events(channel)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_timerange ON events(start_time, end_time)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_stage ON events(stage)')
-                
-                
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_cycle ON events(cycle)')
+
+                # Bring an existing events table up to the current column set.
+                self._ensure_event_param_columns(conn)
+
                 conn.commit()
 
 
                 # If database didn't exist, log creation
                 if not db_exists:
                     self.logger.info(f"Created new database at: {db_path}")
-                    
+
                 return db_path
-        
+
             # Use the safe database operation
             return self._safe_database_operation(db_path, init_db)
+
+    # Spectral / RMS parameter columns added to the events table after the
+    # amplitude columns. Kept in sync with the CREATE TABLE definition above and
+    # with eventprocessor.ParalEvents; the k_complex path delegates to this
+    # exporter, so this migration covers both slow_wave and k_complex rows.
+    _EVENT_PARAM_COLUMNS = (
+        ('rms', 'REAL'),
+        ('power', 'REAL'),
+        ('peak_power_freq', 'REAL'),
+        ('energy', 'REAL'),
+        ('peak_energy_freq', 'REAL'),
+    )
+
+    def _ensure_event_param_columns(self, conn):
+        """Additively migrate the ``events`` table to hold spectral/RMS columns.
+
+        SQLite has no ``ADD COLUMN IF NOT EXISTS``, so existing columns are read
+        from ``PRAGMA table_info(events)`` and only absent ones are added. The
+        operation is idempotent and touches no existing rows (new columns are
+        ``NULL`` on legacy rows) or other tables.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            Open connection to the target database. The caller is responsible
+            for committing; this method commits only when it actually alters the
+            schema so a no-op run leaves the connection state unchanged.
+
+        Returns
+        -------
+        list of str
+            Names of the columns that were added (empty when already current).
+        """
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(events)")
+        existing = {row[1] for row in cursor.fetchall()}
+        # No events table yet (fresh DB before CREATE TABLE): nothing to migrate.
+        if not existing:
+            return []
+        added = []
+        for col, col_type in self._EVENT_PARAM_COLUMNS:
+            if col not in existing:
+                cursor.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type}")
+                added.append(col)
+        if added:
+            conn.commit()
+            self.logger.info(
+                f"Migrated events table: added spectral/RMS columns {added}"
+            )
+        return added
 
 
 
@@ -1206,7 +1631,26 @@ class ParalSWA:
             "updated": 0,
             "skipped": 0
         }
-        
+
+        def _norm_stage(val):
+            """Normalize a Stage cell to the joined form stored in the DB.
+
+            The duplicate check and the INSERT must agree on this, otherwise
+            re-importing a multi-stage CSV never matches existing rows and
+            append mode silently overwrites instead of skipping.
+            """
+            import ast
+            if isinstance(val, list):
+                return "".join(str(s) for s in val)
+            if isinstance(val, str) and '[' in val:
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, list):
+                        return "".join(str(s) for s in parsed)
+                except Exception:
+                    pass
+            return str(val)
+
         # Read the CSV file
         self.logger.info(f"Reading parameters from CSV: {csv_file}")
         try:
@@ -1253,6 +1697,9 @@ class ParalSWA:
             # Define database operation function
             def process_csv_data(conn):
                 cursor = conn.cursor()
+                # Auto-upgrade an existing DB (initialize_sqlite_database is only
+                # called when the file is absent, so migrate here for old DBs).
+                self._ensure_event_param_columns(conn)
 
                 # Determine event type. Caller override wins.
                 if event_type_override is not None:
@@ -1293,11 +1740,11 @@ class ParalSWA:
                     'Min. amplitude (uV)':'min_amp',
                     'Max. amplitude (uV)': 'max_amp',
                     'Peak-to-peak amplitude (uV)': 'peak2peak_amp',
-                    #'RMS (uV)': 'rms',
-                    #'Power (uV^2)': 'power',
-                    #'Peak power frequency (Hz)': 'peak_power_freq',
-                    #'Energy (uV^2s)': 'energy',
-                    #'Peak energy frequency': 'peak_energy_freq',
+                    'RMS (uV)': 'rms',
+                    'Power (uV^2)': 'power',
+                    'Peak power frequency (Hz)': 'peak_power_freq',
+                    'Energy (uV^2s)': 'energy',
+                    'Peak energy frequency (Hz)': 'peak_energy_freq',
                     'UUID': 'uuid'
                 }
                 
@@ -1320,7 +1767,9 @@ class ParalSWA:
                 # Extract frequency band from filename if possible
                 filename = os.path.basename(csv_file)
                 freq_band = "unknown"
-                
+                freq_lower = None
+                freq_upper = None
+
                 # Try to extract frequency from filename (e.g., sw_parameters_Staresina2015_0.3-2.0Hz_NREM2NREM3.csv)
                 if "_" in filename and "Hz" in filename:
                     parts = filename.split('_')
@@ -1359,12 +1808,24 @@ class ParalSWA:
                 if method_override is not None:
                     method = method_override
                 else:
-                    method = "unknown"
-                    if "_" in filename:
-                        parts = filename.split('_')
-                        if len(parts) > 2:
-                            # Typically the format is sw_parameters_METHOD_freq_stages.csv
-                            method = parts[2]
+                    # Prefer a truthful 'Method' CSV column (written by the DB
+                    # export; preserves slash-methods) over the lossy filename
+                    # parse, so a DB-exported CSV re-imports without corrupting
+                    # events.method even when no method= arg is passed. Legacy
+                    # JSON-exported CSVs lack this column and keep the historical
+                    # filename-parse behaviour.
+                    method = None
+                    if 'Method' in df.columns:
+                        method_vals = df['Method'].dropna()
+                        if len(method_vals) > 0:
+                            method = str(method_vals.iloc[0])
+                    if method is None:
+                        method = "unknown"
+                        if "_" in filename:
+                            parts = filename.split('_')
+                            if len(parts) > 2:
+                                # Typically the format is sw_parameters_METHOD_freq_stages.csv
+                                method = parts[2]
 
                 df['method'] = method
                 existing_columns.append('method')
@@ -1416,9 +1877,10 @@ class ParalSWA:
                             original_idx = batch_start + batch_idx
                             freq_lower = df['freq_lower'].iloc[original_idx] if 'freq_lower' in df.columns else None
                             freq_upper = df['freq_upper'].iloc[original_idx] if 'freq_upper' in df.columns else None
-                            stage = df['Stage'].iloc[original_idx] if 'Stage' in df.columns else None
+                            stage = _norm_stage(df['Stage'].iloc[original_idx]) if 'Stage' in df.columns else None
 
-                            query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower = ? AND freq_upper = ? AND stage = ?)")
+                            # `IS` (not `=`) so NULL freq bounds match NULL, since `x = NULL` is never true in SQL.
+                            query_parts.append("(event_type = ? AND channel = ? AND start_time = ? AND method = ? AND freq_lower IS ? AND freq_upper IS ? AND stage = ?)")
                             query_params.extend([event_type, batch_channels[batch_idx], batch_start_times[batch_idx], method, freq_lower, freq_upper, stage])
 
                         if query_parts:
@@ -1440,8 +1902,8 @@ class ParalSWA:
                         method,
                         row.get('freq_lower', None),
                         row.get('freq_upper', None),
-                        str(row.get('Stage',''))
-                        ) in existing_events, 
+                        _norm_stage(row.get('Stage',''))
+                        ) in existing_events,
                     axis=1
                 )
 
@@ -1467,25 +1929,14 @@ class ParalSWA:
                 
                 # Process each row based on whether it exists and append mode
                 for _, row in df.iterrows():
-                    if isinstance(row['Stage'], list):
-                        row['Stage'] = '+'.join(row['Stage'])
-                    elif isinstance(row['Stage'], str) and '[' in row['Stage']:
-                        # Sometimes stage might be a string representation of a list like "['NREM2', 'NREM3']"
-                        # Try to convert it to a proper list then join
-                        try:
-                            import ast
-                            stage_list = ast.literal_eval(row['Stage'])
-                            if isinstance(stage_list, list):
-                                row['Stage'] = ''.join(stage_list)
-                        except:
-                            # If conversion fails, keep as is
-                            pass
+                    row['Stage'] = _norm_stage(row['Stage'])
+
                     # Skip existing rows when in append mode
                     if append and row['exists_in_db']:
                         stats["skipped"] += 1
                         continue
                     values = [row[col] if col in row else None for col in existing_columns]
-                    
+
                     # Handle NaN values
                     for i, val in enumerate(values):
                         # Check if value is NaN (using pandas or numpy's isnan)
@@ -1493,25 +1944,22 @@ class ParalSWA:
                             values[i] = None  # Convert NaN to None (which becomes NULL in SQLite)
 
                     try:
-                        if append and row['exists_in_db']:
-                            # Skip existing rows when in append mode
-                            stats["skipped"] += 1
-                            continue
                         if not append and row['exists_in_db']:
                             # Update existing row when not in append mode
                             update_columns = [col for col in db_columns if col != 'uuid']
                             update_values = [val for i, val in enumerate(values) if db_columns[i] != 'uuid']
-                            
-                            # Update based on the unique constraint, not just UUID
+
+                            # Update based on the unique constraint, not just UUID.
+                            # `IS` on freq bounds so NULL matches NULL; stage is already normalized above.
                             cursor.execute(f"""
                             UPDATE events
                             SET {', '.join([f'{col} = ?' for col in update_columns])}
                             WHERE event_type = ? AND channel = ? AND start_time = ? AND method = ?
-                                AND freq_lower = ? AND freq_upper = ? AND stage = ?
+                                AND freq_lower IS ? AND freq_upper IS ? AND stage = ?
                             """, update_values + [
-                                event_type, 
-                                row.get('Channel', ''), 
-                                row.get('Start time', 0), 
+                                event_type,
+                                row.get('Channel', ''),
+                                row.get('Start time', 0),
                                 method,
                                 row.get('freq_lower', None),
                                 row.get('freq_upper', None),
@@ -1561,13 +2009,25 @@ class ParalSWA:
                         # For CSVs like: spindle_parameters_Ferrarelli2007_9-12Hz_NREM2NREM3.csv
                         # Matching JSONs like: spindles_Ferrarelli2007_9-12Hz_NREM2NREM3_E101.json
                         
-                        # Extract the method and frequency-stage parts
-                        method = parts[2]  # Ferrarelli2007
+                        # Extract the method and frequency-stage parts from the
+                        # CSV name. Use a local (not the `method` arg) so the
+                        # caller's override survives for the INSERT below.
+                        file_method = parts[2]  # e.g. Ferrarelli2007
                         freq_stage = parts[3:]  # ['9-12Hz', 'NREM2NREM3']
                         freq_stage_str = '_'.join(freq_stage).replace('.csv', '')
-                        
+
+                        # Map event_type -> the JSON prefix the detector actually
+                        # wrote. `{event_type}s` is wrong for slow waves
+                        # (slowwaves, not slow_waves) and k-complexes (kcomplex),
+                        # which left their empty/failed channels undetected here.
+                        json_prefix = {
+                            'spindle': 'spindles',
+                            'slow_wave': 'slowwaves',
+                            'k_complex': 'kcomplex',
+                        }.get(event_type, f"{event_type}s")
+
                         # Construct pattern to find related JSON files
-                        json_pattern = f"{event_type}s_{method}_{freq_stage_str}_*"
+                        json_pattern = f"{json_prefix}_{file_method}_{freq_stage_str}_*"
                         
                         # Find JSON files matching the pattern
                         json_dir = os.path.dirname(csv_file)
@@ -1578,6 +2038,7 @@ class ParalSWA:
 
                         # Extract channel names from JSON files
                         empty_channels = set()
+                        failed_channels = {}
                         for file in all_json_files:
                             try:
                                 # Extract channel name from filename
@@ -1586,19 +2047,24 @@ class ParalSWA:
                                 # Skip if channel already in processed_channels
                                 if channel_name in processed_channels:
                                     continue
-                                
-                                # Read JSON file to check if it's empty
+
+                                # Read JSON file to check its contents
                                 with open(file, 'r', encoding='utf-8') as f:
                                     content = json.load(f)
-                                    
-                                # If JSON file contains an empty array, add to empty_channels
-                                if isinstance(content, list) and len(content) == 0:
+
+                                # An empty array means the channel had no events;
+                                # an error-sentinel dict means detection failed and
+                                # must be re-run, so record it as unsuccessful.
+                                if isinstance(content, dict) and 'error' in content:
+                                    failed_channels[channel_name] = str(content.get('error', 'unknown error'))
+                                    self.logger.warning(f"Found error-sentinel JSON for channel: {channel_name}")
+                                elif isinstance(content, list) and len(content) == 0:
                                     empty_channels.add(channel_name)
                                     self.logger.info(f"Found empty JSON file for channel: {channel_name}")
                             except Exception as e:
                                 self.logger.warning(f"Error checking JSON file {file}: {e}")
-    
-                        
+
+
                         # Add empty channels to processing_status
                         for channel in empty_channels:
                             cursor.execute('''
@@ -1606,11 +2072,22 @@ class ParalSWA:
                             (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
                             VALUES (?, ?, 1, 1, 1, datetime('now'), 'No events detected')
                             ''', (channel,event_type))
-            
+
+                        # Record failed channels as unsuccessful so a resume re-runs them
+                        for channel, err in failed_channels.items():
+                            cursor.execute('''
+                            INSERT OR REPLACE INTO processing_status
+                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
+                            VALUES (?, ?, 1, 0, 1, datetime('now'), ?)
+                            ''', (channel, event_type, err[:500]))
+
                         if empty_channels:
                             self.logger.info(f"Recorded {len(empty_channels)} channels with no events: {', '.join(empty_channels)}")
+                        if failed_channels:
+                            self.logger.warning(f"Recorded {len(failed_channels)} failed channels: {', '.join(failed_channels)}")
                         # Add empty channels count to stats
                         stats["empty_channels"] = len(empty_channels)
+                        stats["failed_channels"] = len(failed_channels)
                     
                     conn.commit()
 

@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import bisect
 import logging
 
 from wonambi.trans import fetch, math
@@ -8,6 +9,7 @@ from wonambi.attr import Annotations
 
 from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
+from turtlewave_hdEEG import dbwrite
 
 
 class ParalKC:
@@ -61,7 +63,9 @@ class ParalKC:
                           reject_artifacts=True, reject_arousals=True,
                           stage=None, cat=None,
                           save_to_annotations=False, json_dir=None,
-                          create_empty_json=True):
+                          create_empty_json=True,
+                          *, write_db=False, db_path=None, resume=False,
+                          run_params=None, replace_channels=None, n_fft_sec=4):
         """
         Detect K-complexes in the dataset.
 
@@ -98,6 +102,28 @@ class ParalKC:
         cat, reject_artifacts, reject_arousals, save_to_annotations,
         json_dir, create_empty_json
             Same semantics as ParalSWA.detect_slow_waves.
+        write_db : bool, keyword-only, default False
+            When True, write detected K-complexes straight into a SQLite
+            database (``db_path``) under the ``'k_complex'`` event type via the
+            direct-write path (deterministic uuid5 rows, detector-own
+            morphology in ``det_*``, batched re-measured columns, per-scope
+            ``processing_status`` tracking, ``detection_runs`` provenance). When
+            False the behaviour is byte-identical to the legacy JSON-only path.
+        db_path : str or None, keyword-only
+            Target SQLite database (or directory -> ``neural_events.db``).
+        resume : bool, keyword-only, default False
+            When True (and ``write_db``), channels already recorded as
+            ``success = 1`` for the same scope are skipped.
+        run_params : dict or None, keyword-only
+            Extra parameters merged into ``detection_runs.params_json``.
+        replace_channels : iterable of str or None, keyword-only
+            Scoped channel re-detection (P3). Channels in this set have their
+            existing rows for this exact scope (event_type, method, band)
+            DELETE-then-INSERT replaced in one transaction; channels not in the
+            set keep the append/upsert path and are never touched. Only
+            meaningful with ``write_db=True``. ``None`` (default) disables it.
+        n_fft_sec : int, keyword-only, default 4
+            FFT window (seconds) for the batched spectral re-measurement.
 
         Returns
         -------
@@ -198,9 +224,108 @@ class ParalKC:
                 save_to_annotations = False
                 new_annotations = None
 
+        # ------------------------------------------------------------------
+        # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
+        # ------------------------------------------------------------------
+        stages_key = stages_str
+        db_conn = None
+        run_id = None
+        db_skip = set()
+        rec_start = None
+        s_freq = None
+        if write_db:
+            if db_path is None:
+                self.logger.error("write_db=True but db_path is None; skipping DB writes")
+                write_db = False
+            else:
+                try:
+                    if os.path.isdir(db_path):
+                        db_path = os.path.join(db_path, 'neural_events.db')
+                    self.initialize_sqlite_database(db_path)
+                    db_conn = dbwrite.open_write_connection(db_path)
+                    dbwrite.ensure_direct_write_schema(db_conn, self.logger)
+                    try:
+                        s_freq = self.dataset.header['s_freq']
+                    except Exception:
+                        s_freq = None
+                    try:
+                        rec_start = self.dataset.header.get('start_time')
+                    except Exception:
+                        rec_start = None
+                    run_id = str(uuid.uuid4())
+                    params_dict = {
+                        'frequency': list(frequency),
+                        'trough_duration': list(trough_duration),
+                        'neg_peak_thresh': neg_peak_thresh,
+                        'p2p_thresh': p2p_thresh,
+                        'min_isolation': min_isolation,
+                        'detrend': detrend, 'polar': polar,
+                        'method': method_str,
+                        'ref_chan': ref_chan, 'cat': cat,
+                        'reject_artifacts': reject_artifacts,
+                        'reject_arousals': reject_arousals,
+                        'n_fft_sec': n_fft_sec,
+                    }
+                    if run_params:
+                        params_dict.update(run_params)
+                    # Cite the original (unescaped) method token(s).
+                    orig_method = "_".join(methods) if isinstance(methods, list) else str(methods)
+                    dbwrite.record_run(
+                        db_conn, run_id, self.EVENT_TYPE, method_str,
+                        dbwrite.method_citation(orig_method),
+                        json.dumps(params_dict, default=str),
+                        ref_chan, polar, stage, reject_artifacts, reject_arousals)
+                    if resume:
+                        db_skip = dbwrite.resume_skip_channels(
+                            db_conn, self.EVENT_TYPE, method_str,
+                            frequency[0], frequency[1], stages_key)
+                        if db_skip:
+                            self.logger.info(
+                                f"Resume: skipping {len(db_skip)} already-completed "
+                                f"channels for this scope")
+                except Exception as e:
+                    self.logger.error(f"Could not set up direct-DB write: {e}", exc_info=True)
+                    write_db = False
+                    if db_conn is not None:
+                        try:
+                            db_conn.close()
+                        except Exception:
+                            pass
+                        db_conn = None
+
+        # Epoch -> stage lookup so each KC is attributed to the single scored
+        # epoch it falls in (matches the SW convention).
+        try:
+            _det_epochs = sorted(
+                ((float(e['start']), float(e['end']), str(e['stage']))
+                 for e in self.annotations.get_epochs()),
+                key=lambda x: x[0]
+            ) if self.annotations is not None else []
+        except Exception as e:
+            self.logger.warning(f"Could not build epoch stage lookup: {e}")
+            _det_epochs = []
+        _det_epoch_starts = [e[0] for e in _det_epochs]
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _det_epochs:
+                return None
+            idx = bisect.bisect_right(_det_epoch_starts, t) - 1
+            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
+                return _det_epochs[idx][2]
+            return None
+
         all_kcs = []
 
+        # Scoped channel re-detection (P3): channels whose existing rows are
+        # DELETE-then-INSERT replaced for this scope; all others stay on P2's
+        # append/upsert path untouched.
+        replace_set = {str(c) for c in replace_channels} if replace_channels else set()
+
         for ch in chan:
+            if write_db and resume and ch in db_skip:
+                self.logger.info(f"Resume: channel {ch} already complete for this scope; skipping")
+                continue
             try:
                 self.logger.info(f"Reading data for channel {ch}")
                 segments = fetch(self.dataset, self.annotations, cat=cat,
@@ -210,14 +335,26 @@ class ParalKC:
 
                 channel_kcs = []
                 channel_json_kcs = []
+                channel_db_events = []
+                channel_param_segments = []
 
                 for meth in methods:
                     self.logger.info(f"Applying method: {meth}")
                     for i, seg in enumerate(segments):
                         processed_seg = seg.copy()
-                        if polar == 'opposite':
-                            processed_seg['data'].data[0][0] = (
-                                -processed_seg['data'].data[0][0])
+                        # Do NOT invert here. `polar` is passed to
+                        # DetectKComplex below, which forwards it as Wonambi's
+                        # own `opts.invert`; the underlying Massimini method
+                        # then negates its local copy of the signal exactly
+                        # once (wonambi/detect/slowwave.py:192). Any inversion
+                        # added here would cancel that and make
+                        # polar='opposite' identical to polar='normal'. Note
+                        # `seg.copy()` above is a shallow dict copy, so
+                        # processed_seg['data'] is still the caller's ChanTime
+                        # until detrend replaces it — an in-place negation here
+                        # would also leak across methods.
+                        # Locked down by test_slow_wave_polarity in
+                        # tests/test_turtlewave.py.
                         if detrend:
                             try:
                                 processed_seg['data'] = math(
@@ -246,6 +383,30 @@ class ParalKC:
                             kc['uuid'] = str(uuid.uuid4())
                             kc['chan'] = ch
                             channel_kcs.append(kc)
+
+                            if write_db:
+                                kc_start = float(kc.get('start', 0))
+                                kc_end = float(kc.get('end', 0))
+                                kc_dur = float(kc.get('dur', kc_end - kc_start))
+                                single_stage = _stage_at(kc_start)
+                                if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
+                                    single_stage = stage[0]
+                                morph = dbwrite.event_det_morphology(kc)
+                                ev = {
+                                    'uuid': dbwrite.event_uuid5(
+                                        self.EVENT_TYPE, ch, kc_start, meth,
+                                        frequency[0], frequency[1], single_stage),
+                                    'start_time': kc_start, 'end_time': kc_end,
+                                    'duration': kc_dur, 'stage': single_stage,
+                                    'method': meth,
+                                }
+                                ev.update(morph)
+                                channel_db_events.append(ev)
+                                channel_param_segments.append(
+                                    dbwrite.make_param_segment(
+                                        processed_seg['data'], kc_start, kc_end,
+                                        self.EVENT_TYPE, single_stage, ch))
+
                             if json_dir:
                                 channel_json_kcs.append({
                                     'uuid': kc['uuid'],
@@ -268,6 +429,22 @@ class ParalKC:
                 self.logger.info(
                     f"Found {len(channel_kcs)} K-complexes in channel {ch}")
 
+                # Direct-DB write: one batched re-measurement + one transaction
+                # per channel, BEFORE the JSON write.
+                if write_db and db_conn is not None:
+                    batched = dbwrite.compute_batched_params(
+                        channel_param_segments, frequency, s_freq,
+                        n_fft_sec, self.logger)
+                    dbwrite.write_channel_events(
+                        db_conn, run_id, self.EVENT_TYPE, ch, method_str,
+                        frequency[0], frequency[1], stages_key,
+                        channel_db_events, batched, rec_start,
+                        n_fft_sec, self.logger,
+                        replace=(ch in replace_set), replace_methods=methods)
+                    self.logger.info(
+                        f"Wrote {len(channel_db_events)} K-complex rows for "
+                        f"channel {ch} to the database")
+
                 if json_dir:
                     ch_json = os.path.join(
                         json_dir,
@@ -283,19 +460,38 @@ class ParalKC:
                             f"Saved K-complex data for channel {ch} to "
                             f"{ch_json}")
             except Exception as e:
-                self.logger.warning(
-                    f"No K-complexes in channel {ch}: {e}")
-                if json_dir and create_empty_json:
+                # A real read/detection failure is logged as an error with a
+                # traceback so it is not mistaken for a channel that legitimately
+                # had no K-complexes.
+                self.logger.error(
+                    f"Failed to process channel {ch}: {e}", exc_info=True)
+                # In the direct-DB path, record the failure in processing_status
+                # (success=0) instead of an error sentinel JSON, so a resume
+                # re-runs only this channel.
+                if write_db and db_conn is not None:
+                    dbwrite.record_channel_failure(
+                        db_conn, self.EVENT_TYPE, ch, method_str,
+                        frequency[0], frequency[1], stages_key, e)
+                # Write an error sentinel (not an empty list) so downstream import
+                # can tell a failed channel apart from one that legitimately had no
+                # K-complexes and re-run it.
+                elif json_dir and create_empty_json:
                     try:
                         ch_json = os.path.join(
                             json_dir,
                             f"{self.FILE_PREFIX}_{method_str}_{freq_str}_"
                             f"{stages_str}_{ch}.json")
                         with open(ch_json, 'w', encoding='utf-8') as f:
-                            json.dump([], f)
+                            json.dump({"error": str(e), "channel": ch}, f)
                     except Exception as je:
                         self.logger.error(
-                            f"Could not write empty JSON for {ch}: {je}")
+                            f"Could not write sentinel JSON for {ch}: {je}")
+
+        if write_db and db_conn is not None:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
 
         if save_to_annotations and new_annotations is not None and all_kcs:
             try:
@@ -332,10 +528,12 @@ class ParalKC:
             event_type=self.EVENT_TYPE)
 
     def export_kc_density_to_csv(self, json_input, csv_file, stage=None,
-                                 file_pattern=None):
+                                 file_pattern=None, reject_artifacts=True,
+                                 reject_arousals=True):
         return self._sw_proxy.export_slow_wave_density_to_csv(
             json_input=json_input, csv_file=csv_file, stage=stage,
-            file_pattern=file_pattern)
+            file_pattern=file_pattern, reject_artifacts=reject_artifacts,
+            reject_arousals=reject_arousals)
 
     def initialize_sqlite_database(self, db_path='neural_events.db'):
         return self._sw_proxy.initialize_sqlite_database(db_path)

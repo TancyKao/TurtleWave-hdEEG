@@ -1,0 +1,11 @@
+prune examples
+prune presentation_kc
+prune _scratch
+prune docs
+prune tests
+prune build
+prune dist
+prune site
+global-exclude *.py[cod]
+global-exclude .DS_Store
+global-exclude __pycache__

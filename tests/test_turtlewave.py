@@ -121,6 +121,138 @@ def test_improved_detect_spindle():
         print(f"[FAIL] Error testing ImprovedDetectSpindle: {e}")
         
 
+def _make_chantime(sig, s_freq):
+    """Wrap a 1-D signal in a single-trial, single-channel ChanTime.
+
+    Parameters
+    ----------
+    sig : ndarray
+        Signal for one channel, shape (n_samples,).
+    s_freq : float
+        Sampling frequency in Hz.
+
+    Returns
+    -------
+    instance of wonambi.datatype.ChanTime
+        One trial, one channel named 'Cz'.
+    """
+    from wonambi.datatype import ChanTime
+
+    data = ChanTime()
+    data.s_freq = s_freq
+    data.axis['chan'] = np.empty(1, dtype='O')
+    data.axis['time'] = np.empty(1, dtype='O')
+    data.data = np.empty(1, dtype='O')
+    data.axis['chan'][0] = np.array(['Cz'])
+    data.axis['time'][0] = np.arange(len(sig)) / s_freq
+    data.data[0] = np.asarray(sig, dtype='f')[None, :]
+    return data
+
+
+def _synthetic_slow_oscillation(s_freq=256.0, duration=600.0, freq=0.8,
+                                jitter=0.7, seed=0):
+    """Build an asymmetric slow oscillation for polarity testing.
+
+    The wave has a sharp, large negative half-cycle and a broad, smaller
+    positive half-cycle, so it is *not* symmetric under negation — a detector
+    that genuinely inverts must return different events for the signal and
+    its negation. Per-cycle amplitude jitter gives the relative-threshold
+    methods (Ngo2015) a spread to threshold against.
+
+    Parameters
+    ----------
+    s_freq : float
+        Sampling frequency in Hz.
+    duration : float
+        Length of the signal in seconds.
+    freq : float
+        Slow-oscillation frequency in Hz.
+    jitter : float
+        Standard deviation of the per-cycle multiplicative amplitude jitter.
+    seed : int
+        Seed for the amplitude jitter and the additive noise.
+
+    Returns
+    -------
+    ndarray
+        Signal in microvolts, shape (n_samples,).
+    """
+    rng = np.random.default_rng(seed)
+    n = int(duration * s_freq)
+    phase = 2 * np.pi * freq * np.arange(n) / s_freq
+    sine = np.sin(phase)
+    base = (-np.abs(sine) ** 0.6 * (sine < 0) * 110.0
+            + (sine > 0) * sine ** 2 * 60.0)
+    cycle = (phase // (2 * np.pi)).astype(int)
+    gain = 1.0 + jitter * rng.standard_normal(cycle.max() + 2)[cycle]
+    return base * gain + rng.standard_normal(n) * 2.0
+
+
+def test_slow_wave_polarity():
+    """Polarity regression: polar='opposite' must invert exactly once.
+
+    `ImprovedDetectSlowWave.invert` is Wonambi's own `DetectSlowWave.invert`,
+    and every slow-wave method negates the signal itself
+    (wonambi/detect/slowwave.py:192, :256, :322). If turtlewave inverts as
+    well — in the detector's `__call__` or in the processor loop — the two
+    cancel and polar='opposite' silently becomes polar='normal', producing
+    confidently wrong events with no error. This asserts the two invariants
+    that catch that:
+
+    1. ``opposite(x)`` returns exactly the events of ``normal(-x)``.
+    2. ``opposite(x)`` differs from ``normal(x)`` — i.e. inverting is not a
+       no-op on a signal that is genuinely asymmetric.
+    """
+    print("\n8. Testing slow-wave / K-complex polarity handling:")
+
+    from turtlewave_hdEEG.extensions import (ImprovedDetectSlowWave,
+                                             ImprovedDetectKComplex)
+
+    s_freq = 256.0
+    sig = _synthetic_slow_oscillation(s_freq=s_freq)
+
+    def starts(events):
+        return [round(float(evt['start']), 6) for evt in events]
+
+    cases = [(ImprovedDetectSlowWave, method, {}) for method in
+             ('Massimini2004', 'AASM/Massimini2004', 'Ngo2015',
+              'Staresina2015')]
+    cases.append((ImprovedDetectKComplex, 'AASM/Massimini2004',
+                  {'min_isolation': 1.0}))
+
+    # Ngo2015 thresholds are relative to the mean event amplitude, so its
+    # yield on a synthetic stimulus is not stable enough to assert a floor on;
+    # its round-trip equality is still checked.
+    needs_events = {'Massimini2004', 'AASM/Massimini2004', 'Staresina2015'}
+
+    for cls, method, kwargs in cases:
+        opposite = starts(cls(method=method, polar='opposite',
+                              **kwargs)(_make_chantime(sig, s_freq)))
+        negated = starts(cls(method=method, polar='normal',
+                             **kwargs)(_make_chantime(-sig, s_freq)))
+        normal = starts(cls(method=method, polar='normal',
+                            **kwargs)(_make_chantime(sig, s_freq)))
+
+        label = f"{cls.__name__.replace('ImprovedDetect', '')}/{method}"
+        print(f"   {label:<28} opposite(x)={len(opposite):>4}  "
+              f"normal(-x)={len(negated):>4}  normal(x)={len(normal):>4}")
+
+        assert opposite == negated, (
+            f"{label}: polar='opposite' on x must equal polar='normal' on -x, "
+            f"got {len(opposite)} vs {len(negated)} events")
+
+        if method in needs_events:
+            assert opposite, (
+                f"{label}: no events detected, so the polarity round-trip "
+                f"assertion above is vacuous")
+            assert opposite != normal, (
+                f"{label}: polar='opposite' is identical to polar='normal' — "
+                f"the inversion is being applied twice and cancelling")
+
+    print("[ok] polar='opposite' inverts exactly once for all slow-wave "
+          "methods and K-complexes")
+
+
 def test_package_structure():
     """Test the overall package structure"""
     print("\n6. Testing package structure:")
@@ -145,6 +277,8 @@ if __name__ == "__main__":
     test_paralevents_class()
     test_largedataset_class()
     test_xlannotations_class()
+    test_improved_detect_spindle()
+    test_slow_wave_polarity()
     test_package_structure()
     
     print("\nAll tests completed!")

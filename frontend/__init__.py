@@ -12,7 +12,7 @@ except ImportError:
     EVENT_REVIEW_AVAILABLE = False
     event_review_main = None
     EventReviewInterface = None
-__version__ = '3.1.0'
+__version__ = '4.0.0'
 __all__ = ['main']
 
 # Add to __all__ if available

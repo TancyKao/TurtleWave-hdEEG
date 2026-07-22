@@ -654,7 +654,7 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         # Check if we need to invert the signal
         if hasattr(self, 'invert') and self.invert:
             # Make a copy to avoid modifying the original
-            data_copy = data.copy()
+            data_copy = data._copy(data=True)
             # Invert signal for all epochs
             for i in range(len(data_copy.data)):
                 data_copy.data[i] = -data_copy.data[i]
@@ -806,9 +806,19 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
         instance of graphoelement.SlowWaves
             Detected slow waves
         """
-        # Invert signal if requested
-        if self.invert:
-            data.data[0][0] = -data.data[0][0]
+        # Do NOT invert here. `self.invert` (set from polar='opposite' in
+        # __init__) is Wonambi's own DetectSlowWave attribute, and every
+        # slow-wave method applies it itself on its local copy of the signal:
+        # detect_Massimini2004, detect_Ngo2015 and detect_Staresina2015 each
+        # begin with `if opts.invert: dat_orig = -dat_orig`
+        # (wonambi/detect/slowwave.py:192, :256, :322). Inverting here as well
+        # would cancel the parent's inversion and make polar='opposite'
+        # bit-identical to polar='normal'. See test_slow_wave_polarity in
+        # tests/test_turtlewave.py, which locks this down.
+        #
+        # The parent also builds `dat_orig` fresh per channel
+        # (hstack(data(chan=chan)) then a demean that allocates a new array),
+        # so it never mutates the caller's segment in place.
 
         # Run detection using parent class
         events = super().__call__(data)

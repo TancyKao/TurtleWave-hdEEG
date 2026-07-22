@@ -10,6 +10,12 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 - [**Slow Wave Processor**](swprocessor.md) - Slow wave detection algorithms
 - [**PAC Processor**](pacprocessor.md) - Phase-amplitude coupling analysis
 
+### Database & Provenance
+
+- [**Direct-to-Database Write**](dbwrite.md) - `write_db=True` detection path, `detection_runs` provenance, DB → CSV export
+- [**Re-run Guards**](rerun.md) - Correctness guards for scoped channel re-detection
+- [**Utilities**](utils.md) - Artefact-free density denominators and other shared helpers
+
 ### User Interface
 
 - [**GUI Components**](gui.md) - Graphical user interface
