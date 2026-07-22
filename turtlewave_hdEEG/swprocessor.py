@@ -455,9 +455,20 @@ class ParalSWA:
                             # Create a copy of the segment for processing
                             processed_seg = seg.copy()
 
-                            # Polarity is handled inside the detector (polar=...),
-                            # which inverts on a copy. Do NOT invert here as well —
-                            # a second inversion cancels the first.
+                            # Do NOT invert here. `polar` is passed to
+                            # DetectSlowWave below, which forwards it as
+                            # Wonambi's own `opts.invert`; each slow-wave
+                            # method then negates its local copy of the signal
+                            # exactly once (wonambi/detect/slowwave.py:192,
+                            # :256, :322). Any inversion added here would
+                            # cancel that and make polar='opposite' identical
+                            # to polar='normal'. Note `seg.copy()` above is a
+                            # shallow dict copy, so processed_seg['data'] is
+                            # still the caller's ChanTime until detrend
+                            # replaces it — an in-place negation here would
+                            # also leak across methods.
+                            # Locked down by test_slow_wave_polarity in
+                            # tests/test_turtlewave.py.
 
                             if detrend:
                                 self.logger.debug(f'Applying detrend to segment {i + 1}')

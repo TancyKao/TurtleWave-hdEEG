@@ -433,8 +433,13 @@ class ParalEvents:
                         for i, seg in enumerate(segments):
                             self.logger.info(f'Detecting events, segment {i + 1} of {len(segments)}')
 
-                            # Polarity is handled inside the detector (polar=...),
-                            # which inverts on a copy. Do NOT invert here as well.
+                            # Do NOT invert here. Unlike the slow-wave module,
+                            # Wonambi's spindle detectors have no `opts.invert`
+                            # of their own, so ImprovedDetectSpindle.__call__
+                            # is the single place the inversion happens — and
+                            # it does it on a copy, leaving seg['data'] intact
+                            # for the next method. Inverting here would make it
+                            # two and cancel.
                             # Run detection
                             spindles = detection(seg['data'])
 

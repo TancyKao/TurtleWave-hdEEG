@@ -342,9 +342,19 @@ class ParalKC:
                     self.logger.info(f"Applying method: {meth}")
                     for i, seg in enumerate(segments):
                         processed_seg = seg.copy()
-                        # Polarity is handled inside the detector (polar=...),
-                        # which inverts on a copy. Do NOT invert here as well —
-                        # a second inversion cancels the first.
+                        # Do NOT invert here. `polar` is passed to
+                        # DetectKComplex below, which forwards it as Wonambi's
+                        # own `opts.invert`; the underlying Massimini method
+                        # then negates its local copy of the signal exactly
+                        # once (wonambi/detect/slowwave.py:192). Any inversion
+                        # added here would cancel that and make
+                        # polar='opposite' identical to polar='normal'. Note
+                        # `seg.copy()` above is a shallow dict copy, so
+                        # processed_seg['data'] is still the caller's ChanTime
+                        # until detrend replaces it — an in-place negation here
+                        # would also leak across methods.
+                        # Locked down by test_slow_wave_polarity in
+                        # tests/test_turtlewave.py.
                         if detrend:
                             try:
                                 processed_seg['data'] = math(
