@@ -19,10 +19,15 @@ Density is computed **per cycle, normalised by that cycle's full NREM period**::
 
     density_per_min = count / cycle_nrem_dur_min
 
-The N2+N3-only duration (``cycle_nrem_n23_dur_min``) is also included as an
-adjacent column so density can be re-divided by N2+N3 if preferred. Cycle
-durations come from the ``sleep_cycles`` table for the ``'2022'`` definition
-(the method that owns ``events.cycle``), joined on cycle number.
+An N2+N3-only density is emitted alongside it in ``density_n23_per_min``::
+
+    density_n23_per_min = count / cycle_nrem_n23_dur_min
+
+both raw durations (``cycle_nrem_dur_min`` full period, ``cycle_nrem_n23_dur_min``
+N2+N3 only) are kept as adjacent columns so either denominator can be recomputed
+downstream. Cycle durations come from the ``sleep_cycles`` table for the
+``'2022'`` definition (the method that owns ``events.cycle``), joined on cycle
+number.
 
 CAVEAT: normalising by NREM duration is appropriate for NREM events (slow waves,
 spindles, K-complexes). For REM-locked events, divide by REM duration
@@ -77,7 +82,7 @@ SUMMARY_FIELDS = [
     "count",
     "cycle_nrem_dur_min", "cycle_nrem_n23_dur_min",
     "cycle_rem_min", "cycle_dur_min",
-    "density_per_min",
+    "density_per_min", "density_n23_per_min",
     "peak2peak_amp_mean", "peak2peak_amp_sd", "peak2peak_amp_median",
     "duration_mean", "duration_sd", "duration_median",
     "min_amp_mean", "max_amp_mean",
@@ -254,7 +259,9 @@ def export_database(db_path, raw_writer, summary_rows):
         subj, cyc_num, event_type, method, channel = key
         count = len(g["p2p"])
         nrem = g["cycle_nrem_dur_min"]
+        n23 = g["cycle_nrem_n23_dur_min"]
         density = count / nrem if nrem else float("nan")
+        density_n23 = count / n23 if n23 else float("nan")
 
         summary_rows.append({
             "subject": subj,
@@ -268,6 +275,7 @@ def export_database(db_path, raw_writer, summary_rows):
             "cycle_rem_min": _fnum(g["cycle_rem_min"]),
             "cycle_dur_min": _fnum(g["cycle_dur_min"]),
             "density_per_min": _fnum(density),
+            "density_n23_per_min": _fnum(density_n23),
             "peak2peak_amp_mean": _stat(g["p2p"], np.mean),
             "peak2peak_amp_sd": _stat(g["p2p"], _sd),
             "peak2peak_amp_median": _stat(g["p2p"], np.median),
