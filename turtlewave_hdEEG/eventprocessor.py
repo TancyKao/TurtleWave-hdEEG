@@ -146,6 +146,12 @@ class ParalEvents:
             Whether to exclude segments marked with artifact annotations
         reject_arousals : bool
             Whether to exclude segments marked with arousal annotations
+        stage : list or str or None
+            Sleep stage(s) to analyze
+        cat : tuple or None
+            Category specification for data selection (concatenation)
+        save_to_annotations : bool
+            Whether to save detected spindles to the annotation file
         json_dir : str or None
             Directory to save individual channel JSON files (one per channel)
         create_empty_json : bool
@@ -176,8 +182,10 @@ class ParalEvents:
             Only meaningful with ``write_db=True``. ``None`` (default) disables
             replacement entirely.
         **detector_params : dict
-        Additional parameters to pass to the detector. These are method-specific
-        and can include parameters like det_thresh, sel_thresh, etc.
+            Additional parameters to pass to the detector. These are
+            method-specific and can include parameters like det_thresh,
+            sel_thresh, etc.
+
         Returns
         -------
         list

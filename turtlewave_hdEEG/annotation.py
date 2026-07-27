@@ -137,12 +137,10 @@ class XLAnnotations:
         """
         Import stages from header array into annotations using Wonambi's import_staging
         with Compumedics format.
-        
-        Parameters
-        ----------
-        rater_name : str
-            Name of the rater to use for staging (default: "Automatic_Staging")
-        
+
+        The rater name applied to the imported staging is taken from the instance
+        attribute ``self.rater_name`` set at construction, not from an argument.
+
         Returns
         -------
         bool
