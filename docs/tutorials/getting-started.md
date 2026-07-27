@@ -189,11 +189,18 @@ Take a moment to review these numbers. They tell the story of your data.
 
 Navigate to your output directory. You'll find:
 
-**`*_spindles.h5`** - Your detected spindle events
+**`spindle_results/*.json`** - One JSON file per channel with the raw detected events
+
+**`spindle_results/spindle_parameters_*.csv`** - All channels aggregated into a single CSV
 
 - Contains timing, amplitude, frequency for each spindle
 - Organized by channel and sleep stage
 - Ready for statistical analysis
+
+**`neural_events.db`** - SQLite database the CSV was imported into
+
+- Queryable with SQL or pandas (`pd.read_sql`)
+- The store the EEG Review GUI reads from
 
 **`*_annotations.xml`** - Sleep stage annotations
 
@@ -206,7 +213,9 @@ Navigate to your output directory. You'll find:
 - Documents parameters used
 
 !!! tip "Next steps with your data"
-    These HDF5 files can be loaded in Python with pandas or h5py for further analysis. We'll cover that in the how-to guides.
+    The CSV can be loaded directly with pandas. For SQL access to
+    `neural_events.db`, use `sqlite3` or `pd.read_sql_query`. We'll cover that
+    in the how-to guides.
 
 ## What You've Learned
 
@@ -225,7 +234,8 @@ The pattern you just learned applies to all TurtleWave analyses:
 1. **Load data** - Select your recording
 2. **Annotate** - Map sleep stages and artifacts
 3. **Detect** - Run event detection
-4. **Review** - Examine results
+4. **Import** - Get results into `neural_events.db`
+5. **Review** - Triage detected events in the QC dashboard
 
 This same workflow works for slow waves, phase-amplitude coupling, and other analyses.
 
@@ -234,6 +244,15 @@ This same workflow works for slow waves, phase-amplitude coupling, and other ana
 Now that you understand the basics, you're ready to explore more:
 
 ### Immediate Next Steps
+
+**Review what you just detected:**
+
+- [Review EEG events in the QC dashboard](eeg-review-gui-tutorial.md) — now
+  review those events: triage flagged channels and drill into epochs before
+  you trust the counts
+- [Write detection results directly to the database](../how-to/direct-to-database-detection.md)
+  — get results into `neural_events.db` for analysis, skipping the
+  JSON→CSV→import round-trip
 
 **Try different event types:**
 
@@ -308,7 +327,7 @@ Ran into issues? Here are solutions to common problems:
 - Ensure you have write permissions to the output directory
 
 !!! question "Still stuck?"
-    Don't hesitate to ask for help! Check our [GitHub Discussions](https://github.com/your-repo/turtlewave-hdEEG/discussions) or open an issue. The community is here to help you succeed.
+    Don't hesitate to ask for help! Open an issue on [GitHub Issues](https://github.com/TancyKao/TurtleWave-hdEEG/issues) with your error message and system details.
 
 ## Final Thoughts
 
@@ -319,7 +338,8 @@ You've taken your first steps into sleep EEG analysis with TurtleWave. What felt
 
 **Ready for more?** Pick your next adventure:
 
-- [How to optimize detection parameters](../how-to/detect-slow-waves.md)
+- [Review your detected events in the QC dashboard](eeg-review-gui-tutorial.md)
+- [How to optimize spindle detection parameters](../how-to/detect-spindles.md#optimizing-detection)
 - [Understanding TurtleWave's architecture](../explanation/overview.md)
 - [API reference for scripting](../reference/api/index.md)
 

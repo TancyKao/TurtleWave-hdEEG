@@ -25,6 +25,7 @@ Start with our tutorials to learn by doing:
 Check our how-to guides for practical solutions:
 
 - [**Installation**](how-to/installation.md) - Set up TurtleWave
+- [**Detect Spindles**](how-to/detect-spindles.md) - Run spindle detection
 - [**Detect Slow Waves**](how-to/detect-slow-waves.md) - Run slow wave detection
 - [**Review EEG Events**](how-to/review-eeg-events.md) - Validate detected events efficiently
 
@@ -52,15 +53,15 @@ Read our explanations:
 
 ### Review GUI
 
-- **High-throughput review** - Process thousands of events efficiently
-- **Keyboard-driven workflow** - Rapid accept/reject decisions
-- **Flexible filtering** - Filter by event type, channel, sleep stage, confidence
+- **QC-driven triage** - Spot outlier channels first, then drill into their epochs
+- **Keyboard-driven workflow** - Flag a channel for re-detection with `F`
+- **Flexible filtering** - Filter by event type, channel, sleep stage, method, frequency band
 - **Performance optimized** - Handle 100,000+ events smoothly
 
 ### Data Formats
 
 - **Input:** EEGLAB (.set/.fdt), EDF, MNE-compatible formats
-- **Output:** SQLite databases, CSV files, XML annotations
+- **Output:** JSON per channel, aggregated CSV, and a SQLite database (`neural_events.db`)
 
 ## Installation
 
@@ -75,35 +76,49 @@ For detailed installation instructions, see the [Installation Guide](how-to/inst
 ### Detect Sleep Spindles
 
 ```python
-from turtlewave_hdEEG import LargeDataset, EventProcessor
+from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import ParalEvents, CustomAnnotations
 
-# Load EEG data
-dataset = LargeDataset('subject001.set')
+# Load EEG data and annotations
+data = WonambiDataset('subject001.set')
+annot = CustomAnnotations('subject001_annotations.xml')
 
 # Detect spindles
-processor = EventProcessor(dataset)
-spindles = processor.detect_spindles(
-    channels=['Cz', 'Fz'],
-    freq_range=(11, 16),
-    method='wavelet'
+event_processor = ParalEvents(dataset=data, annotations=annot)
+spindles = event_processor.detect_spindles(
+    method='Ferrarelli2007',
+    chan=['Cz', 'Fz'],
+    frequency=(11, 16),
+    stage=['NREM2', 'NREM3'],
+    json_dir='wonambi/spindle_results',
 )
 
-# Save results
-spindles.to_csv('spindles.csv')
+# Aggregate the per-channel JSON into CSV, then into the database
+event_processor.export_spindle_parameters_to_csv(
+    json_input='wonambi/spindle_results',
+    csv_file='wonambi/spindle_results/spindle_parameters.csv',
+    file_pattern='spindles_Ferrarelli2007',
+)
+event_processor.import_parameters_csv_to_database(
+    csv_file='wonambi/spindle_results/spindle_parameters.csv',
+    db_path='wonambi/neural_events.db',
+)
 ```
+
+See [`examples/hdEEG_spindle_detector.py`](https://github.com/TancyKao/TurtleWave-hdEEG/blob/master/examples/hdEEG_spindle_detector.py)
+for the full script, including density export. `write_db=True` can also
+write straight to the database and skip the CSV step — see
+[Write Detection Results Directly to the Database](how-to/direct-to-database-detection.md).
 
 ### Review Detected Events
 
 ```bash
-python -m frontend.eeg_review_gui
+eeg_review_gui
 ```
 
-Then:
-
-1. Load your event database
-2. Load your EEG file
-3. Review events using keyboard shortcuts (A = accept, R = reject)
-4. Export reviewed events
+Then load your database, EEG file, and annotations, triage channels on the
+**Channels (QC)** tab, drill into a channel's **Epochs** to inspect outliers,
+and press **F** to flag a channel for re-detection.
 
 See the [EEG Review GUI Tutorial](tutorials/eeg-review-gui-tutorial.md) for a complete walkthrough.
 
@@ -120,13 +135,11 @@ This documentation follows the [Diátaxis framework](DIATAXIS_FRAMEWORK.md), org
 
 ## Support
 
-- **Issues:** [GitHub Issues](https://github.com/your-repo/turtlewave-hdEEG/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/your-repo/turtlewave-hdEEG/discussions)
-- **Email:** support@turtlewave.org
+- **Issues and questions:** [GitHub Issues](https://github.com/TancyKao/TurtleWave-hdEEG/issues)
 
 ## Contributing
 
-We welcome contributions! See our [Contributing Guide](https://github.com/your-repo/turtlewave-hdEEG/blob/main/CONTRIBUTING.md) for details.
+We welcome contributions! See our [repository](https://github.com/TancyKao/TurtleWave-hdEEG) for details.
 
 ## Citation
 
@@ -137,10 +150,10 @@ If you use TurtleWave in your research, please cite:
   title = {TurtleWave: High-density EEG Event Detection for Sleep Research},
   author = {TurtleWave Development Team},
   year = {2024},
-  url = {https://github.com/your-repo/turtlewave-hdEEG}
+  url = {https://github.com/TancyKao/TurtleWave-hdEEG}
 }
 ```
 
 ## License
 
-TurtleWave is released under the MIT License. See [LICENSE](https://github.com/your-repo/turtlewave-hdEEG/blob/main/LICENSE) for details.
+TurtleWave is released under the MIT License. See [LICENSE](https://github.com/TancyKao/TurtleWave-hdEEG/blob/master/LICENSE) for details.

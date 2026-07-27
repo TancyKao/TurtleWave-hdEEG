@@ -73,12 +73,12 @@ TurtleWave is built on a foundation of established scientific Python libraries:
 **Core Requirements:**
 
 - Python ≥3.8
-- NumPy ≥1.17.0 - Numerical computing
+- NumPy ==1.26.4 - Numerical computing (pinned for Wonambi compatibility)
 - SciPy ≥1.3.0 - Scientific computing
 - Matplotlib ≥3.1.0 - Visualization
 - h5py ≥2.10.0 - HDF5 file handling
 - PyQt5 ≥5.12.0 - Graphical interface
-- Wonambi ≥7.15 - EEG analysis foundation
+- Wonambi ==7.15 - EEG analysis foundation (pinned; its API is what the extension classes inherit from)
 
 **Additional Dependencies:**
 
