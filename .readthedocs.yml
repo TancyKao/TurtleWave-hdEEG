@@ -11,17 +11,15 @@ build:
   tools:
     python: "3.10"
 
-# Build documentation in the docs/ directory with Sphinx
-sphinx:
-  configuration: docs/source/conf.py
+# Build documentation with MkDocs (mkdocs-material + mkdocstrings)
+mkdocs:
+  configuration: mkdocs.yml
 
-# Optionally build your docs in additional formats such as PDF
-formats:
-  - pdf
-
-# Optionally set the version of Python and requirements required to build your docs
+# Install the package plus its optional [docs] dependency group so there is a
+# single source of truth for doc dependencies (declared in pyproject.toml).
 python:
   install:
     - method: pip
       path: .
-    - requirements: docs/requirements.txt
+      extra_requirements:
+        - docs
