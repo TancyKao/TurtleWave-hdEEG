@@ -136,6 +136,7 @@ This documentation follows the [Diátaxis framework](DIATAXIS_FRAMEWORK.md), org
 ## Support
 
 - **Issues and questions:** [GitHub Issues](https://github.com/TancyKao/TurtleWave-hdEEG/issues)
+- **Email:** [tancy.kao@woolcock.org.au](mailto:tancy.kao@woolcock.org.au)
 
 ## Contributing
 
