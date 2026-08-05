@@ -40,7 +40,7 @@ import os
 import sys
 from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalEvents, CustomAnnotations
+from turtlewave_hdEEG import ParalEvents, CustomAnnotations, fmt_freq_token
 import logging
 import argparse as _ap
 
@@ -132,7 +132,7 @@ spindles = event_processor.detect_spindles(
 
 
 # After processing all channels, export parameters
-freq_range = f"{test_frequency[0]}-{test_frequency[1]}Hz"
+freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
 
 # for selecting proper json files

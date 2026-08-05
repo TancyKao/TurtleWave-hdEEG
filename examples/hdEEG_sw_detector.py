@@ -23,7 +23,7 @@ import os
 import sys
 from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalSWA, CustomAnnotations
+from turtlewave_hdEEG import ParalSWA, CustomAnnotations, fmt_freq_token
 import logging
 import argparse as _ap
 
@@ -114,7 +114,7 @@ slow_waves = event_processor.detect_slow_waves(
 # Export results
 test_method_str = "_".join(test_method).replace('/', '_') if isinstance(test_method, list) else str(test_method).replace('/', '_')
 
-freq_range = f"{test_frequency[0]}-{test_frequency[1]}Hz"
+freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
 file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
 
@@ -142,10 +142,17 @@ else:
         file_pattern=file_pattern
     )
 
+    # Pass the UNESCAPED method. test_method_str ('AASM_Massimini2004') is the
+    # filesystem-safe form used in filenames only; the direct-write path and
+    # the other drivers store the original 'AASM/Massimini2004'. Storing both
+    # spellings splits one run across two methods with no UNIQUE collision,
+    # which double-counts densities and hides half the events from any
+    # method-scoped query.
     csv2db = event_processor.import_parameters_csv_to_database(
         csv_file     = os.path.join(json_dir, f'sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv'),
         db_path      = db_path,
-        method       = test_method_str
+        event_type   = 'slow_wave',
+        method       = test_method
         )
 
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

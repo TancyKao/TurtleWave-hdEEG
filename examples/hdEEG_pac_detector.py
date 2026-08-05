@@ -26,7 +26,49 @@ import sqlite3
 from wonambi.dataset import Dataset as WonambiDataset
 #from wonambi.attr import Annotations
 from turtlewave_hdEEG.utils import read_channels_from_csv
-from turtlewave_hdEEG import ParalPAC, CustomAnnotations
+from turtlewave_hdEEG import ParalPAC, CustomAnnotations, derive_subject
+
+def verify_pac_rows(db_path, subject, stages, n_channels_requested):
+    """Count the ``pac_coupling`` rows a run actually landed, and report.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database.
+    subject : str
+        Subject id the rows should be keyed under.
+    stages : list of str or str
+        Stages analysed, used only for the printed scope.
+    n_channels_requested : int
+        Channels handed to the analysis, for the comparison line.
+
+    Returns
+    -------
+    int
+        Number of ``pac_coupling`` rows for this subject. 0 when the table
+        does not exist, so an absent table reads as "nothing landed" rather
+        than raising.
+    """
+    stage_str = ''.join(stages) if isinstance(stages, list) else str(stages)
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            n_rows = conn.execute(
+                "SELECT COUNT(*) FROM pac_coupling WHERE subject = ?",
+                (subject,)).fetchone()[0]
+            n_chan = conn.execute(
+                "SELECT COUNT(DISTINCT channel) FROM pac_coupling "
+                "WHERE subject = ?", (subject,)).fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as e:
+        print(f"Could not read pac_coupling in {db_path}: {e}")
+        return 0
+
+    print(f"\npac_coupling rows for subject '{subject}' (stages {stage_str}): "
+          f"{n_rows} row(s) across {n_chan}/{n_channels_requested} channel(s)")
+    return n_rows
+
 
 def list_available_methods(db_path):
     """List available detection methods in the database for both slow waves and spindles."""
@@ -341,6 +383,15 @@ def main():
     parser.add_argument('--channel', type=str, help='Specific channel to analyze (default: all)')
     parser.add_argument('--sw_freq_range', type=float, nargs=2, help='Slow wave frequency range for filtering events (Hz)')
     parser.add_argument('--spindle_freq_range', type=float, nargs=2, help='Spindle frequency range for filtering events (Hz)')
+    parser.add_argument('--subject', type=str, default=None,
+                        help='Subject id used as the pac_coupling primary key. '
+                             'Default: derived from the annotation XML filename, '
+                             'else from the root directory name.')
+    parser.add_argument('--no-write-db', dest='no_write_db', action='store_true',
+                        help='Do not write PAC results into neural_events.db '
+                             '(CSV/.npy files only). Results written only to '
+                             'files are easy to lose track of; prefer the '
+                             'default database write.')
 
     args = parser.parse_args()
 
@@ -504,6 +555,17 @@ def main():
         'stages': ''.join(args.stages) if isinstance(args.stages, list) else args.stages  # Convert to combined string
     }
         
+    # Resolve the subject id once. This is the primary key of pac_coupling, so
+    # a PAC run without it cannot be stored; deriving it here (explicit ->
+    # annotation XML stem -> root directory name) means the database write is
+    # the default path rather than something the caller has to remember.
+    subject = derive_subject(annotation_path=annot_file,
+                             root_dir=args.root_dir,
+                             explicit=args.subject)
+    write_db = not args.no_write_db
+    print(f"Subject: {subject}")
+    print(f"Write PAC results to database: {write_db} ({db_path})")
+
     # Create modified analyze_pac method to handle method selection in SQL queries
     def modified_analyze_pac(event_type, pair_with_spindles=False):
         """Wrapper for analyze_pac to handle method selection"""
@@ -519,7 +581,11 @@ def main():
             'time_window': 1.0,
             'db_path': db_path,
             'out_dir': args.output_dir,
-            'event_opts': event_opts
+            'event_opts': event_opts,
+            # analyze_pac still defaults write_db=False (flipping that default
+            # is a later stage); pass it explicitly so results reach the DB.
+            'write_db': write_db,
+            'subject': subject,
         }
         
         # Create method-specific output directory
@@ -638,9 +704,33 @@ def main():
         else:
             print("Comodulogram generation failed.")
     
+    # Post-run verification. The failure this whole change exists to stop was
+    # a PAC run that completed cleanly, wrote CSVs, and never reached the
+    # database -- and still printed "ALL DONE". Check the rows are actually
+    # there before saying so, and exit non-zero if they are not.
+    # Bound unconditionally: `results` stays empty whenever no analysis ran
+    # (e.g. --sw_method without --spindle_method, since the sw_spindle branch
+    # needs both), and the summary below reads it either way.
+    n_rows = None
+    if write_db and results:
+        n_rows = verify_pac_rows(db_path, subject, args.stages, len(channels))
+        if n_rows == 0:
+            print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+            print(f"ERROR: PAC analysis produced results but NO rows landed in "
+                  f"pac_coupling for subject '{subject}' in {db_path}.")
+            print("Results exist only as CSV/.npy files under "
+                  f"{args.output_dir} and are not in the database.")
+            print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
+            sys.exit(1)
+
     print("\n~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
     print(f"PAC analysis completed")
     print(f"Results saved to {args.output_dir}")
+    if not results:
+        print("No PAC analysis ran: the slow-wave/spindle coupling branch "
+              "needs BOTH --sw_method and --spindle_method.")
+    elif write_db:
+        print(f"PAC rows in database: {n_rows} (subject '{subject}')")
     print(f"ALL DONE")
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
 

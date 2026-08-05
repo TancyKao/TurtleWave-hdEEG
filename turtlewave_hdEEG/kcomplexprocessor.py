@@ -171,12 +171,22 @@ class ParalKC:
         if reject_arousals:
             reject_types.append('Arousal')
 
-        method_str = "_".join(methods).replace('/', '_')
-        freq_str = f"{frequency[0]}-{frequency[1]}Hz"
+        # Two forms of the method, deliberately kept apart:
+        #   method_db  - canonical, UNESCAPED ('AASM/Massimini2004'), for
+        #                every database write and query, matching the
+        #                CSV-import path and the citation table.
+        #   method_str - filesystem-safe ('AASM_Massimini2004'), ONLY for
+        #                filenames and path components.
+        method_db = "_".join(methods)
+        method_str = method_db.replace('/', '_')
+        # Single source of truth for the band token so the JSON filenames
+        # written here and any file_pattern a caller rebuilds later cannot
+        # drift (see dbwrite.fmt_freq_token).
+        freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
         stages_str = "".join(stage) if stage else "all"
 
         self.logger.info(
-            f"Detecting K-complexes (method={method_str}, "
+            f"Detecting K-complexes (method={method_db}, "
             f"freq={freq_str}, stages={stages_str}, "
             f"min_isolation={min_isolation}s)")
 
@@ -260,7 +270,7 @@ class ParalKC:
                         'p2p_thresh': p2p_thresh,
                         'min_isolation': min_isolation,
                         'detrend': detrend, 'polar': polar,
-                        'method': method_str,
+                        'method': method_db,
                         'ref_chan': ref_chan, 'cat': cat,
                         'reject_artifacts': reject_artifacts,
                         'reject_arousals': reject_arousals,
@@ -268,16 +278,14 @@ class ParalKC:
                     }
                     if run_params:
                         params_dict.update(run_params)
-                    # Cite the original (unescaped) method token(s).
-                    orig_method = "_".join(methods) if isinstance(methods, list) else str(methods)
                     dbwrite.record_run(
-                        db_conn, run_id, self.EVENT_TYPE, method_str,
-                        dbwrite.method_citation(orig_method),
+                        db_conn, run_id, self.EVENT_TYPE, method_db,
+                        dbwrite.method_citation(method_db),
                         json.dumps(params_dict, default=str),
                         ref_chan, polar, stage, reject_artifacts, reject_arousals)
                     if resume:
                         db_skip = dbwrite.resume_skip_channels(
-                            db_conn, self.EVENT_TYPE, method_str,
+                            db_conn, self.EVENT_TYPE, method_db,
                             frequency[0], frequency[1], stages_key)
                         if db_skip:
                             self.logger.info(
@@ -436,7 +444,7 @@ class ParalKC:
                         channel_param_segments, frequency, s_freq,
                         n_fft_sec, self.logger)
                     dbwrite.write_channel_events(
-                        db_conn, run_id, self.EVENT_TYPE, ch, method_str,
+                        db_conn, run_id, self.EVENT_TYPE, ch, method_db,
                         frequency[0], frequency[1], stages_key,
                         channel_db_events, batched, rec_start,
                         n_fft_sec, self.logger,
@@ -470,7 +478,7 @@ class ParalKC:
                 # re-runs only this channel.
                 if write_db and db_conn is not None:
                     dbwrite.record_channel_failure(
-                        db_conn, self.EVENT_TYPE, ch, method_str,
+                        db_conn, self.EVENT_TYPE, ch, method_db,
                         frequency[0], frequency[1], stages_key, e)
                 # Write an error sentinel (not an empty list) so downstream import
                 # can tell a failed channel apart from one that legitimately had no
@@ -515,7 +523,41 @@ class ParalKC:
                                     export_params='all', frequency=None,
                                     ref_chan=None, grp_name='eeg',
                                     n_fft_sec=4, file_pattern=None,
-                                    skip_empty_files=True):
+                                    skip_empty_files=True, strict=True):
+        """Export K-complex parameters to CSV.
+
+        Parameters
+        ----------
+        json_input : str
+            Directory holding the per-channel K-complex JSON files.
+        csv_file : str
+            Output CSV path.
+        export_params : dict or str
+            Parameters to export; ``'all'`` exports everything available.
+        frequency : tuple or None
+            Band used for the power calculations.
+        ref_chan : list or None
+            Reference channel(s) used when re-measuring parameters.
+        grp_name : str
+            Channel group name.
+        n_fft_sec : int
+            FFT window length in seconds.
+        file_pattern : str or None
+            Filename prefix selecting the JSON files to aggregate.
+        skip_empty_files : bool
+            Whether to skip channels whose JSON holds no events.
+        strict : bool
+            If True (default), raise ``FileNotFoundError`` when
+            ``file_pattern`` matches no JSON file rather than returning
+            quietly. See
+            :meth:`ParalSWA.export_slow_wave_parameters_to_csv`.
+
+        Returns
+        -------
+        dict or None
+            Dictionary of calculated parameters, or None when there was
+            nothing to export.
+        """
         # Pass event_type=EVENT_TYPE so the SW exporter writes 'k_complex'
         # into the CSV's "Event type" column instead of the default
         # 'slow_wave'. Without this, the importer (and downstream review GUI
@@ -525,7 +567,7 @@ class ParalKC:
             export_params=export_params, frequency=frequency,
             ref_chan=ref_chan, grp_name=grp_name, n_fft_sec=n_fft_sec,
             file_pattern=file_pattern, skip_empty_files=skip_empty_files,
-            event_type=self.EVENT_TYPE)
+            event_type=self.EVENT_TYPE, strict=strict)
 
     def export_kc_density_to_csv(self, json_input, csv_file, stage=None,
                                  file_pattern=None, reject_artifacts=True,
@@ -539,15 +581,38 @@ class ParalKC:
         return self._sw_proxy.initialize_sqlite_database(db_path)
 
     def import_parameters_csv_to_database(self, csv_file, db_path,
-                                          append=True, method=None):
+                                          append=True, method=None,
+                                          force=False):
+        """Import a K-complex parameters CSV into ``neural_events.db``.
+
+        Parameters
+        ----------
+        csv_file : str
+            Path to the parameters CSV produced by
+            :meth:`export_kc_parameters_to_csv`.
+        db_path : str
+            Path to the SQLite database.
+        append : bool
+            If True, add without replacing existing entries.
+        method : str or None
+            The *original* method string, e.g. ``'AASM/Massimini2004'``. Pass
+            it explicitly: the importer's filename parser breaks on the
+            escaped form ``AASM_Massimini2004`` and would store just
+            ``'AASM'``.
+        force : bool
+            Overwrite rows that carry a ``run_id`` from the direct-to-database
+            path, losing their provenance link. Default False refuses.
+
+        Returns
+        -------
+        dict
+            Import statistics, including ``"ok": True`` on success.
+        """
         # Pass event_type='k_complex' so the row lands under the right type
-        # in the events table. Pass method= explicitly because the SW
-        # importer's filename parser breaks on escaped methods like
-        # 'AASM_Massimini2004' (returns just 'AASM'). Caller should pass
-        # the *original* method string here (e.g. 'AASM/Massimini2004').
+        # in the events table.
         return self._sw_proxy.import_parameters_csv_to_database(
             csv_file=csv_file, db_path=db_path, append=append,
-            event_type=self.EVENT_TYPE, method=method)
+            event_type=self.EVENT_TYPE, method=method, force=force)
 
     def save_detection_summary(self, output_dir, method, parameters,
                                results_summary):

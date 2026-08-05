@@ -77,3 +77,15 @@ event_processor.import_parameters_csv_to_database(
 writes straight to the database instead, skipping the JSON/CSV round-trip —
 see [Write Detection Results Directly to the Database](../../how-to/direct-to-database-detection.md).
 Refer to individual module documentation for specific parameters and methods.
+
+!!! note
+    The `export_*_parameters_to_csv` / `export_*_density_to_csv` exporters
+    default to `strict=True`: a `file_pattern` that matches zero JSON files
+    raises `FileNotFoundError` instead of writing an empty placeholder CSV.
+    `import_parameters_csv_to_database` raises rather than returning an
+    error dict, and accepts `event_type=` / `method=` / `force=` — see
+    [Upgrade to 4.0, Step 7](../../how-to/upgrade-to-4.0.md#step-7-exporters-and-importers-now-raise-instead-of-failing-silently)
+    if you have existing scripts built around the old return-a-dict
+    behaviour. Build `file_pattern`'s frequency segment with
+    [`fmt_freq_token`](dbwrite.md) rather than a hand-written f-string — see
+    [About naming, subject identity & provenance conventions](../../explanation/naming-and-identity-conventions.md).

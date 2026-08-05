@@ -95,6 +95,38 @@ python hdEEG_spindle_detector_GADI.py \
 See `examples/NCI_commands/hdEEG_spindle_detector_GADI.py` and
 `examples/NCI_commands/hdEEG_sw_detector_GADI.py`.
 
+Both drivers verify channel coverage after detection and **exit non-zero if
+any requested channel is missing**, instead of printing "All done" over an
+incomplete run:
+
+```python
+from turtlewave_hdEEG.dbwrite import verify_channel_coverage
+
+coverage = verify_channel_coverage(
+    db_path=db_path,
+    event_type="spindle",
+    method="Moelle2011",
+    requested_channels=all_channels,
+    freq_lower=9.0,
+    freq_upper=12.0,
+    stage_key="NREM2NREM3",
+)
+if not coverage["complete"]:
+    print(f"Missing channels: {coverage['missing']}")
+    sys.exit(1)
+```
+
+`coverage["failed"]` lists channels with an in-scope recorded failure (these
+always count as missing, whatever event rows exist for them);
+`coverage["events_only"]` lists channels credited by event rows alone with no
+matching `processing_status` row for this exact scope — weaker evidence,
+since `events.stage` cannot be scoped to the run's joined stage set the way
+`processing_status` can. A caller reporting success should report
+`events_only` too. `coverage["scoped_status"]` is `False` when the database
+predates the per-scope `processing_status` schema; the check then falls back
+to an event-type-only comparison that cannot distinguish a status row left by
+a different method or band.
+
 ## What lands in the database
 
 When `write_db=True`, each event row in `events` additionally carries:
@@ -157,6 +189,22 @@ events, `export_events_to_csv` returns `None` and writes nothing; if the
 `stage` filter excludes every row even though the same type/method/band DOES
 have events under other stages, it raises `ValueError` instead of silently
 writing an empty file, so a stage-token typo is caught immediately.
+
+**Re-importing that CSV is guarded.** `import_parameters_csv_to_database`
+does `INSERT OR REPLACE` on a deterministic event UUID with no `run_id` in
+its column list, so importing a CSV over rows the direct-write path already
+wrote would blank their `run_id` and sever them from their `detection_runs`
+provenance — with no error, since the row count looks identical either way.
+`import_parameters_csv_to_database` checks for this before writing and raises
+`RuntimeError` if any in-scope rows carry a non-`NULL` run_id. Re-run
+detection with `write_db=True` to update those rows properly, or pass
+`force=True` to proceed anyway and accept the lost provenance link. It also
+now raises on a missing/unreadable CSV or a bad database scope instead of
+returning `{"error": ..., "added": 0}`, so a broken import can never be
+mistaken for a clean, empty one. (`pac_coupling` has no `run_id` column and
+is keyed on its own natural key instead, so this particular guard does not
+apply to `import_pac_csv_to_database` / `backfill_pac_directory` — see
+[Back-fill PAC results into the database](backfill-pac-to-database.md).)
 
 ## See also
 

@@ -129,7 +129,9 @@ Detection writes one JSON file per channel to `json_dir`. Aggregate them into
 CSV, then import into the database:
 
 ```python
-freq_range = "11-13Hz"
+from turtlewave_hdEEG.dbwrite import fmt_freq_token
+
+freq_range = fmt_freq_token(11, 13)  # must match the `frequency` passed to detect_spindles
 stages_str = "NREM2NREM3"
 file_pattern = f"spindles_Moelle2011_{freq_range}_{stages_str}"
 
@@ -149,13 +151,29 @@ event_processor.export_spindle_density_to_csv(
 event_processor.import_parameters_csv_to_database(
     csv_file='wonambi/spindle_results/spindle_parameters.csv',
     db_path='wonambi/neural_events.db',
+    method='Moelle2011',  # optional here; the CSV's own Method column is the fallback
 )
 ```
 
 !!! note
-    Unlike `ParalSWA.import_parameters_csv_to_database`,
-    `ParalEvents.import_parameters_csv_to_database` does not take a `method`
-    keyword — the method is read back out of the CSV's own `Method` column.
+    Build `file_pattern`'s frequency segment with `fmt_freq_token`, not a
+    hand-written f-string — a formatter that doesn't match what
+    `detect_spindles` wrote (e.g. rounding `11` to `11.0`) matches zero JSON
+    files and, by default, raises `FileNotFoundError` rather than silently
+    exporting an empty CSV (`strict=True` is the default on all three
+    exporters; pass `strict=False` to restore the old placeholder-CSV
+    behaviour). See
+    [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md).
+
+!!! note
+    `import_parameters_csv_to_database` accepts an optional `event_type=` /
+    `method=` override; pass `method=` explicitly whenever the CSV's own
+    `Method` column could be ambiguous (e.g. after hand-editing the CSV, or
+    for a multi-method run). It now raises rather than returning
+    `{"error": ..., "added": 0}` on failure, and refuses to import over rows
+    already written by the direct-to-database path unless you pass
+    `force=True` — see
+    [Write Detection Results Directly to the Database](direct-to-database-detection.md#pull-a-csv-back-out-of-the-database).
 
 The parameters CSV includes start/end time, channel, sleep stage, amplitude,
 duration, and frequency for each spindle. The density CSV reports both

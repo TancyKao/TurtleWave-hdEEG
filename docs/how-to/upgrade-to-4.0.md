@@ -177,13 +177,49 @@ directly, not from a PyPI release.
   un-detrended data. Anyone who believed they detrended their slow waves or
   K-complexes did not — at any version, including 4.0.0.
 
-## Step 7 — No code changes required
+## Step 7 — Exporters and importers now raise instead of failing silently
+
+This step needs your attention only if a script wraps these calls and
+inspects their return value for an error, instead of letting exceptions
+propagate. **No new arguments are involved — this is a behaviour change to
+existing calls.**
+
+- `export_spindle_parameters_to_csv`, `export_slow_wave_parameters_to_csv`
+  and `export_kc_parameters_to_csv` (and their density-export equivalents)
+  now default to `strict=True`: when `file_pattern` matches zero JSON files,
+  they raise `FileNotFoundError` instead of writing a one-line placeholder
+  CSV. A zero-match export is almost always a filename round-trip bug (the
+  band or method token in the pattern doesn't match what the detector wrote),
+  and the placeholder CSV made that indistinguishable from a genuinely empty
+  run downstream. Pass `strict=False` to restore the old placeholder-CSV
+  behaviour if you rely on it.
+- `import_parameters_csv_to_database` (on `ParalEvents`, `ParalSWA`,
+  `ParalKC`) now raises (`FileNotFoundError`, `RuntimeError`, or whatever the
+  underlying failure was) instead of returning
+  `{"error": ..., "added": 0}`. It also gained `event_type=`, `method=` and
+  `force=` keywords — `force=True` is required to re-import a CSV over rows
+  already written by the `write_db=True` path (otherwise it raises
+  `RuntimeError`, protecting those rows' `run_id` provenance link).
+- `ParalPAC.store_pac_to_database` and `import_pac_csv_to_database` now
+  re-raise on failure instead of logging a traceback and returning as if
+  nothing had gone wrong; `backfill_pac_directory` catches per-file so one
+  bad CSV doesn't abort a whole walk, and reports the count in a new
+  `failed` key.
+
+See
+[Write Detection Results Directly to the Database](direct-to-database-detection.md#pull-a-csv-back-out-of-the-database)
+and
+[About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md)
+for the reasoning.
+
+## Step 8 — No further code changes required
 
 All imports and function signatures are unchanged. Every new parameter across
 the detectors and exporters is keyword-only with a default, so existing calls
-behave exactly as before. `turtlewave_hdEEG/__init__.py` gained exports and
-lost none. Console script names (`turtlewave_gui`, `eeg_review_gui`) are
-unchanged. If none of steps 1–6 apply to your project, you can stop here.
+that don't rely on the old silent-failure behaviour corrected in Step 7 behave
+exactly as before. `turtlewave_hdEEG/__init__.py` gained exports and lost
+none. Console script names (`turtlewave_gui`, `eeg_review_gui`) are unchanged.
+If none of steps 1–7 apply to your project, you can stop here.
 
 ## New in 4.0 worth adopting
 
@@ -201,6 +237,7 @@ A few 4.0 capabilities are opt-in and don't require any of the steps above:
 ## Related
 
 - [Event Density is Artefact-Free](../explanation/overview.md#event-density-is-artefact-free)
+- [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md)
 - [Back-fill PAC Results into the Database](backfill-pac-to-database.md)
 - [Write Detection Results Directly to the Database](direct-to-database-detection.md)
 - [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels.md)

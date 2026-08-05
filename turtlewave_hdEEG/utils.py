@@ -2,6 +2,158 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 import json
 import csv
+import logging
+import os
+import re
+
+logger = logging.getLogger('turtlewave_hdEEG.utils')
+
+#: Matches a BIDS-style subject token anywhere in a filename stem, e.g.
+#: ``sub-10sd`` in ``sub-10sd_ses-1_task-psg_run-1_desc-inspect_eeg.xml``.
+SUBJECT_RE = re.compile(r"sub-[A-Za-z0-9]+")
+
+
+def missing_json_message(json_dir, file_pattern, max_listed=25):
+    """Build the error text for a ``file_pattern`` that matched no JSON file.
+
+    A zero-match export is nearly always a filename round-trip bug: the band
+    or method token in the pattern does not match what the detector wrote.
+    Diagnosing it needs the pattern, the directory, and what is actually in
+    that directory, so all three go in the message.
+
+    Parameters
+    ----------
+    json_dir : str
+        Directory that was searched.
+    file_pattern : str
+        The pattern that matched nothing.
+    max_listed : int, optional
+        Maximum number of filenames to list before truncating.
+
+    Returns
+    -------
+    str
+        Multi-line, human-readable diagnostic message.
+    """
+    import glob as _glob
+
+    try:
+        present = sorted(os.path.basename(p)
+                         for p in _glob.glob(os.path.join(str(json_dir), "*.json")))
+    except Exception:
+        present = []
+
+    if present:
+        shown = present[:max_listed]
+        listing = "\n  ".join(shown)
+        if len(present) > max_listed:
+            listing += f"\n  ... and {len(present) - max_listed} more"
+        found = (f"{len(present)} JSON file(s) are present:\n  {listing}")
+    else:
+        found = "the directory contains no .json files at all."
+
+    return (
+        f"No JSON files matched file_pattern {file_pattern!r} in {json_dir!r}; "
+        f"{found}\n"
+        "The pattern must reproduce exactly what the detector wrote: "
+        "{event_type}_{method}_{freq_lo}-{freq_hi}Hz_{stages_joined}. "
+        "Build the band token with turtlewave_hdEEG.fmt_freq_token(lo, hi) on "
+        "both sides, and escape '/' in method names as '_'. "
+        "Pass strict=False to fall back to the old placeholder-CSV behaviour.")
+
+
+def derive_subject(annotation_path=None, root_dir=None, explicit=None):
+    """Resolve the subject identifier for a recording.
+
+    A single, shared implementation of subject resolution so that every
+    caller (detectors, PAC, the back-fill scripts, the GUI) keys the database
+    the same way. Resolution order is: an explicit value, then a BIDS
+    ``sub-XXXX`` token in the annotation XML filename, then the name of the
+    recording's root directory.
+
+    There is deliberately **no** whole-filename-stem fallback. Falling back to
+    the stem makes the subject id a function of which XML the caller happened
+    to point at, and a subject directory routinely holds more than one --
+    e.g. ``MCI042_BL_clean_rebuilt.xml`` and
+    ``MCI042_BL_clean_rebuilt_review-qc.xml`` would key one recording as two
+    different subjects. Since ``subject`` is the primary key of
+    ``sleep_cycles``, ``stage_durations`` and ``pac_coupling``, that silently
+    splits one recording's rows in two. The directory name is stable across
+    such variants, so a non-BIDS filename falls through to it.
+
+    This function never raises. If nothing resolves it returns
+    ``'unknown_subject'``, because losing a run to an exception in an id
+    helper is worse than storing a placeholder that a human can spot.
+
+    Parameters
+    ----------
+    annotation_path : str or None, optional
+        Path to the Wonambi annotation XML. Only its basename is inspected,
+        and only for a ``sub-XXXX`` token; the file need not exist. A filename
+        without that token contributes nothing and resolution moves on to
+        ``root_dir``.
+    root_dir : str or None, optional
+        Recording/subject root directory. Its basename is used when the
+        annotation filename carries no ``sub-`` token; a ``sub-`` prefix is
+        added when absent.
+    explicit : str or None, optional
+        Caller-supplied subject id. Any truthy value short-circuits the
+        search and is returned stripped.
+
+    Returns
+    -------
+    str
+        The resolved subject identifier, e.g. ``'sub-10sd'``.
+
+    Examples
+    --------
+    >>> derive_subject(explicit='sub-10sd')
+    'sub-10sd'
+    >>> derive_subject(annotation_path='/data/w/sub-10sd_ses-1_eeg.xml')
+    'sub-10sd'
+    >>> derive_subject(root_dir='/data/10sd/')
+    'sub-10sd'
+    >>> # Non-BIDS filename: the directory decides, so both XMLs in one
+    >>> # subject folder resolve to the same id.
+    >>> derive_subject(annotation_path='/d/MCI042_BL/MCI042_BL_review-qc.xml',
+    ...                root_dir='/d/MCI042_BL')
+    'sub-MCI042_BL'
+    """
+    try:
+        if explicit is not None and str(explicit).strip():
+            subject = str(explicit).strip()
+            logger.info(f"Subject '{subject}' resolved from: explicit argument")
+            return subject
+
+        if annotation_path:
+            stem = os.path.basename(str(annotation_path))
+            match = SUBJECT_RE.search(stem)
+            if match:
+                subject = match.group(0)
+                logger.info(
+                    f"Subject '{subject}' resolved from: annotation filename "
+                    f"({stem})")
+                return subject
+            logger.debug(
+                f"No 'sub-' token in annotation filename ({stem}); falling "
+                f"back to the root directory name")
+
+        if root_dir:
+            folder = os.path.basename(str(root_dir).rstrip(os.sep))
+            if folder:
+                subject = folder if folder.startswith("sub-") else f"sub-{folder}"
+                logger.info(
+                    f"Subject '{subject}' resolved from: root directory name "
+                    f"({folder})")
+                return subject
+    except Exception as e:  # never let an id helper break a detection run
+        logger.warning(f"derive_subject failed ({e}); using 'unknown_subject'")
+        return 'unknown_subject'
+
+    logger.warning(
+        "derive_subject: no explicit id, annotation path or root directory "
+        "given; using 'unknown_subject'")
+    return 'unknown_subject'
 
 
 

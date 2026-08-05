@@ -265,13 +265,24 @@ class ParalSWA:
             self.logger.warning("Slow waves will not be saved to annotations.")
             save_to_annotations = False
 
-        # Convert method to string
-        method_str = "_".join(method).replace('/', '_') if isinstance(method, list) else str(method).replace('/', '_')
+        # Two forms of the method, deliberately kept apart because they have
+        # conflicting requirements and one value cannot satisfy both:
+        #   method_db  - canonical, UNESCAPED ('AASM/Massimini2004'). Everything
+        #                stored in or queried from the database uses this, so
+        #                direct-write rows match CSV-imported rows and the
+        #                citation table (keyed on the unescaped name).
+        #   method_str - filesystem-safe ('AASM_Massimini2004'). ONLY for
+        #                filenames and path components; existing result
+        #                directories are named this way.
+        method_db = "_".join(method) if isinstance(method, list) else str(method)
+        method_str = method_db.replace('/', '_')
 
-        # Convert frequency to string
-        freq_str = f"{frequency[0]}-{frequency[1]}Hz"
+        # Convert frequency to string. Single source of truth for the band
+        # token so the JSON filenames written here and any file_pattern a
+        # caller rebuilds later cannot drift (see dbwrite.fmt_freq_token).
+        freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
 
-        self.logger.info(f"Starting slow wave detection with method={method_str}, frequency={freq_str}")
+        self.logger.info(f"Starting slow wave detection with method={method_db}, frequency={freq_str}")
         self.logger.debug(f"Parameters: channels={chan}, reject_artifacts={reject_artifacts}, reject_arousals={reject_arousals}")
 
         # Log adaptive threshold parameters if applicable
@@ -317,7 +328,7 @@ class ParalSWA:
                         'detrend': detrend, 'polar': polar,
                         'peak_thresh_sigma': peak_thresh_sigma,
                         'ptp_thresh_sigma': ptp_thresh_sigma,
-                        'method': method_str,
+                        'method': method_db,
                         'ref_chan': ref_chan, 'cat': cat,
                         'reject_artifacts': reject_artifacts,
                         'reject_arousals': reject_arousals,
@@ -325,15 +336,14 @@ class ParalSWA:
                     }
                     if run_params:
                         params_dict.update(run_params)
-                    run_citation = citation or dbwrite.method_citation(
-                        "_".join(method) if isinstance(method, list) else str(method))
+                    run_citation = citation or dbwrite.method_citation(method_db)
                     dbwrite.record_run(
-                        db_conn, run_id, event_type, method_str, run_citation,
+                        db_conn, run_id, event_type, method_db, run_citation,
                         json.dumps(params_dict, default=str),
                         ref_chan, polar, stage, reject_artifacts, reject_arousals)
                     if resume:
                         db_skip = dbwrite.resume_skip_channels(
-                            db_conn, event_type, method_str,
+                            db_conn, event_type, method_db,
                             frequency[0], frequency[1], stages_key)
                         if db_skip:
                             self.logger.info(
@@ -388,7 +398,9 @@ class ParalSWA:
                                 f.write(self.dataset.filename)
                             f.write('</filename></dataset><rater><name>Wonambi</name></rater></annotations>')
                         new_annotations = Annotations(annotation_file_path)
-                    print(f"Will save slow waves to new annotation file: {annotation_file_path}")    
+                    self.logger.info(
+                        f"Will save slow waves to new annotation file: "
+                        f"{annotation_file_path}")
 
                 except Exception as e:
                     self.logger.error(f"Error creating new annotation file: {e}")
@@ -595,7 +607,7 @@ class ParalSWA:
                             channel_param_segments, frequency, s_freq,
                             n_fft_sec, self.logger)
                         dbwrite.write_channel_events(
-                            db_conn, run_id, event_type, ch, method_str,
+                            db_conn, run_id, event_type, ch, method_db,
                             frequency[0], frequency[1], stages_key,
                             channel_db_events, batched, rec_start,
                             n_fft_sec, self.logger,
@@ -631,7 +643,7 @@ class ParalSWA:
                         # sentinel JSON, so a resume re-runs only this channel.
                         if write_db and db_conn is not None:
                             dbwrite.record_channel_failure(
-                                db_conn, event_type, ch, method_str,
+                                db_conn, event_type, ch, method_db,
                                 frequency[0], frequency[1], stages_key, e)
                         # Write an error sentinel (not an empty list) so downstream
                         # import can tell a failed channel apart from one that
@@ -671,10 +683,10 @@ class ParalSWA:
     def export_slow_wave_parameters_to_csv(self, json_input, csv_file, export_params='all',
                                          frequency=None, ref_chan=None, grp_name='eeg',
                                          n_fft_sec=4, file_pattern=None, skip_empty_files=True,
-                                         event_type='slow_wave'):
+                                         event_type='slow_wave', strict=True):
         """
         Calculate slow wave parameters from JSON files and export to CSV.
-        
+
         Parameters
         ----------
         json_input : str or list
@@ -691,27 +703,60 @@ class ParalSWA:
             FFT window size in seconds for spectral analysis
         file_pattern : str or None
             Pattern to filter JSON files if json_input is a directory
+        skip_empty_files : bool
+            Whether to skip empty JSON files or include them in the report
+        event_type : str
+            Value written into the CSV "Event type" column. ``ParalKC`` passes
+            ``'k_complex'`` so K-complexes are not mislabelled as slow waves.
+        strict : bool
+            If True (default), raise ``FileNotFoundError`` when ``file_pattern``
+            matches no JSON file. A zero-match export is almost always a
+            filename round-trip bug (the band or method token in the pattern
+            not matching what the detector wrote), and returning quietly made
+            that indistinguishable from a genuinely empty run. Pass
+            ``strict=False`` to restore the silent behaviour.
+
+        Returns
+        -------
+        dict or None
+            Dictionary of calculated parameters, or None when there was
+            nothing to export.
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``strict`` is True and no JSON file matches ``file_pattern``.
         """
         from wonambi.trans.analyze import event_params, export_event_params
         import glob
-        
+
         # Clean memory first
         self.clean_memory()
 
         self.logger.info("Calculating slow wave parameters for CSV export...")
-         
+
         # Load slow waves from JSON file(s)
         json_files = []
         if file_pattern:
             all_json_files = glob.glob(os.path.join(json_input, "*.json"))
-            json_files = [f for f in all_json_files if 
-                        f"{file_pattern}_" in os.path.basename(f) or 
+            json_files = [f for f in all_json_files if
+                        f"{file_pattern}_" in os.path.basename(f) or
                         f"{file_pattern}." in os.path.basename(f)]
         else:
             json_files = glob.glob(os.path.join(json_input, "*.json"))
 
         self.logger.info(f"Found {len(json_files)} JSON files matching pattern: {file_pattern}")
-        
+
+        if not json_files:
+            from .utils import missing_json_message
+            msg = missing_json_message(json_input, file_pattern)
+            if strict:
+                self.logger.error(msg)
+                raise FileNotFoundError(msg)
+            self.logger.warning(msg)
+            return None
+
+
         # Load slow waves from JSON files
         all_slow_waves = []
         empty_channels = [] 
@@ -985,9 +1030,7 @@ class ParalSWA:
             self.logger.info(f"Successfully exported to {csv_file} with HH:MM:SS time format")
             return params
         except Exception as e:
-            self.logger.error(f"Error calculating parameters: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"Error calculating parameters: {e}", exc_info=True)
             return None
 
     def export_slow_wave_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None,
@@ -1027,8 +1070,8 @@ class ParalSWA:
         json_files = []
         if file_pattern:
             all_json_files = glob.glob(os.path.join(json_input, "*.json"))
-            json_files = [f for f in all_json_files if 
-                        f"{file_pattern}_" in os.path.basename(f) or 
+            json_files = [f for f in all_json_files if
+                        f"{file_pattern}_" in os.path.basename(f) or
                         f"{file_pattern}." in os.path.basename(f)]
         else:
             json_files = glob.glob(os.path.join(json_input, "*.json"))
@@ -1586,7 +1629,8 @@ class ParalSWA:
 
 
     def import_parameters_csv_to_database(self, csv_file, db_path, append=True,
-                                          event_type=None, method=None):
+                                          event_type=None, method=None,
+                                          force=False):
         """
         Import event parameters from an existing CSV file into SQLite database.
         Supports multiple event types and incremental updates.
@@ -1610,11 +1654,29 @@ class ParalSWA:
             underscore-splits and grabs ``parts[2]``, which mangles methods
             with embedded underscores (e.g. ``AASM_Massimini2004`` → ``AASM``).
             Pass the original method string here to bypass it.
+        force : bool
+            Allow the import to proceed even when the target scope already
+            holds rows written by the direct-to-database path (rows with a
+            non-NULL ``run_id``). The import is ``INSERT OR REPLACE`` on a
+            deterministic event UUID, so importing a CSV over those rows blanks
+            their ``run_id`` and severs them from their ``detection_runs``
+            provenance. Default False refuses instead.
 
         Returns
         -------
         dict
-            Summary of the operation with counts of added, updated, and skipped rows
+            Summary of the operation with counts of added, updated and skipped
+            rows, plus ``"ok": True`` on success.
+
+        Raises
+        ------
+        RuntimeError
+            If the target scope already contains direct-written rows and
+            ``force`` is False.
+        Exception
+            Any failure during parsing or the database transaction is
+            re-raised rather than being swallowed into an error dict, so a
+            failed import can never be mistaken for a clean re-run.
         """
         import sqlite3
         import pandas as pd
@@ -1631,7 +1693,10 @@ class ParalSWA:
         # Check if the file exists
         if not os.path.exists(csv_file):
             self.logger.error(f"CSV file not found: {csv_file}")
-            return {"error": "CSV file not found", "added": 0, "updated": 0, "skipped": 0}
+            raise FileNotFoundError(
+                f"Parameters CSV not found: {csv_file}. The export step that "
+                f"should have written it either failed or wrote a different "
+                f"filename (check the file_pattern / band token).")
         
         # Track statistics
         stats = {
@@ -1674,8 +1739,12 @@ class ParalSWA:
                     break
             
             if header_row is None:
-                self.logger.error("Could not find header row in CSV")
-                return {"error": "Could not find header row", "added": 0, "updated": 0, "skipped": 0}
+                self.logger.error(
+                    f"Could not find a 'Start time' header row in {csv_file}; "
+                    f"this is not a parameters CSV (a placeholder CSV written "
+                    f"by a zero-match export looks like this). Nothing imported.")
+                return {"ok": False, "error": "Could not find header row",
+                        "added": 0, "updated": 0, "skipped": 0}
             
             # Check if there are statistic rows after the header
             has_stat_rows = False
@@ -1692,8 +1761,9 @@ class ParalSWA:
             df = pd.read_csv(csv_file, skiprows=skiprows)
             
             if df.empty:
-                self.logger.warning("CSV file contains no data rows")
-                return {"error": "Empty CSV file", "added": 0, "updated": 0, "skipped": 0}
+                self.logger.warning(f"CSV file contains no data rows: {csv_file}")
+                return {"ok": False, "error": "Empty CSV file",
+                        "added": 0, "updated": 0, "skipped": 0}
                 
             self.logger.info(f"Read {len(df)} parameter rows from CSV")
             
@@ -1838,7 +1908,13 @@ class ParalSWA:
                 df['method'] = method
                 existing_columns.append('method')
                 db_columns.append('method')
-                
+
+                # Refuse to overwrite direct-written rows, whose run_id this
+                # INSERT OR REPLACE would silently blank.
+                dbwrite.guard_run_id(conn, event_type, method,
+                                     freq_lower, freq_upper,
+                                     force=force, logger=self.logger)
+
                 # Set event_type from our detection
                 df['event_type'] = event_type
                 if 'event_type' not in db_columns:
@@ -2106,14 +2182,17 @@ class ParalSWA:
 
                 conn.close()
 
+                stats["ok"] = True
                 return stats
             # Use the safe database operation
             return self._safe_database_operation(db_path, process_csv_data)
-        
+
         except Exception as e:
-            self.logger.error(f"Error processing CSV: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"error": str(e), "added": 0, "updated": 0, "skipped": 0}
+            # Re-raise. Swallowing this into {"error": ..., "added": 0} made a
+            # failed import indistinguishable from a clean idempotent re-run,
+            # and the driver scripts went on to report success.
+            self.logger.error(f"Error processing CSV {csv_file}: {e}",
+                              exc_info=True)
+            raise
 
 

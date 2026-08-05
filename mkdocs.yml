@@ -125,6 +125,7 @@ nav:
 
   - Explanation:
     - Overview: explanation/overview.md
+    - Naming, Subject Identity & Provenance Conventions: explanation/naming-and-identity-conventions.md
     - EEG Review GUI Architecture: explanation/eeg-review-gui-architecture.md
 
 extra:

@@ -13,7 +13,7 @@ import os
 import argparse as _ap
 
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalKC, CustomAnnotations
+from turtlewave_hdEEG import ParalKC, CustomAnnotations, fmt_freq_token
 
 # Optional CLI overrides (backward-compatible: no args => unchanged behaviour).
 # Used by the eeg_review_gui "Export Re-run Package" QC handoff.
@@ -94,7 +94,7 @@ kcomplexes = event_processor.detect_kcomplexes(
 
 # 6. Export ------------------------------------------------------------
 method_str = str(test_method).replace('/', '_')
-freq_range = f"{test_frequency[0]}-{test_frequency[1]}Hz"
+freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
 file_pattern = f"kcomplex_{method_str}_{freq_range}_{stages_str}"
 

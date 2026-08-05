@@ -5,6 +5,35 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1] — 2026-08-05
+
+Closes a class of silent data loss where detection wrote files and a separately
+constructed string had to find them again. Affected runs completed without
+errors and wrote nothing to `neural_events.db`.
+
+### Added
+
+- Public API: `derive_subject`, `fmt_freq_token`, `ensure_pac_schema`, `guard_run_id`, `verify_channel_coverage`, and `stored_event_type` / `stored_method` on `analyze_pac`.
+
+### Changed
+
+- Both HPC batch drivers verify channel coverage against the database and exit non-zero when channels are missing, instead of always logging success.
+
+### Fixed
+
+- PAC results now reach `neural_events.db`; the GUI and `examples/hdEEG_pac_detector.py` never requested a database write, so runs produced CSVs only and created no `pac_coupling` table.
+- The cluster spindle driver built its frequency-band filename token with one-decimal formatting while detection wrote it unformatted, so any band bound needing two decimals matched zero files, imported nothing, and still logged success; all band tokens now come from one shared function.
+- Detection methods containing a slash, such as `AASM/Massimini2004`, were truncated to `AASM` in `events.method`.
+- A multi-method spindle run stamped every row with a single method, so the uniqueness constraint silently discarded the other method's events.
+- Failed CSV imports returned "0 added" and were indistinguishable from a clean re-run; importers now raise, and parameter exporters raise when their pattern matches no files instead of writing a placeholder CSV.
+- Continuous PAC was storable as slow-wave coupling; `analyze_pac` now refuses to write a row whose scope it cannot name.
+- A subject identifier could differ depending on which annotation XML a caller pointed at, splitting one recording across two database keys.
+
+### Upgrading
+
+- PAC results from 4.0.0 exist as CSVs only; back-fill or re-run them to populate `pac_coupling`.
+- The first coverage check against a database created before 4.0.1 reports a large `events_only` warning, because legacy `processing_status` rows migrate in with an empty method, zero frequency bounds and an empty stage and never match the scoped query. It exits 0 and self-heals after one scoped run.
+
 ## [4.0.0] — 2026-07-22
 
 The review GUI drops per-event triage: the Events tab is gone and review now

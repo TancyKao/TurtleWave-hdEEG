@@ -24,7 +24,12 @@ import logging
 try:
     from turtlewave_hdEEG import LargeDataset, XLAnnotations, ParalEvents, ParalSWA, ParalKC, CustomAnnotations
     from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave, ImprovedDetectSpindle, ImprovedDetectKComplex
-    
+    # Single source of truth for the '{lo}-{hi}Hz' filename token. The
+    # detectors name their per-channel JSON with this same function, so the
+    # file_pattern rebuilt here to find those files again cannot drift from
+    # the names they were written under.
+    from turtlewave_hdEEG.dbwrite import fmt_freq_token
+
     #from wonambi.dataset import Dataset as WonambiDataset
 except ImportError as e:
     print(f"Error importing TurtleWave hdEEG package: {e}")
@@ -1043,12 +1048,18 @@ class TurtleWaveGUI(QMainWindow):
             
             # Export results
             # Format names for export
-            freq_range_str = f"{params['frequency'][0]}-{params['frequency'][1]}Hz"
+            # detect_slow_waves names its JSON with the method escaped
+            # (swprocessor: str(method).replace('/', '_')), so a shipped option
+            # like 'AASM/Massimini2004' must be escaped the same way here or
+            # the pattern matches nothing on disk.
+            method_str = str(params['method']).replace('/', '_')
+            freq_range_str = fmt_freq_token(params['frequency'][0],
+                                            params['frequency'][1])
             stages_str = "".join(params['stage'])
-            file_pattern = f"slowwaves_{params['method']}_{freq_range_str}_{stages_str}"
+            file_pattern = f"slowwaves_{method_str}_{freq_range_str}_{stages_str}"
 
             # Export parameters to CSV
-            param_csv = os.path.join(json_dir, f'sw_parameters_{params["method"]}_{freq_range_str}_{stages_str}.csv')
+            param_csv = os.path.join(json_dir, f'sw_parameters_{method_str}_{freq_range_str}_{stages_str}.csv')
             self.write_log(f"Exporting parameters to {param_csv}")
             event_processor.export_slow_wave_parameters_to_csv(
                 json_input=json_dir,
@@ -1063,11 +1074,16 @@ class TurtleWaveGUI(QMainWindow):
             self.write_log(f"Initializing/updating database at {db_path}")
             event_processor.initialize_sqlite_database(db_path)
             self.write_log(f"Importing slow wave parameters to database")
-            stats = event_processor.import_parameters_csv_to_database(param_csv, db_path)
-            self.write_log(f"Database update complete: {stats['added']} added, {stats['updated']} updated, {stats['skipped']} skipped")
+            # Pass the original (unescaped) method so the importer doesn't
+            # mangle 'AASM/Massimini2004' down to 'AASM' by splitting the
+            # filename (swprocessor's fallback parser).
+            sw_import_ok = self.import_to_database(
+                "Slow wave database import",
+                event_processor.import_parameters_csv_to_database,
+                param_csv, db_path, method=params['method'])
 
             # Export density to CSV
-            density_csv = os.path.join(json_dir, f'sw_density_{params["method"]}_{freq_range_str}_{stages_str}.csv')
+            density_csv = os.path.join(json_dir, f'sw_density_{method_str}_{freq_range_str}_{stages_str}.csv')
             self.write_log(f"Exporting density to {density_csv}")
             event_processor.export_slow_wave_density_to_csv(
                 json_input=json_dir,
@@ -1077,9 +1093,15 @@ class TurtleWaveGUI(QMainWindow):
             )
             
             self.write_log(f"Slow wave parameters saved to {param_csv}")
-            self.write_log(f"Slow wave parameters saved to {db_path}")
             self.write_log(f"Slow wave density saved to {density_csv}")
-            self.write_log("Slow wave detection completed successfully")
+            if sw_import_ok:
+                self.write_log(f"Slow wave parameters saved to {db_path}")
+                self.write_log("Slow wave detection completed successfully")
+            else:
+                self.write_log(
+                    f"Slow wave detection finished, but NOTHING was written to "
+                    f"{db_path}. The CSV files above are intact; see the "
+                    f"database import errors earlier in this log.")
 
             try:
                 # Prepare parameters summary
@@ -1543,7 +1565,8 @@ class TurtleWaveGUI(QMainWindow):
             kcomplexes = event_processor.detect_kcomplexes(**detect_kwargs)
 
             method_str = str(params['method']).replace('/', '_')
-            freq_range_str = f"{params['frequency'][0]}-{params['frequency'][1]}Hz"
+            freq_range_str = fmt_freq_token(params['frequency'][0],
+                                            params['frequency'][1])
             stages_str = "".join(params['stage'])
             file_pattern = f"kcomplex_{method_str}_{freq_range_str}_{stages_str}"
 
@@ -1561,11 +1584,10 @@ class TurtleWaveGUI(QMainWindow):
             self.write_log("Importing K-complex parameters to database")
             # Pass the original (unescaped) method so the importer doesn't
             # mangle 'AASM/Massimini2004' down to 'AASM' via filename parsing.
-            stats = event_processor.import_parameters_csv_to_database(
+            kc_import_ok = self.import_to_database(
+                "K-complex database import",
+                event_processor.import_parameters_csv_to_database,
                 param_csv, db_path, method=params['method'])
-            self.write_log(
-                f"Database update complete: {stats['added']} added, "
-                f"{stats['updated']} updated, {stats['skipped']} skipped")
 
             density_csv = os.path.join(
                 json_dir,
@@ -1576,9 +1598,15 @@ class TurtleWaveGUI(QMainWindow):
                 stage=params['stage'], file_pattern=file_pattern)
 
             self.write_log(f"K-complex parameters saved to {param_csv}")
-            self.write_log(f"K-complex parameters saved to {db_path}")
             self.write_log(f"K-complex density saved to {density_csv}")
-            self.write_log("K-complex detection completed successfully")
+            if kc_import_ok:
+                self.write_log(f"K-complex parameters saved to {db_path}")
+                self.write_log("K-complex detection completed successfully")
+            else:
+                self.write_log(
+                    f"K-complex detection finished, but NOTHING was written to "
+                    f"{db_path}. The CSV files above are intact; see the "
+                    f"database import errors earlier in this log.")
 
             try:
                 parameters_summary = {
@@ -3542,7 +3570,15 @@ class TurtleWaveGUI(QMainWindow):
             
             # Add GUI log handler
             pac_processor.logger.addHandler(gui_log_handler)
-            
+
+            # Resolve the subject the PAC rows will be keyed under, and say so
+            # in the log: without it the results go to CSV only and never
+            # reach neural_events.db.
+            subject = self.resolve_subject()
+            self.write_log(
+                f"PAC results will be written to the database at "
+                f"{params['db_path']} under subject '{subject}'")
+
             # Setup event options if using SW-Spindle coupling
             event_opts = {}
             if params['method'] == "SW-Spindle":
@@ -3551,7 +3587,18 @@ class TurtleWaveGUI(QMainWindow):
                     'sw_method': params['sw_method'],
                     'spindle_method': params['spindle_method']
                 }
-            
+
+            # Label for a continuous-data run. There are no detected events to
+            # derive a scope from, so analyze_pac would otherwise fall back to
+            # event_type='slow_wave', method='unknown' and file a theta-gamma
+            # result as slow-wave coupling. Describe what was actually
+            # analysed, and derive it from the configured bands so the label
+            # stays correct for any continuous band pair, not just Theta-Gamma.
+            continuous_method = (
+                f"{params['method']}"
+                f"_phase{fmt_freq_token(*params['phase_freq'])}"
+                f"_amp{fmt_freq_token(*params['amp_freq'])}")
+
             # Run PAC analysis
             if params['method'] == "SW-Spindle":
                 # For SW-Spindle coupling
@@ -3568,11 +3615,16 @@ class TurtleWaveGUI(QMainWindow):
                     time_window=params['time_window'],
                     db_path=params['db_path'],
                     out_dir=pac_dir,
-                    event_opts=event_opts
+                    event_opts=event_opts,
+                    write_db=True,
+                    subject=subject
                 )
             else:
                 # For other coupling types (e.g., Theta-Gamma)
                 self.write_log(f"Running {params['method']} coupling analysis...")
+                self.write_log(
+                    f"Continuous-data run: rows will be stored as "
+                    f"event_type='continuous', method='{continuous_method}'")
                 results = pac_processor.analyze_pac(
                     chan=params['channels'],
                     stage=params['stages'],
@@ -3582,13 +3634,22 @@ class TurtleWaveGUI(QMainWindow):
                     use_detected_events=False,  # Use continuous data
                     time_window=params['time_window'],
                     db_path=params['db_path'],
-                    out_dir=pac_dir
+                    out_dir=pac_dir,
+                    write_db=True,
+                    subject=subject,
+                    stored_event_type='continuous',
+                    stored_method=continuous_method
                 )
             
 
+            # For the continuous branch the CSV exporter names its output
+            # directory after 'spindle_method', so give it the same descriptive
+            # label the database row gets instead of letting it write to
+            # pac_results/unknown/.
             method_info = {
                 'sw_method': event_opts.get('sw_method', 'unknown') if event_opts else 'unknown',
-                'spindle_method': event_opts.get('spindle_method', 'unknown') if event_opts else 'unknown',
+                'spindle_method': (event_opts.get('spindle_method', 'unknown')
+                                   if event_opts else continuous_method),
                 'event_type': 'slow_wave' if params['method'] == 'SW-Spindle' else 'continuous',
                 'stage': params['stages'],
                 'pair_with_spindles': True if params['method'] == 'SW-Spindle' else False
@@ -3613,7 +3674,17 @@ class TurtleWaveGUI(QMainWindow):
             )
             
             self.write_log(f"PAC analysis completed. Results saved to {pac_dir}")
-            
+
+            # Confirm the rows actually landed under the labels this run
+            # should have written, so a database write that silently did
+            # nothing cannot look like a successful run. The SW-Spindle scope
+            # is derived inside analyze_pac from event_opts, so it is checked
+            # by breakdown rather than against a scope rebuilt here.
+            expect_scope = (None if params['method'] == "SW-Spindle"
+                            else ('continuous', continuous_method))
+            self.verify_pac_rows(params['db_path'], subject,
+                                 expect_scope=expect_scope)
+
             # Store results for later use
             self.pac_results = {
                 'dir': pac_dir,
@@ -4065,12 +4136,19 @@ class TurtleWaveGUI(QMainWindow):
             )
             
             # Format names for export
-            freq_range_str = f"{freq_range[0]}-{freq_range[1]}Hz"
+            # detect_spindles names its JSON with the method escaped
+            # (eventprocessor: method_db.replace('/', '_')), as the slow-wave
+            # and K-complex detectors do, so escape it the same way here or
+            # the pattern would not match on disk. The unescaped method stays
+            # in use for the database write below, which keeps events.method
+            # canonical.
+            method_str = str(self.spindle_method).replace('/', '_')
+            freq_range_str = fmt_freq_token(freq_range[0], freq_range[1])
             stages_str = "".join(selected_stages)
-            file_pattern = f"spindles_{self.spindle_method}_{freq_range_str}_{stages_str}"
-            
+            file_pattern = f"spindles_{method_str}_{freq_range_str}_{stages_str}"
+
             # Export parameters to CSV
-            param_csv = os.path.join(json_dir, f'spindle_parameters_{self.spindle_method}_{freq_range_str}_{stages_str}.csv')
+            param_csv = os.path.join(json_dir, f'spindle_parameters_{method_str}_{freq_range_str}_{stages_str}.csv')
 
             method_info = {
                 'method': self.spindle_method,
@@ -4093,11 +4171,15 @@ class TurtleWaveGUI(QMainWindow):
             self.write_log(f"Initializing/updating database at {db_path}")
             event_processor.initialize_sqlite_database(db_path)
             self.write_log(f"Importing spindle parameters to database")
-            stats = event_processor.import_parameters_csv_to_database(param_csv, db_path)
-            self.write_log(f"Database update complete: {stats['added']} added, {stats['updated']} updated, {stats['skipped']} skipped")
+            # method= is passed explicitly so a multi-method run cannot stamp
+            # one method on every row (the importer otherwise infers it).
+            spindle_import_ok = self.import_to_database(
+                "Spindle database import",
+                event_processor.import_parameters_csv_to_database,
+                param_csv, db_path, method=self.spindle_method)
 
             # Export density to CSV
-            density_csv = os.path.join(json_dir, f'spindle_density_{self.spindle_method}_{freq_range_str}_{stages_str}.csv')
+            density_csv = os.path.join(json_dir, f'spindle_density_{method_str}_{freq_range_str}_{stages_str}.csv')
             event_processor.export_spindle_density_to_csv(
                 json_input=json_dir,
                 csv_file=density_csv,
@@ -4107,7 +4189,14 @@ class TurtleWaveGUI(QMainWindow):
             
             self.write_log(f"Spindle parameters saved to {param_csv}")
             self.write_log(f"Spindle density saved to {density_csv}")
-            self.write_log("Spindle detection completed successfully")
+            if spindle_import_ok:
+                self.write_log(f"Spindle parameters saved to {db_path}")
+                self.write_log("Spindle detection completed successfully")
+            else:
+                self.write_log(
+                    f"Spindle detection finished, but NOTHING was written to "
+                    f"{db_path}. The CSV files above are intact; see the "
+                    f"database import errors earlier in this log.")
             
             # Save detection summary
             try:
@@ -4367,6 +4456,218 @@ class TurtleWaveGUI(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Error launching Event Review: {e}")
                 self.write_log(f"Error launching Event Review: {e}")
 
+
+    def verify_pac_rows(self, db_path, subject, expect_scope=None):
+        """Report the PAC rows the run left in the database, per scope.
+
+        Read-only. A PAC run that writes CSV files but no database rows is
+        the failure this check exists to surface, so zero rows (or a missing
+        ``pac_coupling`` table) is reported prominently rather than passing
+        for success. The breakdown is per ``(event_type, method)`` rather than
+        a single count for the subject, because a bare count cannot tell a
+        correctly labelled row from one filed under the wrong scope.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the SQLite database that was written to.
+        subject : str
+            Subject identifier the rows were keyed under.
+        expect_scope : tuple of (str, str) or None
+            The ``(event_type, method)`` this run should have written. When
+            given, that scope is required to be present and non-empty.
+
+        Returns
+        -------
+        int or None
+            Rows for `subject` in `expect_scope`, or across all scopes when no
+            scope is given. None when the database could not be read.
+        """
+        import sqlite3
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name='pac_coupling'")
+            if cur.fetchone() is None:
+                self.write_log("!" * 60)
+                self.write_log(
+                    f"!!! No 'pac_coupling' table exists in {db_path}. The PAC "
+                    f"results were NOT stored in the database; only the CSV "
+                    f"files under the results directory were written.")
+                self.write_log("!" * 60)
+                return 0
+            cur.execute(
+                "SELECT event_type, method, COUNT(*) FROM pac_coupling "
+                "WHERE subject = ? GROUP BY event_type, method "
+                "ORDER BY event_type, method", (subject,))
+            scopes = cur.fetchall()
+        except Exception as e:
+            self.write_log(
+                f"Could not verify PAC rows in {db_path}: "
+                f"{type(e).__name__}: {e}")
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+        total = sum(count for _, _, count in scopes)
+        if scopes:
+            self.write_log(
+                f"Database check: {total} pac_coupling row(s) for subject "
+                f"'{subject}' in {db_path}, by scope:")
+            for event_type, method, count in scopes:
+                self.write_log(
+                    f"    event_type={event_type!r}, method={method!r}: "
+                    f"{count} row(s)")
+
+        if expect_scope is None:
+            if not scopes:
+                self.write_log("!" * 60)
+                self.write_log(
+                    f"!!! Database check: 0 pac_coupling rows for subject "
+                    f"'{subject}' in {db_path}. The PAC results did NOT reach "
+                    f"the database; only the CSV files were written.")
+                self.write_log("!" * 60)
+            return total
+
+        n_rows = next((count for event_type, method, count in scopes
+                       if (event_type, method) == tuple(expect_scope)), 0)
+        if not n_rows:
+            self.write_log("!" * 60)
+            self.write_log(
+                f"!!! Database check: 0 pac_coupling rows for subject "
+                f"'{subject}' under the scope this run should have written, "
+                f"event_type={expect_scope[0]!r}, method={expect_scope[1]!r}.")
+            self.write_log(
+                "!!! The results did not reach the database under the "
+                "expected labels; only the CSV files were written.")
+            self.write_log("!" * 60)
+        return n_rows
+
+    def resolve_subject(self, explicit=None):
+        """Resolve the subject identifier used to key database rows.
+
+        Uses ``turtlewave_hdEEG.utils.derive_subject``, whose precedence is
+        an explicit value, then a BIDS ``sub-XXXX`` token in the annotation
+        XML filename, then the basename of the output directory (prefixed
+        with ``sub-`` when it lacks one). There is deliberately no
+        whole-filename-stem fallback, so two annotation XMLs in the same
+        output directory resolve to the same subject. It never raises; if
+        nothing resolves it returns ``'unknown_subject'``.
+
+        Parameters
+        ----------
+        explicit : str or None
+            A subject id supplied by the caller, which wins over anything
+            derived from paths.
+
+        Returns
+        -------
+        str
+            The resolved subject identifier.
+        """
+        from turtlewave_hdEEG.utils import derive_subject
+        return derive_subject(
+            explicit=explicit,
+            annotation_path=self.annot_file_path,
+            root_dir=self.output_dir,
+        )
+
+    def log_import_result(self, label, stats):
+        """Log an importer's return value verbatim and judge whether it worked.
+
+        A result of zero added, zero updated and zero skipped is reported as a
+        failure to reach the database rather than as a quiet success, because
+        on its own it is indistinguishable from a clean idempotent re-run
+        (which shows non-zero updated or skipped counts).
+
+        Parameters
+        ----------
+        label : str
+            Human-readable name of the import step, used in the log lines.
+        stats : dict
+            The dictionary returned by ``import_parameters_csv_to_database``.
+
+        Returns
+        -------
+        bool
+            True when rows reached the database, False otherwise.
+        """
+        if not isinstance(stats, dict):
+            self.write_log(
+                f"!!! {label}: importer returned {stats!r}, expected a stats "
+                f"dict. Treating this as a FAILURE; assume nothing reached "
+                f"the database.")
+            return False
+
+        # Verbatim, so any extra keys (notably 'error') are visible.
+        self.write_log(f"{label}: importer returned {stats}")
+
+        if stats.get('error'):
+            self.write_log("!" * 60)
+            self.write_log(f"!!! {label} FAILED: {stats['error']}")
+            self.write_log("!!! Nothing was written to the database.")
+            self.write_log("!" * 60)
+            return False
+
+        added = stats.get('added', 0)
+        updated = stats.get('updated', 0)
+        skipped = stats.get('skipped', 0)
+
+        if (added, updated, skipped) == (0, 0, 0):
+            self.write_log("!" * 60)
+            self.write_log(
+                f"!!! {label}: 0 added, 0 updated, 0 skipped, so NOTHING "
+                f"reached the database.")
+            self.write_log(
+                "!!! This is not a clean re-run (a re-run reports updated or "
+                "skipped rows). The CSV was most likely empty or matched no "
+                "detected events. Check the export step above.")
+            self.write_log("!" * 60)
+            return False
+
+        self.write_log(
+            f"{label} complete: {added} added, {updated} updated, "
+            f"{skipped} skipped")
+        return True
+
+    def import_to_database(self, label, importer, *args, **kwargs):
+        """Run a CSV-to-database importer and report failure loudly.
+
+        The importers raise on failure rather than returning an error
+        sentinel, so an exception here means no rows were written. It is
+        caught, reported in the GUI log with its traceback, and turned into a
+        False return so the surrounding run can finish and say so, instead of
+        dying silently or taking the window down.
+
+        Parameters
+        ----------
+        label : str
+            Human-readable name of the import step.
+        importer : callable
+            The bound ``import_parameters_csv_to_database`` method.
+        *args, **kwargs
+            Passed straight through to `importer`.
+
+        Returns
+        -------
+        bool
+            True when rows reached the database, False otherwise.
+        """
+        import traceback
+        try:
+            stats = importer(*args, **kwargs)
+        except Exception as e:
+            self.write_log("!" * 60)
+            self.write_log(f"!!! {label} FAILED: {type(e).__name__}: {e}")
+            self.write_log("!!! Nothing was written to the database.")
+            for line in traceback.format_exc().rstrip().splitlines():
+                self.write_log(f"!!!   {line}")
+            self.write_log("!" * 60)
+            return False
+        return self.log_import_result(label, stats)
 
     def write_log(self, message):
         """Add message to log"""

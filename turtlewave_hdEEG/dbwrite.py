@@ -264,6 +264,311 @@ def _table_columns(conn, table):
     return {row[1] for row in cur.fetchall()}
 
 
+def verify_channel_coverage(db_path, event_type, method, requested_channels,
+                            freq_lower, freq_upper, stage_key, logger=None):
+    """Check that every requested channel is accounted for in the database.
+
+    A detection run is complete only if each requested channel either has
+    events stored for the run's scope, or carries a ``processing_status`` row
+    for that same scope recording ``success = 1``. Counting events alone would
+    flag a genuinely event-free channel as a failure; counting status alone
+    would miss a channel whose events never reached ``events``. The union of
+    the two is the honest check, and it is what lets a batch driver exit
+    non-zero instead of printing "All done" over an empty database.
+
+    Two properties are load-bearing, and getting either wrong reproduces the
+    silent-success bug this function exists to catch:
+
+    * **``success = 1``, not ``processed = 1``.** ``upsert_processing_status``
+      hardcodes ``processed = 1`` and encodes the outcome in ``success``, so
+      :func:`record_channel_failure` writes ``processed = 1, success = 0``.
+      Filtering on ``processed`` would count a channel that crashed
+      mid-detection as covered.
+    * **The full scope, not just the event type.** Without the
+      method/band/stage columns, a status row left by an earlier run of a
+      different method or band masks a channel that never ran in the current
+      one.
+
+    The ``events`` half cannot be scoped by stage: ``events.stage`` records
+    each event's own epoch stage, not the run's joined stage key, so
+    filtering on it would discard valid rows. Two things limit the resulting
+    blind spot. A channel with an in-scope ``success = 0`` row is excluded
+    whatever events exist for it, which closes the case where a re-run over a
+    narrower stage set crashes on a channel an earlier run had populated. And
+    channels vouched for by events alone are returned in ``events_only`` so a
+    caller can report how much of its "complete" rests on the weaker
+    evidence. A channel killed outright (no status row written at all) whose
+    events predate the run is the residual case ``events_only`` exists to
+    surface.
+
+    The unscoped fallback fires only on ``sqlite3.OperationalError``, i.e. a
+    ``processing_status`` table not yet widened to the per-scope primary key
+    by :func:`ensure_direct_write_schema` — the same condition and the same
+    handling as :func:`resume_skip_channels`. It still requires
+    ``success = 1``.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database.
+    event_type : str
+        Event type of the run (``'spindle'``, ``'slow_wave'``, ...).
+    method : str
+        Detection method as stored in ``events.method`` (the unescaped string,
+        e.g. ``'AASM/Massimini2004'``).
+    requested_channels : list of str
+        Channels the run was asked to process.
+    freq_lower, freq_upper : float
+        Band bounds of the run. Required: they are part of the scope.
+    stage_key : str
+        Joined stage set of the run (e.g. ``'NREM2NREM3'``). Required: it is
+        part of the scope.
+    logger : logging.Logger or None, optional
+        Logger used to report when the unscoped fallback was taken.
+
+    Returns
+    -------
+    dict
+        ``{'requested': int, 'with_events': int, 'covered': int,
+        'missing': list of str, 'complete': bool, 'scoped_status': bool,
+        'failed': list of str, 'events_only': list of str}``.
+        ``scoped_status`` is False when the unscoped fallback was used;
+        ``failed`` lists channels with an in-scope failure; ``events_only``
+        lists channels credited by event rows alone, whose evidence cannot be
+        stage-scoped. A caller reporting success should report
+        ``events_only`` too.
+    """
+    requested = [str(c) for c in (requested_channels or [])]
+    result = {'requested': len(requested), 'with_events': 0, 'covered': 0,
+              'missing': list(requested), 'complete': False,
+              'scoped_status': True}
+
+    if not os.path.exists(db_path):
+        return result
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # NOTE: the events half cannot be scoped by stage. events.stage holds
+        # the per-epoch stage of each event ('NREM2'), not the run's joined
+        # stage key ('NREM2NREM3'), so filtering on it would reject valid
+        # rows. Two mitigations below: an in-scope FAILURE always wins over
+        # event evidence, and channels credited by events alone are counted
+        # and reported.
+        with_events = {str(r[0]) for r in conn.execute('''
+            SELECT DISTINCT channel FROM events
+            WHERE event_type = ? AND method = ?
+              AND freq_lower = ? AND freq_upper = ?
+            ''', (event_type, method, float(freq_lower),
+                  float(freq_upper))).fetchall()}
+
+        try:
+            succeeded = {str(r[0]) for r in conn.execute('''
+                SELECT channel FROM processing_status
+                WHERE event_type = ? AND method = ? AND freq_lower = ?
+                  AND freq_upper = ? AND stage = ? AND success = 1
+                ''', (event_type, method, float(freq_lower), float(freq_upper),
+                      stage_key)).fetchall()}
+            # A channel that FAILED in exactly this scope is never covered,
+            # whatever events an earlier run over a different stage set left
+            # behind. This is what closes the stage-scope leak: run A over
+            # NREM2+NREM3 leaves Cz events; run B over NREM3 only crashes on
+            # Cz; run B must not be credited by run A's rows.
+            failed = {str(r[0]) for r in conn.execute('''
+                SELECT channel FROM processing_status
+                WHERE event_type = ? AND method = ? AND freq_lower = ?
+                  AND freq_upper = ? AND stage = ? AND success = 0
+                ''', (event_type, method, float(freq_lower), float(freq_upper),
+                      stage_key)).fetchall()}
+        except sqlite3.OperationalError:
+            # processing_status not yet migrated to the wide schema; the scope
+            # columns do not exist. Same fallback as resume_skip_channels.
+            result['scoped_status'] = False
+            if logger is not None:
+                logger.warning(
+                    "processing_status has no per-scope columns (unmigrated "
+                    "database); falling back to an event_type-only status "
+                    "check. A status row from a different method or band "
+                    "cannot be distinguished.")
+            succeeded = {str(r[0]) for r in conn.execute(
+                "SELECT channel FROM processing_status "
+                "WHERE event_type = ? AND success = 1",
+                (event_type,)).fetchall()}
+            failed = {str(r[0]) for r in conn.execute(
+                "SELECT channel FROM processing_status "
+                "WHERE event_type = ? AND success = 0",
+                (event_type,)).fetchall()} - succeeded
+    finally:
+        conn.close()
+
+    covered = (with_events | succeeded) - failed
+    missing = [c for c in requested if c not in covered]
+    # Channels vouched for by events alone, with no status row for this exact
+    # scope. Their events may predate this run (they cannot be stage-scoped),
+    # so this is the weaker half of the evidence and the caller should say so.
+    events_only = [c for c in requested
+                   if c in covered and c not in succeeded]
+    result.update({
+        'with_events': len(with_events & set(requested)),
+        'covered': len(requested) - len(missing),
+        'missing': missing,
+        'complete': not missing,
+        'failed': sorted(failed & set(requested)),
+        'events_only': events_only,
+    })
+    return result
+
+
+def guard_run_id(conn, event_type, method, freq_lower=None, freq_upper=None,
+                 force=False, logger=None):
+    """Refuse a CSV import that would blank direct-written provenance.
+
+    The CSV importers write with ``INSERT OR REPLACE`` keyed on a
+    deterministic event UUID, and their column list has no ``run_id``. So
+    re-importing a CSV over rows that the direct-to-database path wrote
+    replaces those rows with ``run_id = NULL``, severing them from their
+    ``detection_runs`` provenance without any error. This guard detects that
+    situation before the write loop starts.
+
+    A database with no ``run_id`` column at all (one built entirely by the
+    legacy CSV path) has nothing to protect: the function returns 0 rather
+    than raising an ``OperationalError`` on the missing column.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection to the target database.
+    event_type : str
+        Event type being imported (``'spindle'``, ``'slow_wave'``, ...).
+    method : str
+        Detection method being imported.
+    freq_lower, freq_upper : float or None, optional
+        Band bounds narrowing the scope. Omitted from the check when None.
+    force : bool, optional
+        Proceed (with a warning) instead of raising.
+    logger : logging.Logger or None, optional
+        Logger for the warning emitted when ``force`` is True.
+
+    Returns
+    -------
+    int
+        Number of direct-written rows found in the scope (0 when the column
+        is absent or nothing matches).
+
+    Raises
+    ------
+    RuntimeError
+        If direct-written rows exist in the scope and ``force`` is False.
+    """
+    if 'run_id' not in _table_columns(conn, 'events'):
+        return 0
+
+    sql = ("SELECT COUNT(*) FROM events "
+           "WHERE run_id IS NOT NULL AND event_type = ? AND method = ?")
+    params = [event_type, method]
+    if freq_lower is not None:
+        sql += " AND freq_lower = ?"
+        params.append(float(freq_lower))
+    if freq_upper is not None:
+        sql += " AND freq_upper = ?"
+        params.append(float(freq_upper))
+
+    n_rows = conn.execute(sql, params).fetchone()[0]
+    if not n_rows:
+        return 0
+
+    band = ''
+    if freq_lower is not None and freq_upper is not None:
+        band = f" {fmt_freq_token(freq_lower, freq_upper)}"
+    scope = f"event_type={event_type!r}, method={method!r}{band}"
+
+    if force:
+        if logger is not None:
+            logger.warning(
+                f"force=True: importing over {n_rows} direct-written row(s) "
+                f"({scope}); their run_id provenance will be cleared.")
+        return n_rows
+
+    raise RuntimeError(
+        f"Refusing to import: {n_rows} row(s) in this scope ({scope}) were "
+        f"written by the direct-to-database path and carry a run_id linking "
+        f"them to detection_runs. A CSV import is INSERT OR REPLACE and would "
+        f"blank that run_id. Re-run detection with write_db=True to update "
+        f"them, or pass force=True to overwrite and lose the provenance link.")
+
+
+def ensure_pac_schema(conn):
+    """Create the ``pac_coupling`` table and its indexes if absent.
+
+    Purely additive: it never touches ``events``, ``processing_status``,
+    ``sleep_cycles`` or ``stage_durations``. The primary key is the natural
+    key of a PAC result (subject, channel, event type, method, stage, and the
+    phase/amplitude frequency bounds), so a re-run with identical parameters
+    replaces its own row rather than inserting a duplicate.
+
+    This lives in ``dbwrite`` rather than ``pacprocessor`` so that
+    :func:`ensure_direct_write_schema` can create the table on every detection
+    run. A reader (review GUI, analysis notebook) then never hits
+    ``OperationalError: no such table: pac_coupling`` on a database where PAC
+    has not been run yet — it sees an empty table, which is the truth.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. The caller owns the connection lifecycle;
+        this function commits but does not close.
+
+    Returns
+    -------
+    None
+    """
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS pac_coupling (
+        -- Natural key
+        subject TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        event_type TEXT NOT NULL,       -- 'slow_wave', 'spindle', 'sw_spindle'
+        method TEXT NOT NULL,           -- detector / pairing method token
+        stage TEXT NOT NULL,            -- combined stage string (e.g. 'NREM2NREM3')
+        phase_freq_lower REAL NOT NULL,
+        phase_freq_upper REAL NOT NULL,
+        amp_freq_lower REAL NOT NULL,
+        amp_freq_upper REAL NOT NULL,
+
+        -- Coupling metrics (NaN stored as NULL)
+        mi_raw REAL,
+        mi_norm REAL,
+        median_mi_pval REAL,
+        preferred_phase_rad REAL,
+        preferred_phase_deg REAL,
+        mean_vector_length REAL,
+        rho REAL,
+        rayleigh_z REAL,
+        rayleigh_p REAL,
+
+        -- Number of artefact-free segments/events actually coupled.
+        -- NOT NULL by design: a row with an unrecoverable event count is
+        -- rejected upstream and flagged for re-run, never stored as 0/NULL.
+        n_events INTEGER NOT NULL,
+
+        -- Provenance
+        idpac TEXT,                     -- str(tuple) of (method, surrogate, correction)
+        ref_chan TEXT,
+        invert INTEGER,                 -- 0/1 polarity flag actually used
+        turtlewave_version TEXT,
+        processing_timestamp TEXT,
+        source_path TEXT,
+
+        PRIMARY KEY (subject, channel, event_type, method, stage,
+                     phase_freq_lower, phase_freq_upper,
+                     amp_freq_lower, amp_freq_upper)
+    )''')
+
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_subject ON pac_coupling(subject)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_channel ON pac_coupling(channel)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_method_stage ON pac_coupling(method, stage)')
+    conn.commit()
+
+
 def ensure_direct_write_schema(conn, logger=None):
     """Additively migrate a database for the direct-write path.
 
@@ -280,6 +585,8 @@ def ensure_direct_write_schema(conn, logger=None):
        absence of the ``method`` column). Legacy rows copy across with the new
        scope columns defaulted to ``''`` / ``0`` so the coarse CSV-import
        markers remain idempotent.
+    4. Create the ``pac_coupling`` table via :func:`ensure_pac_schema`, so a
+       reader never hits a missing table on a database where PAC has not run.
 
     Parameters
     ----------
@@ -373,6 +680,10 @@ def ensure_direct_write_schema(conn, logger=None):
         FROM processing_status''')
         conn.execute('DROP TABLE processing_status')
         conn.execute('ALTER TABLE processing_status_new RENAME TO processing_status')
+
+    # (4) pac_coupling: created eagerly so a reader never faces a missing
+    # table on a database where PAC has not (yet) been run.
+    ensure_pac_schema(conn)
 
     conn.commit()
 
@@ -947,7 +1258,9 @@ def write_channel_events(conn, run_id, event_type, channel, method,
         Number of event rows written.
     """
     now = datetime.datetime.now().isoformat()
-    freq_band = f"{freq_lower}-{freq_upper}Hz"
+    # Same helper the detectors use for the JSON filename token, so this is
+    # the last place the two spellings could drift apart.
+    freq_band = fmt_freq_token(freq_lower, freq_upper)
     placeholders = ', '.join(['?'] * len(EVENT_INSERT_COLUMNS))
     sql = (f"INSERT OR REPLACE INTO events ({', '.join(EVENT_INSERT_COLUMNS)}) "
            f"VALUES ({placeholders})")
@@ -1178,6 +1491,49 @@ def _fmt_freq_component(value):
     return str(int(v)) if v.is_integer() else repr(v)
 
 
+def fmt_freq_token(lo, hi):
+    """Format a detection band as the ``{freq_lo}-{freq_hi}Hz`` filename token.
+
+    This is the single source of truth for the frequency component of the
+    project naming convention
+    ``{event_type}_{method}_{freq_lo}-{freq_hi}Hz_{stages_joined}``. It must
+    be used on *both* sides of the filename round-trip: where a detector
+    writes its per-channel JSON, and where a caller rebuilds the
+    ``file_pattern`` to find those files again.
+
+    It is deliberately the plain historical expression ``f"{lo}-{hi}Hz"`` and
+    applies no normalisation, so existing result directories keep matching.
+    The bug it fixes was never the format but the *divergence*: a driver that
+    re-derived the token with a different formatter (``f"{lo:.1f}"``, which
+    turns a 1.25 Hz bound into ``1.2``) matched zero files and produced an
+    empty run that still reported success. Feeding one function the same
+    ``frequency`` tuple the detector used removes that failure mode whatever
+    the format is.
+
+    Parameters
+    ----------
+    lo : float or int
+        Lower band bound in Hz.
+    hi : float or int
+        Upper band bound in Hz.
+
+    Returns
+    -------
+    str
+        The band token, e.g. ``'0.5-1.25Hz'``, ``'11-16Hz'``, ``'9.0-12.0Hz'``.
+
+    Examples
+    --------
+    >>> fmt_freq_token(0.5, 1.25)
+    '0.5-1.25Hz'
+    >>> fmt_freq_token(11, 16)
+    '11-16Hz'
+    >>> fmt_freq_token(9.0, 12.0)
+    '9.0-12.0Hz'
+    """
+    return f"{lo}-{hi}Hz"
+
+
 def default_csv_path(output_dir, event_type, method, frequency, stage):
     """Build the standard parameter-CSV path for a detection scope.
 
@@ -1210,6 +1566,11 @@ def default_csv_path(output_dir, event_type, method, frequency, stage):
     prefix = _CSV_PREFIX.get(str(event_type), f"{event_type}_parameters")
     method_token = str(method).replace('/', '_')
     lo, hi = frequency
+    # NOTE: this deliberately keeps _fmt_freq_component's normalisation
+    # (9.0 -> '9'), which DIVERGES from fmt_freq_token ('9.0-12.0Hz'). The
+    # divergence predates the Stage A work and is left alone here because
+    # changing it would rename CSVs users already have on disk. Closing it is
+    # scheduled for Stage B, when the file round-trip goes away entirely.
     freq_token = f"{_fmt_freq_component(lo)}-{_fmt_freq_component(hi)}Hz"
     # Normalise any accepted stage form (list, single, or joined token) to the
     # canonical joined token, so the filename is identical whichever form the

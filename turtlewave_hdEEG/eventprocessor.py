@@ -246,13 +246,24 @@ class ParalEvents:
             self.logger.warning("Spindles will not be saved to annotations.")
             save_to_annotations = False
 
-        # Convert method to string
-        method_str = "_".join(method) if isinstance(method, list) else str(method)
+        # Two forms of the method, deliberately kept apart, matching the
+        # slow-wave and K-complex processors so all three follow one rule:
+        #   method_db  - canonical, UNESCAPED, for every database write and
+        #                query, so direct-write rows match CSV-imported rows
+        #                and the citation table.
+        #   method_str - filesystem-safe, ONLY for filenames and paths.
+        # No shipped spindle method contains a "/", so this changes no
+        # filename today; it stops a future slashed method from writing a
+        # path separator into a filename.
+        method_db = "_".join(method) if isinstance(method, list) else str(method)
+        method_str = method_db.replace('/', '_')
         
-        # Convert frequency to string
-        freq_str = f"{frequency[0]}-{frequency[1]}Hz"
+        # Convert frequency to string. Single source of truth for the band
+        # token so the JSON filenames written here and any file_pattern a
+        # caller rebuilds later cannot drift (see dbwrite.fmt_freq_token).
+        freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
 
-        self.logger.info(f"Starting spindle detection with method={method_str}, frequency={freq_str}")
+        self.logger.info(f"Starting spindle detection with method={method_db}, frequency={freq_str}")
         self.logger.debug(f"Parameters: channels={chan}, reject_artifacts={reject_artifacts}, reject_arousals={reject_arousals}")
 
         if detector_params:
@@ -291,7 +302,7 @@ class ParalEvents:
                     run_id = str(_uuid_mod.uuid4())
                     params_dict = {
                         'frequency': list(frequency), 'duration': list(duration),
-                        'polar': polar, 'method': method_str,
+                        'polar': polar, 'method': method_db,
                         'ref_chan': ref_chan, 'cat': cat,
                         'detector_params': detector_params,
                         'reject_artifacts': reject_artifacts,
@@ -301,13 +312,13 @@ class ParalEvents:
                     if run_params:
                         params_dict.update(run_params)
                     dbwrite.record_run(
-                        db_conn, run_id, 'spindle', method_str,
-                        dbwrite.method_citation(method_str),
+                        db_conn, run_id, 'spindle', method_db,
+                        dbwrite.method_citation(method_db),
                         json.dumps(params_dict, default=str),
                         ref_chan, polar, stage, reject_artifacts, reject_arousals)
                     if resume:
                         db_skip = dbwrite.resume_skip_channels(
-                            db_conn, 'spindle', method_str,
+                            db_conn, 'spindle', method_db,
                             frequency[0], frequency[1], stages_key)
                         if db_skip:
                             self.logger.info(
@@ -385,7 +396,9 @@ class ParalEvents:
                                 f.write(self.dataset.filename)
                             f.write('</filename></dataset><rater><name>Wonambi</name></rater></annotations>')
                         new_annotations = Annotations(annotation_file_path)
-                    print(f"Will save spindles to new annotation file: {annotation_file_path}")    
+                    self.logger.info(
+                        f"Will save spindles to new annotation file: "
+                        f"{annotation_file_path}")
 
                 except Exception as e:
                     self.logger.error(f"Error creating new annotation file: {e}")
@@ -525,7 +538,7 @@ class ParalEvents:
                             channel_param_segments, frequency, s_freq,
                             db_n_fft_sec, self.logger)
                         dbwrite.write_channel_events(
-                            db_conn, run_id, 'spindle', ch, method_str,
+                            db_conn, run_id, 'spindle', ch, method_db,
                             frequency[0], frequency[1], stages_key,
                             channel_db_events, batched, rec_start,
                             db_n_fft_sec, self.logger,
@@ -561,7 +574,7 @@ class ParalEvents:
                         # sentinel JSON, so a resume re-runs only this channel.
                         if write_db and db_conn is not None:
                             dbwrite.record_channel_failure(
-                                db_conn, 'spindle', ch, method_str,
+                                db_conn, 'spindle', ch, method_db,
                                 frequency[0], frequency[1], stages_key, e)
                         # Write an error sentinel (not an empty list) so downstream
                         # import can tell a failed channel apart from one that
@@ -598,14 +611,14 @@ class ParalEvents:
     
  
 
-    def export_spindle_parameters_to_csv(self, json_input, csv_file, export_params='all', 
-                              frequency=None, ref_chan=None, grp_name='eeg', n_fft_sec=4, 
-                              file_pattern=None,skip_empty_files=True):
+    def export_spindle_parameters_to_csv(self, json_input, csv_file, export_params='all',
+                              frequency=None, ref_chan=None, grp_name='eeg', n_fft_sec=4,
+                              file_pattern=None,skip_empty_files=True, strict=True):
         """
 
-    
+
         Calculate spindle parameters from JSON files and export to CSV.
-        
+
         Parameters
         ----------
         json_input : str or list
@@ -626,11 +639,25 @@ class ParalEvents:
             Group name for channel selection
         skip_empty_files : bool
             Whether to skip empty JSON files or include them in the report
+        strict : bool
+            If True (default), raise ``FileNotFoundError`` when ``file_pattern``
+            matches no JSON file. A zero-match export is almost always a
+            filename round-trip bug (the band token or method token in the
+            pattern not matching what the detector wrote), and the historical
+            behaviour of writing a one-line placeholder CSV made that
+            indistinguishable from a genuinely empty run: the import then
+            reported ``added: 0`` and the driver still logged success. Pass
+            ``strict=False`` to restore the placeholder-CSV behaviour.
 
         Returns
         -------
         dict
             Dictionary of calculated parameters
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``strict`` is True and no JSON file matches ``file_pattern``.
         """
         #self.logger.warning("export_spindle_parameters_to_csv is deprecated. Please use calculate_and_store_parameters() and export_parameters_to_csv() instead.")
         
@@ -653,18 +680,22 @@ class ParalEvents:
             # Get all JSON files in the directory
             all_json_files = glob.glob(os.path.join(json_input, "*.json"))
             # Match files where pattern is followed by underscore or dot
-            json_files = [f for f in all_json_files if 
-                        f"{file_pattern}_" in os.path.basename(f) or 
+            json_files = [f for f in all_json_files if
+                        f"{file_pattern}_" in os.path.basename(f) or
                         f"{file_pattern}." in os.path.basename(f)]
         else:
             # If no pattern, get all JSON files
             json_files = glob.glob(os.path.join(json_input, "*.json"))
 
-
         self.logger.info(f"Found {len(json_files)} JSON files matching pattern: {file_pattern}")
         
         if not json_files:
-            self.logger.warning(f"No JSON files found matching pattern: {file_pattern}")
+            from .utils import missing_json_message
+            msg = missing_json_message(json_input, file_pattern)
+            if strict:
+                self.logger.error(msg)
+                raise FileNotFoundError(msg)
+            self.logger.warning(msg)
             with open(csv_file, 'w', newline='', encoding='utf-8') as outfile:
                 writer = csv.writer(outfile)
                 writer.writerow(["No JSON files found matching pattern:", file_pattern])
@@ -959,9 +990,7 @@ class ParalEvents:
             self.logger.info(f"Successfully exported to {csv_file} with HH:MM:SS time format")
             return params
         except Exception as e:
-            self.logger.error(f"Error calculating parameters: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"Error calculating parameters: {e}", exc_info=True)
             return None
 
     
@@ -1013,8 +1042,8 @@ class ParalEvents:
             # Get all JSON files in the directory
             all_json_files = glob.glob(os.path.join(json_input, "*.json"))
             # Match files where pattern is followed by underscore or dot
-            json_files = [f for f in all_json_files if 
-                        f"{file_pattern}_" in os.path.basename(f) or 
+            json_files = [f for f in all_json_files if
+                        f"{file_pattern}_" in os.path.basename(f) or
                         f"{file_pattern}." in os.path.basename(f)]
         else:
             # If no pattern, get all JSON files
@@ -1602,11 +1631,13 @@ class ParalEvents:
 
 
 
-    def import_parameters_csv_to_database(self, csv_file, db_path,  append=True):
+    def import_parameters_csv_to_database(self, csv_file, db_path, append=True,
+                                          event_type=None, method=None,
+                                          force=False):
         """
         Import event parameters from an existing CSV file into SQLite database.
         Supports multiple event types and incremental updates.
-        
+
         Parameters
         ----------
         csv_file : str
@@ -1616,11 +1647,43 @@ class ParalEvents:
         append : bool
             If True, adds to existing database without replacing existing entries
             If False, replaces any existing entries with the same UUID
-                
+        event_type : str or None
+            Override the inferred event type. The default heuristic (filename
+            substring plus the CSV ``"Event type"`` column) does not recognise
+            every prefix, so callers ingesting a non-spindle CSV should pass
+            this explicitly.
+        method : str or None
+            Override the method parsed from the filename. The filename parser
+            underscore-splits and takes ``parts[2]``, which mangles methods
+            containing underscores in their escaped form (e.g.
+            ``AASM/Massimini2004`` -> ``AASM_Massimini2004`` -> ``'AASM'``) and
+            stamps one method on every row of a multi-method run — whose
+            collisions the ``event_chan_time`` UNIQUE constraint then drops
+            silently under ``INSERT OR REPLACE``. Pass the original method
+            string to bypass the parser.
+        force : bool
+            Allow the import to proceed even when the target scope already
+            holds rows written by the direct-to-database path (rows with a
+            non-NULL ``run_id``). The import is ``INSERT OR REPLACE`` on a
+            deterministic event UUID, so importing a CSV over those rows blanks
+            their ``run_id`` and severs them from their ``detection_runs``
+            provenance. Default False refuses instead.
+
         Returns
         -------
         dict
-            Summary of the operation with counts of added, updated, and skipped rows
+            Summary of the operation with counts of added, updated and skipped
+            rows, plus ``"ok": True`` on success.
+
+        Raises
+        ------
+        RuntimeError
+            If the target scope already contains direct-written rows and
+            ``force`` is False.
+        Exception
+            Any failure during parsing or the database transaction is
+            re-raised rather than being swallowed into an error dict, so a
+            failed import can never be mistaken for a clean re-run.
         """
         import sqlite3
         import pandas as pd
@@ -1633,11 +1696,16 @@ class ParalEvents:
         if not os.path.exists(db_path):
             self.initialize_sqlite_database(db_path)
         
-        # Check if the file exists
+        # Check if the file exists. Raise: an absent CSV means the export step
+        # before this one produced nothing, which is a broken pipeline, not an
+        # empty result.
         if not os.path.exists(csv_file):
             self.logger.error(f"CSV file not found: {csv_file}")
-            return {"error": "CSV file not found", "added": 0, "updated": 0, "skipped": 0}
-        
+            raise FileNotFoundError(
+                f"Parameters CSV not found: {csv_file}. The export step that "
+                f"should have written it either failed or wrote a different "
+                f"filename (check the file_pattern / band token).")
+
         # Track statistics
         stats = {
             "added": 0,
@@ -1679,9 +1747,13 @@ class ParalEvents:
                     break
             
             if header_row is None:
-                self.logger.error("Could not find header row in CSV")
-                return {"error": "Could not find header row", "added": 0, "updated": 0, "skipped": 0}
-            
+                self.logger.error(
+                    f"Could not find a 'Start time' header row in {csv_file}; "
+                    f"this is not a parameters CSV (a placeholder CSV written "
+                    f"by a zero-match export looks like this). Nothing imported.")
+                return {"ok": False, "error": "Could not find header row",
+                        "added": 0, "updated": 0, "skipped": 0}
+
             # Check if there are statistic rows after the header
             has_stat_rows = False
             if header_row + 1 < len(lines):
@@ -1697,31 +1769,46 @@ class ParalEvents:
             df = pd.read_csv(csv_file, skiprows=skiprows)
             
             if df.empty:
-                self.logger.warning("CSV file contains no data rows")
-                return {"error": "Empty CSV file", "added": 0, "updated": 0, "skipped": 0}
-                
+                self.logger.warning(f"CSV file contains no data rows: {csv_file}")
+                return {"ok": False, "error": "Empty CSV file",
+                        "added": 0, "updated": 0, "skipped": 0}
+
             self.logger.info(f"Read {len(df)} parameter rows from CSV")
-            
+
+            # Capture caller overrides (both names are rebound inside
+            # process_csv_data, so they must be snapshotted here).
+            event_type_override = event_type
+            method_override = method
+
             # Define database operation function
             def process_csv_data(conn):
                 cursor = conn.cursor()
                 # Auto-upgrade an existing DB (initialize_sqlite_database is only
                 # called when the file is absent, so migrate here for old DBs).
                 self._ensure_event_param_columns(conn)
-                # Determine event type from CSV filename or content
-                event_type = "spindle"  # Default
-                filename = os.path.basename(csv_file).lower()
-                if 'slow_wave' in filename or 'slowwave' in filename or 'sw' in filename:
-                    event_type = "slow_wave"
-                elif 'spindle' in filename:
-                    event_type = "spindle"
 
-                # Override event_type if 'Event type' column exists in CSV
-                if 'Event type' in df.columns:
-                    # Use the first non-null value in the Event type column
-                    event_types = df['Event type'].dropna()
-                    if len(event_types) > 0:
-                        event_type = event_types.iloc[0]
+                # Determine event type. Caller override wins.
+                if event_type_override is not None:
+                    event_type = event_type_override
+                    # The downstream INSERT reads the event type from the CSV
+                    # 'Event type' column, not from the df['event_type']
+                    # assignment below, so stamp the override there too.
+                    if 'Event type' in df.columns:
+                        df['Event type'] = event_type
+                else:
+                    event_type = "spindle"  # Default
+                    filename_lc = os.path.basename(csv_file).lower()
+                    if 'slow_wave' in filename_lc or 'slowwave' in filename_lc or 'sw' in filename_lc:
+                        event_type = "slow_wave"
+                    elif 'spindle' in filename_lc:
+                        event_type = "spindle"
+
+                    # Override event_type if 'Event type' column exists in CSV
+                    if 'Event type' in df.columns:
+                        # Use the first non-null value in the Event type column
+                        event_types = df['Event type'].dropna()
+                        if len(event_types) > 0:
+                            event_type = event_types.iloc[0]
 
                 self.logger.info(f"Importing parameters for event type: {event_type}")
 
@@ -1798,30 +1885,41 @@ class ParalEvents:
                 db_columns.append('freq_lower')
                 db_columns.append('freq_upper')
                 
-                # Resolve method with precedence: a truthful 'Method' CSV column
-                # (written by the DB export; preserves slash-methods like
-                # 'AASM/Massimini2004') over the lossy filename parse
+                # Resolve method with precedence: an explicit caller override
+                # first, then a truthful 'Method' CSV column (written by the DB
+                # export; preserves slash-methods like 'AASM/Massimini2004'),
+                # and only then the lossy filename parse
                 # (filename.split('_')[2] mangles slash-methods to 'AASM' and
                 # would corrupt events.method on an INSERT OR REPLACE re-import).
                 # Legacy JSON-exported CSVs have no 'Method' column, so they keep
                 # the historical filename-parse behaviour unchanged.
-                method = None
-                if 'Method' in df.columns:
-                    method_vals = df['Method'].dropna()
-                    if len(method_vals) > 0:
-                        method = str(method_vals.iloc[0])
-                if method is None:
-                    method = "unknown"
-                    if "_" in filename:
-                        parts = filename.split('_')
-                        if len(parts) > 2:
-                            # Typically the format is spindle_parameters_METHOD_freq_stages.csv
-                            method = parts[2]
+                if method_override is not None:
+                    method = method_override
+                else:
+                    method = None
+                    if 'Method' in df.columns:
+                        method_vals = df['Method'].dropna()
+                        if len(method_vals) > 0:
+                            method = str(method_vals.iloc[0])
+                    if method is None:
+                        method = "unknown"
+                        if "_" in filename:
+                            parts = filename.split('_')
+                            if len(parts) > 2:
+                                # Typically the format is spindle_parameters_METHOD_freq_stages.csv
+                                method = parts[2]
 
                 df['method'] = method
                 existing_columns.append('method')
                 db_columns.append('method')
-                
+
+                # Refuse to overwrite direct-written rows, whose run_id this
+                # INSERT OR REPLACE would silently blank.
+                dbwrite.guard_run_id(conn, event_type, method,
+                                     freq_lower, freq_upper,
+                                     force=force, logger=self.logger)
+
+
                 # Set event_type from our detection
                 df['event_type'] = event_type
                 if 'event_type' not in db_columns:
@@ -2075,14 +2173,17 @@ class ParalEvents:
 
                 conn.close()
 
+                stats["ok"] = True
                 return stats
             # Use the safe database operation
             return self._safe_database_operation(db_path, process_csv_data)
-    
+
         except Exception as e:
-            self.logger.error(f"Error processing CSV: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"error": str(e), "added": 0, "updated": 0, "skipped": 0}
+            # Re-raise. Swallowing this into {"error": ..., "added": 0} made a
+            # failed import indistinguishable from a clean idempotent re-run,
+            # and the driver scripts went on to report success.
+            self.logger.error(f"Error processing CSV {csv_file}: {e}",
+                              exc_info=True)
+            raise
 
 
