@@ -2335,9 +2335,26 @@ class TurtleWaveGUI(QMainWindow):
         method_select_layout.addWidget(QLabel("PAC Type:"))
         self.pac_method_combo = QComboBox()
         self.pac_method_combo.addItems(["SW-Spindle", "Theta-Gamma"])
+
+        # Theta-Gamma coupling is not implemented yet. Keep the entry visible so
+        # the roadmap stays legible, but grey it out: clearing Qt.ItemIsEnabled on
+        # the combo's model item makes it unselectable by both mouse and keyboard,
+        # so update_pac_params() can never be called with "Theta-Gamma".
+        theta_gamma_index = self.pac_method_combo.findText("Theta-Gamma")
+        theta_gamma_item = self.pac_method_combo.model().item(theta_gamma_index)
+        theta_gamma_item.setFlags(theta_gamma_item.flags() & ~QtCore.Qt.ItemIsEnabled)
+        self.pac_method_combo.setItemData(
+            theta_gamma_index,
+            "Theta-Gamma coupling is not implemented yet; only SW-Spindle "
+            "coupling can be run in this version.",
+            QtCore.Qt.ToolTipRole)
+        # Make sure the enabled entry is the one selected on startup.
+        self.pac_method_combo.setCurrentIndex(
+            self.pac_method_combo.findText("SW-Spindle"))
+
         method_select_layout.addWidget(self.pac_method_combo)
         method_layout.addLayout(method_select_layout)
-        
+
         # Connect method change to update parameters
         self.pac_method_combo.currentTextChanged.connect(self.update_pac_params)
         
@@ -3004,23 +3021,18 @@ class TurtleWaveGUI(QMainWindow):
             self.update_pac_available_channels()
         
         elif method_name == "Theta-Gamma":
-            # Set defaults for Theta-Gamma coupling
+            # Currently unreachable: the "Theta-Gamma" combo entry is disabled in
+            # setup_pac_tab() because the analysis is not implemented. Kept so the
+            # parameter page wiring is ready for whoever implements it.
             self.pac_param_stack.setCurrentIndex(1)
-            
+
             # Disable SW and spindle method selection
             self.sw_method_pac_combo.setEnabled(False)
             self.spindle_method_pac_combo.setEnabled(False)
-            
-            # For Theta-Gamma, clear channel lists and show future implementation message
-            self.pac_available_channels = []
-            self.pac_selected_channels = []
-            self.update_pac_channel_lists()
-            
-            # Add a placeholder item to indicate future implementation
-            self.pac_available_list.addItem("-- Theta-Gamma PAC: Future Implementation --")
-            self.pac_available_list.setSelectionMode(QAbstractItemView.NoSelection)
-            
-            self.write_log("Theta-Gamma PAC channel selection will be implemented in a future update")
+
+            # Channel population is still to be written: update_pac_available_channels()
+            # derives channels from the detected SW/spindle events in the database,
+            # which does not apply to a continuous-band analysis.
 
     # update frequency ranges from database
     def update_sw_freq_from_db(self, display_name):
