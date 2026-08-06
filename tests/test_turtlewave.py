@@ -510,6 +510,184 @@ def test_density_multi_method_run():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_cycle_subject_spelling_delete():
+    """Re-running the cycle writers must replace old-spelling rows, not add to them.
+
+    The writers normalise the subject before inserting, so a row written
+    earlier under the bare folder name -- which the cycle how-to tells users
+    to pass -- is not matched by a delete on the canonical id. Without the
+    widened delete the insert adds a *second* row: ``sleep_cycles`` ends up
+    with both spellings, and ``stage_durations`` (``PRIMARY KEY (subject)``,
+    one row per recording by contract) doubles any total taken over it.
+    """
+    print("\n12. Testing the cycle subject-spelling delete:")
+
+    import tempfile
+    import logging
+    from turtlewave_hdEEG import dbwrite, ParalSWA, ParalCycles
+
+    tmp = tempfile.mkdtemp(prefix='tw_spelling_')
+    db = os.path.join(tmp, 'neural_events.db')
+    ParalSWA(None, None, log_level=logging.CRITICAL).initialize_sqlite_database(db)
+    conn = dbwrite.open_write_connection(db)
+    try:
+        # Pre-existing rows, written under the BARE id by an earlier run.
+        conn.execute(
+            "INSERT INTO sleep_cycles (subject, method, cycle_number, "
+            "nrem_start, nrem_end, rem_start, rem_end, nrem_dur_min, "
+            "nrem_n23_dur_min, rem_dur_min, cycle_dur_min) "
+            "VALUES ('10sd','2022',1,0,600,600,900,10.0,8.0,5.0,15.0)")
+        conn.execute(
+            "INSERT INTO stage_durations (subject, epoch_length, wake_min, "
+            "n1_min, n2_min, n3_min, rem_min, artefact_min, total_min) "
+            "VALUES ('10sd',30,60.0,20.0,150.0,90.0,80.0,0.0,400.0)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    cyc = ParalCycles(annotations=None, subject='10sd',
+                      log_level=logging.CRITICAL)
+    cycles = [{'method': '2022', 'cycle_number': 1, 'nrem_start_sec': 0.0,
+               'nrem_end_sec': 600.0, 'rem_end_sec': 900.0,
+               'nrem_dur_min': 10.0, 'nrem_n23_dur_min': 8.0,
+               'rem_dur_min': 5.0, 'cycle_dur_min': 15.0}]
+    durations = {'epoch_length': 30, 'wake_min': 60.0, 'n1_min': 20.0,
+                 'n2_min': 150.0, 'n3_min': 90.0, 'rem_min': 80.0,
+                 'artefact_min': 0.0, 'total_min': 400.0}
+    cyc.store_cycles_to_database(cycles, db, subject='10sd')
+    cyc.store_stage_durations(durations, db, subject='10sd')
+
+    conn = sqlite3.connect(db)
+    try:
+        cycle_rows = conn.execute(
+            "SELECT subject, method, cycle_number FROM sleep_cycles").fetchall()
+        dur_rows = conn.execute(
+            "SELECT subject, total_min FROM stage_durations").fetchall()
+        total = conn.execute(
+            "SELECT SUM(total_min) FROM stage_durations").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert len(cycle_rows) == 1, f"sleep_cycles duplicated: {cycle_rows}"
+    assert cycle_rows[0][0] == 'sub-10sd', cycle_rows
+    print(f"[ok] sleep_cycles: 1 row, {cycle_rows[0][0]!r}")
+
+    assert len(dur_rows) == 1, f"stage_durations duplicated: {dur_rows}"
+    assert dur_rows[0][0] == 'sub-10sd', dur_rows
+    print(f"[ok] stage_durations: 1 row, {dur_rows[0][0]!r}")
+
+    assert total == 400.0, f"SUM(total_min) = {total}, expected 400.0"
+    print(f"[ok] SELECT SUM(total_min) = {total} (not 800.0)")
+
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pac_twin_delete_is_scoped():
+    """The pac_coupling twin delete must remove the twin and nothing else.
+
+    ``subject`` is part of the natural key and is normalised on the way in, so
+    a row written earlier under another spelling of the same recording is a
+    *different* key and ``INSERT OR REPLACE`` would leave it as a duplicate.
+    The twin is deleted first -- but that delete carries the row's whole
+    natural key, so it must not touch a neighbour differing in any one
+    component. This is the highest-consequence delete in the package; the
+    seven near misses below pin every column of the key.
+    """
+    print("\n13. Testing the scope of the pac_coupling twin delete:")
+
+    import tempfile
+    import logging
+    from turtlewave_hdEEG import dbwrite, ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_pactwin_')
+    db = os.path.join(tmp, 'neural_events.db')
+
+    base = dict(channel='C3', event_type='slow_wave', method='Staresina2015',
+                stage='NREM2', phase_freq_lower=0.5, phase_freq_upper=1.25,
+                amp_freq_lower=11.0, amp_freq_upper=16.0)
+
+    # The twin, then one neighbour per key column, then a different subject.
+    rows = [
+        ('twin (differs only in subject spelling)', dict(base, subject='10sd')),
+        ('neighbour: channel', dict(base, subject='10sd', channel='C4')),
+        ('neighbour: event_type', dict(base, subject='10sd',
+                                       event_type='spindle')),
+        ('neighbour: method', dict(base, subject='10sd', method='Ngo2015')),
+        ('neighbour: stage', dict(base, subject='10sd', stage='NREM3')),
+        ('neighbour: amp_freq_lower', dict(base, subject='10sd',
+                                           amp_freq_lower=12.0)),
+        ('neighbour: phase_freq_lower', dict(base, subject='10sd',
+                                             phase_freq_lower=0.75)),
+        ('different subject entirely', dict(base, subject='sub-OTHER')),
+    ]
+
+    conn = dbwrite.open_write_connection(db)
+    try:
+        dbwrite.ensure_pac_schema(conn)
+        for label, r in rows:
+            conn.execute(
+                "INSERT INTO pac_coupling (subject, channel, event_type, "
+                "method, stage, phase_freq_lower, phase_freq_upper, "
+                "amp_freq_lower, amp_freq_upper, n_events) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (r['subject'], r['channel'], r['event_type'], r['method'],
+                 r['stage'], r['phase_freq_lower'], r['phase_freq_upper'],
+                 r['amp_freq_lower'], r['amp_freq_upper'], 111))
+        conn.commit()
+        before = conn.execute("SELECT COUNT(*) FROM pac_coupling").fetchone()[0]
+    finally:
+        conn.close()
+    assert before == 8, f"fixture built {before} rows, expected 8"
+    print(f"[ok] fixture: {before} rows (1 twin + 6 near misses + 1 other "
+          f"subject)")
+
+    class _FakeDataset:
+        filename = os.path.join(tmp, 'x.set')
+        header = {'s_freq': 100.0}
+
+    pac = ParalPAC(dataset=_FakeDataset(), rootpath=tmp,
+                   log_level=logging.CRITICAL)
+    stats = pac.store_pac_to_database(
+        db_path=db, subject='10sd', event_type='slow_wave',
+        method='Staresina2015', stage='NREM2', phase_freq=(0.5, 1.25),
+        amp_freq=(11.0, 16.0), idpac=(1, 2, 4),
+        results={'C3': {'0.5-1.25Hz_11-16Hz': {
+            'mi_raw': 0.17, 'mi_norm': 0.17, 'pval': 0.49,
+            'preferred_phase_rad': -1.14, 'preferred_phase_deg': -65.3,
+            'mean_vector_length': 0.0801, 'rho': -0.88, 'rayleigh_z': 2.2,
+            'rayleigh_p': 0.1, 'n_segments': 351, 'outputfile': None,
+            'csv_written': False, 'amp_file': 'x.npy'}}})
+    assert stats.get('ok'), stats
+
+    conn = sqlite3.connect(db)
+    try:
+        after = conn.execute("SELECT COUNT(*) FROM pac_coupling").fetchone()[0]
+        survivors = set(conn.execute(
+            "SELECT subject, channel, event_type, method, stage, "
+            "phase_freq_lower, amp_freq_lower FROM pac_coupling"))
+    finally:
+        conn.close()
+
+    assert after == 8, f"{before} rows in, {after} out (expected 8)"
+    print(f"[ok] {before} rows in, {after} rows out")
+
+    canonical = ('sub-10sd', 'C3', 'slow_wave', 'Staresina2015', 'NREM2',
+                 0.5, 11.0)
+    assert canonical in survivors, "the canonical row was not written"
+    twin = ('10sd', 'C3', 'slow_wave', 'Staresina2015', 'NREM2', 0.5, 11.0)
+    assert twin not in survivors, "the old-spelling twin survived"
+    print("[ok] the twin was replaced by the canonical row")
+
+    for label, r in rows[1:]:
+        key = (r['subject'], r['channel'], r['event_type'], r['method'],
+               r['stage'], r['phase_freq_lower'], r['amp_freq_lower'])
+        assert key in survivors, f"collateral damage to {label}: {key}"
+    print(f"[ok] all {len(rows) - 1} neighbours intact (channel, event_type, "
+          f"method, stage, amp_freq, phase_freq, other subject)")
+
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("TESTING TURTLEWAVE-HDEEG PACKAGE UPDATES")
     print("=======================================")
@@ -526,5 +704,7 @@ if __name__ == "__main__":
     test_density_with_bare_subject_id()
     test_density_identity_axis()
     test_density_multi_method_run()
+    test_cycle_subject_spelling_delete()
+    test_pac_twin_delete_is_scoped()
 
     print("\nAll tests completed!")

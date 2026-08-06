@@ -39,6 +39,9 @@ import numpy as np
 from . import dbwrite
 from .utils import normalize_subject
 
+#: Fallback for module-level helpers called without a processor logger.
+LOGGER = logging.getLogger('turtlewave_hdEEG.cycleprocessor')
+
 
 def _subject_spellings(conn, table, subject, logger=None):
     """Every stored spelling of one recording's id in ``table``.
@@ -68,13 +71,23 @@ def _subject_spellings(conn, table, subject, logger=None):
     Returns
     -------
     list of str
-        Stored spellings equivalent to ``subject``, canonical first.
+        Stored spellings equivalent to ``subject``, canonical first. On a
+        failed lookup this degrades to ``[subject]`` -- the pre-fix
+        single-spelling delete -- and says so at WARNING, because that
+        degradation silently re-introduces the duplicate row this function
+        exists to prevent.
     """
     try:
         stored = [r[0] for r in conn.execute(
             f"SELECT DISTINCT subject FROM {table} "
             f"WHERE subject IS NOT NULL AND subject != ''")]
-    except Exception:
+    except Exception as e:
+        (logger or LOGGER).warning(
+            "Could not read the stored subject spellings from %s (%s), so the "
+            "idempotency delete falls back to the canonical id '%s' alone. If "
+            "this recording has rows under an older spelling of its id they "
+            "will NOT be replaced, and the insert that follows adds a "
+            "duplicate instead. Check the table and re-run.", table, e, subject)
         return [subject]
     equivalent = [s for s in stored
                   if str(s) != subject and normalize_subject(str(s)) == subject]
