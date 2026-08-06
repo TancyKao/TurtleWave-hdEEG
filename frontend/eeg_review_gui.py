@@ -6,6 +6,7 @@ Optimized for high-density EEG event review with virtualized table and timeline
 
 import sys
 import sqlite3
+import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -35,6 +36,50 @@ try:
 except ImportError as e:
     print(f"Import warning: {e}")
     mne = None
+
+
+# ============================================================================
+# Logging for the density helpers
+# ============================================================================
+
+class _RepeatSuppressingFilter(logging.Filter):
+    """Let each distinct message through once per context, then drop repeats.
+
+    The QC dashboard rebuilds its density denominators on every refresh, and
+    ``turtlewave_hdEEG.utils.compute_analysed_seconds`` warns about an
+    inconsistent annotation each time it does. The warning is about the file,
+    not about the refresh, so repeating it once per stage per refresh buries
+    the rest of the log without adding information.
+
+    Suppression happens here, in the GUI, and never in the library: that
+    warning reports a data-integrity condition and the library deliberately
+    refuses to be silenced by a ``logger=None`` argument. What this does is
+    accept the record once and stop the identical restatement.
+
+    The context is the annotation file the message is about, so opening a
+    different file reports its own condition rather than inheriting the last
+    file's silence.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.context = None
+        self._seen = set()
+
+    def filter(self, record):
+        key = (self.context, record.levelno, record.getMessage())
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        return True
+
+
+#: Logger the review GUI hands to the density helpers, so their warnings pass
+#: through the repeat filter above instead of going straight to the library's
+#: module logger.
+_density_logger = logging.getLogger('frontend.eeg_review_gui.density')
+_density_repeat_filter = _RepeatSuppressingFilter()
+_density_logger.addFilter(_density_repeat_filter)
 
 
 # ============================================================================
@@ -3709,12 +3754,21 @@ class EventReviewGUI(QMainWindow):
         # Lazy import keeps GUI imports headless-safe; utils is Qt-free and the
         # single source of truth for the artefact-free subtraction.
         from turtlewave_hdEEG.utils import build_density_denominators
+        # Route the helpers' warnings through the repeat filter rather than
+        # leaving them on the library's module logger. The denominators are
+        # rebuilt on every refresh, so an annotation-inconsistency warning -
+        # which is about the file, not about this refresh - would otherwise be
+        # restated once per stage every time the dashboard redraws. Passing
+        # None would not silence it either (the library refuses to be silenced
+        # on a data-integrity condition, correctly); it would only send it
+        # somewhere this GUI cannot de-duplicate.
+        _density_repeat_filter.context = getattr(self, 'annot_file_path', None)
         try:
             dens = build_density_denominators(
                 self.annotations, self.eeg_data,
                 reject_artifacts=True, reject_arousals=True,
                 stage_list=stage_list, stages_present=stage_list,
-                logger=None,  # avoid a reject-assumption WARNING every refresh
+                logger=_density_logger,
                 extra_artefact_intervals=extra_intervals)
         except Exception:
             return None

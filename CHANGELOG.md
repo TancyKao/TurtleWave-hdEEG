@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Closes a class of silent data loss where detection wrote files and a separately
 constructed string had to find them again. Affected runs completed without
-errors and wrote nothing to `neural_events.db`.
+errors and wrote nothing to `neural_events.db`. Two density fixes change
+exported numbers for some recordings — see **Upgrading** for who is affected.
 
 ### Added
 
@@ -18,6 +19,8 @@ errors and wrote nothing to `neural_events.db`.
 ### Changed
 
 - Both HPC batch drivers verify channel coverage against the database and exit non-zero when channels are missing, instead of always logging success.
+- Quieter, more accurate logs: dataset-loader diagnostics and per-file bookkeeping dropped to debug level, and the GUI log pane no longer double-timestamps library lines, repeats the same warning, or reports a CSV as saved when none was written.
+- Two failure paths that were logged at info level are now logged as errors.
 
 ### Fixed
 
@@ -28,11 +31,18 @@ errors and wrote nothing to `neural_events.db`.
 - Failed CSV imports returned "0 added" and were indistinguishable from a clean re-run; importers now raise, and parameter exporters raise when their pattern matches no files instead of writing a placeholder CSV.
 - Continuous PAC was storable as slow-wave coupling; `analyze_pac` now refuses to write a row whose scope it cannot name.
 - A subject identifier could differ depending on which annotation XML a caller pointed at, splitting one recording across two database keys.
+- Density denominators no longer subtract time for epochs scored past the annotation's `last_second`; those epochs contributed negative durations that inflated density, and in one recording drove the denominator negative and reported negative densities without an error. The inconsistency is now logged once per stage at WARNING.
+- The example scripts and both cluster drivers pass the run's real `reject_artifacts` / `reject_arousals` settings to the density export instead of assuming both were enabled, so a run with `reject_arousals=False` no longer has arousal time subtracted from its denominator.
+- A detection run in which every channel succeeded and found zero events is now a clean no-op: the parameter exporter writes a header-only CSV, as the density exporter already did, and the importer records a successful import of nothing, instead of writing no file and failing the import with `FileNotFoundError`.
+- A run in which no channel produced an event and at least one channel failed no longer looks like an empty night: no CSV is written and the import fails loudly, instead of a header-only CSV importing as a clean zero-event result.
+- Channels that fail are now named at ERROR with their reason. A partially failed run still exports the channels that succeeded, so the presence of a parameters CSV does not mean every channel was detected — check the log before treating a montage as complete.
 
 ### Upgrading
 
 - PAC results from 4.0.0 exist as CSVs only; back-fill or re-run them to populate `pac_coupling`.
 - The first coverage check against a database created before 4.0.1 reports a large `events_only` warning, because legacy `processing_status` rows migrate in with an empty method, zero frequency bounds and an empty stage and never match the scoped query. It exits 0 and self-heals after one scoped run.
+- Re-export densities for any run that used `reject_artifacts=False` or `reject_arousals=False`. Those denominators were computed as if both were True, so they subtracted time the detector never excluded. Runs that left both at their default True are unaffected by this change.
+- Re-export densities for any recording whose annotation scores epochs beyond `last_second`; 4.0.1 logs a WARNING per stage when it finds this, so re-running the export tells you whether you were affected. Recordings whose epochs all fit inside `last_second` are unchanged. Where such epochs exist, the old error depended on whether the file happened to contain artefact or arousal events to reject: on one subject, `reject_arousals=False` densities moved by NREM2 −2.80%, Wake −5.03% and NREM1 −1.53%, while the same subject with both flags True was unchanged.
 
 ## [4.0.0] — 2026-07-22
 

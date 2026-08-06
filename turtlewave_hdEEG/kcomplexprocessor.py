@@ -545,7 +545,8 @@ class ParalKC:
         file_pattern : str or None
             Filename prefix selecting the JSON files to aggregate.
         skip_empty_files : bool
-            Whether to skip channels whose JSON holds no events.
+            Whether to list the channels whose JSON held no events in the log
+            at INFO (``False``) or only at DEBUG (``True``, the default).
         strict : bool
             If True (default), raise ``FileNotFoundError`` when
             ``file_pattern`` matches no JSON file rather than returning
@@ -556,7 +557,9 @@ class ParalKC:
         -------
         dict or None
             Dictionary of calculated parameters, or None when there was
-            nothing to export.
+            nothing to export. A run that detected no K-complexes writes a
+            header-only CSV and returns None; only an unmatched
+            ``file_pattern`` raises.
         """
         # Pass event_type=EVENT_TYPE so the SW exporter writes 'k_complex'
         # into the CSV's "Event type" column instead of the default
@@ -570,14 +573,74 @@ class ParalKC:
             event_type=self.EVENT_TYPE, strict=strict)
 
     def export_kc_density_to_csv(self, json_input, csv_file, stage=None,
-                                 file_pattern=None, reject_artifacts=True,
-                                 reject_arousals=True):
+                                 file_pattern=None, reject_artifacts=None,
+                                 reject_arousals=None):
+        """Export K-complex statistics to CSV with whole-night and per-stage densities.
+
+        Delegates to :meth:`ParalSWA.export_slow_wave_density_to_csv`, since
+        K-complex and slow-wave density are computed identically; pass
+        ``file_pattern`` with the K-complex prefix so only K-complex JSONs are
+        aggregated.
+
+        The stage-specific density denominator is the artefact-free in-stage
+        time actually fed to the detector (per channel), computed with
+        :func:`turtlewave_hdEEG.utils.compute_analysed_seconds`, not the sum of
+        all scored epochs of the stage. Detection rejects artefact/arousal
+        epochs, so using all scored epochs as the denominator systematically
+        under-estimates density in proportion to each recording's artefact
+        load.
+
+        Parameters
+        ----------
+        json_input : str or list
+            Path to JSON file, directory of JSON files, or list of JSON files
+        csv_file : str
+            Path to output CSV file
+        stage : str or list
+            Sleep stage(s) to include
+        file_pattern : str or None
+            Pattern to filter JSON files
+        reject_artifacts : bool or None, optional
+            Subtract time overlapped by 'Artefact' events from the density
+            denominator. Should match the detection run's setting. ``None``
+            (the default) assumes True and logs a warning saying so; pass the
+            value explicitly to confirm it matches the run and silence the
+            warning.
+        reject_arousals : bool or None, optional
+            Subtract time overlapped by 'Arousal' events from the density
+            denominator. Should match the detection run's setting. ``None``
+            (the default) assumes True and logs a warning saying so; pass the
+            value explicitly to confirm it matches the run and silence the
+            warning.
+
+        Returns
+        -------
+        dict or None
+            Per-stage, per-channel statistics keyed by stage, or None when
+            ``file_pattern`` matched no JSON file (a placeholder CSV is written
+            in that case).
+        """
         return self._sw_proxy.export_slow_wave_density_to_csv(
             json_input=json_input, csv_file=csv_file, stage=stage,
             file_pattern=file_pattern, reject_artifacts=reject_artifacts,
             reject_arousals=reject_arousals)
 
     def initialize_sqlite_database(self, db_path='neural_events.db'):
+        """Create the ``neural_events.db`` schema if it is not already there.
+
+        Delegates to :meth:`ParalSWA.initialize_sqlite_database`; the schema is
+        shared by every event type, so K-complexes need no table of their own.
+
+        Parameters
+        ----------
+        db_path : str, optional
+            Path to the SQLite database. Default ``'neural_events.db'``.
+
+        Returns
+        -------
+        str
+            The path to the initialised database.
+        """
         return self._sw_proxy.initialize_sqlite_database(db_path)
 
     def import_parameters_csv_to_database(self, csv_file, db_path,
@@ -606,7 +669,10 @@ class ParalKC:
         Returns
         -------
         dict
-            Import statistics, including ``"ok": True`` on success.
+            Import statistics, including ``"ok": True`` on success. A run that
+            detected no K-complexes yields a header-only CSV and imports as a
+            clean no-op: ``{"ok": True, "no_events": True, "added": 0, ...}``.
+            See :meth:`ParalSWA.import_parameters_csv_to_database`.
         """
         # Pass event_type='k_complex' so the row lands under the right type
         # in the events table.

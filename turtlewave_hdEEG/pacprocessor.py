@@ -1585,7 +1585,7 @@ class ParalPAC:
                                 
                                 all_data.append(data_row)
                                 
-                        logger.info(f"Processed data from {file}")
+                        logger.debug(f"Processed data from {file}")
                     except Exception as e:
                         logger.error(f"Error processing {file}: {e}")
                 

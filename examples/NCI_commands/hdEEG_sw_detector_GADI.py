@@ -213,11 +213,18 @@ def main():
 
     logger.info("Exporting density CSV...")
     dens_csv = os.path.join(json_dir, f"sw_density_{test_method_str}_{freq_range}_{stages_str}.csv")
+    # Forward the run's own rejection settings. The density denominator is
+    # the recording time the detector actually analysed; leaving these to the
+    # exporter's assumption (both True) while detection ran with
+    # --reject_arousals off subtracts arousal time the detector never
+    # excluded, which biases every density downward.
     event_processor.export_slow_wave_density_to_csv(
         json_input=json_dir,
         csv_file=dens_csv,
         stage=test_stages,
-        file_pattern=file_pattern
+        file_pattern=file_pattern,
+        reject_artifacts=args.reject_artifacts,
+        reject_arousals=args.reject_arousals
     )
 
     logger.info("Initializing / updating SQLite DB...")
