@@ -33,6 +33,11 @@ try:
 except ImportError as e:
     print(f"Import warning: {e}")
 
+try:
+    from frontend.db_connect import connect_events_db
+except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
+    from db_connect import connect_events_db
+
 
 # ============================================================================
 # EventDatabase Class
@@ -43,15 +48,18 @@ class EventDatabase:
     
     def __init__(self, db_path):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        # write=True: this class creates the review/QC tables, adds
+        # columns and saves review decisions.
+        self.conn = connect_events_db(db_path, write=True)
         self._auto_optimize()
         self.create_review_tables()
     
     def _auto_optimize(self):
         """Apply performance optimizations"""
         cursor = self.conn.cursor()
+        # journal_mode is deliberately absent -- it is decided once, in
+        # frontend/db_connect.py.
         optimizations = [
-            "PRAGMA journal_mode=WAL",
             "PRAGMA synchronous=NORMAL",
             "PRAGMA cache_size=-64000",
             "PRAGMA temp_store=MEMORY",

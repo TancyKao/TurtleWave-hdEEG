@@ -129,6 +129,11 @@ a different method or band.
 
 ## What lands in the database
 
+!!! note
+    Writing straight to `neural_events.db` on a mapped network drive or a
+    synced cloud folder can fail with `disk I/O error` — see
+    [Run with the database on a network drive](run-with-database-on-a-network-drive.md).
+
 When `write_db=True`, each event row in `events` additionally carries:
 
 - **Detector-own morphology** — `det_trough`, `det_peak`, `det_ptp`,

@@ -51,7 +51,7 @@ def verify_pac_rows(db_path, subject, stages, n_channels_requested):
     """
     stage_str = ''.join(stages) if isinstance(stages, list) else str(stages)
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=60.0)
         try:
             n_rows = conn.execute(
                 "SELECT COUNT(*) FROM pac_coupling WHERE subject = ?",
@@ -77,7 +77,7 @@ def list_available_methods(db_path):
         return None, None
     
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=60.0)
         cursor = conn.cursor()
         
         # Get slow wave methods
@@ -112,7 +112,7 @@ def get_event_stats(db_path, sw_method=None, spindle_method=None, channel=None, 
         return
     
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=60.0)
         cursor = conn.cursor()
         
         # Build query for slow waves
@@ -227,7 +227,7 @@ def get_common_channels(db_path, sw_method, spindle_method, stages):
         return []
     
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=60.0)
         cursor = conn.cursor()
         
         # Convert stages to combined string format

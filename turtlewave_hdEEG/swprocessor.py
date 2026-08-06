@@ -1713,11 +1713,30 @@ class ParalSWA:
 
 
     def _safe_database_operation(self, db_path, operation_func):
-        """Safely perform a database operation with proper connection handling"""
-        import sqlite3
+        """Run a database operation on a properly configured write connection.
+
+        Routed through :func:`~turtlewave_hdEEG.dbwrite.open_write_connection`
+        so schema initialisation and CSV import get the same 60 s busy timeout
+        and journal-mode handling as the direct-write path. A bare
+        ``sqlite3.connect`` here used Python's 5 s default, which is not enough
+        on a DELETE-mode database (network drives) where an open review GUI
+        holds a read transaction and blocks the writer.
+
+        Parameters
+        ----------
+        db_path : str
+            Path to the SQLite database.
+        operation_func : callable
+            Called with the open connection; its return value is returned.
+
+        Returns
+        -------
+        object
+            Whatever ``operation_func`` returns.
+        """
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            conn = dbwrite.open_write_connection(db_path, logger=self.logger)
             result = operation_func(conn)
             return result
         except Exception as e:

@@ -35,6 +35,11 @@ try:
 except ImportError as e:
     print(f"Error importing TurtleWave hdEEG package: {e}")
 
+try:
+    from frontend.db_connect import connect_events_db
+except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
+    from db_connect import connect_events_db
+
 
 class LoggingOutput(QtCore.QObject):
     """Class to capture and redirect logging to the GUI"""
@@ -3130,12 +3135,11 @@ class TurtleWaveGUI(QMainWindow):
                 
                 db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
                 if os.path.exists(db_path):
-                    import sqlite3
-                    conn = sqlite3.connect(db_path)
+                    conn = connect_events_db(db_path)
                     cursor = conn.cursor()
-                    
+
                     cursor.execute(
-                        "SELECT freq_lower, freq_upper FROM events WHERE event_type = 'slow_wave' AND method = ? LIMIT 1", 
+                        "SELECT freq_lower, freq_upper FROM events WHERE event_type = 'slow_wave' AND method = ? LIMIT 1",
                         (method,)
                     )
                     result = cursor.fetchone()
@@ -3176,12 +3180,11 @@ class TurtleWaveGUI(QMainWindow):
                 
                 db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
                 if os.path.exists(db_path):
-                    import sqlite3
-                    conn = sqlite3.connect(db_path)
+                    conn = connect_events_db(db_path)
                     cursor = conn.cursor()
-                    
+
                     cursor.execute(
-                        "SELECT freq_lower, freq_upper FROM events WHERE event_type = 'spindle' AND method = ? LIMIT 1", 
+                        "SELECT freq_lower, freq_upper FROM events WHERE event_type = 'spindle' AND method = ? LIMIT 1",
                         (method,)
                     )
                     result = cursor.fetchone()
@@ -3254,10 +3257,9 @@ class TurtleWaveGUI(QMainWindow):
                     "Database not found. Cannot update available channels.")
                 return
             
-            import sqlite3
-            conn = sqlite3.connect(db_path)
+            conn = connect_events_db(db_path)
             cursor = conn.cursor()
-            
+
             # Find channels with both SW and spindles for the selected methods and stages
             query = """
                 SELECT DISTINCT sw.channel 
@@ -3327,10 +3329,10 @@ class TurtleWaveGUI(QMainWindow):
             try:
                 db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
                 if os.path.exists(db_path):
-                    import sqlite3
-                    conn = sqlite3.connect(db_path)
+                    # write=True: _ensure_database_indexes issues CREATE INDEX.
+                    conn = connect_events_db(db_path, write=True)
                     cursor = conn.cursor()
-                    
+
                     # Ensure indexes exist for better performance
                     self._ensure_database_indexes(cursor)
                     
@@ -3421,10 +3423,10 @@ class TurtleWaveGUI(QMainWindow):
             return
 
         try:
-            import sqlite3
-            conn = sqlite3.connect(db_path)
+            # write=True: _ensure_database_indexes issues CREATE INDEX.
+            conn = connect_events_db(db_path, write=True)
             cursor = conn.cursor()
-            
+
             # Create performance indexes if they don't exist
             self._ensure_database_indexes(cursor)
             
@@ -4616,10 +4618,9 @@ class TurtleWaveGUI(QMainWindow):
             Rows for `subject` in `expect_scope`, or across all scopes when no
             scope is given. None when the database could not be read.
         """
-        import sqlite3
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            conn = connect_events_db(db_path)
             cur = conn.cursor()
             cur.execute("SELECT name FROM sqlite_master "
                         "WHERE type='table' AND name='pac_coupling'")

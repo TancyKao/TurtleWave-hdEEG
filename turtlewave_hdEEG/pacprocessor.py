@@ -26,6 +26,7 @@ import pandas as pd
 from datetime import datetime
 
 from .utils import derive_subject
+from . import dbwrite
 
 
 # ---------------------------------------------------------------------------
@@ -438,10 +439,14 @@ class ParalPAC:
                     # Get events from SQLite database
                     logger.info(f"Using detected {event_type} events from database")
                     
-                    # Connect to database
+                    # Connect to database. Read-only use, but with the same 60 s
+                    # busy timeout as the writers: under DELETE journal mode
+                    # (network drives) a writer blocks readers, and Python's 5 s
+                    # default would fail this query while a detection export is
+                    # mid-write.
                     conn = None
                     try:
-                        conn = sqlite3.connect(db_path)
+                        conn = sqlite3.connect(db_path, timeout=60.0)
                         cursor = conn.cursor()
                         
                         # Construct SQL query based on parameters
@@ -2052,7 +2057,9 @@ class ParalPAC:
 
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            # Writer: routed through dbwrite so it gets the 60 s busy timeout
+            # and the preserve-existing-journal-mode behaviour.
+            conn = dbwrite.open_write_connection(db_path, logger=logger)
             self._init_pac_table(conn)
 
             for ch, ch_results in results.items():
@@ -2303,7 +2310,9 @@ class ParalPAC:
 
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            # Writer: routed through dbwrite so it gets the 60 s busy timeout
+            # and the preserve-existing-journal-mode behaviour.
+            conn = dbwrite.open_write_connection(db_path, logger=logger)
             self._init_pac_table(conn)
 
             for _, r in df.iterrows():

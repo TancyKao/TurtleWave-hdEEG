@@ -37,6 +37,11 @@ except ImportError as e:
     print(f"Import warning: {e}")
     mne = None
 
+try:
+    from frontend.db_connect import connect_events_db
+except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
+    from db_connect import connect_events_db
+
 
 # ============================================================================
 # Logging for the density helpers
@@ -91,8 +96,10 @@ class EventDatabase:
     
     def __init__(self, db_path):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
-        
+        # write=True: this class creates the review/QC tables, adds
+        # columns and saves review decisions.
+        self.conn = connect_events_db(db_path, write=True)
+
         # Auto-optimize on connection
         self._auto_optimize()
         self.create_review_tables()
@@ -109,13 +116,13 @@ class EventDatabase:
         """Automatically apply performance optimizations"""
         cursor = self.conn.cursor()
         
-        # Performance PRAGMAs
+        # Performance PRAGMAs. journal_mode is deliberately absent -- it is
+        # decided once, in frontend/db_connect.py. mmap_size is absent too: memory
+        # mapping is exactly what fails on SMB/NFS shares.
         optimizations = [
-            "PRAGMA journal_mode=WAL",
             "PRAGMA synchronous=NORMAL",
             "PRAGMA cache_size=-64000",
             "PRAGMA temp_store=MEMORY",
-            "PRAGMA mmap_size=268435456",
         ]
         
         for pragma in optimizations:

@@ -5,6 +5,47 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.2] — 2026-08-06
+
+Fixes `disk I/O error` when `neural_events.db` lives on a mapped network drive
+or a synced folder. The databases were permanently in SQLite WAL journal mode,
+which cannot work over a network filesystem, and every connection reimposed WAL
+without checking whether it had been applied. The package now leaves an existing
+database's journal mode alone, so converting a database once is enough — see
+**Upgrading**.
+
+### Added
+
+- `TURTLEWAVE_SQLITE_JOURNAL` environment variable imposing a SQLite journal mode on every database this package opens, overriding the preserve rule in both directions.
+- Public API: `set_journal_mode`, converting an existing database to another journal mode, and `VALID_JOURNAL_MODES`, the accepted mode names.
+- `examples/set_db_journal_mode.py`: converts one database or a whole `ROOT/*/wonambi/neural_events.db` tree.
+- Docs: [Run with a database on a network drive](docs/how-to/run-with-database-on-a-network-drive.md) and [Database concurrency and journalling](docs/explanation/database-concurrency-and-journalling.md).
+
+### Changed
+
+- The package no longer overrides a journal mode you chose deliberately: `open_write_connection` preserves an existing database's mode and logs it, and applies WAL only to a database it creates. A database on local disk is already WAL and stays WAL.
+- `finalize_cycles_and_durations` and `ParalCycles.run` raise `FileNotFoundError` when the database does not exist instead of creating one; they annotate an existing `neural_events.db` and a missing file means a wrong path or detection that never ran.
+- `open_write_connection` gains optional `journal` and `logger` arguments; existing calls are unaffected.
+- `store_cycles_to_database`, `store_stage_durations`, `tag_events_with_cycles` and `ParalCycles.run` gain an optional trailing `conn` argument for sharing one connection.
+- A `disk I/O error` from `open_write_connection` or `set_journal_mode` now names the database, the WAL-on-a-network-drive cause, `set_journal_mode` and the how-to page. Same exception class, with the original attached as `__cause__`.
+
+### Fixed
+
+- A detection run or a review GUI silently converted a database back to WAL, undoing a conversion made to keep it working on a network drive.
+- The review GUIs no longer force `journal_mode=WAL` and `mmap_size`, both unusable over a network filesystem, and the detection GUI's connections now set a lock timeout.
+- `open_write_connection` now checks that an imposed journal mode was actually applied and warns when it was not, instead of assuming the pragma took effect.
+- The CSV importers, the PAC writers and several readers wait up to 60 seconds for a lock instead of five, so a reader and a writer on a `DELETE`-mode database no longer collide.
+- A mistyped `db_path` in the cycle backfill wrote a stray empty database and then failed with `no such table: main.events`; it now fails immediately naming the path.
+- `finalize_cycles_and_durations` uses one timed connection per subject instead of six untimed connect/close cycles, each of which recreated the WAL sidecar files.
+- `import frontend` no longer raises `ImportError` without PyQt5 installed; the main GUI import is guarded like the review GUI's already was.
+
+### Upgrading
+
+- Journal mode is a persistent property of the database file, so a database created before 4.0.2 is in WAL until you convert it. Close every GUI and convert once with `examples/set_db_journal_mode.py`; from 4.0.2 the choice sticks, and later runs will not switch it back. See [Run with a database on a network drive](docs/how-to/run-with-database-on-a-network-drive.md).
+- Set `TURTLEWAVE_SQLITE_JOURNAL=DELETE` only if you are creating *new* databases on the share; a database created there would otherwise be created in WAL and fail the same way.
+- A cycle backfill pointed at a database that does not exist now raises `FileNotFoundError` instead of creating an empty one. Any script relying on that database being created must run detection first.
+- Databases on local disk need no action.
+
 ## [4.0.1] — 2026-08-05
 
 Closes a class of silent data loss where detection wrote files and a separately

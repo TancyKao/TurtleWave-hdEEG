@@ -182,7 +182,7 @@ def export_database(db_path, raw_writer, summary_rows):
         ``n_total == n_raw + n_excluded + n_unmatched`` accounts for every
         event row.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=60.0)
     conn.row_factory = sqlite3.Row
 
     subjects = db_subjects(conn)

@@ -2,7 +2,7 @@
 turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 """
 
-__version__ = '4.0.1'
+__version__ = '4.0.2'
 
 # Import important classes to expose at the package level
 from .dataset import LargeDataset
@@ -17,7 +17,8 @@ from .cycleprocessor import (ParalCycles, detect_cycles,
                              finalize_cycles_and_durations)
 from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
                          ImprovedDetectKComplex)
-from .dbwrite import export_events_to_csv, default_csv_path, fmt_freq_token
+from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
+                      set_journal_mode, VALID_JOURNAL_MODES)
 from .utils import derive_subject, read_channels_from_csv
 from .rerun import (RerunGuardError, verify_rater_match, channel_clean_gate,
                     resolve_rerun_params)
