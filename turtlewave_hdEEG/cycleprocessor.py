@@ -37,6 +37,55 @@ import numpy as np
 # up the journal-mode override and the busy timeout (it used to call
 # sqlite3.connect directly, with neither).
 from . import dbwrite
+from .utils import normalize_subject
+
+
+def _subject_spellings(conn, table, subject, logger=None):
+    """Every stored spelling of one recording's id in ``table``.
+
+    The idempotency delete in the cycle writers is keyed on ``subject``. Now
+    that the writers normalise before inserting, a row written earlier under
+    the bare folder name (which the cycle how-to tells users to pass) is not
+    matched by a delete on the canonical id, so the insert adds a *second* row
+    instead of replacing the first. ``stage_durations`` has
+    ``PRIMARY KEY (subject)`` -- one row per recording is its whole contract --
+    and the duplicate doubles any total computed from it.
+
+    Matching every spelling that normalises to the same canonical id makes the
+    delete do what it always claimed to.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    table : str
+        Table holding a ``subject`` column.
+    subject : str
+        Canonical (already normalised) subject id.
+    logger : logging.Logger or None, optional
+        Logger for the stale-spelling notice. Default ``None``.
+
+    Returns
+    -------
+    list of str
+        Stored spellings equivalent to ``subject``, canonical first.
+    """
+    try:
+        stored = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT subject FROM {table} "
+            f"WHERE subject IS NOT NULL AND subject != ''")]
+    except Exception:
+        return [subject]
+    equivalent = [s for s in stored
+                  if str(s) != subject and normalize_subject(str(s)) == subject]
+    if equivalent and logger is not None:
+        logger.warning(
+            "%s holds this recording under %d older spelling(s) of its "
+            "subject id (%s); they are being replaced by '%s' so the "
+            "recording keeps one row per key instead of gaining a duplicate.",
+            table, len(equivalent), ", ".join(repr(s) for s in equivalent),
+            subject)
+    return [subject] + equivalent
 
 
 # Numeric hypnogram codes as produced by ``XLAnnotations.get_hypnogram()``:
@@ -538,17 +587,29 @@ class ParalCycles:
         int
             Number of cycles written.
         """
-        subject = subject if subject is not None else (self.subject or '')
+        # One canonical spelling, matching analysed_time / pac_coupling and the
+        # detectors. The cycle how-to tells users to pass the bare folder name,
+        # so without this a recording carries '10sd' here and 'sub-10sd' there
+        # -- two subjects to SQL, and the detectors' single-subject guard then
+        # refuses the recording's own next run.
+        subject = normalize_subject(
+            subject if subject is not None else (self.subject or ''))
         own = conn is None
         if own:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
             method_vals = {c['method'] for c in cycles} or {method}
+            # Delete every stored spelling of this recording's id, not just the
+            # canonical one, or a row written under the bare folder name
+            # survives and the insert adds a duplicate cycle.
+            spellings = _subject_spellings(conn, 'sleep_cycles', subject,
+                                           self.logger)
+            placeholders = ",".join("?" * len(spellings))
             for m in method_vals:
                 conn.execute(
-                    'DELETE FROM sleep_cycles WHERE subject=? AND method=?',
-                    (subject, m))
+                    f'DELETE FROM sleep_cycles WHERE subject IN ({placeholders}) '
+                    f'AND method=?', (*spellings, m))
             conn.executemany('''
                 INSERT INTO sleep_cycles
                     (subject, method, cycle_number, nrem_start, nrem_end,
@@ -621,14 +682,23 @@ class ParalCycles:
         int
             Number of rows written (always 1).
         """
-        subject = subject if subject is not None else (self.subject or '')
+        # Same canonical spelling as write_cycles_to_database; see there.
+        subject = normalize_subject(
+            subject if subject is not None else (self.subject or ''))
         own = conn is None
         if own:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_stage_durations_table(conn)
+            # Same as write_cycles_to_database: match every stored spelling of
+            # this recording's id. stage_durations is PRIMARY KEY (subject), so
+            # a missed old-spelling row is a second row for one recording and
+            # doubles any SUM over the table.
+            spellings = _subject_spellings(conn, 'stage_durations', subject,
+                                           self.logger)
             conn.execute(
-                'DELETE FROM stage_durations WHERE subject=?', (subject,))
+                'DELETE FROM stage_durations WHERE subject IN (%s)'
+                % ",".join("?" * len(spellings)), spellings)
             conn.execute('''
                 INSERT INTO stage_durations
                     (subject, epoch_length, wake_min, n1_min, n2_min, n3_min,

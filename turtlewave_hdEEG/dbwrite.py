@@ -560,6 +560,319 @@ def set_journal_mode(db_path, mode='DELETE', logger=None):
         conn.close()
 
 
+#: Default basename of the store of record. One database per recording/subject.
+DEFAULT_DB_NAME = 'neural_events.db'
+
+
+def resolve_db_target(db_path=None, output_dir=None, logger=None):
+    """Resolve the SQLite file a detection run writes its events to.
+
+    Single source of truth for "which database?", shared by every detector so
+    the spindle, slow-wave, K-complex and PAC paths cannot drift apart. The
+    resolution order is:
+
+    1. an explicit ``db_path`` -- a file path is used as given; a path that is
+       an existing *directory* becomes ``<db_path>/neural_events.db``;
+    2. ``output_dir`` -- ``<output_dir>/neural_events.db`` when that file
+       already exists (never create a second database beside one that is
+       already there), otherwise the sibling
+       ``<parent of output_dir>/neural_events.db``, which is the deployment
+       shape in use (``.../<subject>/wonambi/neural_events.db`` beside
+       ``.../<subject>/wonambi/<results dir>/``);
+    3. ``./neural_events.db`` in the current working directory.
+
+    Unlike the code this replaces, an unresolvable target **raises**. The old
+    behaviour -- log an error, set ``write_db = False`` and carry on -- turned
+    a demanded database write into a silently discarded run, the same class of
+    data loss as a ``file_pattern`` that matches nothing.
+
+    Parameters
+    ----------
+    db_path : str or None, optional
+        Explicit database file, or a directory to place ``neural_events.db``
+        in. Default ``None``.
+    output_dir : str or None, optional
+        Results directory of the run, used to locate the database when
+        ``db_path`` is not given. Default ``None``.
+    logger : logging.Logger or None, optional
+        Logger for the one-line resolution message. Default ``None``.
+
+    Returns
+    -------
+    str
+        Absolute path of the database file to write. Its parent directory
+        exists on return.
+
+    Raises
+    ------
+    ValueError
+        If ``db_path`` is given but blank, if the resolved path is an existing
+        directory, or if the parent directory does not exist and cannot be
+        created. Every one of these means "a database write was asked for and
+        no database can be written", which must never be downgraded to a
+        no-op.
+
+    Examples
+    --------
+    >>> resolve_db_target(db_path='/data/sub-01/wonambi/neural_events.db')
+    '/data/sub-01/wonambi/neural_events.db'
+    """
+    source = None
+    resolved = None
+
+    if db_path is not None:
+        if not str(db_path).strip():
+            raise ValueError(
+                "A database write was requested but db_path is an empty "
+                "string. Pass a database file, a directory to create "
+                f"{DEFAULT_DB_NAME} in, or None to resolve one automatically.")
+        candidate = os.path.abspath(os.path.expanduser(str(db_path).strip()))
+        if os.path.isdir(candidate):
+            resolved = os.path.join(candidate, DEFAULT_DB_NAME)
+            source = 'explicit db_path (directory)'
+        else:
+            resolved = candidate
+            source = 'explicit db_path'
+    elif output_dir is not None and str(output_dir).strip():
+        out = os.path.abspath(os.path.expanduser(str(output_dir).strip()))
+        inside = os.path.join(out, DEFAULT_DB_NAME)
+        resolved = os.path.join(os.path.dirname(out) or out, DEFAULT_DB_NAME)
+        source = 'sibling of the output directory'
+        # The rule is fixed, never "whichever file happens to exist": two
+        # invocations of one command must resolve to one database. When a
+        # second candidate exists inside the output directory the situation is
+        # genuinely ambiguous, so refuse rather than pick.
+        if os.path.isfile(inside) and os.path.abspath(inside) != resolved:
+            raise ValueError(
+                f"Two candidate databases for output_dir {out!r}: "
+                f"{inside!r} (inside it) and {resolved!r} (its sibling, which "
+                f"is the rule). Refusing to guess which one this run belongs "
+                f"to -- pass db_path explicitly.")
+    else:
+        resolved = os.path.abspath(os.path.join(os.getcwd(), DEFAULT_DB_NAME))
+        source = 'current working directory'
+
+    if os.path.isdir(resolved):
+        raise ValueError(
+            f"A database write was requested but the resolved target "
+            f"{resolved!r} is a directory, not a file ({source}). Pass an "
+            f"explicit db_path.")
+
+    parent = os.path.dirname(resolved)
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            raise ValueError(
+                f"A database write was requested but its directory {parent!r} "
+                f"does not exist and could not be created ({e}). Pass an "
+                f"explicit db_path to an existing directory, or pass "
+                f"write_db=False to run without a database.") from e
+
+    if logger is not None:
+        logger.info(f"Database target resolved to {resolved} ({source})")
+    return resolved
+
+
+#: Subject-bearing tables consulted by :func:`assert_single_subject`.
+#: ``events`` is deliberately absent -- it has no subject column, which is
+#: precisely why the guard is needed.
+_SUBJECT_TABLES = ('analysed_time', 'detection_runs', 'pac_coupling',
+                   'sleep_cycles', 'stage_durations')
+
+
+def subjects_in_database(conn):
+    """Return every subject id already present in a database.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+
+    Returns
+    -------
+    set of str
+        Subject ids found across ``analysed_time``, ``detection_runs``,
+        ``pac_coupling``, ``sleep_cycles`` and ``stage_durations``, each put
+        into the canonical ``sub-`` form by
+        :func:`turtlewave_hdEEG.utils.normalize_subject`. NULL and empty ids
+        are ignored (rows written before the column existed).
+
+    Notes
+    -----
+    Normalising here is what makes the comparison in
+    :func:`assert_single_subject` an identity test rather than a string test.
+    ``ParalCycles`` historically stored whatever it was handed, and the cycle
+    how-to tells users to pass the bare folder name, so one recording can
+    genuinely carry ``'10sd'`` in ``stage_durations`` and ``'sub-10sd'`` in
+    ``analysed_time``. Those are one subject, and comparing the raw strings
+    would refuse the recording's own next run.
+    """
+    from .utils import normalize_subject
+    found = set()
+    for table in _SUBJECT_TABLES:
+        cols = _table_columns(conn, table)
+        if not cols or 'subject' not in cols:
+            continue
+        for (subj,) in conn.execute(
+                f"SELECT DISTINCT subject FROM {table} "
+                f"WHERE subject IS NOT NULL AND subject != ''"):
+            canonical = normalize_subject(str(subj))
+            if canonical:
+                found.add(canonical)
+    return found
+
+
+def assert_single_subject(conn, subject, db_path=None, logger=None):
+    """Refuse to write a second recording's events into another's database.
+
+    One database per recording is the deployment shape, and the schema
+    depends on it: ``events`` has **no subject column**, and
+    :func:`event_uuid5` keys a row on
+    ``(event_type, channel, start_time, method, band, stage)`` only. Two
+    subjects sharing a database therefore collide -- identical channel labels
+    at identical times produce identical uuids, so the second subject's
+    ``INSERT OR REPLACE`` overwrites the first's rows, and a scoped
+    re-detection ``DELETE`` (which is also subject-blind) removes the other
+    subject's channel outright. ``verify_channel_coverage`` then reports full
+    coverage over the wrong data. None of that raises, and none of it is
+    recoverable.
+
+    This is the one cheap check that catches it: if the database already
+    carries a *different* subject, stop before the first write.
+
+    **Databases written before 4.2 carry no subject at all** -- there was no
+    ``analysed_time`` table and ``detection_runs`` had no ``subject`` column.
+    Such a database is *unattributed*: it cannot be proved to belong to this
+    recording. It is claimed rather than refused -- the subject is stamped on
+    and a WARNING names the database, its event count and the subject being
+    claimed. Refusing it would cost a manual step on every irreplaceable
+    database that already exists while buying very little, because the
+    overwrite risk lives in the *second* recording written to a database, and
+    once stamped that second recording is refused.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection (schema already ensured).
+    subject : str
+        Subject this run belongs to, already normalised
+        (:func:`turtlewave_hdEEG.utils.normalize_subject`).
+    db_path : str or None, optional
+        Path used in the message. Default ``None``.
+    logger : logging.Logger or None, optional
+        Logger for the claim warning and the confirmation line. Default
+        ``None``.
+
+    Returns
+    -------
+    set of str
+        The subjects already present (empty for a fresh or unattributed
+        database).
+
+    Raises
+    ------
+    ValueError
+        If the database already holds rows for a subject other than
+        ``subject``. Both sides of that comparison are normalised, so one
+        recording spelled two ways is one subject, not two.
+    """
+    from .utils import normalize_subject
+    subject = normalize_subject(str(subject))
+    existing = subjects_in_database(conn)
+    others = {s for s in existing if s != subject}
+    if others:
+        raise ValueError(
+            f"{db_path or 'This database'} already holds data for subject(s) "
+            f"{sorted(others)}, and this run is subject '{subject}'. One "
+            f"database per recording is required: the events table has no "
+            f"subject column and event ids are keyed on "
+            f"(event_type, channel, start_time, method, band, stage), so a "
+            f"second subject's identical channel labels would overwrite the "
+            f"first's rows and a scoped re-run would delete them. Point "
+            f"db_path at this recording's own neural_events.db.")
+
+    if not existing:
+        # No subject named anywhere. If the database already holds events it
+        # was written before 4.2 (or by the CSV importers): claim it for this
+        # recording and say so loudly, so that from here on a *different*
+        # recording is refused.
+        n_events = 0
+        if _table_columns(conn, 'events'):
+            n_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        if n_events:
+            stamped = 0
+            if _table_columns(conn, 'detection_runs'):
+                cur = conn.execute(
+                    "UPDATE detection_runs SET subject = ? "
+                    "WHERE subject IS NULL", (subject,))
+                stamped = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                conn.commit()
+            if logger is not None:
+                if stamped:
+                    logger.warning(
+                        "%s holds %d event(s) but named no subject (written "
+                        "before 4.2). Claiming it for '%s' and stamping %d "
+                        "existing detection_runs row(s). From now on a "
+                        "different subject is refused. If those events belong "
+                        "to another recording, stop and point db_path at this "
+                        "recording's own neural_events.db.",
+                        db_path or 'This database', n_events, subject, stamped)
+                else:
+                    # Be honest: nothing was stamped. This run's own
+                    # detection_runs row (written moments later by record_run)
+                    # is what will attribute the database.
+                    logger.warning(
+                        "%s holds %d event(s) but named no subject (written "
+                        "before 4.2). Claiming it for '%s'. No existing "
+                        "detection_runs row could be stamped -- there are "
+                        "none with a NULL subject -- so the attribution comes "
+                        "from this run's own provenance row. From now on a "
+                        "different subject is refused. If those events belong "
+                        "to another recording, stop and point db_path at this "
+                        "recording's own neural_events.db.",
+                        db_path or 'This database', n_events, subject)
+
+    if logger is not None and existing:
+        logger.debug(f"Database subject check passed: only '{subject}' present")
+    return existing
+
+
+def recording_root_from_db(db_path):
+    """Recording root directory implied by a database path.
+
+    ``neural_events.db`` lives in the recording's ``wonambi`` working
+    directory, so the directory that *names* the recording is one level up in
+    that layout. Used only as the ``root_dir`` hint for
+    :func:`turtlewave_hdEEG.utils.derive_subject`; the subject id it produces
+    keys ``analysed_time``, never ``events``.
+
+    Parameters
+    ----------
+    db_path : str or None
+        Path to the database file.
+
+    Returns
+    -------
+    str or None
+        The directory holding the database, with a trailing ``wonambi``
+        component stripped, or ``None`` when ``db_path`` is ``None``.
+
+    Examples
+    --------
+    >>> recording_root_from_db('/data/10sd/wonambi/neural_events.db')
+    '/data/10sd'
+    >>> recording_root_from_db('/data/10sd/neural_events.db')
+    '/data/10sd'
+    """
+    if not db_path:
+        return None
+    parent = os.path.dirname(os.path.abspath(str(db_path)))
+    if os.path.basename(parent).lower() == 'wonambi':
+        return os.path.dirname(parent)
+    return parent
+
+
 def _table_columns(conn, table):
     cur = conn.execute(f"PRAGMA table_info({table})")
     return {row[1] for row in cur.fetchall()}
@@ -873,6 +1186,273 @@ def ensure_pac_schema(conn):
     conn.commit()
 
 
+def ensure_analysed_time_schema(conn):
+    """Create the ``analysed_time`` table if absent.
+
+    ``analysed_time`` holds the **density denominator**: the artefact-free
+    in-stage seconds actually fed to the detector, per sleep stage. It is the
+    one quantity a density cannot be derived from ``events`` alone, so it is
+    stored once at detection time and every density is computed on read from
+    it (see :mod:`turtlewave_hdEEG.density`).
+
+    It is keyed on ``(subject, stage, reject_artifacts, reject_arousals)``
+    because the rejection settings *define* the denominator: a run that kept
+    arousal epochs analysed more seconds than one that dropped them, and the
+    two must never be mixed. ``stage_durations`` is deliberately NOT a
+    fallback -- that table holds raw hypnogram time with no artefact
+    subtraction, and dividing an artefact-free numerator by it re-introduces
+    the artefact-scaled under-estimation of density that 4.0 removed.
+
+    Purely additive; it touches no existing table.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. Commits, does not close.
+
+    Returns
+    -------
+    None
+    """
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS analysed_time (
+        subject TEXT NOT NULL,
+        stage TEXT NOT NULL,              -- single scored stage, e.g. 'NREM2'
+        reject_artifacts INTEGER NOT NULL,
+        reject_arousals INTEGER NOT NULL,
+
+        analysed_seconds REAL NOT NULL,   -- artefact-free in-stage seconds
+        artefact_seconds_excluded REAL,   -- in-stage seconds removed
+        epoch_length REAL,                -- nominal scoring epoch (s)
+        source TEXT,                      -- 'detection' | 'backfill' | ...
+        annotation_file TEXT,
+        turtlewave_version TEXT,
+        processing_timestamp TEXT,
+
+        PRIMARY KEY (subject, stage, reject_artifacts, reject_arousals)
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_analysed_time_subject '
+                 'ON analysed_time(subject)')
+    conn.commit()
+
+
+def record_analysed_time(conn, subject, stage, analysed_seconds,
+                         artefact_seconds_excluded=None, reject_artifacts=True,
+                         reject_arousals=True, epoch_length=30,
+                         source='detection', annotation_file=None):
+    """Insert-or-replace one ``analysed_time`` row (one stage).
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection (schema already ensured).
+    subject : str
+        Subject identifier, as resolved by
+        :func:`turtlewave_hdEEG.utils.derive_subject`.
+    stage : str
+        A single scored stage label (e.g. ``'NREM2'``). Never a joined set --
+        a combined denominator is the sum of its stage rows, computed on read.
+    analysed_seconds : float
+        Artefact-free in-stage seconds fed to the detector.
+    artefact_seconds_excluded : float or None, optional
+        In-stage seconds removed by artefact/arousal rejection. Default
+        ``None``.
+    reject_artifacts, reject_arousals : bool, optional
+        The rejection settings this denominator was computed under. Part of
+        the primary key. Default ``True``.
+    epoch_length : float, optional
+        Nominal scoring epoch length in seconds. Default ``30``.
+    source : str, optional
+        Provenance tag: ``'detection'`` when written by a detection run.
+        Default ``'detection'``.
+    annotation_file : str or None, optional
+        Scoring file the denominator was computed from. Default ``None``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``subject`` is normalised through
+    :func:`turtlewave_hdEEG.utils.normalize_subject` here as well as at
+    resolution time, so a caller reaching this function directly cannot key
+    one recording under two spellings.
+    """
+    from .utils import normalize_subject
+    conn.execute('''
+    INSERT OR REPLACE INTO analysed_time
+        (subject, stage, reject_artifacts, reject_arousals, analysed_seconds,
+         artefact_seconds_excluded, epoch_length, source, annotation_file,
+         turtlewave_version, processing_timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        str(normalize_subject(subject)), str(stage),
+        1 if reject_artifacts else 0, 1 if reject_arousals else 0,
+        float(analysed_seconds),
+        None if artefact_seconds_excluded is None else float(artefact_seconds_excluded),
+        None if epoch_length is None else float(epoch_length),
+        source, annotation_file,
+        provenance()['turtlewave_version'],
+        datetime.datetime.now().isoformat(),
+    ))
+
+
+def store_analysed_time(conn, subject, annotations, dataset, stages,
+                        reject_artifacts, reject_arousals, epoch_length=30,
+                        source='detection', annotation_file=None, logger=None):
+    """Compute and store the density denominators for a detection run.
+
+    Wraps :func:`turtlewave_hdEEG.utils.build_density_denominators` -- the same
+    artefact-free-time computation the (now deprecated) CSV density exporters
+    used -- and writes one ``analysed_time`` row per requested stage, so
+    density can be derived from the database alone afterwards.
+
+    Failures are logged and swallowed: a denominator that cannot be computed
+    must not lose a detection run that already succeeded. The consequence is
+    visible rather than silent, because :func:`density.event_density` refuses
+    to invent a denominator and reports the missing rows.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection (schema already ensured).
+    subject : str
+        Subject identifier keying the rows.
+    annotations : instance of Annotations
+        Scoring handed to the detector.
+    dataset : instance of Dataset
+        Used only for ``header['s_freq']``.
+    stages : list of str or None
+        The stages the run detected on. ``None`` or empty stores nothing (an
+        all-stage run has no defined per-stage denominator here).
+    reject_artifacts, reject_arousals : bool
+        The run's rejection settings. Stored as part of the key.
+    epoch_length : float, optional
+        Nominal scoring epoch length in seconds. Default ``30``.
+    source : str, optional
+        Provenance tag. Default ``'detection'``.
+    annotation_file : str or None, optional
+        Scoring file path for provenance. Default ``None``.
+    logger : logging.Logger or None, optional
+        Logger for the per-stage summary. Default ``None``.
+
+    Returns
+    -------
+    dict
+        ``{stage: analysed_seconds}`` for the rows written (empty on failure).
+    """
+    if not stages:
+        if logger is not None:
+            logger.warning(
+                "No stage list for this run, so no density denominator was "
+                "stored. Density for this scope will be unavailable until a "
+                "stage-scoped run or a back-fill writes analysed_time.")
+        return {}
+
+    from .utils import build_density_denominators
+
+    written = {}
+    ensure_analysed_time_schema(conn)
+    # All-or-nothing: a partial denominator is worse than none, because a
+    # stage whose row was written before the failure looks complete on read.
+    # A plain `return {}` would leave those rows pending in the connection's
+    # open transaction, and the next write_channel_events commit would commit
+    # them. The savepoint makes the rollback real.
+    conn.execute("SAVEPOINT tw_analysed_time")
+    try:
+        dd = build_density_denominators(
+            annotations, dataset,
+            reject_artifacts=reject_artifacts, reject_arousals=reject_arousals,
+            stage_list=list(stages), stages_present=(), logger=logger)
+        for stg in sorted({str(s) for s in stages}):
+            clean_sec, artefact_sec = dd.analysed_seconds(stg)
+            record_analysed_time(
+                conn, subject, stg, clean_sec,
+                artefact_seconds_excluded=artefact_sec,
+                reject_artifacts=reject_artifacts,
+                reject_arousals=reject_arousals,
+                epoch_length=epoch_length, source=source,
+                annotation_file=annotation_file)
+            written[stg] = clean_sec
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK TO SAVEPOINT tw_analysed_time")
+            conn.execute("RELEASE SAVEPOINT tw_analysed_time")
+        except Exception:
+            pass
+        if logger is not None:
+            logger.error(
+                f"Could not store the density denominator (analysed_time) for "
+                f"subject '{subject}': {e}. No partial rows were kept; "
+                f"detection results are unaffected, but density will be "
+                f"unavailable for this scope until it is back-filled.",
+                exc_info=True)
+        return {}
+
+    conn.execute("RELEASE SAVEPOINT tw_analysed_time")
+    conn.commit()
+    if logger is not None:
+        summary = ", ".join(f"{k}={v / 60.0:.2f} min"
+                            for k, v in sorted(written.items()))
+        logger.info(
+            f"Stored density denominators for subject '{subject}' "
+            f"(artefact-free analysed time): {summary}")
+    return written
+
+
+def read_analysed_time(db_path, subject=None, reject_artifacts=True,
+                       reject_arousals=True):
+    """Read stored density denominators.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to ``neural_events.db``.
+    subject : str or None, optional
+        Restrict to one subject. Normalised through
+        :func:`turtlewave_hdEEG.utils.normalize_subject`, so a bare ``'10sd'``
+        finds the rows detection stored as ``'sub-10sd'``. ``None`` (default)
+        returns every subject.
+    reject_artifacts, reject_arousals : bool, optional
+        The rejection settings whose denominator is wanted; these are part of
+        the key, so asking for the wrong pair returns nothing rather than a
+        mismatched number. Default ``True``.
+
+    Returns
+    -------
+    dict
+        ``{(subject, stage): {'analysed_seconds': float,
+        'artefact_seconds_excluded': float or None, 'source': str}}``.
+        Empty when the table is absent or holds no matching row.
+    """
+    out = {}
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    try:
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='analysed_time'")
+        if cur.fetchone() is None:
+            return out
+        sql = ("SELECT subject, stage, analysed_seconds, "
+               "artefact_seconds_excluded, source FROM analysed_time "
+               "WHERE reject_artifacts = ? AND reject_arousals = ?")
+        params = [1 if reject_artifacts else 0, 1 if reject_arousals else 0]
+        if subject is not None:
+            from .utils import normalize_subject
+            sql += " AND subject = ?"
+            params.append(str(normalize_subject(subject)))
+        for row in conn.execute(sql, params):
+            out[(row[0], row[1])] = {
+                'analysed_seconds': row[2],
+                'artefact_seconds_excluded': row[3],
+                'source': row[4],
+            }
+    finally:
+        conn.close()
+    return out
+
+
 def ensure_direct_write_schema(conn, logger=None):
     """Additively migrate a database for the direct-write path.
 
@@ -891,6 +1471,9 @@ def ensure_direct_write_schema(conn, logger=None):
        markers remain idempotent.
     4. Create the ``pac_coupling`` table via :func:`ensure_pac_schema`, so a
        reader never hits a missing table on a database where PAC has not run.
+    5. Create the ``analysed_time`` table via
+       :func:`ensure_analysed_time_schema`, which holds the density
+       denominator (artefact-free analysed seconds per stage).
 
     Parameters
     ----------
@@ -917,6 +1500,7 @@ def ensure_direct_write_schema(conn, logger=None):
     conn.execute('''
     CREATE TABLE IF NOT EXISTS detection_runs (
         run_id TEXT PRIMARY KEY,
+        subject TEXT,              -- recording this run belongs to
         event_type TEXT,
         method TEXT,
         citation TEXT,
@@ -932,6 +1516,15 @@ def ensure_direct_write_schema(conn, logger=None):
         git_sha TEXT,
         timestamp TEXT
     )''')
+
+    # (2a) detection_runs.subject: added so a run is attributable to a
+    # recording. events has no subject column, so this (with analysed_time) is
+    # what assert_single_subject reads to refuse a second recording's writes.
+    dr_cols = _table_columns(conn, 'detection_runs')
+    if dr_cols and 'subject' not in dr_cols:
+        cur.execute("ALTER TABLE detection_runs ADD COLUMN subject TEXT")
+        if logger is not None:
+            logger.info("Migrated detection_runs table: added column subject")
 
     # (2b) rerun_log: one row per scoped channel re-detection (P3) ---------
     conn.execute('''
@@ -989,11 +1582,17 @@ def ensure_direct_write_schema(conn, logger=None):
     # table on a database where PAC has not (yet) been run.
     ensure_pac_schema(conn)
 
+    # (5) analysed_time: the density denominator. Created eagerly for the same
+    # reason -- density.event_density must be able to tell "no denominator
+    # stored" from "table does not exist".
+    ensure_analysed_time_schema(conn)
+
     conn.commit()
 
 
 def record_run(conn, run_id, event_type, method, citation, params_json,
-               ref_chan, polar, stages, reject_artifacts, reject_arousals):
+               ref_chan, polar, stages, reject_artifacts, reject_arousals,
+               subject=None):
     """Write one ``detection_runs`` provenance row for an invocation.
 
     Parameters
@@ -1018,16 +1617,21 @@ def record_run(conn, run_id, event_type, method, citation, params_json,
         Requested stage set, serialized.
     reject_artifacts, reject_arousals : bool
         Artifact/arousal rejection settings.
+    subject : str or None, optional
+        Recording this run belongs to. Stored so a run is attributable and so
+        :func:`assert_single_subject` can see it even on a run that stored no
+        ``analysed_time`` row. Default ``None``.
     """
     prov = provenance()
     conn.execute('''
     INSERT OR REPLACE INTO detection_runs
-        (run_id, event_type, method, citation, params_json, ref_chan, polar,
-         stages, reject_artifacts, reject_arousals, turtlewave_version,
+        (run_id, subject, event_type, method, citation, params_json, ref_chan,
+         polar, stages, reject_artifacts, reject_arousals, turtlewave_version,
          wonambi_version, numpy_version, git_sha, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
-        run_id, event_type, method, citation, params_json,
+        run_id, (None if subject is None else str(subject)),
+        event_type, method, citation, params_json,
         str(ref_chan), str(polar), str(stages),
         1 if reject_artifacts else 0, 1 if reject_arousals else 0,
         prov['turtlewave_version'], prov['wonambi_version'],

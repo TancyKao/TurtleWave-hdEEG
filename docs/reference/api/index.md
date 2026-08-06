@@ -12,7 +12,8 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 
 ### Database & Provenance
 
-- [**Direct-to-Database Write**](dbwrite.md) - `write_db=True` detection path, `detection_runs` provenance, DB → CSV export
+- [**Direct-to-Database Write**](dbwrite.md) - the `write_db=None` (default) detection path, `detection_runs` provenance, DB → CSV export
+- [**Event Density**](density.md) - per-channel density derived on read from `neural_events.db`
 - [**Re-run Guards**](rerun.md) - Correctness guards for scoped channel re-detection
 - [**Utilities**](utils.md) - Artefact-free density denominators and other shared helpers
 
@@ -35,7 +36,8 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 ## Usage Pattern
 
 Every `Paral*` processor takes a `wonambi.dataset.Dataset` and an annotations
-object, then follows the same detect → export → import pipeline:
+object, then detects straight into `neural_events.db` — no export or import
+step:
 
 ```python
 from wonambi.dataset import Dataset as WonambiDataset
@@ -48,7 +50,9 @@ annot = CustomAnnotations('subject001_annotations.xml')
 # Initialize
 event_processor = ParalEvents(dataset=data, annotations=annot)
 
-# Detect (writes one JSON file per channel to json_dir)
+# Detect. write_db defaults to None (AUTO): events go straight into
+# neural_events.db in wonambi/, resolved from json_dir. No per-channel JSON
+# is written.
 event_processor.detect_spindles(
     method='Ferrarelli2007',
     chan=['E110', 'E111'],
@@ -56,32 +60,26 @@ event_processor.detect_spindles(
     stage=['NREM2', 'NREM3'],
     json_dir='wonambi/spindle_results',
 )
-
-# Aggregate the JSON into CSV, then import into the database
-event_processor.export_spindle_parameters_to_csv(
-    json_input='wonambi/spindle_results',
-    csv_file='wonambi/spindle_results/spindle_parameters.csv',
-    file_pattern='spindles_Ferrarelli2007',
-)
-event_processor.import_parameters_csv_to_database(
-    csv_file='wonambi/spindle_results/spindle_parameters.csv',
-    db_path='wonambi/neural_events.db',
-)
 ```
 
-`ParalSWA.detect_slow_waves` follows the same shape, via
-`export_slow_wave_parameters_to_csv` and `import_parameters_csv_to_database`.
-`ParalPAC.analyze_pac` detects and exports to CSV the same way, using its own
-`export_pac_parameters_to_csv` / `import_pac_csv_to_database` pair. Passing
-`write_db=True` to a `detect_*` call (or `write_db=True` to `analyze_pac`)
-writes straight to the database instead, skipping the JSON/CSV round-trip —
-see [Write Detection Results Directly to the Database](../../how-to/direct-to-database-detection.md).
+`ParalSWA.detect_slow_waves`, `ParalKC.detect_kcomplexes` and
+`ParalPAC.analyze_pac` follow the same shape. Query the database directly
+afterwards — see
+[Read the database with pandas and R](../../how-to/read-database-with-pandas-and-r.md)
+— or pull a CSV back out on demand with
+[`export_events_to_csv`](dbwrite.md). Pass `write_db=False` (or
+`--legacy-json` on the driver scripts) to restore the pre-4.2 JSON → CSV →
+`import_parameters_csv_to_database` pipeline instead — see
+[Write Detection Results Directly to the Database](../../how-to/direct-to-database-detection.md).
 Refer to individual module documentation for specific parameters and methods.
 
 !!! note
-    The `export_*_parameters_to_csv` / `export_*_density_to_csv` exporters
-    default to `strict=True`: a `file_pattern` that matches zero JSON files
-    raises `FileNotFoundError` instead of writing an empty placeholder CSV.
+    The legacy `export_*_parameters_to_csv` / `export_*_density_to_csv`
+    exporters (only relevant on the `write_db=False` path) default to
+    `strict=True`: a `file_pattern` that matches zero JSON files raises
+    `FileNotFoundError` instead of writing an empty placeholder CSV. The
+    density exporters are additionally deprecated in favour of
+    [`density.event_density`](density.md).
     `import_parameters_csv_to_database` raises rather than returning an
     error dict, and accepts `event_type=` / `method=` / `force=` — see
     [Upgrade to 4.0, Step 7](../../how-to/upgrade-to-4.0.md#step-7-exporters-and-importers-now-raise-instead-of-failing-silently)

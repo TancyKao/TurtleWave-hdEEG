@@ -7,6 +7,8 @@ from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave as DetectSlowWave
 from turtlewave_hdEEG import dbwrite
+from turtlewave_hdEEG.utils import derive_subject
+from turtlewave_hdEEG.eventprocessor import _build_epoch_lookup
 import json
 import datetime
 import logging
@@ -136,8 +138,8 @@ class ParalSWA:
                      peak_thresh_sigma=None,
                      ptp_thresh_sigma=None,
                      save_to_annotations=False, json_dir=None,
-                     create_empty_json=True,
-                     *, write_db=False, db_path=None, resume=False,
+                     *, write_db=None, db_path=None, subject=None,
+                     resume=False,
                      run_params=None, replace_channels=None,
                      event_type='slow_wave', citation=None, n_fft_sec=4):
         """
@@ -184,19 +186,34 @@ class ParalSWA:
         save_to_annotations : bool
             Whether to save detected slow waves to annotations
         json_dir : str or None
-            Directory to save individual channel JSON files
-        create_empty_json : bool
-            Whether to create empty JSON files when no slow waves are found
-        write_db : bool, keyword-only, default False
-            When True, write detected events straight into a SQLite database
-            (``db_path``) in addition to the JSON output, via the direct-write
-            path (deterministic uuid5 rows, detector-own morphology in the
-            ``det_*`` columns, batched re-measured amplitude/spectral columns,
-            per-scope ``processing_status`` tracking and a ``detection_runs``
-            provenance row). When False the behaviour is byte-identical to the
-            legacy JSON-only path.
+            Results directory. On the database path (the default) it is used
+            only to locate ``neural_events.db`` and to hold an optional
+            annotation XML -- no per-channel JSON is written. On the legacy
+            path (``write_db=False``) it is where the per-channel JSON files go.
+        write_db : bool or None, keyword-only, default None
+            Database write mode.
+
+            * ``None`` (default) -- AUTO: write to the database, resolving its
+              path with :func:`turtlewave_hdEEG.dbwrite.resolve_db_target`
+              (explicit ``db_path`` -> ``neural_events.db`` beside
+              ``json_dir`` -> ``./neural_events.db``). No per-channel JSON is
+              written; ``neural_events.db`` is the store of record.
+            * ``True`` -- the same, and equally an error if no database can be
+              resolved.
+            * ``False`` -- legacy JSON-only path, unchanged: per-channel JSON
+              (including empty files and error sentinels) is written to
+              ``json_dir`` and no database is touched.
+
+            A failure to resolve or open the database **raises**; it is never
+            downgraded to a silent no-op.
         db_path : str or None, keyword-only
             Target SQLite database (or directory -> ``neural_events.db``).
+            ``None`` resolves the target from ``json_dir``.
+        subject : str or None, keyword-only
+            Subject identifier keying the ``analysed_time`` density
+            denominator. ``None`` derives one with
+            :func:`turtlewave_hdEEG.utils.derive_subject`. Any value is
+            normalised to the canonical ``sub-`` form.
         resume : bool, keyword-only, default False
             When True (and ``write_db``), channels already recorded as
             ``success = 1`` for the same scope are skipped.
@@ -221,6 +238,20 @@ class ParalSWA:
         -------
         list
             List of all detected slow waves
+
+        Raises
+        ------
+        ValueError
+            If a database write is in effect and no database file can be
+            resolved (see
+            :func:`turtlewave_hdEEG.dbwrite.resolve_db_target`).
+
+        Notes
+        -----
+        The run also stores its density denominator -- the artefact-free
+        in-stage seconds it actually analysed -- in ``analysed_time``, so
+        :func:`turtlewave_hdEEG.density.event_density` can derive density from
+        the database without re-reading any file.
         """
         import uuid
        
@@ -259,10 +290,19 @@ class ParalSWA:
         if isinstance(stage, str):
             stage = [stage]
         
-        # Create json_dir if specified
+        # write_db=None means AUTO: the database is the store of record.
+        # write_db=False is the legacy escape hatch and is the ONLY mode that
+        # still writes per-channel JSON.
+        auto_db = write_db is None
+        write_db = True if auto_db else bool(write_db)
+        write_json = (not write_db) and bool(json_dir)
+
+        # json_dir still holds the optional annotation XML and locates the
+        # database, so it is created either way.
         if json_dir:
             os.makedirs(json_dir, exist_ok=True)
-            self.logger.info(f"Channel JSONs will be saved to: {json_dir}")
+            if write_json:
+                self.logger.info(f"Channel JSONs will be saved to: {json_dir}")
         
         # Verify required components
         if self.dataset is None:
@@ -299,6 +339,29 @@ class ParalSWA:
         if first_method == 'Ngo2015' and peak_thresh_sigma is not None and ptp_thresh_sigma is not None:
             self.logger.info(f"Using adaptive thresholds: peak_thresh_sigma={peak_thresh_sigma}, ptp_thresh_sigma={ptp_thresh_sigma}")
 
+        # Build an epoch time->stage lookup so each detected wave can be tagged
+        # with the single stage of the epoch it actually falls in. Detecting over
+        # a multi-stage request (e.g. ['NREM2','NREM3']) otherwise tags every wave
+        # with the whole list, which double-counts events across stages downstream.
+        import bisect as _bisect
+        _det_epochs = _build_epoch_lookup(
+            self.annotations, self.logger, required=write_db)
+        _det_epoch_starts = [e[0] for e in _det_epochs]
+        _n_null_stage = 0
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _det_epochs:
+                return None
+            idx = _bisect.bisect_right(_det_epoch_starts, t) - 1
+            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
+                return _det_epochs[idx][2]
+            return None
+
+        # Built BEFORE the database connection is opened: on the database
+        # path an unusable scoring aborts the run, and doing it first means
+        # that abort cannot leave a connection open.
+
         # ------------------------------------------------------------------
         # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
         # ------------------------------------------------------------------
@@ -309,65 +372,93 @@ class ParalSWA:
         rec_start = None
         s_freq = None
         if write_db:
-            if db_path is None:
-                self.logger.error("write_db=True but db_path is None; skipping DB writes")
-                write_db = False
-            else:
+            # Resolve first: an unresolvable target raises here, BEFORE the
+            # connection is opened and before any channel is detected, instead
+            # of silently downgrading to a run whose results go nowhere.
+            db_path = dbwrite.resolve_db_target(
+                db_path=db_path, output_dir=json_dir, logger=self.logger)
+            # Deliberately NOT downgraded to a no-op: a database that cannot be
+            # opened or migrated must abort the run. Everything after the open
+            # is wrapped so an abort closes the connection instead of leaving
+            # it held (the failure mode 4.0.2 was cut for).
+            self.initialize_sqlite_database(db_path)
+            db_conn = dbwrite.open_write_connection(db_path)
+            try:
+                dbwrite.ensure_direct_write_schema(db_conn, self.logger)
                 try:
-                    if os.path.isdir(db_path):
-                        db_path = os.path.join(db_path, 'neural_events.db')
-                    self.initialize_sqlite_database(db_path)
-                    db_conn = dbwrite.open_write_connection(db_path)
-                    dbwrite.ensure_direct_write_schema(db_conn, self.logger)
-                    try:
-                        s_freq = self.dataset.header['s_freq']
-                    except Exception:
-                        s_freq = None
-                    try:
-                        rec_start = self.dataset.header.get('start_time')
-                    except Exception:
-                        rec_start = None
-                    run_id = str(_uuid_mod.uuid4())
-                    params_dict = {
-                        'frequency': list(frequency),
-                        'trough_duration': list(trough_duration),
-                        'neg_peak_thresh': neg_peak_thresh,
-                        'p2p_thresh': p2p_thresh,
-                        'min_dur': min_dur, 'max_dur': max_dur,
-                        'detrend': detrend, 'polar': polar,
-                        'peak_thresh_sigma': peak_thresh_sigma,
-                        'ptp_thresh_sigma': ptp_thresh_sigma,
-                        'method': method_db,
-                        'ref_chan': ref_chan, 'cat': cat,
-                        'reject_artifacts': reject_artifacts,
-                        'reject_arousals': reject_arousals,
-                        'n_fft_sec': n_fft_sec,
-                    }
-                    if run_params:
-                        params_dict.update(run_params)
-                    run_citation = citation or dbwrite.method_citation(method_db)
-                    dbwrite.record_run(
-                        db_conn, run_id, event_type, method_db, run_citation,
-                        json.dumps(params_dict, default=str),
-                        ref_chan, polar, stage, reject_artifacts, reject_arousals)
-                    if resume:
-                        db_skip = dbwrite.resume_skip_channels(
-                            db_conn, event_type, method_db,
-                            frequency[0], frequency[1], stages_key)
-                        if db_skip:
-                            self.logger.info(
-                                f"Resume: skipping {len(db_skip)} already-completed "
-                                f"channels for this scope")
-                except Exception as e:
-                    self.logger.error(f"Could not set up direct-DB write: {e}", exc_info=True)
-                    write_db = False
-                    if db_conn is not None:
-                        try:
-                            db_conn.close()
-                        except Exception:
-                            pass
-                        db_conn = None
+                    s_freq = self.dataset.header['s_freq']
+                except Exception:
+                    s_freq = None
+                try:
+                    rec_start = self.dataset.header.get('start_time')
+                except Exception:
+                    rec_start = None
+                run_id = str(_uuid_mod.uuid4())
+                params_dict = {
+                    'frequency': list(frequency),
+                    'trough_duration': list(trough_duration),
+                    'neg_peak_thresh': neg_peak_thresh,
+                    'p2p_thresh': p2p_thresh,
+                    'min_dur': min_dur, 'max_dur': max_dur,
+                    'detrend': detrend, 'polar': polar,
+                    'peak_thresh_sigma': peak_thresh_sigma,
+                    'ptp_thresh_sigma': ptp_thresh_sigma,
+                    'method': method_db,
+                    'ref_chan': ref_chan, 'cat': cat,
+                    'reject_artifacts': reject_artifacts,
+                    'reject_arousals': reject_arousals,
+                    'n_fft_sec': n_fft_sec,
+                }
+                if run_params:
+                    params_dict.update(run_params)
+                run_citation = citation or dbwrite.method_citation(method_db)
 
+                # Resolve the subject BEFORE the first write, and refuse if this
+                # database already belongs to a different recording: events has no
+                # subject column, so a second subject's rows would overwrite the
+                # first's under the same uuid5 keys.
+                annot_file = getattr(self.annotations, 'xml_file', None)
+                db_subject = derive_subject(
+                    annotation_path=annot_file,
+                    root_dir=dbwrite.recording_root_from_db(db_path),
+                    explicit=subject)
+                dbwrite.assert_single_subject(
+                    db_conn, db_subject, db_path=db_path, logger=self.logger)
+
+                dbwrite.record_run(
+                    db_conn, run_id, event_type, method_db, run_citation,
+                    json.dumps(params_dict, default=str),
+                    ref_chan, polar, stage, reject_artifacts, reject_arousals,
+                    subject=db_subject)
+
+                # Density denominator: the artefact-free in-stage time this run
+                # actually analysed, so density can be derived from the database
+                # alone (turtlewave_hdEEG.density.event_density).
+                dbwrite.store_analysed_time(
+                    db_conn, db_subject, self.annotations, self.dataset, stage,
+                    reject_artifacts, reject_arousals,
+                    annotation_file=annot_file, logger=self.logger)
+
+                if resume:
+                    db_skip = dbwrite.resume_skip_channels(
+                        db_conn, event_type, method_db,
+                        frequency[0], frequency[1], stages_key)
+                    if db_skip:
+                        self.logger.info(
+                            f"Resume: skipping {len(db_skip)} already-completed "
+                            f"channels for this scope")
+            except Exception:
+                # Never leave the connection held on an aborted setup, and
+                # never let a failing close() replace the real exception --
+                # close() itself raises 'disk I/O error' on the mapped network
+                # drives 4.0.2 was cut for, which would swallow the setup
+                # failure and never reach the raise below.
+                try:
+                    db_conn.close()
+                except Exception:
+                    pass
+                db_conn = None
+                raise
 
         # Create custom annotation file name if saving to annotations
         if save_to_annotations:
@@ -425,31 +516,6 @@ class ParalSWA:
 
         # Store all detected slow waves
         all_slow_waves = []
-
-        # Build an epoch time->stage lookup so each detected wave can be tagged
-        # with the single stage of the epoch it actually falls in. Detecting over
-        # a multi-stage request (e.g. ['NREM2','NREM3']) otherwise tags every wave
-        # with the whole list, which double-counts events across stages downstream.
-        try:
-            import bisect as _bisect
-            _det_epochs = sorted(
-                ((float(e['start']), float(e['end']), str(e['stage']))
-                 for e in self.annotations.get_epochs()),
-                key=lambda x: x[0]
-            ) if self.annotations is not None else []
-        except Exception as e:
-            self.logger.warning(f"Could not build epoch stage lookup: {e}")
-            _det_epochs = []
-        _det_epoch_starts = [e[0] for e in _det_epochs]
-
-        def _stage_at(t):
-            """Return the scored stage of the epoch containing time t, or None."""
-            if t is None or not _det_epochs:
-                return None
-            idx = _bisect.bisect_right(_det_epoch_starts, t) - 1
-            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
-                return _det_epochs[idx][2]
-            return None
 
         # Scoped channel re-detection (P3): channels whose existing rows are
         # DELETE-then-INSERT replaced for this scope; all others stay on P2's
@@ -557,6 +623,12 @@ class ParalSWA:
                                     single_stage = _stage_at(sw_start)
                                     if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
                                         single_stage = stage[0]
+                                    if single_stage is None:
+                                        # No scored epoch contains this event; it
+                                        # has no denominator, so it can never
+                                        # contribute to a density. Reported after
+                                        # the channel loop.
+                                        _n_null_stage += 1
                                     morph = dbwrite.event_det_morphology(sw)
                                     ev = {
                                         'uuid': dbwrite.event_uuid5(
@@ -573,8 +645,8 @@ class ParalSWA:
                                             processed_seg['data'], sw_start, sw_end,
                                             event_type, single_stage, ch))
 
-                                # Add to JSON
-                                if json_dir:
+                                # Add to JSON (legacy write_db=False path only)
+                                if write_json:
                                     # Extract key properties in a serializable format
                                     sw_data = {
                                         'uuid': sw['uuid'],
@@ -626,17 +698,17 @@ class ParalSWA:
                             f"channel {ch} to the database")
 
                     stages_str = "".join(stage) if stage else "all"
-                    if json_dir :
+                    if write_json:
                         try:
-                            ch_json_file = os.path.join(json_dir, 
+                            ch_json_file = os.path.join(json_dir,
                                                       f"slowwaves_{method_str}_{freq_str}_{stages_str}_{ch}.json")
-                            
-                            # Create empty JSON if no waves found but flag is set
-                            if not channel_json_slow_waves and create_empty_json:
+
+                            # Empty JSON marks a channel that ran and found nothing
+                            if not channel_json_slow_waves:
                                 self.logger.debug(f"Creating empty JSON file for channel {ch} (no slow waves detected)")
                                 with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump([], f)
-                            elif channel_json_slow_waves:
+                            else:
                                 with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump(channel_json_slow_waves, f, indent=2)
                                 self.logger.info(f"Saved slow wave data for channel {ch} to {ch_json_file}")
@@ -654,10 +726,10 @@ class ParalSWA:
                             dbwrite.record_channel_failure(
                                 db_conn, event_type, ch, method_db,
                                 frequency[0], frequency[1], stages_key, e)
-                        # Write an error sentinel (not an empty list) so downstream
-                        # import can tell a failed channel apart from one that
-                        # legitimately had no slow waves and re-run it.
-                        elif json_dir and create_empty_json:
+                        # Legacy path only: write an error sentinel (not an empty
+                        # list) so downstream import can tell a failed channel
+                        # apart from one that legitimately had no slow waves.
+                        elif write_json:
                             try:
                                 stages_str = "".join(stage) if stage else "all"
                                 ch_json_file = os.path.join(json_dir,
@@ -667,6 +739,14 @@ class ParalSWA:
                                 self.logger.info(f"Wrote error-sentinel JSON for channel {ch} after failure")
                             except Exception as json_e:
                                 self.logger.error(f"Error creating sentinel JSON for channel {ch}: {json_e}")
+
+        if write_db and _n_null_stage:
+            self.logger.error(
+                "%d of %d detected %s(s) fall outside every scored epoch, so "
+                "their stage is NULL. A NULL-stage row has no density "
+                "denominator and is excluded from every per-stage and pooled "
+                "density. Check that the scoring covers the whole recording.",
+                _n_null_stage, len(all_slow_waves), event_type)
 
         if write_db and db_conn is not None:
             try:
@@ -1132,6 +1212,14 @@ class ParalSWA:
         """
         Export slow wave statistics to CSV with both whole night and stage-specific densities.
 
+        .. deprecated:: 4.2.0
+            Use :func:`turtlewave_hdEEG.density.event_density` instead, which
+            derives density from ``neural_events.db`` and its stored
+            ``analysed_time`` denominator. This method reads the per-channel
+            JSON that detection stopped writing in 4.2 (it still works against
+            a legacy directory produced with ``write_db=False``). Scheduled
+            for removal in 5.0.
+
         The stage-specific density denominator is the artefact-free in-stage time
         actually fed to the detector (per channel), computed with
         :func:`turtlewave_hdEEG.utils.compute_analysed_seconds`, not the sum of
@@ -1164,7 +1252,11 @@ class ParalSWA:
         """
         import glob
         from collections import defaultdict
-        from turtlewave_hdEEG.utils import build_density_denominators
+        from turtlewave_hdEEG.utils import (build_density_denominators,
+                                            warn_density_csv_deprecated)
+
+        warn_density_csv_deprecated(
+            'ParalSWA.export_slow_wave_density_to_csv', self.logger)
 
         # Load slow waves from JSON file(s)
         json_files = []
@@ -1807,7 +1899,10 @@ class ParalSWA:
         import pandas as pd
         import os
         import glob
-        
+        from turtlewave_hdEEG.utils import warn_csv_import_deprecated
+
+        warn_csv_import_deprecated(
+            'ParalSWA.import_parameters_csv_to_database', self.logger)
 
         self.clean_memory()
 

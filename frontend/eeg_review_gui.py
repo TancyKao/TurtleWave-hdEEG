@@ -298,6 +298,70 @@ class EventDatabase:
             list(ids))
         self.conn.commit()
 
+    def get_run_rejections(self, event_type=None, methods=None):
+        """The artefact/arousal rejection settings the detection run used.
+
+        These are not a display preference: they decide how much time the
+        detector actually searched, and therefore the density denominator. The
+        QC dashboard used to assume both were on, which silently inflates
+        density for any run that had one unticked - arousal time gets
+        subtracted from the denominator although the detector searched it.
+
+        Read from ``detection_runs``, which the direct-write path populates,
+        taking the MOST RECENT matching run rather than requiring every stored
+        run to agree. Requiring agreement sounds safer and is not: a database
+        accumulates runs over months, so one old experimental run with arousal
+        rejection off would make this return ``None`` forever afterwards, and
+        the caller's fallback to the detector defaults reintroduces exactly the
+        density inflation this method exists to prevent. The newest run is the
+        one whose events the dashboard is showing.
+
+        The caller scopes this to the event type and method combo currently on
+        screen, which narrows it further: the ordering only has to break ties
+        between runs that are already the right type and method.
+
+        ``timestamp`` is ``datetime.now().isoformat()``, so a lexicographic
+        ``ORDER BY`` is chronological. Rows with no timestamp (written before
+        the column was populated) sort last under ``DESC`` in SQLite, so a
+        dated run always beats an undated one.
+
+        Parameters
+        ----------
+        event_type : str or None, optional
+            Restrict to one event type. Default ``None`` (all).
+        methods : list of str or None, optional
+            Restrict to these methods, UNESCAPED as stored. Default ``None``.
+
+        Returns
+        -------
+        tuple of (bool, bool) or None
+            ``(reject_artifacts, reject_arousals)`` of the most recent matching
+            run. ``None`` only when nothing matches, when neither column is
+            populated, or when ``detection_runs`` is absent (a database written
+            before the direct-write path existed).
+        """
+        where = ["reject_artifacts IS NOT NULL", "reject_arousals IS NOT NULL"]
+        params = []
+        if event_type is not None:
+            where.append("event_type = ?")
+            params.append(str(event_type))
+        if methods:
+            where.append("method IN (%s)" % ",".join("?" * len(methods)))
+            params += [str(m) for m in methods]
+        clause = " WHERE " + " AND ".join(where)
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT reject_artifacts, reject_arousals "
+                f"FROM detection_runs{clause} "
+                "ORDER BY timestamp DESC LIMIT 1", params)
+            row = cursor.fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        return (bool(row[0]), bool(row[1]))
+
     def get_events(self, event_type=None, channels=None, stages=None,
                    reviewed_only=False, unreviewed_only=False, confidence_threshold=0.0,
                    methods=None, freq_band=None, columns=None):
@@ -3700,31 +3764,49 @@ class EventReviewGUI(QMainWindow):
         """Artefact-free analysed minutes over the detection run's stage scope —
         the density denominator for the QC dashboard.
 
-        This is the GUI counterpart of the library's density exporters: it
-        reuses :func:`turtlewave_hdEEG.utils.build_density_denominators` over the
-        SAME stages the run was scoped to, so the number a reviewer sees equals
-        what ``export_*_density_to_csv`` writes for ANY run scope (a spindles-on-
-        N2+N3 run is denominated against N2+N3, not a fixed N2+N3+REM). The run
-        scope is inferred from the distinct stages of the loaded events — the
-        same "detected stages" logic the exporter uses — with Wake dropped
-        (never a detection stage). When no event stages are available, it falls
-        back to the fixed N2+N3+REM set present in the annotation so density
-        greys out gracefully rather than erroring.
+        :func:`turtlewave_hdEEG.density.event_density` is now the single
+        definition of density, and its denominator is the ``analysed_time`` row
+        the detection run stored — the time the detector actually searched. This
+        method cannot simply call it, because the QC dashboard has to answer a
+        question the stored row cannot: what the denominator becomes once the
+        reviewer marks an epoch as artefact. A stored number is fixed; marking an
+        epoch has to shrink it on the next refresh or the dashboard's whole
+        interaction is inert.
 
-        The denominator subtracts BOTH (a) the annotation's Artefact/Arousal
-        spans and (b) the reviewer's LIVE marks in ``qc_artefact_intervals``
-        (passed as ``extra_intervals``), so marking an epoch shrinks the
-        denominator and raises that stage's density on the next refresh.
+        So it recomputes, but from the same function the library stored its row
+        with (:func:`turtlewave_hdEEG.utils.build_density_denominators`, whose
+        ``whole_night_analysed_min`` is the per-stage seconds summed over the
+        scope — exactly what ``event_density(combine_stages=True)`` pools), and
+        it is anchored to the library in two ways:
 
-        Channel-global by design (the export's reviewed denominator): the
-        numerator is per-channel event counts, the denominator is shared.
+        * **The run's own rejection settings are read from the database**
+          (``detection_runs``) instead of being assumed. Assuming both were on
+          is a real bias: a run with arousal rejection unticked searched the
+          arousal time, so subtracting it here shrinks the denominator and
+          inflates every density on the dashboard. The library never has this
+          problem, because the rejection settings are part of the stored row's
+          key — asking with the wrong pair returns nothing rather than a
+          mismatched number.
+        * **With no live marks, the result is checked against the stored row**
+          and a disagreement is reported. Agreement is the expected case; a
+          difference means the scoring loaded for review is not the scoring
+          detection ran on, which silently changes every density in the table.
+
+        The stage scope is the distinct stages of the loaded events, with Wake
+        dropped, which is the same scope ``event_density`` derives from the
+        rows it counts. When no event stages are available it falls back to the
+        fixed N2+N3+REM set present in the annotation, so density greys out
+        gracefully rather than erroring.
+
+        Channel-global by design: the numerator is per-channel event counts,
+        the denominator is shared.
 
         Parameters
         ----------
         extra_intervals : list of (float, float) or None
             The reviewer's live artefact spans in seconds (from
             ``qc_artefact_intervals``). ``None`` reproduces the annotation-only
-            denominator.
+            denominator, which is the case checked against the library.
         event_stages : iterable of str or None
             Stages of the loaded events; their distinct non-Wake values define
             the density time base (the run's scope). ``None``/empty falls back
@@ -3734,14 +3816,17 @@ class EventReviewGUI(QMainWindow):
         -------
         float or None
             Artefact-free minutes over the run's stage scope, or ``None`` when
-            annotations are absent or none of the scope stages are scored
-            (density greyed).
+            annotations are absent, none of the scope stages are scored, or the
+            computation fails while the reviewer has marks pending (density
+            greyed). That last case deliberately does NOT fall back to the
+            stored denominator: it predates the marks, so it would report a
+            density that ignores them.
         """
         if self.annotations is None:
             return None
         # Density time base = the stages the run actually detected on, inferred
-        # from the loaded events (Wake dropped). Matches the exporter's
-        # detected-stage logic so GUI and export agree for any run scope.
+        # from the loaded events (Wake dropped), matching the scope
+        # event_density derives from the rows it counts.
         stage_list = None
         if event_stages is not None:
             scope = sorted({str(s) for s in event_stages
@@ -3758,6 +3843,9 @@ class EventReviewGUI(QMainWindow):
                                 if s in self._QC_DENSITY_STAGES)
         if not stage_list:
             return None
+
+        reject_artifacts, reject_arousals = self._qc_run_rejections()
+
         # Lazy import keeps GUI imports headless-safe; utils is Qt-free and the
         # single source of truth for the artefact-free subtraction.
         from turtlewave_hdEEG.utils import build_density_denominators
@@ -3773,13 +3861,144 @@ class EventReviewGUI(QMainWindow):
         try:
             dens = build_density_denominators(
                 self.annotations, self.eeg_data,
-                reject_artifacts=True, reject_arousals=True,
+                reject_artifacts=reject_artifacts,
+                reject_arousals=reject_arousals,
                 stage_list=stage_list, stages_present=stage_list,
                 logger=_density_logger,
                 extra_artefact_intervals=extra_intervals)
         except Exception:
+            # Nothing computable locally.
+            #
+            # With no marks pending, the stored denominator IS the answer - the
+            # same number this computation would have produced - so use it
+            # rather than greying density out.
+            #
+            # With marks pending it is not an answer at all. The stored row was
+            # written at detection time and knows nothing of the reviewer's
+            # marks, so serving it here would show a density that silently
+            # ignores their edits: they mark an epoch, the number does not
+            # move, and nothing says why. Subtracting the marks from it is not
+            # available either - working out how much of a mark falls in-stage
+            # and is not already excluded by an annotation artefact is exactly
+            # the computation that just failed, and approximating it would put
+            # a wrong number in the same place. So density is withheld and the
+            # reason is stated.
+            if extra_intervals:
+                _density_repeat_filter.context = getattr(
+                    self, 'annot_file_path', None)
+                _density_logger.warning(
+                    "Density is unavailable: the artefact-free denominator "
+                    "could not be computed from the scoring, and there are "
+                    "%d reviewer artefact mark(s) pending. The denominator "
+                    "stored by the detection run is not used here because it "
+                    "predates those marks and would show a density that "
+                    "ignores them. The density column stays blank until the "
+                    "scoring loads cleanly.", len(extra_intervals))
+                return None
+            return self._qc_stored_density_minutes(
+                stage_list, reject_artifacts, reject_arousals)
+
+        minutes = dens.whole_night_analysed_min or None
+        if not extra_intervals:
+            self._qc_check_against_stored(minutes, stage_list,
+                                          reject_artifacts, reject_arousals)
+        return minutes
+
+    def _qc_run_rejections(self):
+        """The rejection settings of the runs in view, or the detector defaults.
+
+        Returns
+        -------
+        tuple of (bool, bool)
+            ``(reject_artifacts, reject_arousals)``. Falls back to
+            ``(True, True)`` - the detector defaults - when the database cannot
+            say, and says so once via the repeat-filtered logger rather than on
+            every dashboard refresh.
+        """
+        if self.db is None:
+            return (True, True)
+        evt = None
+        try:
+            evt = self.qc_widget.current_event_type()
+        except Exception:
+            pass
+        methods, _ = self._current_method_freq()
+        try:
+            found = self.db.get_run_rejections(event_type=evt, methods=methods)
+        except Exception:
+            found = None
+        if found is not None:
+            return found
+        _density_repeat_filter.context = getattr(self, 'annot_file_path', None)
+        _density_logger.warning(
+            "The detection run's artefact/arousal rejection settings could not "
+            "be read from the database for this scope, so the density "
+            "denominator assumes both were on (the detector defaults). If a "
+            "run had either unticked, the densities shown are biased high.")
+        return (True, True)
+
+    def _qc_stored_density_minutes(self, stage_list, reject_artifacts,
+                                   reject_arousals):
+        """The library's own denominator: analysed_time summed over the scope.
+
+        Returns
+        -------
+        float or None
+            Minutes, or ``None`` when any stage in scope has no stored row -
+            deliberately all-or-nothing, because a partial sum is a denominator
+            covering less time than the numerator's events span.
+        """
+        if self.db is None or not getattr(self.db, 'db_path', None):
             return None
-        return dens.whole_night_analysed_min or None
+        try:
+            from turtlewave_hdEEG.dbwrite import read_analysed_time
+            stored = read_analysed_time(self.db.db_path,
+                                        reject_artifacts=reject_artifacts,
+                                        reject_arousals=reject_arousals)
+        except Exception:
+            return None
+        if not stored:
+            return None
+        by_stage = {}
+        for (_subject, stage), row in stored.items():
+            by_stage.setdefault(str(stage), []).append(row['analysed_seconds'])
+        total = 0.0
+        for stage in stage_list:
+            values = by_stage.get(str(stage))
+            if not values:
+                return None
+            # More than one subject in one database is not the shape this GUI
+            # reviews; taking the max would invent time, so refuse instead.
+            if len(set(values)) > 1:
+                return None
+            total += float(values[0])
+        return (total / 60.0) or None
+
+    def _qc_check_against_stored(self, minutes, stage_list, reject_artifacts,
+                                 reject_arousals):
+        """Warn when the recomputed denominator disagrees with the stored one.
+
+        With no live artefact marks the two are the same quantity computed by
+        the same function, so they should agree to within rounding. A real
+        difference means the scoring open for review is not the scoring
+        detection ran on, and every density in the table is then computed
+        against a different amount of time than the exported density is.
+        """
+        stored = self._qc_stored_density_minutes(
+            stage_list, reject_artifacts, reject_arousals)
+        if stored is None or minutes is None:
+            return
+        if abs(stored - minutes) <= max(0.05, 0.001 * stored):
+            return
+        _density_repeat_filter.context = getattr(self, 'annot_file_path', None)
+        _density_logger.warning(
+            "Density denominator mismatch: this dashboard computes %.2f "
+            "analysed minutes over %s from the scoring loaded for review, but "
+            "the detection run stored %.2f minutes for the same stages and "
+            "rejection settings. The densities shown will not match the "
+            "exported ones. The usual cause is a different or edited scoring "
+            "file; the stored value is the one the detector actually used.",
+            minutes, "+".join(stage_list), stored)
 
     def _current_method_freq(self):
         """Read the method + frequency-band filter combos. Returns

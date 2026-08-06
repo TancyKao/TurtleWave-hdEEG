@@ -26,9 +26,10 @@ To detect spindles with default parameters:
 ![Spindle Detection Interface](../images/gui-spindle-detection.png)
 *Spindle Detection tab showing available parameters and channel selection*
 
-Results are written as one JSON file per channel to your output directory,
-then aggregated into a parameters CSV, a density CSV, and imported into
-`neural_events.db`.
+Results are written straight into `neural_events.db` in your output
+directory's `wonambi/` folder — there is no per-channel JSON or CSV step, and
+no GUI toggle to opt back into one. If you need the legacy JSON/CSV files,
+run `examples/hdEEG_spindle_detector.py --legacy-json` instead of the GUI tab.
 
 ### Adjusting Detection Parameters
 
@@ -87,7 +88,9 @@ annot = CustomAnnotations('subject001_annotations.xml')
 # Create the processor
 event_processor = ParalEvents(dataset=data, annotations=annot)
 
-# Run detection
+# Run detection. write_db defaults to None (AUTO): events go straight into
+# neural_events.db resolved from json_dir (or an explicit db_path); no
+# per-channel JSON is written.
 spindles = event_processor.detect_spindles(
     method='Moelle2011',
     chan=['E110', 'E111', 'E112'],
@@ -99,6 +102,7 @@ spindles = event_processor.detect_spindles(
     cat=(1, 1, 1, 0),  # concatenate across cycles, stages, and discontinuities
     save_to_annotations=False,
     json_dir='wonambi/spindle_results',
+    subject='sub-001',
 )
 ```
 
@@ -125,68 +129,78 @@ want cycles and stages kept separate instead.
 
 ## Interpreting Results
 
-Detection writes one JSON file per channel to `json_dir`. Aggregate them into
-CSV, then import into the database:
+Spindles are in `neural_events.db` (`events` table, `event_type = 'spindle'`)
+as soon as detection returns — there's no export or import step. Query it
+with pandas or R:
 
 ```python
-from turtlewave_hdEEG.dbwrite import fmt_freq_token
+import sqlite3
+import pandas as pd
 
-freq_range = fmt_freq_token(11, 13)  # must match the `frequency` passed to detect_spindles
-stages_str = "NREM2NREM3"
-file_pattern = f"spindles_Moelle2011_{freq_range}_{stages_str}"
-
-event_processor.export_spindle_parameters_to_csv(
-    json_input='wonambi/spindle_results',
-    csv_file='wonambi/spindle_results/spindle_parameters.csv',
-    file_pattern=file_pattern,
-)
-
-event_processor.export_spindle_density_to_csv(
-    json_input='wonambi/spindle_results',
-    csv_file='wonambi/spindle_results/spindle_density.csv',
-    stage=['NREM2', 'NREM3'],
-    file_pattern=file_pattern,
-)
-
-event_processor.import_parameters_csv_to_database(
-    csv_file='wonambi/spindle_results/spindle_parameters.csv',
-    db_path='wonambi/neural_events.db',
-    method='Moelle2011',  # optional here; the CSV's own Method column is the fallback
+conn = sqlite3.connect('wonambi/neural_events.db')
+spindles = pd.read_sql_query(
+    "SELECT channel, start_time, duration, stage, peak2peak_amp, rms "
+    "FROM events WHERE event_type = 'spindle' AND method = 'Moelle2011'",
+    conn,
 )
 ```
 
-!!! note
+and report density from the database directly — its denominator is the
+artefact-free in-stage time this run actually analysed, stored automatically
+in `analysed_time`:
+
+```python
+from turtlewave_hdEEG.density import event_density, format_density_table
+
+density_df = event_density(
+    'wonambi/neural_events.db', event_type='spindle', method='Moelle2011',
+    stage=['NREM2', 'NREM3'], subject='sub-001',
+    reject_artifacts=True, reject_arousals=False,  # must match the detection call
+)
+print(format_density_table(density_df))
+```
+
+See [Read the database with pandas and R](read-database-with-pandas-and-r.md)
+for more query patterns, including how to pull a flat CSV back out with
+`export_events_to_csv` if a downstream tool needs one.
+
+!!! note "Using the legacy JSON → CSV → import path instead"
+    If you passed `write_db=False` above, detection wrote one JSON file per
+    channel to `json_dir` instead. Aggregate and import it the pre-4.2 way:
+    ```python
+    from turtlewave_hdEEG.dbwrite import fmt_freq_token
+
+    freq_range = fmt_freq_token(11, 13)  # must match `frequency` above
+    file_pattern = f"spindles_Moelle2011_{freq_range}_NREM2NREM3"
+
+    event_processor.export_spindle_parameters_to_csv(
+        json_input='wonambi/spindle_results',
+        csv_file='wonambi/spindle_results/spindle_parameters.csv',
+        file_pattern=file_pattern,
+    )
+    event_processor.export_spindle_density_to_csv(  # deprecated; JSON-only
+        json_input='wonambi/spindle_results',
+        csv_file='wonambi/spindle_results/spindle_density.csv',
+        stage=['NREM2', 'NREM3'],
+        file_pattern=file_pattern,
+    )
+    event_processor.import_parameters_csv_to_database(  # deprecated
+        csv_file='wonambi/spindle_results/spindle_parameters.csv',
+        db_path='wonambi/neural_events.db',
+        method='Moelle2011',
+    )
+    ```
     Build `file_pattern`'s frequency segment with `fmt_freq_token`, not a
     hand-written f-string — a formatter that doesn't match what
     `detect_spindles` wrote (e.g. rounding `11` to `11.0`) matches zero JSON
     files and, by default, raises `FileNotFoundError` rather than silently
-    exporting an empty CSV (`strict=True` is the default on all three
-    exporters; pass `strict=False` to restore the old placeholder-CSV
-    behaviour). See
+    exporting an empty CSV. `import_parameters_csv_to_database` accepts an
+    optional `event_type=` / `method=` override and refuses to import over
+    rows the direct-write path already wrote unless you pass `force=True` —
+    see
+    [Write Detection Results Directly to the Database](direct-to-database-detection.md#pull-a-csv-back-out-of-the-database)
+    and
     [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md).
-
-!!! note
-    `import_parameters_csv_to_database` accepts an optional `event_type=` /
-    `method=` override; pass `method=` explicitly whenever the CSV's own
-    `Method` column could be ambiguous (e.g. after hand-editing the CSV, or
-    for a multi-method run). It now raises rather than returning
-    `{"error": ..., "added": 0}` on failure, and refuses to import over rows
-    already written by the direct-to-database path unless you pass
-    `force=True` — see
-    [Write Detection Results Directly to the Database](direct-to-database-detection.md#pull-a-csv-back-out-of-the-database).
-
-The parameters CSV includes start/end time, channel, sleep stage, amplitude,
-duration, and frequency for each spindle. The density CSV reports both
-whole-night and stage-specific spindle density, using the artefact-free
-in-stage time actually fed to the detector as the denominator (see
-[Explanation: Event density is artefact-free](../explanation/overview.md#event-density-is-artefact-free)).
-Load either with pandas for statistical analysis, or query
-`neural_events.db` directly once imported.
-
-Alternatively, pass `write_db=True` and `db_path=...` to `detect_spindles` to
-skip the JSON→CSV→import round-trip and write events straight into the
-database — see
-[Write Detection Results Directly to the Database](direct-to-database-detection.md).
 
 ## Optimizing Detection
 
@@ -267,12 +281,15 @@ for subject in subjects:
     annot = CustomAnnotations(os.path.join(root_dir, 'wonambi', f'{subject}_annotations.xml'))
 
     event_processor = ParalEvents(dataset=data, annotations=annot)
+    # AUTO resolves neural_events.db as a sibling of json_dir, i.e.
+    # data/<subject>/wonambi/neural_events.db — one database per subject.
     spindles = event_processor.detect_spindles(
         method='Moelle2011',
         chan=['E110', 'E111', 'E112'],
         frequency=(11, 13),
         stage=['NREM2', 'NREM3'],
         json_dir=os.path.join(root_dir, 'wonambi', 'spindle_results'),
+        subject=subject,
     )
     print(f"{subject}: detected spindles on {len(spindles)} channels")
 ```
@@ -287,4 +304,5 @@ After detecting spindles, you might want to:
 - Run slow wave detection for comparison — [Detect Slow Waves](detect-slow-waves.md)
 - Analyze slow-wave/spindle coupling — [Run PAC Analysis](run-pac-analysis.md)
 - Review detected events in the QC dashboard — [Review EEG Events](review-eeg-events.md)
-- Write results directly to the database — [Direct-to-Database Detection](direct-to-database-detection.md)
+- Read the database from pandas or R — [Read the Database with pandas and R](read-database-with-pandas-and-r.md)
+- Resume interrupted runs, verify coverage, or opt out to legacy JSON — [Direct-to-Database Detection](direct-to-database-detection.md)

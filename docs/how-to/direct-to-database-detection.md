@@ -1,26 +1,26 @@
 # Write Detection Results Directly to the Database
 
-This guide shows you how to run spindle, slow-wave or K-complex detection with
-the direct-to-database write path, instead of the legacy JSON → CSV → import
-pipeline.
+Since 4.2, `detect_spindles`, `detect_slow_waves`, `detect_kcomplexes` and
+`analyze_pac` write straight into `neural_events.db` **by default** — no
+per-channel JSON, no CSV, no separate import step. This guide covers the
+mechanics of that default: what lands in the database, how to resume an
+interrupted run, how to verify a batch job actually finished, how to opt back
+out to the legacy JSON path, and how to pull a flat CSV back out when you need
+one.
 
-## When to use this
+If you're looking for how to load `neural_events.db` into pandas or R for
+statistics, see
+[Read the database with pandas and R](read-database-with-pandas-and-r.md)
+instead — that page is the direct replacement for what CSV used to do for
+you.
 
-**Problem:** The legacy pipeline (JSON per channel, then a CSV export step,
-then a CSV → SQLite import step) is three passes over the same data, and a
-crash mid-run leaves you guessing which channels finished.
+## What happens by default
 
-**Solution:** Pass `write_db=True` (and a few related keyword arguments) to
-`detect_spindles` / `detect_slow_waves` / `detect_kcomplexes`. Each channel's
-events are written straight into `neural_events.db` in one transaction, along
-with a `detection_runs` provenance row recording the method, citation, full
-parameter dict, reference/polarity, artefact-rejection settings and library
-versions used.
-
-## Enable it from a detection script
-
-The direct-write path is opt-in and keyword-only, so existing calls are
-unaffected unless you pass these arguments explicitly:
+Each channel's events are written straight into `neural_events.db` in one
+transaction, along with a `detection_runs` provenance row recording the
+method, citation, full parameter dict, reference/polarity, artefact-rejection
+settings and library versions used. No keyword argument is required — this is
+what `write_db=None` (the default on all four detection/analysis calls) does:
 
 ```python
 from wonambi.dataset import Dataset as WonambiDataset
@@ -40,23 +40,35 @@ spindles = event_processor.detect_spindles(
     reject_arousals=False,
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
-    json_dir="wonambi/spindle_results",   # still written for provenance/debugging
-    write_db=True,
+    json_dir="wonambi/spindle_results",  # locates neural_events.db; no JSON written
     db_path="wonambi/neural_events.db",
+    subject="sub-001",
     resume=False,
 )
 ```
 
-`ParalSWA.detect_slow_waves` and `ParalKC.detect_kcomplexes` accept the same
-`write_db` / `db_path` / `resume` / `run_params` / `replace_channels` keywords.
+`json_dir` still matters on this path: it locates `neural_events.db` (via
+`dbwrite.resolve_db_target`, which prefers an explicit `db_path`, then a
+database beside `json_dir`) and holds the optional annotation XML, but no
+per-channel JSON file is written there anymore. `db_path` can be given
+explicitly instead, or omitted and resolved from `json_dir`; either way, an
+unresolvable target **raises** rather than silently downgrading to a no-op —
+the old behaviour that turned a demanded database write into a silently
+discarded run.
+
+`ParalSWA.detect_slow_waves`, `ParalKC.detect_kcomplexes` and
+`ParalPAC.analyze_pac` accept the same `write_db` / `db_path` / `subject`
+keywords (`analyze_pac` also takes `write_csv`; see
+[Run PAC Analysis](run-pac-analysis.md#write-results-straight-to-the-database)).
+`resume`, `run_params` and `replace_channels` are specific to the three event
+detectors.
 
 !!! tip
-    `examples/hdEEG_spindle_detector.py` and `examples/hdEEG_sw_detector.py`
-    already wire this up behind `--write-db` / `--resume` CLI flags (parsed
-    with `argparse.parse_known_args`, so the rest of the script's hard-coded
-    parameters are unaffected). Run e.g.:
+    `examples/hdEEG_spindle_detector.py`, `examples/hdEEG_sw_detector.py` and
+    `examples/hdEEG_kcomplex_detector.py` already wire this up. Run any of
+    them with no extra flags and events land in `neural_events.db`:
     ```bash
-    python examples/hdEEG_spindle_detector.py --write-db --resume
+    python examples/hdEEG_spindle_detector.py --subject sub-001 --resume
     ```
 
 ## Resume an interrupted run
@@ -64,10 +76,10 @@ spindles = event_processor.detect_spindles(
 **Problem:** A batch job died partway through a subject with 128 channels and
 you don't want to re-detect the 90 that already succeeded.
 
-**Solution:** Pass `resume=True` alongside `write_db=True`. A channel is
-skipped only when a `processing_status` row already recorded `success = 1` for
-the **exact same scope** — event type, method, frequency band and stage set.
-A channel that previously failed (`success = 0`) is retried, not skipped.
+**Solution:** Pass `resume=True`. A channel is skipped only when a
+`processing_status` row already recorded `success = 1` for the **exact same
+scope** — event type, method, frequency band and stage set. A channel that
+previously failed (`success = 0`) is retried, not skipped.
 
 ```python
 event_processor.detect_spindles(
@@ -75,11 +87,18 @@ event_processor.detect_spindles(
     chan=all_channels,
     frequency=(11, 13),
     stage=["NREM2", "NREM3"],
-    write_db=True,
     db_path="wonambi/neural_events.db",
     resume=True,
 )
 ```
+
+Crash-resume is the acceptance test for the direct-write path: `kill -9`
+mid-run, re-run with `resume=True`, and confirm completed channels are
+untouched while the killed channel re-detects cleanly. This works even
+without `resume=True` — each event row's `uuid` is a deterministic `uuid5` of
+its detection scope, so re-detecting an unchanged channel is a true row-level
+no-op under `INSERT OR REPLACE` — but `resume=True` additionally skips the
+re-computation, not just the re-insert.
 
 ## Run it on the NCI Gadi cluster
 
@@ -89,7 +108,7 @@ The `_GADI.py` driver scripts mirror the same flags:
 python hdEEG_spindle_detector_GADI.py \
     --root /scratch/xx99/subjects --subject sub-001 \
     --method Moelle2011 --stages NREM2,NREM3 --freq 9.0,12.0 \
-    --write-db --resume
+    --resume
 ```
 
 See `examples/NCI_commands/hdEEG_spindle_detector_GADI.py` and
@@ -134,7 +153,7 @@ a different method or band.
     synced cloud folder can fail with `disk I/O error` — see
     [Run with the database on a network drive](run-with-database-on-a-network-drive.md).
 
-When `write_db=True`, each event row in `events` additionally carries:
+Each event row in `events` carries:
 
 - **Detector-own morphology** — `det_trough`, `det_peak`, `det_ptp`,
   `det_trough_time`, `det_peak_time`: the values the detector itself decided
@@ -157,20 +176,101 @@ Massimini2004, Ngo2015, Staresina2015, etc.), the full parameter dict, the
 reference channel(s), polarity, requested stages, artefact/arousal rejection
 flags, and `turtlewave_hdEEG` / `wonambi` / `numpy` versions plus the git SHA.
 
-Each row's `uuid` is a deterministic `uuid5` of its detection scope (event
-type, channel, start time, method, band, stage), so re-detecting an unchanged
-channel with `write_db=True` is a true row-level no-op under
-`INSERT OR REPLACE` — it never duplicates rows.
+The run also stores its density denominator — the artefact-free in-stage
+seconds it actually analysed — in `analysed_time`, so
+[`turtlewave_hdEEG.density.event_density`](../reference/api/density.md) can
+derive density straight from the database. See
+[Read the database with pandas and R](read-database-with-pandas-and-r.md).
+
+## Opt out: the legacy JSON → CSV → import path
+
+**Problem:** You need the per-channel JSON files — for a downstream tool that
+still expects them, for archival, or to debug a single channel's raw detector
+output — or you're running against a script that hasn't been updated yet and
+you don't want its behaviour to change.
+
+**Solution:** Pass `write_db=False` (or `--legacy-json` on the driver
+scripts). This restores the pre-4.2 pipeline verbatim: one JSON file per
+channel (including empty ones and error sentinels) is written to `json_dir`,
+and nothing touches a database until you separately aggregate the JSON into a
+CSV and import that CSV.
+
+```python
+spindles = event_processor.detect_spindles(
+    method="Moelle2011",
+    chan=["E110", "E111", "E112"],
+    frequency=(11, 13),
+    stage=["NREM2", "NREM3"],
+    json_dir="wonambi/spindle_results",
+    write_db=False,
+)
+
+event_processor.export_spindle_parameters_to_csv(
+    json_input="wonambi/spindle_results",
+    csv_file="wonambi/spindle_results/spindle_parameters.csv",
+    file_pattern="spindles_Moelle2011_11-13Hz_NREM2NREM3",
+)
+event_processor.import_parameters_csv_to_database(
+    csv_file="wonambi/spindle_results/spindle_parameters.csv",
+    db_path="wonambi/neural_events.db",
+    method="Moelle2011",
+)
+```
+
+```bash
+python examples/hdEEG_spindle_detector.py --legacy-json
+```
+
+A database written this way has no `analysed_time` table, so
+`turtlewave_hdEEG.density.event_density` refuses to compute a density against
+it — use the exporter's own `export_spindle_density_to_csv` /
+`export_slow_wave_density_to_csv` / `export_kc_density_to_csv` instead (these
+are deprecated but still work against a legacy JSON directory).
+
+!!! warning "`--legacy-json` after a direct-write run on the same scope fails, on purpose"
+    Since the database is now the default target, it's easy to end up running
+    `--legacy-json` against the same `db_path`/scope (event type, method,
+    band) that a previous default run already wrote directly. The CSV import
+    step at the end of the legacy pipeline calls `guard_run_id`, which refuses
+    to proceed when the scope already holds rows with a non-`NULL` `run_id` —
+    importing would blank that provenance link with no other sign anything
+    happened. The script exits with an uncaught `RuntimeError` (exit code 1),
+    and the error message names `force=True` as the way past it if you really
+    want to overwrite those rows and accept the lost `detection_runs` link.
+    Re-running detection with the default (AUTO) path instead of
+    `--legacy-json` is almost always what you want here.
+
+`--write-db` is still accepted on the spindle/slow-wave/K-complex driver
+scripts and the two `_GADI.py` cluster drivers — it's a true no-op on all
+five: passing it or omitting it resolves to the identical AUTO behaviour,
+because `write_db=True` and `write_db=None` behave identically for
+`detect_spindles` / `detect_slow_waves` / `detect_kcomplexes`. Only the two
+`_GADI.py` drivers actually print anything about it (a one-line warning that
+it's a no-op); `examples/hdEEG_spindle_detector.py`, `hdEEG_sw_detector.py`
+and `hdEEG_kcomplex_detector.py` register it with `help=SUPPRESS` and nothing
+reads it, so passing it there is silent.
+
+`analyze_pac` and its driver, `examples/hdEEG_pac_detector.py`, are
+different: there is no `--write-db` flag — the PAC driver's opt-out flag is
+`--no-write-db`, not the mirror-image of the other drivers'
+`--legacy-json`. And passing `write_db=True` explicitly to `analyze_pac` is
+**not** a no-op relative to the `write_db=None` default: on an unnameable
+scope (continuous PAC with no `stored_event_type=`/`stored_method=`), AUTO
+logs an error and skips the write, while explicit `write_db=True` raises
+`ValueError` instead. See
+[Write results straight to the database](run-pac-analysis.md#write-results-straight-to-the-database).
 
 ## Pull a CSV back out of the database
 
-**Problem:** Your downstream stats pipeline expects a flat CSV, but you wrote
-straight to the database.
+**Problem:** Your downstream stats pipeline expects a flat CSV, but events
+are in the database.
 
 **Solution:** Call `export_events_to_csv` for the scope you need. It writes
 the SAME column layout as the legacy JSON → CSV exporters (plus the additional
 `det_*` columns at the end), so the file round-trips back through
-`import_parameters_csv_to_database` unchanged.
+`import_parameters_csv_to_database` unchanged. If you want the *whole*
+database as a data frame instead — the more common case for statistics — see
+[Read the database with pandas and R](read-database-with-pandas-and-r.md).
 
 ```python
 from turtlewave_hdEEG import export_events_to_csv
@@ -202,19 +302,30 @@ wrote would blank their `run_id` and sever them from their `detection_runs`
 provenance — with no error, since the row count looks identical either way.
 `import_parameters_csv_to_database` checks for this before writing and raises
 `RuntimeError` if any in-scope rows carry a non-`NULL` run_id. Re-run
-detection with `write_db=True` to update those rows properly, or pass
-`force=True` to proceed anyway and accept the lost provenance link. It also
-now raises on a missing/unreadable CSV or a bad database scope instead of
-returning `{"error": ..., "added": 0}`, so a broken import can never be
-mistaken for a clean, empty one. (`pac_coupling` has no `run_id` column and
-is keyed on its own natural key instead, so this particular guard does not
-apply to `import_pac_csv_to_database` / `backfill_pac_directory` — see
+detection to update those rows properly, or pass `force=True` to proceed
+anyway and accept the lost provenance link. It also now raises on a
+missing/unreadable CSV or a bad database scope instead of returning
+`{"error": ..., "added": 0}`, so a broken import can never be mistaken for a
+clean, empty one. (`pac_coupling` has no `run_id` column and is keyed on its
+own natural key instead, so this particular guard does not apply to
+`import_pac_csv_to_database` / `backfill_pac_directory` — see
 [Back-fill PAC results into the database](backfill-pac-to-database.md).)
+
+`import_parameters_csv_to_database`, `import_pac_csv_to_database` and the
+three `export_*_density_to_csv` methods are all deprecated (`5.0` removal) in
+favour of the database being the store of record — each emits a
+`DeprecationWarning` **and** a `logger.warning`, since deprecation warnings
+alone are invisible to a script that isn't run under `-W`.
 
 ## See also
 
+- [Read the database with pandas and R](read-database-with-pandas-and-r.md)
+  — the replacement for what CSV used to do for downstream statistics.
+- [Upgrade to 4.2](upgrade-to-4.2.md) — what changes for existing 4.0/4.1
+  scripts and PBS jobs.
 - [Re-run detection on reviewer-selected channels](rerun-detection-on-channels.md)
   — the direct-write path's `replace_channels` argument is what makes a scoped
   re-detection possible.
 - [Explanation: Event density is artefact-free](../explanation/overview.md#event-density-is-artefact-free)
 - [Reference: dbwrite module](../reference/api/dbwrite.md)
+- [Reference: density module](../reference/api/density.md)

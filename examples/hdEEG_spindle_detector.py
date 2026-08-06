@@ -9,15 +9,17 @@ Modules:
     - turtlewave_hdEEG: Custom library for processing EEG events and annotations.
 Functions:
     - detect_spindles: Detects spindles in EEG data based on specified parameters.
-    - export_spindle_parameters_to_csv: Exports spindle parameters to a CSV file.
-    - export_spindle_density_to_csv: Exports spindle density information to a CSV file.
+    - event_density: Derives per-channel density from neural_events.db.
+    - export_spindle_parameters_to_csv / export_spindle_density_to_csv:
+      legacy (--legacy-json) CSV exports, deprecated since 4.2.
 Workflow:
     1. Define file paths for the EEG dataset and annotations.
     2. Load the dataset and annotations.
     3. Create an instance of the ParalEvents class for processing events.
     4. Specify test parameters for spindle detection, including method, channels, frequency range, and sleep stages.
-    5. Run the spindle detection algorithm and save the results in JSON format.
-    6. Export spindle parameters and density information to CSV files for further analysis.
+    5. Run the spindle detection algorithm; events go straight into
+       neural_events.db (no per-channel JSON).
+    6. Report per-channel spindle density derived from that database.
 Parameters:
     - root_dir (str): Root directory containing the EEG dataset and annotations.
     - datafilename (str): Name of the EEG dataset file.
@@ -25,10 +27,11 @@ Parameters:
     - test_method (str): Spindle detection method to use (e.g., 'Ferrarelli2007', 'Moelle2011').
     - test_stages (list): Sleep stages to include in the analysis (e.g., 'NREM3').
     - test_frequency (tuple): Frequency range for spindle detection (e.g., (9, 12)).
-    - json_dir (str): Directory to save JSON results.
+    - out_dir (str): Results directory; locates neural_events.db, and holds
+      the JSON/CSV on the legacy --legacy-json path.
 Outputs:
-    - JSON files containing spindle detection results.
-    - CSV files with spindle parameters and density information.
+    - Rows in neural_events.db (events, detection_runs, analysed_time).
+    - With --legacy-json: per-channel JSON plus parameter/density CSVs.
 Usage:
     1. Ensure you have the TurtleWave-hdEEG library installed.
     Run this script to detect spindles in hdEEG data and export the results for further analysis.
@@ -78,12 +81,19 @@ _p.add_argument('--annot', default=None,
                 help='override annotation XML (e.g. QC sidecar)')
 _p.add_argument('--channels', default=None,
                 help='CSV of channels to detect (no header, one per row)')
-_p.add_argument('--write-db', dest='write_db', action='store_true',
-                help='write events straight to neural_events.db and skip the '
-                     'JSON->CSV->import steps (default: legacy JSON+CSV path)')
+_p.add_argument('--legacy-json', dest='legacy_json', action='store_true',
+                help='opt back into the legacy JSON -> CSV -> import pipeline. '
+                     'By default events go straight into neural_events.db and '
+                     'no per-channel JSON or intermediate CSV is written.')
+# Accepted so existing command lines keep working; it now names the default.
+_p.add_argument('--write-db', dest='write_db_flag', action='store_true',
+                help=_ap.SUPPRESS)
+_p.add_argument('--subject', dest='subject', default=None,
+                help='subject id keying the density denominator '
+                     '(default: derived from the annotation/recording path)')
 _p.add_argument('--resume', dest='resume', action='store_true',
-                help='with --write-db, skip channels already completed for this '
-                     'exact method/band/stage scope in the database')
+                help='skip channels already completed for this exact '
+                     'method/band/stage scope in the database')
 _cli, _ = _p.parse_known_args()
 
 # 1. Define the file paths for the dataset and annotations
@@ -104,7 +114,7 @@ annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 # The JSON files are in the 'wonambi'/'spindle_results' subdirectory.
 data_file = os.path.join(root_dir, datafilename)
 annot_file = _cli.annot if _cli.annot else os.path.join(root_dir, "wonambi",annotfilename)
-json_dir = os.path.join(root_dir, "wonambi", "spindle_results")
+out_dir = os.path.join(root_dir, "wonambi", "spindle_results")
 db_path = os.path.join(root_dir, "wonambi",'neural_events.db')
 
 # 2. Load dataset and annotations
@@ -142,11 +152,12 @@ spindles = event_processor.detect_spindles(
     reject_arousals      = False,
     cat                  = (1, 1, 1, 0),# concatenate across cycles, stages, and discontinuities (event types separate)
     save_to_annotations  = False, # save to annotations
-    json_dir             = json_dir,
-    # Direct-to-DB path (opt-in). When --write-db is not passed these are
-    # write_db=False / resume=False, so behaviour is byte-identical to before.
-    write_db             = _cli.write_db,
-    db_path              = db_path if _cli.write_db else None,
+    json_dir             = out_dir,
+    subject              = _cli.subject,
+    # neural_events.db is the store of record. --legacy-json opts back into
+    # the per-channel JSON that the export/import steps below consume.
+    write_db             = False if _cli.legacy_json else True,
+    db_path              = None if _cli.legacy_json else db_path,
     resume               = _cli.resume,
 )
 
@@ -158,34 +169,45 @@ spindles = event_processor.detect_spindles(
 """
 
 
-# After processing all channels, export parameters
+# After processing all channels, report density and (legacy only) export CSVs
 freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
 
-# for selecting proper json files
-file_pattern = f"spindles_{test_method}_{freq_range}_{stages_str}"
-
-if _cli.write_db:
-    # Direct-to-DB run: events are already in neural_events.db (with det_* and
-    # spectral columns and provenance). The JSON->CSV->import steps are not
-    # needed. A flat CSV can still be produced on demand from the DB:
+if not _cli.legacy_json:
+    # Events are already in neural_events.db with det_* and spectral columns
+    # and a detection_runs provenance row. Density is derived from the database
+    # on read -- its denominator is the artefact-free in-stage time this run
+    # analysed, stored in analysed_time. A flat CSV can still be produced on
+    # demand:
     #   from turtlewave_hdEEG import export_events_to_csv
     #   export_events_to_csv(db_path, 'spindle', test_method, test_frequency,
-    #                        test_stages, output_dir=json_dir)
+    #                        test_stages, output_dir=out_dir)
+    from turtlewave_hdEEG.density import event_density, format_density_table
+
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
-    print(f"Spindle events written directly to DB: {db_path}")
-    print(f"ALL DONE (direct-to-DB)")
+    print(f"Spindle events written to: {db_path}")
+    try:
+        # Rejection settings must match the detection call above: they are part
+        # of the analysed_time key, so a mismatch divides by a different amount
+        # of recording time.
+        density_df = event_density(
+            db_path, event_type='spindle', method=test_method,
+            stage=test_stages, subject=_cli.subject,
+            reject_artifacts=True, reject_arousals=False)
+        print("Spindle density (events per minute of artefact-free in-stage time):")
+        print(format_density_table(density_df))
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Spindle density unavailable: {e}")
+    print("ALL DONE")
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
 else:
-    # 6. Test the new SQLite parameter calculation and storage
-    # print("\nCalculating and storing parameters in SQLite database...")
-
-    # Initialize the database
-    #event_processor.initialize_sqlite_database(db_path)
+    # Legacy path: the per-channel JSON written above is aggregated into CSVs
+    # and imported. file_pattern must use the same band token the detector used.
+    file_pattern = f"spindles_{test_method}_{freq_range}_{stages_str}"
 
     param2CSV = event_processor.export_spindle_parameters_to_csv(
-        json_input   = json_dir,
-        csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
+        json_input   = out_dir,
+        csv_file     = os.path.join(out_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
         file_pattern = file_pattern  # Pattern to match JSON files
     )
 
@@ -194,8 +216,8 @@ else:
     # mismatch here (detection kept arousal epochs, the denominator subtracts
     # them) biases every density. Detection above used reject_arousals=False.
     density2CSV = event_processor.export_spindle_density_to_csv(
-        json_input       = json_dir,
-        csv_file         = os.path.join(json_dir, f'spindle_density_{test_method}_{freq_range}_{stages_str}.csv'),
+        json_input       = out_dir,
+        csv_file         = os.path.join(out_dir, f'spindle_density_{test_method}_{freq_range}_{stages_str}.csv'),
         stage            = test_stages,
         file_pattern     = file_pattern,
         reject_artifacts = True,
@@ -203,12 +225,14 @@ else:
     )
 
     csv2db = event_processor.import_parameters_csv_to_database(
-        csv_file     = os.path.join(json_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
-        db_path      = db_path
+        csv_file     = os.path.join(out_dir, f'spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv'),
+        db_path      = db_path,
+        event_type   = 'spindle',
+        method       = test_method
         )
 
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
     print(f"Spindle parameters saved")
     print(f"Spindle density saved")
-    print(f"ALL DONE")
+    print(f"ALL DONE (legacy JSON+CSV path)")
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

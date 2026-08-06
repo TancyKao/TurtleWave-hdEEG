@@ -124,6 +124,23 @@ for name in sorted(os.listdir(ROOT)):
     print(f"[{name}] {summary}")
 ```
 
+Passing the bare folder name (`name`, e.g. `'10sd'`) as `subject` above is
+fine as written: `subject` is normalised to the canonical `sub-` form on
+write (and on every read, e.g. by `density.event_density`), so `'10sd'` and
+`'sub-10sd'` name the same recording throughout `sleep_cycles`,
+`stage_durations`, `analysed_time` and `pac_coupling`.
+
+If an earlier run already wrote `sleep_cycles`/`stage_durations` rows under a
+different, non-canonical spelling of this recording's subject (e.g. `'10sd'`
+from a script that predates normalisation, alongside a later run's
+`'sub-10sd'`), re-running `store_cycles_to_database` / `store_stage_durations`
+replaces those older-spelling rows rather than leaving them alongside the new
+ones — `stage_durations` in particular has one row per subject as its whole
+contract, and a stale second spelling would double any total computed from
+it. A `logger.warning` names every older spelling found and how many rows it
+replaced, so check the log after a re-run on a recording you've run under
+more than one subject spelling.
+
 `examples/backfill_cycles.py` is a hardened, ready-to-run version of this loop
 (subject-id derivation, per-subject try/except so one bad folder doesn't abort
 the batch, and a PASS/FAIL summary):

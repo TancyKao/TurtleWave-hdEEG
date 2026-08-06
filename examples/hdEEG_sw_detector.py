@@ -61,12 +61,19 @@ _p.add_argument('--annot', default=None,
                 help='override annotation XML (e.g. QC sidecar)')
 _p.add_argument('--channels', default=None,
                 help='CSV of channels to detect (no header, one per row)')
-_p.add_argument('--write-db', dest='write_db', action='store_true',
-                help='write events straight to neural_events.db and skip the '
-                     'JSON->CSV->import steps (default: legacy JSON+CSV path)')
+_p.add_argument('--legacy-json', dest='legacy_json', action='store_true',
+                help='opt back into the legacy JSON -> CSV -> import pipeline. '
+                     'By default events go straight into neural_events.db and '
+                     'no per-channel JSON or intermediate CSV is written.')
+# Accepted so existing command lines keep working; it now names the default.
+_p.add_argument('--write-db', dest='write_db_flag', action='store_true',
+                help=_ap.SUPPRESS)
+_p.add_argument('--subject', dest='subject', default=None,
+                help='subject id keying the density denominator '
+                     '(default: derived from the annotation/recording path)')
 _p.add_argument('--resume', dest='resume', action='store_true',
-                help='with --write-db, skip channels already completed for this '
-                     'exact method/band/stage scope in the database')
+                help='skip channels already completed for this exact '
+                     'method/band/stage scope in the database')
 _cli, _ = _p.parse_known_args()
 
 # 1. Define the file paths for the dataset and annotations
@@ -83,7 +90,7 @@ channels_csv_path = os.path.join(root_dir, "channels.csv")
 # Construct the full paths
 data_file = os.path.join(root_dir, datafilename)
 annot_file = _cli.annot if _cli.annot else os.path.join(root_dir, "wonambi", annotfilename)
-json_dir = os.path.join(root_dir, "wonambi", "sw_results")
+out_dir = os.path.join(root_dir, "wonambi", "sw_results")
 db_path = os.path.join(root_dir, "wonambi",'neural_events.db')
 
 
@@ -130,11 +137,12 @@ slow_waves = event_processor.detect_slow_waves(
     reject_arousals=True,
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
-    json_dir=json_dir,
-    create_empty_json=True,
-    # Direct-to-DB path (opt-in). Off by default -> legacy behaviour unchanged.
-    write_db=_cli.write_db,
-    db_path=db_path if _cli.write_db else None,
+    json_dir=out_dir,
+    subject=_cli.subject,
+    # neural_events.db is the store of record. --legacy-json opts back into
+    # the per-channel JSON the export/import steps below consume.
+    write_db=False if _cli.legacy_json else True,
+    db_path=None if _cli.legacy_json else db_path,
     resume=_cli.resume,
 )
 
@@ -143,22 +151,42 @@ test_method_str = "_".join(test_method).replace('/', '_') if isinstance(test_met
 
 freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
-file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
 
-if _cli.write_db:
-    # Direct-to-DB run: slow waves are already in neural_events.db. Skip the
-    # JSON->CSV->import steps. A flat CSV can be produced on demand from the DB:
+if not _cli.legacy_json:
+    # Slow waves are already in neural_events.db with det_* and spectral
+    # columns and a detection_runs provenance row. Density is derived from the
+    # database on read -- its denominator is the artefact-free in-stage time
+    # this run analysed, stored in analysed_time. A flat CSV can still be
+    # produced on demand:
     #   from turtlewave_hdEEG import export_events_to_csv
     #   export_events_to_csv(db_path, 'slow_wave', test_method, test_frequency,
-    #                        test_stages, output_dir=json_dir)
+    #                        test_stages, output_dir=out_dir)
+    from turtlewave_hdEEG.density import event_density, format_density_table
+
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
-    print(f"Slow wave events written directly to DB: {db_path}")
-    print(f"ALL DONE (direct-to-DB)")
+    print(f"Slow wave events written to: {db_path}")
+    try:
+        # Rejection settings must match the detection call above: they are part
+        # of the analysed_time key, so a mismatch divides by a different amount
+        # of recording time.
+        density_df = event_density(
+            db_path, event_type='slow_wave', method=test_method,
+            stage=test_stages, subject=_cli.subject,
+            reject_artifacts=True, reject_arousals=True)
+        print("Slow wave density (events per minute of artefact-free in-stage time):")
+        print(format_density_table(density_df))
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Slow wave density unavailable: {e}")
+    print("ALL DONE")
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
 else:
+    # Legacy path: aggregate the per-channel JSON written above into CSVs and
+    # import them. file_pattern must use the same band token the detector used.
+    file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
+
     param2CSV = event_processor.export_slow_wave_parameters_to_csv(
-        json_input=json_dir,
-        csv_file=os.path.join(json_dir, f'sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv'),
+        json_input=out_dir,
+        csv_file=os.path.join(out_dir, f'sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv'),
         file_pattern=file_pattern
     )
 
@@ -166,8 +194,8 @@ else:
     # denominator must be the recording time the detector actually analysed,
     # otherwise every density is biased.
     density2CSV = event_processor.export_slow_wave_density_to_csv(
-        json_input=json_dir,
-        csv_file=os.path.join(json_dir, f'sw_density_{test_method_str}_{freq_range}_{stages_str}.csv'),
+        json_input=out_dir,
+        csv_file=os.path.join(out_dir, f'sw_density_{test_method_str}_{freq_range}_{stages_str}.csv'),
         stage=test_stages,
         file_pattern=file_pattern,
         reject_artifacts=True,
@@ -181,7 +209,7 @@ else:
     # which double-counts densities and hides half the events from any
     # method-scoped query.
     csv2db = event_processor.import_parameters_csv_to_database(
-        csv_file     = os.path.join(json_dir, f'sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv'),
+        csv_file     = os.path.join(out_dir, f'sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv'),
         db_path      = db_path,
         event_type   = 'slow_wave',
         method       = test_method
@@ -190,5 +218,5 @@ else:
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
     print(f"Slow wave parameters saved")
     print(f"Slow wave density saved")
-    print(f"ALL DONE")
+    print(f"ALL DONE (legacy JSON+CSV path)")
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

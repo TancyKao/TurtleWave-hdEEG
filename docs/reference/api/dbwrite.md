@@ -1,10 +1,11 @@
 # Direct-to-Database Write API Reference
 
-The `dbwrite` module holds the shared primitives that `ParalEvents`, `ParalSWA`
-and `ParalKC` use to write detected events straight into `neural_events.db`
-(the `write_db=True` path), bypassing the JSON → CSV → import round-trip. It
-also provides the on-demand DB → CSV export used to pull a flat file back out
-of the database.
+The `dbwrite` module holds the shared primitives that `ParalEvents`, `ParalSWA`,
+`ParalKC` and `ParalPAC` use to write results straight into `neural_events.db`
+— the default path since 4.2 (`write_db=None`). It also provides the on-demand
+DB → CSV export used to pull a flat file back out of the database, and the
+`analysed_time` schema/readers that back
+[`turtlewave_hdEEG.density`](density.md).
 
 See [Direct-to-database detection](../../how-to/direct-to-database-detection.md)
 for a task-oriented walkthrough, and
@@ -12,9 +13,22 @@ for a task-oriented walkthrough, and
 for the reasoning behind `fmt_freq_token` and the `method_db`/`method_str`
 split.
 
-A few of these primitives are worth knowing about even outside the direct-write
-path:
+A few of these primitives are worth knowing about even outside a detection call:
 
+- **`resolve_db_target(db_path, output_dir, logger)`** is the single source of
+  truth for "which database file does this run write to" — explicit `db_path`
+  wins, then a database beside `output_dir`/`json_dir`, then
+  `./neural_events.db`. Every detector and `analyze_pac` call this rather than
+  resolving a path locally; an unresolvable target raises instead of silently
+  downgrading to no write at all.
+- **`recording_root_from_db(db_path)`** derives the recording's root directory
+  from a database path (stripping a trailing `wonambi` component), used as the
+  `root_dir` hint for `derive_subject`.
+- **`ensure_analysed_time_schema` / `record_analysed_time` / `store_analysed_time`
+  / `read_analysed_time`** create and populate the `analysed_time` table — the
+  artefact-free density denominator every direct-write detection run stores
+  automatically, and the only thing
+  [`density.event_density`](density.md) reads besides `events` itself.
 - **`fmt_freq_token(lo, hi)`** is the single source of truth for the
   `{freq_lo}-{freq_hi}Hz` filename/pattern token — use it on both sides of any
   round-trip that names or re-finds a detector's output.

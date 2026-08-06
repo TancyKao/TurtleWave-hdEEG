@@ -6,14 +6,15 @@ This guide provides practical solutions for specific QC-triage tasks in the Turt
 
 The review GUI reads events out of `neural_events.db` — it doesn't detect
 anything itself. Before you can review, events must already be detected into
-that database:
+that database. By default they already are — detection writes straight into
+`neural_events.db`:
 
 - [Detect Spindles](detect-spindles.md) (or slow waves / K-complexes /
   PAC — any detector works)
-- [Write Detection Results Directly to the Database](direct-to-database-detection.md)
-  — the `write_db=True` path, or the legacy JSON → CSV →
-  `import_parameters_csv_to_database` route documented on each detector's
-  how-to page
+- If you ran detection with `write_db=False` / `--legacy-json`, follow the
+  legacy JSON → CSV → `import_parameters_csv_to_database` route documented on
+  each detector's how-to page, or see
+  [Write Detection Results Directly to the Database](direct-to-database-detection.md#opt-out-the-legacy-json-csv-import-path)
 
 ## Triage Channels by QC Verdict
 

@@ -65,6 +65,12 @@ result = pac_processor.analyze_pac(
 )
 ```
 
+This already writes the per-channel results to the `pac_coupling` table in
+`db_path` — `write_db` defaults to `None` (AUTO), which persists to the
+database whenever the run's scope can be named, with no per-channel CSV. See
+[Write results straight to the database](#write-results-straight-to-the-database)
+below for `subject=` and the continuous-PAC case.
+
 `analyze_pac` reads events straight out of `neural_events.db` (rather than
 re-detecting) when `use_detected_events=True`; `event_type` and
 `pair_with_spindles` control which events anchor the analysis:
@@ -94,8 +100,11 @@ descriptions programmatically at runtime.
 
 ## Write results straight to the database
 
-Pass `write_db=True` (and `subject=...`) to persist the per-channel PAC
-results directly to the `pac_coupling` table, instead of only writing CSVs:
+`write_db` defaults to `None` (**AUTO**): on the event-locked path
+(`use_detected_events=True`, shown above), `analyze_pac` already persists the
+per-channel PAC results to the `pac_coupling` table in `db_path` without you
+passing anything — this happened in the very first example on this page.
+Pass `subject=...` explicitly so the row is keyed correctly:
 
 ```python
 result = pac_processor.analyze_pac(
@@ -109,38 +118,52 @@ result = pac_processor.analyze_pac(
     pair_with_spindles=True,
     db_path='data/subject001/wonambi/neural_events.db',
     out_dir='data/subject001/wonambi/pac_results',
-    write_db=True,
     subject='sub-001',
 )
 ```
 
 If `subject` is omitted, it is derived from the root path basename (with a
 warning) — pass it explicitly to avoid an ambiguous subject id in
-`pac_coupling`.
+`pac_coupling`. Pass `write_db=False` to skip the database write entirely
+(the legacy CSV-only behaviour).
 
-!!! warning "`write_db=True` must be able to name what it stores"
-    `analyze_pac` only writes to `pac_coupling` when `write_db=True` is
-    passed explicitly — there is no implicit database write. On the
-    event-locked path above (`use_detected_events=True`), the stored
-    `event_type`/`method` are derived automatically from `event_type` /
-    `pair_with_spindles` / `event_opts`. If you instead run **continuous**
-    PAC (`use_detected_events=False`, e.g. theta-gamma coupling with no
-    anchoring event), there is no event scope to derive a label from, so you
-    must pass `stored_event_type=` and `stored_method=` yourself (e.g.
-    `stored_event_type='continuous'`, `stored_method='theta_gamma'`).
-    `analyze_pac` raises `ValueError` at entry — before running any
-    analysis — rather than storing a continuous result under a guessed
-    label that would be indistinguishable from event-locked coupling.
+!!! warning "The stored scope must be nameable"
+    On the event-locked path above, the stored `event_type`/`method` are
+    derived automatically from `event_type` / `pair_with_spindles` /
+    `event_opts`. If you instead run **continuous** PAC
+    (`use_detected_events=False`, e.g. theta-gamma coupling with no anchoring
+    event), there is no event scope to derive a label from — AUTO logs an
+    error and skips the write rather than guessing. Pass `stored_event_type=`
+    and `stored_method=` yourself (e.g. `stored_event_type='continuous'`,
+    `stored_method='theta_gamma'`) to store it; combine with `write_db=True`
+    to make a missing label raise `ValueError` at entry instead of being
+    silently skipped.
 
-    The database write itself (`store_pac_to_database`) also now raises on
-    failure instead of logging a traceback and returning as if nothing had
-    gone wrong — a failed write can no longer look like a successful one that
+    The database write itself (`store_pac_to_database`) raises on failure
+    instead of logging a traceback and returning as if nothing had gone
+    wrong — a failed write can no longer look like a successful one that
     happened to store zero rows.
 
 ## Export results to CSV
 
-Whether or not you used `write_db=True`, you can export the summary CSV from
-the in-memory tracking dict:
+By default (`write_db=None`/AUTO), `analyze_pac` does **not** write the
+per-channel `*_pac_parameters.csv` files — only `pac_coupling` and the
+sibling `*_mean_amps.npy` (always written, holding the per-event modulogram
+matrix). Pass `write_csv=True` to get the per-channel CSVs too (they're
+implicit on the legacy `write_db=False` path):
+
+```python
+result = pac_processor.analyze_pac(
+    ...,
+    write_csv=True,
+)
+```
+
+`export_pac_parameters_to_csv` then builds **one summary CSV** across
+channels — it globs for those per-channel `*_pac_parameters.csv` files under
+`out_dir/<method_dir>/<stage_str>/` and aggregates them (falling back to the
+in-memory tracking dict, with fewer columns, if none are found — e.g. because
+`write_csv` was left at its AUTO default of `False`):
 
 ```python
 method_info = {
@@ -161,10 +184,12 @@ export_result = pac_processor.export_pac_parameters_to_csv(
 print(f"Exported {export_result['channels']} channels, {export_result['rows']} rows")
 ```
 
-`export_pac_parameters_to_csv` writes per-channel CSVs under
+The per-channel CSVs `write_csv=True` produces live under
 `out_dir/<method_dir>/<stage_str>/`, which is exactly the tree layout
 [`backfill_pac_to_db.py`](backfill-pac-to-database.md) expects if you need to
-re-import them later.
+re-import them later. If you just want `pac_coupling` as a data frame without
+any of this, query it directly — see
+[Read the database with pandas and R](read-database-with-pandas-and-r.md#read-pac-results).
 
 ## Generate a comodulogram
 
@@ -213,7 +238,10 @@ explicit channel list is given — reuse that logic
 
 ## Next Steps
 
+- [Read the database with pandas and R](read-database-with-pandas-and-r.md) —
+  query `pac_coupling` directly for statistics
 - [Back-fill PAC Results into the Database](backfill-pac-to-database.md) —
   loading PAC CSVs from an older run
 - [Upgrade to 4.0](upgrade-to-4.0.md) — the preferred-phase 180-degree fix
+- [Upgrade to 4.2](upgrade-to-4.2.md) — `write_db`/`write_csv` AUTO defaults
 - Reference: [PAC Processor](../reference/api/pacprocessor.md)

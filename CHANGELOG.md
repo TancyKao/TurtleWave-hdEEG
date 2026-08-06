@@ -5,6 +5,63 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] — 2026-08-06
+
+Makes `neural_events.db` the single store of record. Detection writes to the
+database by default and no longer writes per-channel JSON, and the
+export-import-density file round-trip is gone from the drivers, the example
+scripts and the GUI. That round-trip is what lost events silently: detection
+wrote files and a separately built string had to find them again. Density is now
+derived from the database, which also closes a gap where `--write-db` runs
+produced no density at all. `--legacy-json` keeps the old path — see **Upgrading**.
+
+### Added
+
+- `density.event_density`, deriving per-channel density from the database, and `density.format_density_table`.
+- `analysed_time` table holding the artefact-free density denominator, written at detection time.
+- Public API: `resolve_db_target`, `recording_root_from_db`, `ensure_analysed_time_schema`, `record_analysed_time`, `store_analysed_time`, `read_analysed_time`.
+- `--legacy-json` on the detection drivers, and `--subject` on the three example detectors.
+- `normalize_subject`, giving one canonical `sub-` subject form, and `subjects_in_database` / `assert_single_subject`, which refuse a write that would mix subjects in one database.
+- `subject` column on `detection_runs`.
+- `include_zero_channels` on `event_density`, on by default, so a channel that detected nothing appears as a zero rather than vanishing from a montage summary.
+- `write_csv` on `analyze_pac`, gating the per-channel PAC parameter CSVs.
+- An Export CSV button on each GUI detection tab, writing events and density for a chosen scope.
+- Docs: [Read the database with pandas and R](docs/how-to/read-database-with-pandas-and-r.md) and [Upgrade to 4.2](docs/how-to/upgrade-to-4.2.md).
+
+### Changed
+
+- `write_db` defaults to `None`, meaning write to the database; `write_db=False` keeps the JSON and CSV path.
+- Detection no longer writes per-channel JSON unless `write_db=False`. Crash-resume comes from `processing_status`, which records per-channel failures with reasons.
+- `resolve_db_target` raises when a database write was asked for and no path resolves, instead of silently continuing without one.
+- The GUI reports a run by reading the database back, and names the database path and the event and channel counts on completion.
+- `analyze_pac` writes per-channel CSVs only when `write_csv=True` or `write_db=False`. The `*_mean_amps.npy` modulogram is always written; it is not reconstructable from `pac_coupling`.
+- The three `export_*_density_to_csv` methods and the CSV import route are deprecated and warn through both `DeprecationWarning` and the logger.
+
+### Removed
+
+- The `create_empty_json` parameter on `detect_spindles`, `detect_slow_waves` and `detect_kcomplexes`.
+- `--write-db` on the drivers, now the default. The flag is still accepted and does nothing; the two cluster drivers warn when it is passed.
+
+### Fixed
+
+- The review GUI's QC density assumed both artefact and arousal rejection regardless of what the run used, inflating density by 8% on a run detected with arousal rejection off. It now reads the run's own settings from `detection_runs`.
+- A `--write-db` run produced no density at all, because the drivers returned before the density export.
+- Detection continued after failing to read the sleep scoring, stamping every event with no stage; the run then read as an empty night while the database held it in full. It now stops and says so.
+- Density pooled across stages divided by only the stages that produced events, over-estimating whenever a requested stage detected nothing.
+- A joined stage token such as `NREM2NREM3` returned an empty density frame that read as "nothing detected".
+- The drivers and the GUI disagreed on a subject's name, which put two denominators in one database and then failed every density query that did not name a subject.
+
+### Upgrading
+
+- Detection now writes to `neural_events.db` and no JSON. Pass `--legacy-json`, or `write_db=False`, to keep the old output.
+- Scripts passing `create_empty_json` raise `TypeError`. Remove the argument.
+- A database built by `--legacy-json` has no `analysed_time` table, so `event_density` refuses to compute on it rather than substituting raw hypnogram time. Use the legacy density CSV for those runs.
+- Density read from the QC dashboard before this release was too high for any run detected with arousal rejection off, which is the default on the spindle drivers. Re-read affected numbers.
+- Subject identifiers are normalised to the `sub-` form, so `--subject 10sd` and `--subject sub-10sd` now name one subject. The cycle and stage-duration writers stored whatever they were handed before this release, so a database written by an earlier version can hold the other spelling; re-running cycles rewrites those rows rather than adding a second set, and says how many it replaced.
+- Detection refuses to write into a database that already holds another subject. A database written before 4.2 records no subject, so the first run claims it and says so in a warning; from then on a second subject is refused. One database per subject remains the expected layout.
+- Detection now stops when the sleep scoring cannot be read, where it previously carried on and produced events with no stage.
+- Schema changes are additive. An existing database gains an `analysed_time` table and a `subject` column on `detection_runs`; no column is dropped, renamed or retyped. The first 4.2 run fills that column in for rows that have none.
+
 ## [4.0.2] — 2026-08-06
 
 Fixes `disk I/O error` when `neural_events.db` lives on a mapped network drive

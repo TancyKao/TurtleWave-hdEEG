@@ -7,9 +7,12 @@ silent data loss.
 
 ## Background
 
-`turtlewave_hdEEG`'s detection pipeline writes results in three places that
-must independently agree on the same identity: a JSON file per channel on
-disk, a row in `neural_events.db`, and (for the legacy path) a CSV in
+Since 4.2, detection writes straight into `neural_events.db` by default
+(`write_db=None` resolves to a database write) and no per-channel JSON is
+produced. The failure mode this page documents belongs to the **legacy path**
+— `write_db=False` / `--legacy-json` — where the pipeline still writes
+results in three places that must independently agree on the same identity: a
+JSON file per channel on disk, a row in `neural_events.db`, and a CSV in
 between. Nothing enforces that agreement at write time — a detector writes a
 filename, and some other piece of code, often written months later by someone
 else, has to reconstruct the same string to find that file again, or to key a
@@ -19,11 +22,18 @@ constructed strings drifting apart: a frequency token rebuilt with a
 different formatter than the one that named the file, and a subject id
 resolved two different ways for two XML files in the same subject folder.
 
+The `method_db`/`method_str` split and `derive_subject` below still apply on
+the direct-write path too — filenames aren't involved, but the same canonical
+vs. filesystem-safe distinction, and the same subject-resolution precedence,
+key `events`, `pac_coupling` and `analysed_time`.
+
 ## The `{event_type}_{method}_{freq_lo}-{freq_hi}Hz_{stages_joined}` convention
 
-Every detector's JSON output, and the `file_pattern` used to find it again
-downstream, follows this template. Two helpers exist specifically so no
-caller has to reproduce it by hand:
+Every legacy-path detector's JSON output, and the `file_pattern` used to find
+it again downstream, follows this template. It's also the naming convention
+`dbwrite.default_csv_path` reuses when you pull a CSV back out of the database
+with `export_events_to_csv`. Two helpers exist specifically so no caller has
+to reproduce it by hand:
 
 - **`turtlewave_hdEEG.dbwrite.fmt_freq_token(lo, hi)`** is the single source
   of truth for the `{freq_lo}-{freq_hi}Hz` segment. Use it on *both* sides of

@@ -14,6 +14,7 @@ from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
 from turtlewave_hdEEG import ParalSWA, CustomAnnotations, fmt_freq_token
 from turtlewave_hdEEG.dbwrite import verify_channel_coverage
+from turtlewave_hdEEG.density import event_density, format_density_table
 
 
 def find_one(patterns):
@@ -41,12 +42,17 @@ def main():
     ap.add_argument("--polar", default="normal", choices=["normal", "opposite"])
     ap.add_argument("--reject_artifacts", action="store_true", default=True)
     ap.add_argument("--reject_arousals", action="store_true", default=False)
-    ap.add_argument("--write-db", dest="write_db", action="store_true", default=False,
-                    help="write events straight to neural_events.db and skip the "
-                         "JSON->CSV->import steps (default off: legacy JSON+CSV path)")
+    ap.add_argument("--legacy-json", dest="legacy_json", action="store_true", default=False,
+                    help="opt back into the legacy JSON -> CSV -> import pipeline. "
+                         "By default events go straight into neural_events.db and "
+                         "no per-channel JSON or intermediate CSV is written.")
+    # Accepted so PBS scripts that still pass it keep running; it now names the
+    # default, so it does nothing.
+    ap.add_argument("--write-db", dest="write_db_flag", action="store_true",
+                    default=False, help=argparse.SUPPRESS)
     ap.add_argument("--resume", action="store_true", default=False,
-                    help="with --write-db, skip channels already completed for this "
-                         "exact method/band/stage scope in the database")
+                    help="skip channels already completed for this exact "
+                         "method/band/stage scope in the database")
     ap.add_argument("--loglevel", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     args = ap.parse_args()
 
@@ -56,6 +62,11 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)]
     )
     logger = logging.getLogger("hdEEG_sw_detector")
+
+    if args.write_db_flag:
+        logger.warning(
+            "--write-db is now the default and has no effect; pass "
+            "--legacy-json to get the old JSON -> CSV -> import pipeline.")
 
     subj_dir = os.path.join(args.root, args.subject)
     if not os.path.isdir(subj_dir):
@@ -91,13 +102,13 @@ def main():
         sys.exit(6)
 
     # Output locations
-    json_dir = os.path.join(subj_dir, "wonambi", "sw_results")
-    os.makedirs(json_dir, exist_ok=True)
+    out_dir = os.path.join(subj_dir, "wonambi", "sw_results")
+    os.makedirs(out_dir, exist_ok=True)
     db_path = os.path.join(subj_dir, "wonambi", "neural_events.db")
 
     logger.info(f"Dataset:    {data_file}")
     logger.info(f"Annotation: {annot_file}")
-    logger.info(f"JSON out:   {json_dir}")
+    logger.info(f"Results:    {'JSON+CSV in ' + out_dir if args.legacy_json else db_path}")
     logger.info(f"DB path:    {db_path}")
 
     # Parse params
@@ -130,19 +141,17 @@ def main():
         reject_arousals=args.reject_arousals,
         cat=(1, 1, 1, 0),
         save_to_annotations=False,
-        json_dir=json_dir,
-        create_empty_json=True,
-        # Direct-to-DB path (opt-in). Off by default -> legacy behaviour intact.
-        write_db=args.write_db,
-        db_path=db_path if args.write_db else None,
+        json_dir=out_dir,
+        subject=args.subject,
+        # Database is the store of record. --legacy-json opts back into the
+        # per-channel JSON the export/import steps below consume.
+        write_db=False if args.legacy_json else True,
+        db_path=None if args.legacy_json else db_path,
         resume=args.resume,
     )
 
-    # Filenames
-    # MUST use the same helper the detector used to name its JSON files.
     freq_range = fmt_freq_token(f_lo, f_hi)
     stages_str = "".join(test_stages)
-    file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
 
     def check_coverage_or_exit():
         """Verify the run reached the database, else log and exit non-zero.
@@ -194,32 +203,71 @@ def main():
         logger.info("All done: every requested channel is accounted for in "
                     "the database")
 
-    if args.write_db:
-        # Slow waves are already in neural_events.db. Skip JSON->CSV->import.
-        # A flat CSV can be produced on demand from the DB with
-        # export_events_to_csv (pass the exact method= for slash-methods).
-        logger.info(f"Direct-to-DB run complete; events written to {db_path}")
+    def report_density():
+        """Log per-channel slow-wave density derived from the database.
+
+        The denominator is the artefact-free in-stage time the detector
+        actually analysed, stored in ``analysed_time`` by the run above. The
+        rejection settings are forwarded because they are part of that key: a
+        mismatch selects a denominator covering a different amount of time.
+        """
+        try:
+            df = event_density(
+                db_path, event_type="slow_wave", method=test_method,
+                stage=test_stages, subject=args.subject,
+                reject_artifacts=args.reject_artifacts,
+                reject_arousals=args.reject_arousals)
+        except (ValueError, FileNotFoundError) as e:
+            logger.error(f"Slow-wave density unavailable: {e}")
+            return
+        if len(df) == 0:
+            logger.warning(
+                "No slow-wave rows in the database for this scope, so there "
+                "is no density to report. The coverage check below says "
+                "whether that is an empty night or a lost run.")
+            return
+        logger.info("Slow-wave density (events per minute of artefact-free "
+                    "in-stage time):\n%s", format_density_table(df))
+        if len(test_stages) > 1:
+            combined = event_density(
+                db_path, event_type="slow_wave", method=test_method,
+                stage=test_stages, subject=args.subject,
+                reject_artifacts=args.reject_artifacts,
+                reject_arousals=args.reject_arousals,
+                combine_stages=True)
+            logger.info("Slow-wave density, stages pooled:\n%s",
+                        format_density_table(combined))
+
+    if not args.legacy_json:
+        # Slow waves are already in neural_events.db, with det_* + spectral
+        # columns and a detection_runs provenance row. There is no file
+        # round-trip to perform. A flat CSV can be produced on demand with
+        # turtlewave_hdEEG.export_events_to_csv (pass the exact method= for
+        # slash-methods).
+        logger.info(f"Detection complete; events written to {db_path}")
+        report_density()
         check_coverage_or_exit()
         return
 
-    # Exporting
-    logger.info("Exporting parameters CSV...")
-    params_csv = os.path.join(json_dir, f"sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv")
+    # ---- legacy JSON -> CSV -> import path (--legacy-json) ---------------
+    logger.info("Legacy path: exporting JSON to CSV and importing to SQLite...")
+    # MUST use the same band token the detector used to name its JSON files.
+    file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
+    params_csv = os.path.join(out_dir, f"sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv")
     event_processor.export_slow_wave_parameters_to_csv(
-        json_input=json_dir,
+        json_input=out_dir,
         csv_file=params_csv,
         file_pattern=file_pattern
     )
 
-    logger.info("Exporting density CSV...")
-    dens_csv = os.path.join(json_dir, f"sw_density_{test_method_str}_{freq_range}_{stages_str}.csv")
+    dens_csv = os.path.join(out_dir, f"sw_density_{test_method_str}_{freq_range}_{stages_str}.csv")
     # Forward the run's own rejection settings. The density denominator is
     # the recording time the detector actually analysed; leaving these to the
     # exporter's assumption (both True) while detection ran with
     # --reject_arousals off subtracts arousal time the detector never
     # excluded, which biases every density downward.
     event_processor.export_slow_wave_density_to_csv(
-        json_input=json_dir,
+        json_input=out_dir,
         csv_file=dens_csv,
         stage=test_stages,
         file_pattern=file_pattern,
@@ -227,7 +275,6 @@ def main():
         reject_arousals=args.reject_arousals
     )
 
-    logger.info("Initializing / updating SQLite DB...")
     event_processor.initialize_sqlite_database(db_path)
     # Pass the UNESCAPED method (e.g. 'AASM/Massimini2004'). Without it the
     # importer falls back to filename.split('_')[2], which stores a bare

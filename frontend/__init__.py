@@ -21,7 +21,7 @@ except ImportError:
     EVENT_REVIEW_AVAILABLE = False
     event_review_main = None
     EventReviewInterface = None
-__version__ = '4.0.2'
+__version__ = '4.2.0'
 __all__ = []
 
 # Add to __all__ if available

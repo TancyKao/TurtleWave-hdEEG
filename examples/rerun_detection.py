@@ -215,7 +215,6 @@ def main(argv=None):
                   reject_artifacts=args.reject_artifacts,
                   reject_arousals=args.reject_arousals,
                   save_to_annotations=False, json_dir=None,
-                  create_empty_json=False,
                   write_db=True, db_path=db_path, resume=False,
                   replace_channels=redetect)
 

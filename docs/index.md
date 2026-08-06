@@ -61,7 +61,10 @@ Read our explanations:
 ### Data Formats
 
 - **Input:** EEGLAB (.set/.fdt), EDF, MNE-compatible formats
-- **Output:** JSON per channel, aggregated CSV, and a SQLite database (`neural_events.db`)
+- **Output:** a SQLite database (`neural_events.db`) by default — one row per
+  event, no intermediate files. Pass `write_db=False` (or `--legacy-json` on
+  the driver scripts) to opt back into per-channel JSON plus an aggregated
+  CSV instead.
 
 ## Installation
 
@@ -83,7 +86,8 @@ from turtlewave_hdEEG import ParalEvents, CustomAnnotations
 data = WonambiDataset('subject001.set')
 annot = CustomAnnotations('subject001_annotations.xml')
 
-# Detect spindles
+# Detect spindles — events go straight into wonambi/neural_events.db;
+# no per-channel JSON or CSV is written.
 event_processor = ParalEvents(dataset=data, annotations=annot)
 spindles = event_processor.detect_spindles(
     method='Ferrarelli2007',
@@ -91,23 +95,16 @@ spindles = event_processor.detect_spindles(
     frequency=(11, 16),
     stage=['NREM2', 'NREM3'],
     json_dir='wonambi/spindle_results',
-)
-
-# Aggregate the per-channel JSON into CSV, then into the database
-event_processor.export_spindle_parameters_to_csv(
-    json_input='wonambi/spindle_results',
-    csv_file='wonambi/spindle_results/spindle_parameters.csv',
-    file_pattern='spindles_Ferrarelli2007',
-)
-event_processor.import_parameters_csv_to_database(
-    csv_file='wonambi/spindle_results/spindle_parameters.csv',
     db_path='wonambi/neural_events.db',
 )
 ```
 
 See [`examples/hdEEG_spindle_detector.py`](https://github.com/TancyKao/TurtleWave-hdEEG/blob/master/examples/hdEEG_spindle_detector.py)
-for the full script, including density export. `write_db=True` can also
-write straight to the database and skip the CSV step — see
+for the full script, including density reporting. Need a flat CSV for a
+downstream stats tool? See
+[Where did my CSV go?](how-to/read-database-with-pandas-and-r.md#where-did-my-csv-go).
+To keep the old per-channel JSON → CSV → import pipeline instead, pass
+`write_db=False` — see
 [Write Detection Results Directly to the Database](how-to/direct-to-database-detection.md).
 
 ### Review Detected Events
