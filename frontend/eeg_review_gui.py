@@ -3429,6 +3429,70 @@ class FilterDock(QDockWidget):
             it.setText(base + tag)
 
 
+# Wake-like labels are never a detection stage, so they are dropped from the
+# event-derived scope before it becomes the density time base.
+QC_WAKE_STAGES = {'Wake', 'W', 'Undefined', 'Unknown', 'None', ''}
+
+
+def qc_density_stage_scope(event_stages, wake_stages=None):
+    """Stage labels behind a set of ``events.stage`` values, Wake dropped.
+
+    ``events.stage`` holds the *run's* stage scope, which since the joint-token
+    change is a single joined label such as ``'NREM2NREM3'`` rather than one
+    row per epoch stage. That token matches no scored epoch, so feeding it
+    straight to :func:`turtlewave_hdEEG.utils.build_density_denominators` finds
+    zero analysed seconds and the QC dashboard's density silently blanks or
+    goes wrong. Splitting it back into components restores real stage labels.
+
+    Module-level (not a method) so the derivation can be tested without a Qt
+    application, and lazily importing the library so this module stays
+    importable headless.
+
+    Parameters
+    ----------
+    event_stages : iterable of str or None
+        Distinct ``events.stage`` values of the loaded events. Each may be a
+        joint token (``'NREM2NREM3'``), a single stage (``'NREM2'``), or a
+        legacy short label the library's vocabulary does not know (``'N2'``),
+        which is passed through unsplit rather than discarded.
+    wake_stages : set of str or None
+        Labels to drop. Defaults to :data:`QC_WAKE_STAGES`.
+
+    Returns
+    -------
+    list of str or None
+        Sorted, de-duplicated non-Wake stage labels, or ``None`` when
+        ``event_stages`` is ``None`` or nothing survives - both of which mean
+        "no event-derived scope", the caller's signal to fall back.
+    """
+    if event_stages is None:
+        return None
+    drop = QC_WAKE_STAGES if wake_stages is None else wake_stages
+    try:
+        from turtlewave_hdEEG.dbwrite import split_stage_token
+    except Exception:
+        split_stage_token = None
+    scope = set()
+    for value in event_stages:
+        text = str(value)
+        parts = None
+        if split_stage_token is not None:
+            try:
+                parts = split_stage_token(text)
+            except Exception:
+                # Unknown vocabulary (legacy 'N2', 'Stage2', a site-specific
+                # label): keep the value whole. Dropping it would shrink the
+                # denominator; guessing at it would corrupt it.
+                parts = None
+        if not parts:
+            parts = [text]
+        for part in parts:
+            label = str(part)
+            if label not in drop:
+                scope.add(label)
+    return sorted(scope) or None
+
+
 class EventReviewGUI(QMainWindow):
     """Main event review GUI with 3-panel design"""
     
@@ -3742,8 +3806,9 @@ class EventReviewGUI(QMainWindow):
                           'N2', 'N3', 'Stage2', 'Stage3'}
 
     # Wake-like labels are never a detection stage, so they are dropped from the
-    # event-derived scope before it becomes the density time base.
-    _WAKE_STAGES = {'Wake', 'W', 'Undefined', 'Unknown', 'None', ''}
+    # event-derived scope before it becomes the density time base. Aliased to
+    # the module-level set so the Qt-free helper and the widget cannot drift.
+    _WAKE_STAGES = QC_WAKE_STAGES
 
     def _scored_minutes(self):
         """Total minutes in scored sleep stages (total sleep time, TST).
@@ -3792,11 +3857,12 @@ class EventReviewGUI(QMainWindow):
           difference means the scoring loaded for review is not the scoring
           detection ran on, which silently changes every density in the table.
 
-        The stage scope is the distinct stages of the loaded events, with Wake
-        dropped, which is the same scope ``event_density`` derives from the
-        rows it counts. When no event stages are available it falls back to the
-        fixed N2+N3+REM set present in the annotation, so density greys out
-        gracefully rather than erroring.
+        The stage scope is the distinct stages of the loaded events, with joint
+        run tokens split into their components and Wake dropped (see
+        :func:`qc_density_stage_scope`), which is the same scope
+        ``event_density`` derives from the rows it counts. When no event stages
+        are available it falls back to the fixed N2+N3+REM set present in the
+        annotation, so density greys out gracefully rather than erroring.
 
         Channel-global by design: the numerator is per-channel event counts,
         the denominator is shared.
@@ -3808,9 +3874,9 @@ class EventReviewGUI(QMainWindow):
             ``qc_artefact_intervals``). ``None`` reproduces the annotation-only
             denominator, which is the case checked against the library.
         event_stages : iterable of str or None
-            Stages of the loaded events; their distinct non-Wake values define
-            the density time base (the run's scope). ``None``/empty falls back
-            to the fixed N2+N3+REM set.
+            ``events.stage`` values of the loaded events; their distinct
+            non-Wake *components* define the density time base (the run's
+            scope). ``None``/empty falls back to the fixed N2+N3+REM set.
 
         Returns
         -------
@@ -3825,14 +3891,13 @@ class EventReviewGUI(QMainWindow):
         if self.annotations is None:
             return None
         # Density time base = the stages the run actually detected on, inferred
-        # from the loaded events (Wake dropped), matching the scope
-        # event_density derives from the rows it counts.
-        stage_list = None
-        if event_stages is not None:
-            scope = sorted({str(s) for s in event_stages
-                            if str(s) not in self._WAKE_STAGES})
-            if scope:
-                stage_list = scope
+        # from the loaded events (joint tokens split back into components, Wake
+        # dropped), matching the scope event_density derives from the rows it
+        # counts. build_density_denominators keys on scored epoch labels, so it
+        # must be given components: a joint 'NREM2NREM3' matches no epoch and
+        # would produce an empty denominator without a word said.
+        stage_list = qc_density_stage_scope(event_stages,
+                                            wake_stages=self._WAKE_STAGES)
         if stage_list is None:
             # Fallback: no event scope available -> fixed N2+N3+REM present.
             try:

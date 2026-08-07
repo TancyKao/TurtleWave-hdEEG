@@ -259,7 +259,11 @@ def main(argv=None):
         backup = args.backup or os.path.dirname(os.path.abspath(args.annot))
         dbwrite.record_rerun(
             conn, str(_uuid.uuid4()), new_run_id, args.event_type, args.method,
-            freq[0], freq[1], ''.join(args.stages), selected, redetect,
+            # The same canonical token the detectors stamp on events.stage and
+            # processing_status, so this provenance row names the scope in the
+            # one spelling everything else uses.
+            freq[0], freq[1], dbwrite.join_stage_token(args.stages),
+            selected, redetect,
             dropped, os.path.abspath(args.annot), backup, args.requested_by)
     finally:
         conn.close()

@@ -5,6 +5,59 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] — 2026-08-07
+
+`events.stage` now records the stage set the run searched, as one joint token:
+a run over N2 and N3 stores `NREM2NREM3` on every event, written identically by
+all three detectors on both the database and the legacy paths. Two spellings
+used to coexist: detection stored each event's own epoch stage, while the 4.0.x
+CSV import route stored the joined request for spindles and the epoch stage for
+slow waves. A database carrying both blocked the PAC tab outright. A detection
+run now also fills sleep cycles and stage durations, which no run had ever done.
+A database written before 4.3 must be migrated before it is re-detected — see
+**Upgrading**.
+
+### Added
+
+- `events.epoch_stage`, keeping each event's own scored epoch stage beside the run's token.
+- Public API: `join_stage_token`, `split_stage_token`, `stage_components`, `stage_tokens_covering`, `resolve_stage_tokens`, `pooled_denominator`, `stage_format` and `assert_stage_format_compatible`, whose `stage_token` is keyword-only and has no default so the guard cannot be skipped by omission.
+- `db_meta` table, carrying a `stage_format` marker that distinguishes a joint-token database from a pre-4.3 one.
+- `v_event_density` SQL view, so R and plain SQL read the same densities `event_density` computes.
+- `examples/migrate_stage_to_joint.py`: converts a pre-4.3 database and stamps the marker, dry-run by default, deriving the target token per channel group so channels searched over different stage sets are not collapsed into one.
+- Detection fills `sleep_cycles`, `stage_durations` and `events.cycle` on its own connection, without touching the annotation XML.
+- `conn`, `run_id` and `tag_events` on `finalize_cycles_and_durations`, `ParalCycles.run` and `tag_events_with_cycles`, so a detection shares one connection and tags only its own rows.
+- `strict` on `store_analysed_time`, raising and rolling the write back when the denominator comes out as zero seconds for every stage rather than storing one that turns every density in the scope into an unexplained NaN. Detection keeps the tolerant default; the migration passes it.
+
+### Changed
+
+- `events.stage` holds the run's canonical stage token instead of the per-epoch stage or the requested list, in the database, the JSON and the exported filenames.
+- Only `tag_method` writes `events.cycle`; every method used to tag it, last run winning.
+- `finalize_cycles_and_durations` raises when `tag_method` is not one of `methods`, which previously wrote no XML markers at all and silently let the last method own the numbering.
+- Detection stops when a requested stage has no scored epoch, instead of labelling every event with a stage the recording does not contain.
+- Re-detecting a scope over a different stage set raises instead of writing, because the stage keys the stored rows and the new ones would be appended beside them rather than replacing them. Pass `replace_channels` for the affected channels to delete the old rows in the same transaction.
+- `event_density` reports one row per stage token, and refuses a request for a strict subset of a stored joint token rather than returning a number it cannot attribute.
+- The deprecated per-channel JSON carries the run's stage token plus a new `epoch_stage` field; the deprecated density exporters split the token, so their per-stage numbers are unchanged.
+- The PAC channel lookup intersects two per-side queries instead of self-joining on stage, so a genuine stage mismatch is reported and confirmable rather than fatal.
+
+### Fixed
+
+- PAC was unusable on a database built by the 4.0.x CSV import route, where spindles carry the joined stage request and slow waves the per-epoch stage: the channel lookup joined the two on `stage`, which those spellings can never satisfy, so the channel list came back empty and every run failed with "No channels selected".
+- `sleep_cycles`, `stage_durations` and `events.cycle` were never populated by a detection run; only the standalone cycle script filled them.
+- The GUI's post-run verification counted events by single stage, so a successful run would have reported "0 events written" once joint tokens landed.
+- The review GUI's QC density and the legacy JSON exporters treated a joint token as a stage of its own, which matches no denominator and reads as zero everywhere.
+
+### Upgrading
+
+- Detection refuses a pre-4.3 database that already holds rows for the scope it is about to write. `event_uuid5` hashes the stage, so the new token changes every event's identity and `INSERT OR REPLACE` appends a duplicate set instead of replacing it, doubling every count and density in that scope with no error. Run `examples/migrate_stage_to_joint.py`, or detect into a fresh database.
+- Every row written by detection before 4.3 carries a per-epoch stage, spindles included, so a 4.1 or 4.2 database needs migrating in full. Only a database imported from CSV by 4.0.x already carries joint spindle tokens, and there the migration just stamps the marker.
+- The migration reads `processing_status` to find which channels were searched over which stages, and warns when one scope needs more than one token. Check that warning before applying: relabelling a channel searched over N2 alone with a wider token divides its events by a larger denominator from then on.
+- The migration relabels NULL-stage rows with their run's token, which is not invented data: `events.stage` used to be the event's own epoch and could be unresolved, and is now the run's stage scope, which is known for every row in it. The per-epoch uncertainty stays NULL in `events.epoch_stage`; `--keep-null-stage` restores the old behaviour.
+- The migration exits 3 and leaves the marker unstamped when it could not unblock every scope, rather than reporting success while the surviving rows keep refusing re-detection. Treat any non-zero exit as failure, not only 1.
+- The migration's backup is the only way back. A joint token cannot be un-collapsed without re-reading the hypnogram, so keep that file until you have checked the result.
+- `processing_status` rows written by earlier versions are not in canonical stage order, so a resume re-detects those channels instead of skipping them, and coverage verification warns about channels that are not missing. Both are harmless and clear after one 4.3 run.
+- `event_density` with `stage=['NREM2']` against a run detected over N2 and N3 returns no row instead of a wrong one. Use `events.epoch_stage` when you need the split.
+- Schema changes are additive: `events.epoch_stage`, `db_meta` and the `v_event_density` view. No column is dropped, renamed or retyped.
+
 ## [4.2.0] — 2026-08-06
 
 Makes `neural_events.db` the single store of record. Detection writes to the

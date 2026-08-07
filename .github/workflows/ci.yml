@@ -55,3 +55,7 @@ jobs:
       - name: Run smoke tests
         run: |
           python tests/test_turtlewave.py
+
+      - name: Run frontend stage-token tests (offscreen)
+        run: |
+          python tests/test_frontend_stage_tokens.py

@@ -34,9 +34,15 @@ try:
     # that every requested channel is accounted for (verify_channel_coverage),
     # derives density from the stored denominator (event_density), and offers
     # a flat CSV on demand (export_events_to_csv).
+    #
+    # resolve_stage_tokens translates a requested stage set into the tokens
+    # actually stored, so a post-run count reads joint-token rows
+    # ('NREM2NREM3') and legacy per-epoch rows ('NREM2', 'NREM3') alike.
     from turtlewave_hdEEG.dbwrite import (fmt_freq_token, resolve_db_target,
                                           verify_channel_coverage,
-                                          export_events_to_csv)
+                                          export_events_to_csv,
+                                          resolve_stage_tokens,
+                                          join_stage_token)
     from turtlewave_hdEEG.density import event_density
 
     #from wonambi.dataset import Dataset as WonambiDataset
@@ -3277,42 +3283,92 @@ class TurtleWaveGUI(QMainWindow):
                     "Database not found. Cannot update available channels.")
                 return
             
+            # Find channels carrying both slow waves and spindles for the
+            # selected methods, as two independent lookups intersected in
+            # Python rather than one self-join on ``sw.stage = sp.stage``.
+            #
+            # The join demanded that both sides carry the *identical* stage
+            # string. A database where slow waves stored the per-epoch stage
+            # ('NREM2', 'NREM3') and spindles the joined run scope
+            # ('NREM2NREM3') can never satisfy that, so it matched zero rows,
+            # the channel list came back empty, and the only symptom the user
+            # saw was "No channels selected" at run time - with the stage
+            # difference, the actual cause, never mentioned. Joint stage tokens
+            # remove that particular mismatch, but not the general one:
+            # detecting slow waves on N2+N3 and spindles on N2 alone rebuilds
+            # exactly the same dead end.
+            #
+            # Intersecting per-side channel sets keeps a stage difference
+            # visible instead of fatal - it is reported here and confirmed by
+            # the "Continue anyway?" modal in run_pac_analysis, which the join
+            # made unreachable.
             conn = connect_events_db(db_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Find channels with both SW and spindles for the selected methods and stages
-            query = """
-                SELECT DISTINCT sw.channel 
-                FROM events sw
-                JOIN events sp ON sw.channel = sp.channel AND sw.stage = sp.stage
-                WHERE sw.event_type = 'slow_wave' AND sw.method = ? AND sw.stage = ?
-                AND sp.event_type = 'spindle' AND sp.method = ? AND sp.stage = ?
-                ORDER BY sw.channel
-            """
-            
-            cursor.execute(query, (sw_base_method, sw_stage, spindle_base_method, spindle_stage))
-            
-            # Get matching channels
-            matching_channels = [row[0] for row in cursor.fetchall()]
-            conn.close()
+                def _channels_for(event_type, method, stage):
+                    cursor.execute(
+                        "SELECT DISTINCT channel FROM events "
+                        "WHERE event_type = ? AND method = ? AND stage = ? "
+                        "AND channel IS NOT NULL",
+                        (event_type, method, stage))
+                    return {row[0] for row in cursor.fetchall()}
+
+                sw_channels = _channels_for('slow_wave', sw_base_method,
+                                            sw_stage)
+                spindle_channels = _channels_for('spindle',
+                                                 spindle_base_method,
+                                                 spindle_stage)
+            finally:
+                conn.close()
+
+            matching_channels = sorted(sw_channels & spindle_channels)
 
             # The lookup got through, so forget any earlier failure message:
             # if the same problem recurs it should be reported again.
             self.write_log_once('pac_channel_lookup', None)
 
             if matching_channels:
-                #self.write_log(f"Found {len(matching_channels)} channels with both {sw_base_method} slow waves and {spindle_base_method} spindles in {sw_stage}")
-                
                 # Store and update available channels
                 self.pac_available_channels = matching_channels
-                
+                self.write_log_once('pac_channel_empty', None)
+
                 # Update UI
                 self.update_pac_channel_lists()
             else:
-                #self.write_log(f"No channels found with both {sw_base_method} slow waves and {spindle_base_method} spindles in {sw_stage}")
+                # Say which side was empty, and whether the two scopes even
+                # describe the same stages. Kept under its own log key so the
+                # success-path clear above cannot make it repeat on every combo
+                # change.
+                if not sw_channels and not spindle_channels:
+                    reason = (f"no slow-wave rows for method '{sw_base_method}' "
+                              f"stage '{sw_stage}', and no spindle rows for "
+                              f"method '{spindle_base_method}' stage "
+                              f"'{spindle_stage}'")
+                elif not sw_channels:
+                    reason = (f"no slow-wave rows for method '{sw_base_method}' "
+                              f"stage '{sw_stage}' ({len(spindle_channels)} "
+                              f"spindle channel(s) found)")
+                elif not spindle_channels:
+                    reason = (f"no spindle rows for method "
+                              f"'{spindle_base_method}' stage "
+                              f"'{spindle_stage}' ({len(sw_channels)} "
+                              f"slow-wave channel(s) found)")
+                else:
+                    reason = (f"{len(sw_channels)} slow-wave channel(s) and "
+                              f"{len(spindle_channels)} spindle channel(s), "
+                              f"but none in common")
+                if str(sw_stage) != str(spindle_stage):
+                    reason += (f"; the two stage scopes differ (SW '{sw_stage}' "
+                               f"vs spindle '{spindle_stage}'), so re-detect "
+                               f"both on the same stage set")
+                self.write_log_once(
+                    'pac_channel_empty',
+                    "PAC: no channel has both slow waves and spindles - "
+                    + reason)
                 self.pac_available_channels = []
                 self.update_pac_channel_lists()
-        
+
         except Exception as e:
             self.write_log_once('pac_channel_lookup',
                                 f"Error updating available channels: {str(e)}")
@@ -4683,8 +4739,14 @@ class TurtleWaveGUI(QMainWindow):
         frequency : tuple of float
             Band ``(lo, hi)`` of the run.
         stage_list : list of str
-            Stages the run was scoped to. ``events.stage`` holds each event's
-            own epoch stage, so this is an ``IN`` filter, not the joined token.
+            Stages the run was scoped to, as single stage labels.
+            ``events.stage`` holds the *run's* stage set - a joint token such
+            as ``'NREM2NREM3'`` for a two-stage run - so this list is resolved
+            against the tokens actually stored rather than used as a literal
+            ``IN`` filter. Filtering literally would match zero joint-token
+            rows and report "0 events written" after a run that succeeded.
+            Older databases holding one row per epoch stage still read
+            correctly, because a per-epoch label is a one-component token.
         run_ids : set of str or None
             When given, restrict to these ``run_id`` values - the rows this run
             wrote. ``None`` counts the whole scope regardless of run, which
@@ -4706,16 +4768,27 @@ class TurtleWaveGUI(QMainWindow):
         if frequency is not None:
             where += ["freq_lower = ?", "freq_upper = ?"]
             params += [float(frequency[0]), float(frequency[1])]
-        if stage_list:
-            where.append("stage IN (%s)" % ",".join("?" * len(stage_list)))
-            params += [str(s) for s in stage_list]
-        if run_ids:
-            run_ids = sorted(run_ids)
-            where.append("run_id IN (%s)" % ",".join("?" * len(run_ids)))
-            params += run_ids
         conn = None
         try:
             conn = connect_events_db(db_path)
+            if stage_list:
+                # Resolve against the tokens the database actually holds. An
+                # empty result means nothing stored is inside the requested
+                # set, which must match no rows - dropping the predicate here
+                # would count the whole method/band scope instead.
+                tokens = resolve_stage_tokens(conn, list(stage_list),
+                                              where=list(where),
+                                              params=list(params))
+                if tokens:
+                    where.append("stage IN (%s)"
+                                 % ",".join("?" * len(tokens)))
+                    params += [str(t) for t in tokens]
+                else:
+                    where.append("1 = 0")
+            if run_ids:
+                run_ids = sorted(run_ids)
+                where.append("run_id IN (%s)" % ",".join("?" * len(run_ids)))
+                params += run_ids
             cur = conn.cursor()
             cur.execute(
                 "SELECT COUNT(*), COUNT(DISTINCT channel) FROM events "
@@ -5036,7 +5109,10 @@ class TurtleWaveGUI(QMainWindow):
 
         method_str = str(scope['method']).replace('/', '_')
         freq_str = fmt_freq_token(scope['frequency'][0], scope['frequency'][1])
-        stages_str = "".join(scope['stage']) if scope['stage'] else "all"
+        # join_stage_token, not a raw ''.join: the canonical order is what the
+        # detectors wrote into events.stage, so the exported filename cannot
+        # drift from the token it describes when the stages arrive out of order.
+        stages_str = join_stage_token(scope['stage']) if scope['stage'] else "all"
         base = f"{event_type}_{method_str}_{freq_str}_{stages_str}"
         events_csv = os.path.join(out_dir, f"{base}_events.csv")
         density_csv = os.path.join(out_dir, f"{base}_density.csv")

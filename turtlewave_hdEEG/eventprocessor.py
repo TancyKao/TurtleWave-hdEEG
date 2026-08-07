@@ -24,12 +24,21 @@ NON_EVENT_JSON_PREFIXES = ('detection_summary_', 'redetect_request')
 def _build_epoch_lookup(annotations, logger, required):
     """Build the sorted ``(start, end, stage)`` epoch table for stage lookup.
 
-    Every database-bound event carries the single scored stage of the epoch it
-    falls in, and that stage is part of the event's uuid5 identity *and* the
-    key that joins it to its ``analysed_time`` denominator. So on the database
-    path a failure to build this table is fatal, not a warning: the previous
-    behaviour (log, use an empty table) gave every event a NULL stage, which
-    stores a complete run that reads back as an empty night.
+    Still fatal on the database path, for two reasons that survive the move to
+    a joint stage token in ``events.stage``:
+
+    * :func:`turtlewave_hdEEG.dbwrite.store_analysed_time` cannot compute a
+      density denominator from a scoring it cannot read, and it swallows its
+      own failure so the run would complete with no denominator at all;
+    * the joint token labels every row **unconditionally**, so a run scoped to
+      a stage the hypnogram does not contain would stamp thousands of rows
+      with that label and nothing in the database would contradict it. Under
+      per-epoch storage that surfaced as NULL stages. The replacement signal
+      is :func:`assert_scoring_covers_stages`, which needs this table.
+
+    It also still resolves each event's own epoch stage, now stored in the
+    additive ``events.epoch_stage`` column and used as the in-run assertion
+    that detected events really fall in the requested stages.
 
     Parameters
     ----------
@@ -78,6 +87,115 @@ def _build_epoch_lookup(annotations, logger, required):
             "Score the recording, or pass write_db=False to run the legacy "
             "JSON path.")
     return epochs
+
+
+def _json_event_stages(event):
+    """Stage labels of one JSON event, whatever shape its ``stage`` field has.
+
+    The legacy JSON density exporters read ``event['stage']`` directly, and
+    that field has had three shapes across releases: the requested stage
+    **list** (spindles and K-complexes before 4.3), a single per-epoch label
+    (slow waves), and from 4.3 the run's joint **token** (``'NREM2NREM3'``).
+    Treating a joint token as one opaque stage is silent and total: it matches
+    no requested stage and no denominator, so every per-stage density reads
+    zero without an error anywhere.
+
+    Parameters
+    ----------
+    event : dict
+        Event dict loaded from a per-channel JSON file.
+
+    Returns
+    -------
+    list of str
+        Constituent stage labels, de-duplicated in order. Empty when the event
+        carries no ``stage`` field.
+    """
+    from turtlewave_hdEEG.dbwrite import stage_components
+    raw = event.get('stage') if isinstance(event, dict) else None
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    out = []
+    for value in values:
+        for comp in stage_components(str(value)):
+            if comp not in out:
+                out.append(comp)
+    return out
+
+
+def assert_scoring_covers_stages(epochs, stages, logger, required,
+                                 event_label='event'):
+    """Refuse a run scoped to a stage this recording has no scored epoch of.
+
+    The replacement for a signal the joint stage token removes. Every row a
+    run writes now carries the run's requested stage set as its label,
+    unconditionally -- so detecting on ``NREM3`` in a recording scored with no
+    N3 would stamp every detected event ``'NREM3'``, and nothing in the
+    database would contradict it. (Under the per-epoch storage this replaced,
+    the same mistake surfaced as NULL stages.) The density would then be
+    computed against whatever ``analysed_time`` row existed, or against none.
+
+    Detection would also be near-empty anyway -- ``fetch`` returns no segments
+    for an unscored stage -- so failing here costs nothing but a clear message.
+
+    Parameters
+    ----------
+    epochs : list of tuple
+        ``(start, end, stage)`` table from :func:`_build_epoch_lookup`. An
+        empty table skips the check (nothing can be asserted from it).
+    stages : list of str or None
+        Stages the run was scoped to. ``None`` or empty skips the check: an
+        all-stage run makes no claim about any particular stage.
+    logger : logging.Logger
+        Processor logger.
+    required : bool
+        True on the database path, where an unscored requested stage raises.
+        False on the legacy JSON path, where it is logged as an ERROR and the
+        run continues -- JSON carries no stage-keyed denominator, so the
+        blast radius is a set of empty files rather than a wrong density.
+    event_label : str, optional
+        Event name used in the message (``'spindle'``, ``'slow wave'``, ...).
+        Default ``'event'``.
+
+    Returns
+    -------
+    dict
+        ``{stage: n_scored_epochs}`` for every requested stage.
+
+    Raises
+    ------
+    ValueError
+        If ``required`` and any requested stage has zero scored epochs.
+    """
+    if not stages or not epochs:
+        return {}
+    wanted = [str(s) for s in (stages if isinstance(stages, (list, tuple))
+                               else [stages])]
+    counts = {s: 0 for s in wanted}
+    for _start, _end, stg in epochs:
+        if stg in counts:
+            counts[stg] += 1
+    absent = [s for s in wanted if counts[s] == 0]
+    if not absent:
+        logger.debug(
+            "Scoring covers every requested stage: %s",
+            ", ".join(f"{s}={counts[s]} epoch(s)" for s in wanted))
+        return counts
+
+    scored = sorted({str(e[2]) for e in epochs})
+    msg = (
+        f"This run is scoped to stage(s) {absent}, but the scoring contains "
+        f"no epoch of {'them' if len(absent) > 1 else 'it'}. The stages "
+        f"actually scored are {scored}. Every {event_label} row this run "
+        f"writes would be labelled with the requested stage set regardless, "
+        f"so the mistake would be invisible in the database and the density "
+        f"denominator would not match the events. Fix the stage selection or "
+        f"the scoring file.")
+    if required:
+        raise ValueError(msg)
+    logger.error(msg)
+    return counts
 
 
 class ParalEvents:
@@ -287,10 +405,15 @@ class ParalEvents:
 
         Notes
         -----
-        In the direct-write path each spindle's ``stage`` is resolved to the
-        single scored epoch it falls in (via ``_stage_at``), matching the
-        slow-wave/K-complex convention. This differs from the legacy spindle CSV
-        path, which tags each event with the whole requested stage list.
+        ``stage`` on every stored spindle -- database row and JSON alike -- is
+        the **run's** canonical stage token
+        (:func:`turtlewave_hdEEG.dbwrite.join_stage_token`): a run over
+        ``['NREM2', 'NREM3']`` stores ``'NREM2NREM3'`` on all of them, because
+        the two stages were searched as one concatenated segment and an event
+        in that segment is not attributable to one of them. A single-stage run
+        stores ``'NREM2'``. The event's own scored epoch stage is kept
+        alongside in the additive, nullable ``events.epoch_stage`` column, so
+        an N2-vs-N3 split stays recoverable with a plain ``GROUP BY``.
 
         The run also stores its density denominator -- the artefact-free
         in-stage seconds it actually analysed -- in ``analysed_time``, so
@@ -387,6 +510,7 @@ class ParalEvents:
             self.annotations, self.logger, required=write_db)
         _det_epoch_starts = [e[0] for e in _det_epochs]
         _n_null_stage = 0
+        _n_out_of_scope = 0
 
         def _stage_at(t):
             """Return the scored stage of the epoch containing time t, or None."""
@@ -397,10 +521,24 @@ class ParalEvents:
                 return _det_epochs[idx][2]
             return None
 
+        # A requested stage with no scored epoch would otherwise be invisible:
+        # the joint token labels every row with the requested set whether or
+        # not the recording contains it. Fatal on the database path.
+        assert_scoring_covers_stages(
+            _det_epochs, stage, self.logger, required=write_db,
+            event_label='spindle')
+        _requested_stages = set(str(s) for s in stage) if stage else set()
+
         # ------------------------------------------------------------------
         # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
         # ------------------------------------------------------------------
-        stages_key = "".join(stage) if stage else "all"
+        # ONE canonical token for the run's stage set, used for events.stage,
+        # the event_uuid5 stage argument, processing_status, the JSON dict and
+        # the filename -- so the detectors cannot disagree about what a stage
+        # means (spindles used to store the requested LIST while slow waves
+        # stored the per-epoch stage, which made the PAC self-join on
+        # sw.stage = sp.stage structurally unable to match).
+        stages_key = dbwrite.join_stage_token(stage) if stage else "all"
         db_conn = None
         run_id = None
         db_skip = set()
@@ -455,6 +593,18 @@ class ParalEvents:
                 dbwrite.assert_single_subject(
                     db_conn, db_subject, db_path=db_path, logger=self.logger)
 
+                # Refuse any write that would append a duplicate set rather
+                # than replace: the stage is part of both the uuid5 and the
+                # event_chan_time UNIQUE key, so rows stored under a DIFFERENT
+                # stage token (a pre-4.3 per-epoch stage, or an earlier run
+                # over a different stage set) would survive alongside this
+                # run's. stages_key is what makes the second case visible.
+                dbwrite.assert_stage_format_compatible(
+                    db_conn, 'spindle', method, frequency[0], frequency[1],
+                    stage_token=stages_key, channels=chan,
+                    replace_channels=replace_channels,
+                    db_path=db_path, logger=self.logger)
+
                 dbwrite.record_run(
                     db_conn, run_id, 'spindle', method_db,
                     dbwrite.method_citation(method_db),
@@ -469,6 +619,14 @@ class ParalEvents:
                     db_conn, db_subject, self.annotations, self.dataset, stage,
                     reject_artifacts, reject_arousals,
                     annotation_file=annot_file, logger=self.logger)
+
+                # Sleep cycles + stage durations, on this run's connection and
+                # WITHOUT touching the annotation XML. A no-op when they are
+                # already stored. events.cycle is tagged after the channel
+                # loop, scoped to this run.
+                dbwrite.ensure_cycles_populated(
+                    db_conn, self.annotations, db_subject, db_path=db_path,
+                    logger=self.logger)
 
                 if resume:
                     db_skip = dbwrite.resume_skip_channels(
@@ -618,22 +776,26 @@ class ParalEvents:
                                     sp_start = float(sp.get('start', 0))
                                     sp_end = float(sp.get('end', 0))
                                     sp_dur = float(sp.get('dur', sp_end - sp_start))
-                                    single_stage = _stage_at(sp_start)
-                                    if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
-                                        single_stage = stage[0]
-                                    if single_stage is None:
+                                    # events.stage is the RUN's stage token.
+                                    # The epoch stage is kept beside it in the
+                                    # additive epoch_stage column and used as
+                                    # the assertion below.
+                                    epoch_stage = _stage_at(sp_start)
+                                    if epoch_stage is None:
                                         # No scored epoch contains this event.
-                                        # Counted and reported after the loop:
-                                        # such a row has no denominator, so it
-                                        # can never contribute to a density.
+                                        # Counted and reported after the loop.
                                         _n_null_stage += 1
+                                    elif (_requested_stages
+                                            and epoch_stage not in _requested_stages):
+                                        _n_out_of_scope += 1
                                     morph = dbwrite.event_det_morphology(sp)
                                     ev = {
                                         'uuid': dbwrite.event_uuid5(
                                             'spindle', ch, sp_start, meth,
-                                            frequency[0], frequency[1], single_stage),
+                                            frequency[0], frequency[1], stages_key),
                                         'start_time': sp_start, 'end_time': sp_end,
-                                        'duration': sp_dur, 'stage': single_stage,
+                                        'duration': sp_dur, 'stage': stages_key,
+                                        'epoch_stage': epoch_stage,
                                         'method': meth,
                                     }
                                     ev.update(morph)
@@ -641,7 +803,7 @@ class ParalEvents:
                                     channel_param_segments.append(
                                         dbwrite.make_param_segment(
                                             seg['data'], sp_start, sp_end,
-                                            'spindle', single_stage, ch))
+                                            'spindle', stages_key, ch))
 
                                 # Add to JSON (legacy write_db=False path only)
                                 if write_json:
@@ -657,7 +819,15 @@ class ParalEvents:
                                         'method': meth
                                     }
                                     
-                                    sp_data['stage'] = stage
+                                    # The run's canonical stage token, the same
+                                    # string the database stores, so the JSON
+                                    # and the database cannot disagree about
+                                    # what an event's stage means. Was the raw
+                                    # requested LIST, which the CSV importer
+                                    # then flattened with its own join.
+                                    sp_data['stage'] = stages_key
+                                    sp_data['epoch_stage'] = _stage_at(
+                                        sp_data['start_time'])
                                     sp_data['freq_range'] = frequency
                                     # Add frequency/power/amplitude if available
                                     #if 'peak_freq' in sp:
@@ -687,7 +857,7 @@ class ParalEvents:
                             f"Wrote {len(channel_db_events)} spindle rows for "
                             f"channel {ch} to the database")
 
-                    stages_str = "".join(stage) if stage else "all"
+                    stages_str = stages_key
                     if write_json:
                         try:
                             ch_json_file = os.path.join(json_dir, f"spindles_{method_str}_{freq_str}_{stages_str}_{ch}.json")
@@ -721,7 +891,7 @@ class ParalEvents:
                         # apart from one that legitimately had no spindles.
                         elif write_json:
                             try:
-                                stages_str = "".join(stage) if stage else "all"
+                                stages_str = stages_key
                                 ch_json_file = os.path.join(json_dir, f"spindles_{method_str}_{freq_str}_{stages_str}_{ch}.json")
                                 with open(ch_json_file, 'w', encoding='utf-8') as f:
                                     json.dump({"error": str(e), "channel": ch}, f)
@@ -731,13 +901,29 @@ class ParalEvents:
 
         if write_db and _n_null_stage:
             self.logger.error(
-                "%d of %d detected spindle(s) fall outside every scored epoch, "
-                "so their stage is NULL. A NULL-stage row has no density "
-                "denominator and is excluded from every per-stage and pooled "
-                "density. Check that the scoring covers the whole recording.",
-                _n_null_stage, len(all_spindles))
+                "%d of %d detected spindle(s) fall outside every scored epoch "
+                "(events.epoch_stage is NULL). They still carry this run's "
+                "stage token '%s' and so still count towards its density, but "
+                "no scored epoch vouches for them. Check that the scoring "
+                "covers the whole recording.",
+                _n_null_stage, len(all_spindles), stages_key)
+        if write_db and _n_out_of_scope:
+            # The retained assertion: detection ran on segments fetched for the
+            # requested stages, so an event whose own epoch stage is outside
+            # that set means the stage token on its row is not the whole truth.
+            self.logger.warning(
+                "%d of %d detected spindle(s) fall in a scored epoch OUTSIDE "
+                "the requested stage set %s (see events.epoch_stage). They are "
+                "labelled with this run's stage token '%s' like every other "
+                "row. A handful at segment boundaries is expected; a large "
+                "share means the fetch and the scoring disagree.",
+                _n_out_of_scope, len(all_spindles), sorted(_requested_stages),
+                stages_key)
 
         if write_db and db_conn is not None:
+            # events.cycle for THIS run's rows only, from the stored cycles.
+            dbwrite.tag_run_cycles(db_conn, db_subject, run_id=run_id,
+                                   logger=self.logger)
             try:
                 db_conn.close()
             except Exception:
@@ -1395,13 +1581,8 @@ class ParalEvents:
         spindle_stages = set()
         for sp in all_spindles:
             if not isinstance(sp, dict) or 'stage' not in sp:
-                continue        
-            sp_stage = sp['stage']
-            if isinstance(sp_stage, list):
-                for s in sp_stage:
-                    spindle_stages.add(str(s))
-            else:
-                spindle_stages.add(str(sp_stage))
+                continue
+            spindle_stages.update(_json_event_stages(sp))
         
         # If stage is None, process all stages found in spindles
         if stage is None:
@@ -1448,17 +1629,20 @@ class ParalEvents:
             spindles_by_chan[chan].append(sp)
             
             if not combined_stages:
-                # Process stage info, handling multiple stages per spindle
-                sp_stages = []
-                if 'stage' in sp:
-                    sp_stages = sp['stage'] if isinstance(sp['stage'], list) else [sp['stage']]
-                sp_stages = [str(s) for s in sp_stages]
+                # Process stage info, handling multiple stages per spindle.
+                # From 4.3 the JSON carries the run's joint token
+                # ('NREM2NREM3'), not a list, so this splits rather than
+                # iterates -- without it the token becomes a stage of its own,
+                # matching no requested stage and no denominator, and every
+                # per-stage density silently reads zero.
+                sp_stages = _json_event_stages(sp)
 
                 # If the event spans multiple requested stages, attribute it to
                 # the single stage of the epoch it actually occurred in, so it is
                 # not double-counted across stages.
                 if len(sp_stages) > 1:
-                    actual = _stage_at(sp.get('start_time', sp.get('start')))
+                    actual = sp.get('epoch_stage') or _stage_at(
+                        sp.get('start_time', sp.get('start')))
                     if actual in sp_stages:
                         sp_stages = [actual]
 
@@ -1495,9 +1679,9 @@ class ParalEvents:
                     for sp in all_chan_spindles:
                         if 'stage' not in sp:
                             continue
-                        # Get spindle's stages as a set
-                        sp_stages = sp['stage'] if isinstance(sp['stage'], list) else [sp['stage']]
-                        sp_stages = set(str(s) for s in sp_stages)
+                        # Get spindle's stages as a set (a joint token is split
+                        # into its components, see _json_event_stages).
+                        sp_stages = set(_json_event_stages(sp))
 
                         # Check if any of the spindle's stages match any target stage
                         if sp_stages.intersection(stages_set) and id(sp) not in seen_spindles:

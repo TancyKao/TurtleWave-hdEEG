@@ -41,6 +41,7 @@ import logging
 import sqlite3
 import subprocess
 import datetime
+from collections import namedtuple
 
 from wonambi.trans import select
 from wonambi.trans.analyze import event_params
@@ -65,6 +66,14 @@ _DET_MORPH_COLUMNS = (
 
 # ``run_id`` foreign-key-ish link from an event to its detection_runs row.
 _RUN_ID_COLUMN = ('run_id', 'TEXT')
+
+# Per-event scored epoch stage, additive and nullable. ``events.stage`` holds
+# the RUN's canonical stage token ('NREM2NREM3'); this holds the stage of the
+# single scored epoch the event actually fell in ('NREM3'). It is in no key and
+# no index, so adding it re-keys nothing -- its only job is to keep an
+# N2-vs-N3 split recoverable with a plain GROUP BY, without depending on the
+# annotation XML still existing and being unedited.
+_EPOCH_STAGE_COLUMN = ('epoch_stage', 'TEXT')
 
 # Column order used by the direct-write INSERT. Kept in one place so the SQL and
 # the value tuple never drift.
@@ -119,12 +128,23 @@ def event_uuid5(event_type, channel, start_time, method, freq_lo, freq_hi, stage
     freq_lo, freq_hi : float or None
         Lower/upper detection band bounds in Hz.
     stage : str or None
-        Single resolved sleep stage of the event.
+        Stage scope label of the event, as stored in ``events.stage``. From
+        4.3 this is the run's canonical joint token
+        (:func:`join_stage_token`, e.g. ``'NREM2NREM3'``); earlier releases
+        passed the event's own epoch stage.
 
     Returns
     -------
     str
         String form of the uuid5.
+
+    Warnings
+    --------
+    Because the stage is part of the key, re-detecting a scope whose rows were
+    written under the *other* stage convention yields a different uuid AND a
+    different stage, so ``INSERT OR REPLACE`` appends instead of replacing.
+    :func:`assert_stage_format_compatible` is the guard that catches this
+    before the first write; do not bypass it.
     """
     key = "|".join([
         str(event_type), str(channel), _fmt_num(start_time), str(method),
@@ -903,10 +923,11 @@ def verify_channel_coverage(db_path, event_type, method, requested_channels,
       different method or band masks a channel that never ran in the current
       one.
 
-    The ``events`` half cannot be scoped by stage: ``events.stage`` records
-    each event's own epoch stage, not the run's joined stage key, so
-    filtering on it would discard valid rows. Two things limit the resulting
-    blind spot. A channel with an in-scope ``success = 0`` row is excluded
+    The ``events`` half is deliberately NOT scoped by stage. From 4.3 on
+    ``events.stage`` holds the run's joined stage token and filtering on it
+    would work -- but a database may still hold rows written per-epoch by an
+    earlier release, and filtering those out would report a fully-covered
+    channel as missing. Two things limit the resulting blind spot. A channel with an in-scope ``success = 0`` row is excluded
     whatever events exist for it, which closes the case where a re-run over a
     narrower stage set crashes on a channel an earlier run had populated. And
     channels vouched for by events alone are returned in ``events_only`` so a
@@ -965,12 +986,13 @@ def verify_channel_coverage(db_path, event_type, method, requested_channels,
     # coverage check whenever a detection run is mid-write.
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
-        # NOTE: the events half cannot be scoped by stage. events.stage holds
-        # the per-epoch stage of each event ('NREM2'), not the run's joined
-        # stage key ('NREM2NREM3'), so filtering on it would reject valid
-        # rows. Two mitigations below: an in-scope FAILURE always wins over
-        # event evidence, and channels credited by events alone are counted
-        # and reported.
+        # NOTE: the events half is not scoped by stage. events.stage holds the
+        # run's joined token ('NREM2NREM3') from 4.3 on, but rows written by
+        # an earlier release hold the per-epoch stage ('NREM2') and filtering
+        # on either spelling alone would reject the other's valid rows. Two
+        # mitigations below: an in-scope FAILURE always wins over event
+        # evidence, and channels credited by events alone are counted and
+        # reported.
         with_events = {str(r[0]) for r in conn.execute('''
             SELECT DISTINCT channel FROM events
             WHERE event_type = ? AND method = ?
@@ -1300,7 +1322,8 @@ def record_analysed_time(conn, subject, stage, analysed_seconds,
 
 def store_analysed_time(conn, subject, annotations, dataset, stages,
                         reject_artifacts, reject_arousals, epoch_length=30,
-                        source='detection', annotation_file=None, logger=None):
+                        source='detection', annotation_file=None, logger=None,
+                        strict=False):
     """Compute and store the density denominators for a detection run.
 
     Wraps :func:`turtlewave_hdEEG.utils.build_density_denominators` -- the same
@@ -1308,10 +1331,17 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
     used -- and writes one ``analysed_time`` row per requested stage, so
     density can be derived from the database alone afterwards.
 
-    Failures are logged and swallowed: a denominator that cannot be computed
-    must not lose a detection run that already succeeded. The consequence is
-    visible rather than silent, because :func:`density.event_density` refuses
-    to invent a denominator and reports the missing rows.
+    Failures are logged and swallowed **by default**: a denominator that
+    cannot be computed must not lose a detection run that already succeeded,
+    and the consequence stays visible because
+    :func:`density.event_density` refuses to invent a denominator and reports
+    the missing rows.
+
+    That contract is right for a detector and wrong for a caller whose whole
+    job is this write -- a back-fill has nothing else to lose and needs to
+    know. Such a caller passes ``strict=True`` and gets the exception. The
+    default is unchanged, so the three detectors keep behaving exactly as
+    before.
 
     Parameters
     ----------
@@ -1336,18 +1366,34 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
         Scoring file path for provenance. Default ``None``.
     logger : logging.Logger or None, optional
         Logger for the per-stage summary. Default ``None``.
+    strict : bool, optional
+        Re-raise instead of swallowing; treat an empty ``stages``, and a
+        denominator that comes out as zero seconds for every requested stage,
+        as errors rather than as a warning and a stored row. For callers whose
+        only purpose is this write (the migration back-fill). Default
+        ``False``.
 
     Returns
     -------
     dict
-        ``{stage: analysed_seconds}`` for the rows written (empty on failure).
+        ``{stage: analysed_seconds}`` for the rows written (empty on failure
+        when ``strict`` is False).
+
+    Raises
+    ------
+    Exception
+        Only when ``strict`` is True: whatever the denominator computation
+        raised, or ``ValueError`` for an empty ``stages`` or an all-zero
+        denominator.
     """
     if not stages:
+        msg = ("No stage list for this run, so no density denominator was "
+               "stored. Density for this scope will be unavailable until a "
+               "stage-scoped run or a back-fill writes analysed_time.")
+        if strict:
+            raise ValueError(msg)
         if logger is not None:
-            logger.warning(
-                "No stage list for this run, so no density denominator was "
-                "stored. Density for this scope will be unavailable until a "
-                "stage-scoped run or a back-fill writes analysed_time.")
+            logger.warning(msg)
         return {}
 
     from .utils import build_density_denominators
@@ -1388,7 +1434,30 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
                 f"detection results are unaffected, but density will be "
                 f"unavailable for this scope until it is back-filled.",
                 exc_info=True)
+        if strict:
+            raise
         return {}
+
+    # A denominator of zero seconds across EVERY requested stage means the
+    # scoring produced nothing usable -- an unreadable or epoch-less
+    # annotation file yields this rather than an exception, because
+    # build_density_denominators is deliberately tolerant. For a detector that
+    # is survivable (the row is written, and density reports a zero
+    # denominator as NaN with a warning rather than as a density of 0). For a
+    # caller whose only job is this write it is a failure with a
+    # success-shaped return, so strict must not let it pass.
+    if strict and not sum(written.values()):
+        conn.execute("ROLLBACK TO SAVEPOINT tw_analysed_time")
+        conn.execute("RELEASE SAVEPOINT tw_analysed_time")
+        raise ValueError(
+            f"The density denominator for subject '{subject}' came out as "
+            f"0 seconds for every requested stage ({sorted(written)}). The "
+            f"scoring could not be read, contains no scored epochs, or has "
+            f"none of these stages -- build_density_denominators reports that "
+            f"as zero time rather than raising. No row was kept: a "
+            f"zero-second denominator is not a denominator, and storing it "
+            f"would make every density in this scope NaN with no explanation "
+            f"of why. Check the annotation file.")
 
     conn.execute("RELEASE SAVEPOINT tw_analysed_time")
     conn.commit()
@@ -1399,6 +1468,239 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
             f"Stored density denominators for subject '{subject}' "
             f"(artefact-free analysed time): {summary}")
     return written
+
+
+def subject_has_cycles(conn, subject, methods=('2022', '1979')):
+    """Report whether a subject's cycles and stage durations are already stored.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    subject : str
+        Subject id, in any spelling (normalised here).
+    methods : sequence of str, optional
+        Cycle definitions that must ALL be present for the answer to be True.
+        Default ``('2022', '1979')``.
+
+    Returns
+    -------
+    bool
+        True when ``sleep_cycles`` holds at least one row for this subject
+        under every method in ``methods`` **and** ``stage_durations`` holds
+        its row. Anything less is False, so a partially-populated database is
+        completed rather than left half-done.
+
+    Notes
+    -----
+    Matches every stored spelling of the subject id, not just the canonical
+    one: ``ParalCycles`` historically stored whatever it was handed, so one
+    recording can carry ``'10sd'`` in one table and ``'sub-10sd'`` in another.
+    """
+    from .utils import normalize_subject
+    subject = normalize_subject(str(subject))
+
+    def _matches(table):
+        cols = _table_columns(conn, table)
+        if not cols or 'subject' not in cols:
+            return []
+        return [str(r[0]) for r in conn.execute(
+            f"SELECT DISTINCT subject FROM {table} "
+            f"WHERE subject IS NOT NULL AND subject != ''")
+            if normalize_subject(str(r[0])) == subject]
+
+    cyc_spellings = _matches('sleep_cycles')
+    if not cyc_spellings:
+        return False
+    placeholders = ",".join("?" * len(cyc_spellings))
+    stored_methods = {str(r[0]) for r in conn.execute(
+        f"SELECT DISTINCT method FROM sleep_cycles "
+        f"WHERE subject IN ({placeholders})", cyc_spellings)}
+    if not set(str(m) for m in methods).issubset(stored_methods):
+        return False
+    return bool(_matches('stage_durations'))
+
+
+def ensure_cycles_populated(conn, annotations, subject, db_path=None,
+                            methods=('2022', '1979'), tag_method='2022',
+                            epoch_length=30, force=False, logger=None):
+    """Fill ``sleep_cycles`` and ``stage_durations`` during a detection run.
+
+    Before this existed both tables were created by every run and filled by
+    none: only the standalone cycle script ever populated them, so a database
+    produced entirely through the GUI had two empty tables and
+    ``events.cycle`` NULL on every row.
+
+    Two properties are load-bearing:
+
+    * **The annotation XML is never written.** ``write_xml=False`` and
+      ``plot=False`` are passed unconditionally and are not exposed as
+      arguments. A detection run reads the scoring; it must not modify the
+      file a human rater owns, and a marker write is a silent modification of
+      the input.
+    * **The caller's connection is reused.** Opening a second write connection
+      while a detector holds one is a writer-vs-writer collision under DELETE
+      journal mode -- the network-drive failure mode 4.0.2 was cut for.
+
+    ``events.cycle`` is deliberately NOT tagged here: this runs before the
+    channel loop, when the run's rows do not exist yet, and a table-wide
+    tagging pass would renumber an earlier run's events. Tagging is
+    :func:`tag_run_cycles`, called after the loop with the run's own id.
+
+    Every failure is caught and logged: a completed detection must never be
+    lost to a cycle-detection problem, and the two tables are recoverable
+    afterwards with ``examples/`` cycle backfill.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        The detector's open write connection.
+    annotations : object
+        Annotation wrapper exposing ``get_hypnogram()`` and ``epochs``
+        (:class:`turtlewave_hdEEG.annotation.CustomAnnotations`). A plain
+        Wonambi ``Annotations`` has neither; that is detected and skipped with
+        a warning rather than raising.
+    subject : str
+        Subject id keying the two tables.
+    db_path : str or None, optional
+        Path of the database ``conn`` is on, for messages. Default ``None``.
+    methods : sequence of str, optional
+        Cycle definitions to store. Default ``('2022', '1979')`` -- both are
+        stored, keyed by ``(subject, method)``, so neither definition is lost.
+    tag_method : str, optional
+        The definition that will own ``events.cycle`` (used by
+        :func:`tag_run_cycles`). Default ``'2022'``.
+    epoch_length : float, optional
+        Scoring epoch length in seconds. Default ``30``.
+    force : bool, optional
+        Recompute even when the subject already has cycles stored. Default
+        ``False`` (a no-op on the second and later detectors of a run).
+    logger : logging.Logger or None, optional
+        Logger for the summary and any failure. Default ``None``.
+
+    Returns
+    -------
+    dict or None
+        ``{method: [cycle dicts]}`` when cycles were computed, ``{}`` when the
+        subject already had them (no-op), or ``None`` when the step was
+        skipped or failed.
+    """
+    log = logger if logger is not None else logging.getLogger(__name__)
+    if annotations is None:
+        log.warning(
+            "No annotations available, so sleep cycles and stage durations "
+            "were not stored. events.cycle will stay NULL.")
+        return None
+    if not hasattr(annotations, 'get_hypnogram'):
+        log.warning(
+            "The annotation object (%s) has no get_hypnogram(), so sleep "
+            "cycles and stage durations were not stored. Pass a "
+            "turtlewave_hdEEG.CustomAnnotations to have them filled "
+            "automatically.", type(annotations).__name__)
+        return None
+
+    try:
+        if not force and subject_has_cycles(conn, subject, methods=methods):
+            log.debug(
+                "Sleep cycles and stage durations are already stored for "
+                "'%s'; not recomputing.", subject)
+            return {}
+
+        # Lazy import: keeps dbwrite free of an import edge on cycleprocessor
+        # (which imports dbwrite) at module load.
+        from .cycleprocessor import finalize_cycles_and_durations
+        cycles = finalize_cycles_and_durations(
+            annotations, db_path, subject=subject, methods=tuple(methods),
+            tag_method=tag_method,
+            # Not arguments: a detection run must never touch the rater's XML
+            # and must never block on plotting.
+            write_xml=False, plot=False,
+            epoch_length=epoch_length, conn=conn,
+            tag_events=False, log_level=log.level or logging.INFO)
+        log.info(
+            "Stored sleep cycles for subject '%s': %s (annotation XML NOT "
+            "modified). events.cycle is tagged after detection, from '%s'.",
+            subject,
+            ", ".join(f"{m}={len(c)}" for m, c in cycles.items()) or 'none',
+            tag_method)
+        return cycles
+    except Exception as e:
+        log.error(
+            "Could not store sleep cycles / stage durations for subject "
+            "'%s': %s. Detection results are unaffected; back-fill them with "
+            "turtlewave_hdEEG.finalize_cycles_and_durations.", subject, e,
+            exc_info=True)
+        return None
+
+
+def tag_run_cycles(conn, subject, run_id=None, method='2022', logger=None):
+    """Write ``events.cycle`` for one detection run from the stored cycles.
+
+    Reads ``sleep_cycles`` rather than re-detecting, so the numbering in
+    ``events.cycle`` is by construction the same one the table holds, and the
+    hypnogram is read once per run instead of once per detector.
+
+    Scoped to ``run_id`` by default so a detection annotates the rows it just
+    wrote and leaves every other run's ``cycle`` alone.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        The detector's open write connection.
+    subject : str
+        Subject whose cycles to apply, in any spelling.
+    run_id : str or None, optional
+        Restrict the update to this run's rows. ``None`` tags every row (the
+        backfill case). Default ``None``.
+    method : str, optional
+        Which stored cycle definition owns ``events.cycle``. Default
+        ``'2022'``.
+    logger : logging.Logger or None, optional
+        Logger for the count and any failure. Default ``None``.
+
+    Returns
+    -------
+    int
+        Number of event rows tagged (0 when no cycles are stored, or on
+        failure -- which is logged, never raised, so a completed detection is
+        never lost to a tagging problem).
+    """
+    log = logger if logger is not None else logging.getLogger(__name__)
+    try:
+        from .utils import normalize_subject
+        from .cycleprocessor import ParalCycles
+
+        canonical = normalize_subject(str(subject))
+        spellings = [str(r[0]) for r in conn.execute(
+            "SELECT DISTINCT subject FROM sleep_cycles "
+            "WHERE subject IS NOT NULL AND subject != ''")
+            if normalize_subject(str(r[0])) == canonical]
+        if not spellings:
+            log.warning(
+                "No stored sleep cycles for subject '%s', so events.cycle was "
+                "left NULL for this run.", subject)
+            return 0
+        placeholders = ",".join("?" * len(spellings))
+        rows = conn.execute(
+            f"SELECT cycle_number, nrem_start, rem_end FROM sleep_cycles "
+            f"WHERE subject IN ({placeholders}) AND method = ? "
+            f"ORDER BY cycle_number", (*spellings, str(method))).fetchall()
+        if not rows:
+            log.warning(
+                "No '%s' sleep cycles stored for subject '%s', so "
+                "events.cycle was left NULL for this run.", method, subject)
+            return 0
+        # Only the three fields tag_events_with_cycles reads.
+        cycles = [{'cycle_number': r[0], 'nrem_start_sec': r[1],
+                   'rem_end_sec': r[2]} for r in rows]
+        pc = ParalCycles(log_level=log.level or logging.INFO)
+        return pc.tag_events_with_cycles(cycles, conn=conn, run_id=run_id)
+    except Exception as e:
+        log.error(
+            "Could not tag events with cycle numbers for subject '%s': %s. "
+            "Detection results are unaffected; events.cycle stays NULL and "
+            "can be back-filled.", subject, e, exc_info=True)
+        return 0
 
 
 def read_analysed_time(db_path, subject=None, reject_artifacts=True,
@@ -1485,11 +1787,12 @@ def ensure_direct_write_schema(conn, logger=None):
     """
     cur = conn.cursor()
 
-    # (1) events: det_* morphology + run_id -------------------------------
+    # (1) events: det_* morphology + run_id + epoch_stage ------------------
     existing = _table_columns(conn, 'events')
     if existing:  # events table exists (fresh DBs get it via initialize_*)
         added = []
-        for col, col_type in _DET_MORPH_COLUMNS + (_RUN_ID_COLUMN,):
+        for col, col_type in _DET_MORPH_COLUMNS + (_RUN_ID_COLUMN,
+                                                   _EPOCH_STAGE_COLUMN):
             if col not in existing:
                 cur.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type}")
                 added.append(col)
@@ -1587,7 +1890,186 @@ def ensure_direct_write_schema(conn, logger=None):
     # stored" from "table does not exist".
     ensure_analysed_time_schema(conn)
 
+    # (6) db_meta + the stage_format marker -------------------------------
+    # Seeded 'joint' ONLY for a database with no events yet. An existing
+    # database full of per-epoch rows must stay UNMARKED: the absence of the
+    # marker is the evidence assert_stage_format_compatible reads to refuse a
+    # duplicating re-detection, and stamping it here would destroy that
+    # evidence on the very databases the guard exists to protect.
+    ensure_db_meta_schema(conn)
+    if stage_format(conn) is None:
+        n_events = 0
+        if _table_columns(conn, 'events'):
+            try:
+                n_events = conn.execute(
+                    "SELECT COUNT(*) FROM events").fetchone()[0]
+            except sqlite3.OperationalError:
+                n_events = 0
+        if not n_events:
+            set_db_meta(conn, STAGE_FORMAT_KEY, STAGE_FORMAT_JOINT)
+        elif logger is not None:
+            logger.info(
+                "This database holds %d event row(s) and carries no "
+                "db_meta.%s marker, so it is treated as pre-4.3 (per-epoch "
+                "events.stage). Detection into a scope that already has rows "
+                "will be refused rather than silently duplicated; see "
+                "examples/migrate_stage_to_joint.py.", n_events,
+                STAGE_FORMAT_KEY)
+
+    # (7) v_event_density: density in plain SQL, for R and sqlite3 callers.
+    ensure_density_view(conn, logger=logger)
+
     conn.commit()
+
+
+# SQL fragment counting how many stage components a token spans. Built from
+# string lengths because SQLite has no split(): each removal of a known label
+# shortens the token by that label's length, so the number of removals is the
+# length difference divided by the label length. Written once here and reused
+# in both halves of the view so the "all components present" test cannot drift
+# from the pooling it guards.
+#
+# Order matters exactly as it does in split_stage_token: the NREM labels are
+# removed FIRST, because 'NREM1' contains 'REM' and a naive REM test would
+# count NREM epochs as REM. `_SQL_STAGE_REST` is the token with every NREM
+# label already removed, which is what makes the REM test safe.
+_SQL_STAGE_REST = ("replace(replace(replace({col}, 'NREM1', ''), "
+                   "'NREM2', ''), 'NREM3', '')")
+
+_SQL_STAGE_N_COMPONENTS = (
+    "((length({col}) - length(" + _SQL_STAGE_REST + ")) / 5"
+    " + (length(" + _SQL_STAGE_REST + ") - length(replace("
+    + _SQL_STAGE_REST + ", 'REM', ''))) / 3"
+    " + (length(" + _SQL_STAGE_REST + ") - length(replace("
+    + _SQL_STAGE_REST + ", 'Wake', ''))) / 4)")
+
+
+def ensure_density_view(conn, logger=None):
+    """(Re)create the ``v_event_density`` SQL view.
+
+    Density without Python: joins ``events`` to ``analysed_time`` and does the
+    joint-token component pooling in SQL, so R, ``sqlite3`` and any BI tool can
+    read the same numbers :func:`turtlewave_hdEEG.density.event_density`
+    computes.
+
+    A **view**, never a table: it recomputes at query time, so a scoped channel
+    re-detection (which deletes and re-inserts that channel's rows) can never
+    leave it holding pre-correction numbers. A materialised density table would
+    go stale exactly when the pipeline corrects itself.
+
+    Dropped and recreated on every call rather than
+    ``CREATE VIEW IF NOT EXISTS``, so a database opened by a newer release
+    always carries that release's definition instead of a stale one.
+
+    Columns
+    -------
+    ``subject``, ``channel``, ``event_type``, ``method``, ``stage`` (the
+    stored token), ``freq_lower``, ``freq_upper``, ``n_events``,
+    ``analysed_minutes``, ``density_per_min``, ``artefact_minutes_excluded``,
+    ``mean_duration_sec``, ``reject_artifacts``, ``reject_arousals``,
+    ``denominator_complete``.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. Commits, does not close.
+    logger : logging.Logger or None, optional
+        Logger for a failure to create the view. Default ``None``.
+
+    Returns
+    -------
+    bool
+        True when the view exists on return.
+
+    Notes
+    -----
+    Two behaviours differ from :func:`turtlewave_hdEEG.density.event_density`
+    and are deliberate, because SQL cannot express them without inventing rows:
+
+    * **No honest zeros.** A channel that ran and detected nothing has no row
+      in ``events`` and therefore none here. The Python API cross-joins
+      ``processing_status`` to add it. A montage summary taken from this view
+      alone is computed over the channels that fired.
+    * **No per-identity stage scope.** Rows appear for whatever
+      ``(event_type, method, stage)`` combinations exist in ``events``;
+      nothing is fabricated, but nothing is filtered by which run searched
+      what either.
+
+    ``density_per_min`` is NULL, never 0, when a component of the stage token
+    has no ``analysed_time`` row (``denominator_complete = 0``). Rows with a
+    NULL ``stage`` are excluded: they have no denominator at all.
+    """
+    n_comp = _SQL_STAGE_N_COMPONENTS.format(col='e.stage')
+    try:
+        conn.execute("DROP VIEW IF EXISTS v_event_density")
+        conn.execute(f'''
+        CREATE VIEW v_event_density AS
+        SELECT
+            d.subject                                   AS subject,
+            e.channel                                   AS channel,
+            e.event_type                                AS event_type,
+            e.method                                    AS method,
+            e.stage                                     AS stage,
+            e.freq_lower                                AS freq_lower,
+            e.freq_upper                                AS freq_upper,
+            COUNT(*)                                    AS n_events,
+            -- NULL, not a partial sum, when a component of the token has no
+            -- analysed_time row: an incomplete denominator divided into a
+            -- complete count inflates density silently.
+            CASE WHEN d.n_components = d.n_expected
+                 THEN d.analysed_seconds / 60.0
+                 ELSE NULL END                          AS analysed_minutes,
+            CASE WHEN d.n_components = d.n_expected AND d.analysed_seconds > 0
+                 THEN COUNT(*) / (d.analysed_seconds / 60.0)
+                 ELSE NULL END                          AS density_per_min,
+            CASE WHEN d.n_components = d.n_expected
+                 THEN d.artefact_seconds / 60.0
+                 ELSE NULL END                          AS artefact_minutes_excluded,
+            AVG(e.duration)                             AS mean_duration_sec,
+            d.reject_artifacts                          AS reject_artifacts,
+            d.reject_arousals                           AS reject_arousals,
+            CASE WHEN d.n_components = d.n_expected THEN 1 ELSE 0 END
+                                                        AS denominator_complete
+        FROM events e
+        JOIN (
+            SELECT
+                t.stage       AS token,
+                a.subject     AS subject,
+                a.reject_artifacts AS reject_artifacts,
+                a.reject_arousals  AS reject_arousals,
+                SUM(a.analysed_seconds) AS analysed_seconds,
+                SUM(COALESCE(a.artefact_seconds_excluded, 0)) AS artefact_seconds,
+                COUNT(*)      AS n_components,
+                t.n_expected  AS n_expected
+            FROM (
+                SELECT DISTINCT e.stage AS stage,
+                       {n_comp} AS n_expected
+                FROM events e WHERE e.stage IS NOT NULL
+            ) t
+            JOIN analysed_time a
+              ON (CASE a.stage
+                    WHEN 'REM' THEN instr(
+                        replace(replace(replace(t.stage, 'NREM1', ''),
+                                'NREM2', ''), 'NREM3', ''), 'REM')
+                    ELSE instr(t.stage, a.stage)
+                  END) > 0
+            GROUP BY t.stage, a.subject, a.reject_artifacts, a.reject_arousals
+        ) d ON d.token = e.stage
+        WHERE e.stage IS NOT NULL
+        GROUP BY d.subject, e.channel, e.event_type, e.method, e.stage,
+                 e.freq_lower, e.freq_upper, d.reject_artifacts,
+                 d.reject_arousals
+        ''')
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        # A view is a convenience: never lose a detection run over one.
+        if logger is not None:
+            logger.warning(
+                "Could not create the v_event_density SQL view (%s). Density "
+                "from Python (turtlewave_hdEEG.density.event_density) is "
+                "unaffected.", e)
+        return False
 
 
 def record_run(conn, run_id, event_type, method, citation, params_json,
@@ -2137,11 +2619,14 @@ def write_channel_events(conn, run_id, event_type, channel, method,
         Joined stage set of the run (used for ``processing_status``).
     events : list of dict
         Normalized event dicts with keys ``uuid``, ``start_time``, ``end_time``,
-        ``duration``, ``stage`` (single resolved stage), ``method`` (the
-        per-event detecting method, stored in the ``method`` column so it agrees
-        with the event's uuid5 and the events UNIQUE constraint), plus
-        ``det_trough`` / ``det_peak`` / ``det_ptp`` / ``det_trough_time`` /
-        ``det_peak_time``.
+        ``duration``, ``stage`` (the run's canonical joint stage token, the
+        same value hashed into the event's uuid5 -- see
+        :func:`join_stage_token`), the optional ``epoch_stage`` (the event's
+        own scored epoch stage, stored in the additive ``epoch_stage`` column
+        when the database has it), ``method`` (the per-event detecting method,
+        stored in the ``method`` column so it agrees with the event's uuid5 and
+        the events UNIQUE constraint), plus ``det_trough`` / ``det_peak`` /
+        ``det_ptp`` / ``det_trough_time`` / ``det_peak_time``.
     batched : list of dict
         Output of :func:`compute_batched_params`, aligned to ``events``.
     recording_start_time : datetime.datetime or None
@@ -2171,8 +2656,15 @@ def write_channel_events(conn, run_id, event_type, channel, method,
     # Same helper the detectors use for the JSON filename token, so this is
     # the last place the two spellings could drift apart.
     freq_band = fmt_freq_token(freq_lower, freq_upper)
-    placeholders = ', '.join(['?'] * len(EVENT_INSERT_COLUMNS))
-    sql = (f"INSERT OR REPLACE INTO events ({', '.join(EVENT_INSERT_COLUMNS)}) "
+    # epoch_stage is presence-gated rather than assumed: it is additive and a
+    # database whose schema was never ensured (a direct call on a legacy file)
+    # must still take the write, minus the column it does not have.
+    insert_columns = list(EVENT_INSERT_COLUMNS)
+    has_epoch_stage = _EPOCH_STAGE_COLUMN[0] in _table_columns(conn, 'events')
+    if has_epoch_stage:
+        insert_columns.append(_EPOCH_STAGE_COLUMN[0])
+    placeholders = ', '.join(['?'] * len(insert_columns))
+    sql = (f"INSERT OR REPLACE INTO events ({', '.join(insert_columns)}) "
            f"VALUES ({placeholders})")
 
     conn.execute('BEGIN')
@@ -2219,6 +2711,11 @@ def write_channel_events(conn, run_id, event_type, channel, method,
                 ev.get('det_trough_time'), ev.get('det_peak_time'),
                 now, n_fft_sec, run_id,
             )
+            if has_epoch_stage:
+                # The event's OWN scored epoch stage, kept beside the run's
+                # joint token in `stage`. None when no scored epoch contains
+                # the event (the detectors count and report those).
+                row = row + (ev.get('epoch_stage'),)
             conn.execute(sql, row)
 
         upsert_processing_status(
@@ -2333,6 +2830,13 @@ _EXPORT_COLUMNS = [
 # 'R', 'Wake' with 'W' -- no stage is a prefix of another under this order).
 _STAGE_VOCAB = ['NREM1', 'NREM2', 'NREM3', 'Wake', 'REM']
 
+#: Canonical ORDER of the stage vocabulary, used by :func:`join_stage_token`.
+#: Distinct from :data:`_STAGE_VOCAB`, whose order exists only to make the
+#: greedy decomposition in :func:`split_stage_token` unambiguous. This one is
+#: the order a joined token is written in, sleep-depth then REM then Wake, so
+#: that one stage SET has exactly one spelling.
+_STAGE_CANONICAL_ORDER = ['NREM1', 'NREM2', 'NREM3', 'REM', 'Wake']
+
 
 def split_stage_token(stage):
     """Normalise a stage scope argument into a list of constituent stages.
@@ -2382,6 +2886,633 @@ def split_stage_token(stage):
                 f"Cannot split stage token {s!r} into known stages "
                 f"{_STAGE_VOCAB}; pass an explicit list of stages instead.")
     return out
+
+
+def stage_components(stage):
+    """Split a stage token, treating an unrecognised token as one component.
+
+    The forgiving counterpart of :func:`split_stage_token`, for the read side.
+    A reader that raises on an unfamiliar label (``'Undefined'``,
+    ``'Movement'``, or anything a future scoring vocabulary adds) turns a
+    curiosity in one row into a failed query over the whole table, so an
+    unsplittable token is returned whole and compared as an opaque unit.
+
+    Parameters
+    ----------
+    stage : list or tuple or str or None
+        Stage set in any of the forms :func:`split_stage_token` accepts.
+
+    Returns
+    -------
+    list of str
+        Constituent stage labels. ``[]`` for ``None``; ``[stage]`` when the
+        string cannot be decomposed into the known vocabulary.
+
+    Examples
+    --------
+    >>> stage_components('NREM2NREM3')
+    ['NREM2', 'NREM3']
+    >>> stage_components('Undefined')
+    ['Undefined']
+    """
+    if stage is None:
+        return []
+    try:
+        return list(split_stage_token(stage) or [])
+    except ValueError:
+        return [str(stage)]
+
+
+def join_stage_token(stages):
+    """Join a stage set into its single canonical token.
+
+    The one spelling of a run's stage scope, used for ``events.stage``, the
+    :func:`event_uuid5` stage argument, ``processing_status.stage`` and the
+    filename token. Replaces every raw ``''.join(stage)`` in the codebase.
+
+    **Order is load-bearing.** A caller passing ``['NREM3', 'NREM2']`` under a
+    raw join writes ``'NREM3NREM2'``, which never equality-matches the
+    ``'NREM2NREM3'`` a differently-ordered caller wrote -- the same scope is
+    then two tokens, the table fragments, and every reader that filters on one
+    silently misses the other. Sorting into a fixed order removes that failure
+    mode entirely: one stage SET has exactly one token.
+
+    Round-trips with :func:`split_stage_token`:
+    ``split_stage_token(join_stage_token(s))`` is ``s`` deduplicated and
+    reordered.
+
+    Parameters
+    ----------
+    stages : list or tuple or set or str or None
+        Stage set in any form the pipeline uses: a list/tuple/set of labels, a
+        single label, or an already-joined token (which is re-split and
+        re-joined, so passing one through is idempotent).
+
+    Returns
+    -------
+    str
+        The canonical joined token, e.g. ``'NREM2NREM3'``. ``''`` for ``None``
+        or an empty set -- callers that need a scope label for an all-stage run
+        supply their own (``'all'``).
+
+    Notes
+    -----
+    Labels outside the known vocabulary (``'Undefined'``, ``'Movement'``, ...)
+    are not an error: they are kept and appended after the known stages in
+    alphabetical order, so the token stays deterministic and order-insensitive.
+    Such a token is not splittable by :func:`split_stage_token`, exactly as
+    before this function existed.
+
+    Examples
+    --------
+    >>> join_stage_token(['NREM3', 'NREM2'])
+    'NREM2NREM3'
+    >>> join_stage_token(['NREM2', 'NREM3']) == join_stage_token(['NREM3', 'NREM2'])
+    True
+    >>> join_stage_token('NREM2NREM3')
+    'NREM2NREM3'
+    >>> join_stage_token(None)
+    ''
+    """
+    if stages is None:
+        return ''
+    if isinstance(stages, (list, tuple, set, frozenset)):
+        parts = []
+        for s in stages:
+            parts.extend(stage_components(s))
+    else:
+        parts = stage_components(stages)
+
+    seen = set()
+    unique = []
+    for p in (str(x) for x in parts):
+        if p and p not in seen:
+            seen.add(p)
+            unique.append(p)
+
+    known = [s for s in _STAGE_CANONICAL_ORDER if s in seen]
+    unknown = sorted(p for p in unique if p not in _STAGE_CANONICAL_ORDER)
+    return "".join(known + unknown)
+
+
+def stage_tokens_covering(tokens, requested):
+    """Select the stored stage tokens that fall inside a requested stage set.
+
+    The single read-side primitive of the joint-token scheme, and what keeps
+    every reader working against **both** database shapes at once:
+
+    * a database written per-epoch (before 4.3) stores one-component tokens
+      (``'NREM2'``, ``'NREM3'``), and a request for ``['NREM2', 'NREM3']``
+      covers both;
+    * a database written jointly stores ``'NREM2NREM3'``, and the same request
+      covers that one token.
+
+    A request for ``['NREM2']`` alone covers the first database's ``'NREM2'``
+    rows but **not** the second's ``'NREM2NREM3'`` rows -- correctly, because a
+    joint row cannot be attributed to one of its components. That is a missing
+    answer, not a wrong one, and callers should report it as such rather than
+    dividing a joint count by an N2-only denominator.
+
+    Parameters
+    ----------
+    tokens : iterable of str or None
+        Stage tokens present in the data (typically
+        ``SELECT DISTINCT stage FROM events``). ``None`` entries are dropped;
+        the caller handles NULL-stage rows separately.
+    requested : list or tuple or str or None
+        The stage set asked for, in any accepted form. ``None`` means "no
+        restriction" and returns every token unchanged.
+
+    Returns
+    -------
+    list of str
+        The covered tokens, de-duplicated, in the order first seen.
+
+    Examples
+    --------
+    >>> stage_tokens_covering(['NREM2', 'NREM3', 'REM'], ['NREM2', 'NREM3'])
+    ['NREM2', 'NREM3']
+    >>> stage_tokens_covering(['NREM2NREM3'], ['NREM2', 'NREM3'])
+    ['NREM2NREM3']
+    >>> stage_tokens_covering(['NREM2NREM3'], ['NREM2'])
+    []
+    """
+    present = []
+    seen = set()
+    for tok in (tokens or []):
+        if tok is None:
+            continue
+        tok = str(tok)
+        if tok and tok not in seen:
+            seen.add(tok)
+            present.append(tok)
+    if requested is None:
+        return present
+    wanted = set(stage_components(requested) if not isinstance(
+        requested, (list, tuple, set, frozenset))
+        else [c for s in requested for c in stage_components(s)])
+    if not wanted:
+        return present
+    return [tok for tok in present
+            if set(stage_components(tok)).issubset(wanted)]
+
+
+def resolve_stage_tokens(conn, requested, where=None, params=None,
+                         table='events', column='stage'):
+    """Resolve a requested stage set to the tokens actually stored.
+
+    The query-building half of :func:`stage_tokens_covering`: reads the
+    distinct stage tokens a scope holds and returns the ones a caller should
+    put in ``stage IN (...)``. Use it in place of interpolating the requested
+    stage list directly -- that list matches a per-epoch database and misses
+    every joint-token row, which is a silent zero-result, not an error.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    requested : list or tuple or str or None
+        Stage set asked for, in any accepted form. ``None`` returns every
+        stored token (no restriction).
+    where : list of str or None, optional
+        Additional SQL predicates (``'event_type = ?'`` ...) narrowing which
+        rows' tokens are considered. Default ``None``.
+    params : list or None, optional
+        Bound parameters for ``where``. Default ``None``.
+    table, column : str, optional
+        Table and column to read tokens from. Defaults ``'events'`` /
+        ``'stage'``. **Interpolated into the SQL, so never pass user input.**
+
+    Returns
+    -------
+    list of str
+        Tokens to filter on. An **empty list means "no stored token is inside
+        the requested set"**, which callers must render as a matched-nothing
+        filter (``1 = 0``), never as "no filter" -- dropping the predicate
+        would return the whole table.
+
+    Examples
+    --------
+    >>> resolve_stage_tokens(conn, ['NREM2', 'NREM3'],      # doctest: +SKIP
+    ...                      where=['event_type = ?'], params=['spindle'])
+    ['NREM2NREM3']
+    """
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT {column} FROM {table}{clause}",
+            list(params or [])).fetchall()
+    except sqlite3.OperationalError:
+        return [] if requested is None else stage_tokens_covering([], requested)
+    return stage_tokens_covering([r[0] for r in rows], requested)
+
+
+#: Result of :func:`pooled_denominator`.
+#:
+#: ``analysed_seconds`` and ``artefact_seconds_excluded`` are ``nan`` when
+#: ``missing`` is non-empty, so an incomplete denominator can never be divided
+#: into a count by accident.
+PooledDenominator = namedtuple(
+    'PooledDenominator',
+    'analysed_seconds artefact_seconds_excluded source missing components')
+
+
+def pooled_denominator(token, denom):
+    """Sum the per-stage density denominators a stage token spans.
+
+    ``analysed_time`` is keyed per **single** scored stage -- artefact-free
+    analysed time is a physical quantity of a stage, whereas a joint token is a
+    label for a run's scope. So a joint token's denominator is assembled on
+    read, here, by summing its components.
+
+    All-or-nothing by design: if any component has no stored row the pooled
+    value is ``nan``, never a partial sum. A partial denominator is worse than
+    none, because dividing a full joint count by part of the time inflates
+    density silently.
+
+    Parameters
+    ----------
+    token : str
+        Stage token as stored in ``events.stage`` -- one component
+        (``'NREM2'``) or several (``'NREM2NREM3'``).
+    denom : dict
+        ``{stage: {'analysed_seconds': float,
+        'artefact_seconds_excluded': float or None, 'source': str}}``, as read
+        from ``analysed_time`` for one subject and one pair of rejection
+        settings.
+
+    Returns
+    -------
+    PooledDenominator
+        ``(analysed_seconds, artefact_seconds_excluded, source, missing,
+        components)``. ``source`` is the ``'+'``-joined distinct sources of the
+        contributing rows, or ``'missing'`` when incomplete. ``missing`` lists
+        the components with no stored row.
+
+    Examples
+    --------
+    >>> d = {'NREM2': {'analysed_seconds': 1800.0,
+    ...                'artefact_seconds_excluded': 60.0, 'source': 'detection'},
+    ...      'NREM3': {'analysed_seconds': 1200.0,
+    ...                'artefact_seconds_excluded': 0.0, 'source': 'detection'}}
+    >>> pooled_denominator('NREM2NREM3', d).analysed_seconds
+    3000.0
+    >>> pooled_denominator('NREM2REM', d).missing
+    ['REM']
+    """
+    components = stage_components(token)
+    missing = [c for c in components if c not in (denom or {})]
+    if not components or missing:
+        return PooledDenominator(float('nan'), float('nan'), 'missing',
+                                 missing, components)
+    seconds = sum(float(denom[c]['analysed_seconds']) for c in components)
+    # An artefact total is NaN, not 0, when any component never recorded one:
+    # "no artefact time was excluded" and "nobody wrote it down" are different
+    # claims and only the first is a zero.
+    raw_artefact = [denom[c].get('artefact_seconds_excluded')
+                    for c in components]
+    artefact = (float('nan') if any(a is None for a in raw_artefact)
+                else sum(float(a) for a in raw_artefact))
+    source = "+".join(sorted({str(denom[c].get('source')) for c in components}))
+    return PooledDenominator(seconds, artefact, source, [], components)
+
+
+# ---------------------------------------------------------------------------
+# db_meta: schema-shape markers
+# ---------------------------------------------------------------------------
+
+#: ``db_meta`` key recording how ``events.stage`` is populated in a database.
+#: ``'joint'`` = the run's canonical stage token (4.3+); absent or
+#: ``'per_epoch'`` = each event's own epoch stage (4.2 and earlier).
+STAGE_FORMAT_KEY = 'stage_format'
+
+#: Value written by :func:`ensure_direct_write_schema` for databases this
+#: release's detectors populate.
+STAGE_FORMAT_JOINT = 'joint'
+
+#: Value a migration stamps (or a reader infers) for pre-4.3 databases.
+STAGE_FORMAT_PER_EPOCH = 'per_epoch'
+
+
+def ensure_db_meta_schema(conn):
+    """Create the ``db_meta`` key/value table if absent.
+
+    Holds markers describing the *shape* of a database rather than its data --
+    currently only :data:`STAGE_FORMAT_KEY`. Purely additive.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. Commits, does not close.
+
+    Returns
+    -------
+    None
+    """
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS db_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated TEXT
+    )''')
+    conn.commit()
+
+
+def get_db_meta(conn, key, default=None):
+    """Read one ``db_meta`` value.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    key : str
+        Marker name.
+    default : object, optional
+        Returned when the table or the key is absent. Default ``None``.
+
+    Returns
+    -------
+    str or object
+        The stored value, else ``default``.
+    """
+    try:
+        row = conn.execute("SELECT value FROM db_meta WHERE key = ?",
+                           (str(key),)).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    return default if row is None or row[0] is None else str(row[0])
+
+
+def set_db_meta(conn, key, value):
+    """Write one ``db_meta`` value (insert or replace).
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection (``db_meta`` already created).
+    key : str
+        Marker name.
+    value : str
+        Marker value.
+
+    Returns
+    -------
+    None
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta (key, value, updated) VALUES (?, ?, ?)",
+        (str(key), str(value), datetime.datetime.now().isoformat()))
+    conn.commit()
+
+
+def stage_format(conn):
+    """Report how ``events.stage`` is populated in this database.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+
+    Returns
+    -------
+    str or None
+        :data:`STAGE_FORMAT_JOINT`, :data:`STAGE_FORMAT_PER_EPOCH`, or ``None``
+        when the database carries no marker. ``None`` is *not* the same as
+        ``'per_epoch'``: it means the shape was never recorded, which is true
+        of every database written before 4.3 **and** of one whose events came
+        entirely from the CSV importers.
+    """
+    return get_db_meta(conn, STAGE_FORMAT_KEY, None)
+
+
+def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
+                                   freq_upper, *, stage_token,
+                                   channels=None, replace_channels=None,
+                                   db_path=None, logger=None):
+    """Refuse a run that would append a duplicate set instead of replacing.
+
+    :func:`event_uuid5` hashes the stage, and the stage is also the last
+    component of the ``event_chan_time`` UNIQUE constraint. So re-detecting a
+    scope whose stored rows carry a **different** stage value produces a new
+    primary key AND a new unique key: ``INSERT OR REPLACE`` inserts, and the
+    run appends a complete duplicate set beside the old one. Every count and
+    every density in that scope doubles, and nothing raises.
+
+    Two different situations produce that, and both are checked here:
+
+    1. **A pre-4.3 (per-epoch) database.** Its rows carry ``'NREM2'`` and
+       ``'NREM3'``; a 4.3 run over both writes ``'NREM2NREM3'``. Fixed by
+       ``examples/migrate_stage_to_joint.py``.
+    2. **A joint database re-detected under a DIFFERENT stage set.** Run 1 over
+       ``['NREM2']`` stores ``'NREM2'``; run 2 over ``['NREM2', 'NREM3']``
+       stores ``'NREM2NREM3'`` and every event of run 1 survives as a
+       duplicate. The ``stage_format`` marker cannot see this one -- both runs
+       are joint -- so the check is on the token itself, not on the marker.
+
+    A NULL stage counts as "different": such a row was keyed on ``'None'`` and
+    would be duplicated in exactly the same way.
+
+    Loud by design, matching :func:`resolve_db_target`: a run that would
+    silently double a database is stopped before its first write.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection (schema already ensured).
+    event_type : str
+        Event type about to be written (``'spindle'``, ...).
+    methods : str or sequence of str
+        The run's constituent per-event method(s), as they are stored in
+        ``events.method`` -- **not** the ``'_'``-joined run label, which never
+        matches a stored row.
+    freq_lower, freq_upper : float or None
+        Band bounds of the run. Matched NULL-safe.
+    stage_token : str, keyword-only, REQUIRED
+        The canonical stage token this run will write
+        (:func:`join_stage_token`), or ``'all'`` for an unscoped run.
+        Keyword-only and without a default **on purpose**: it is the whole of
+        check (2), and a caller that omitted it would keep only the
+        marker-based check (1) and lose duplicate protection against a
+        same-format, different-stage-set re-run -- silently, since the
+        remaining check still runs and still passes. A missing or ``None``
+        value therefore fails loudly (``TypeError`` / ``ValueError``) rather
+        than degrading the guard.
+    channels : sequence of str or None, optional
+        Channels this run will write. ``None`` (default) checks every channel
+        in the scope, which is the conservative reading.
+    replace_channels : sequence of str or None, optional
+        Channels whose existing rows this run deletes first (scoped
+        re-detection). Their rows cannot duplicate, so they are excluded from
+        the check. Default ``None``.
+    db_path : str or None, optional
+        Path named in the error message. Default ``None``.
+    logger : logging.Logger or None, optional
+        Logger for the one-line all-clear. Default ``None``.
+
+    Returns
+    -------
+    int
+        Number of at-risk rows found (always 0 when this returns).
+
+    Raises
+    ------
+    TypeError
+        If ``stage_token`` is not passed at all.
+    ValueError
+        If ``stage_token`` is ``None``, or if the scope about to be written
+        already holds rows under a different stage token, or if the database
+        is unmarked / marked ``'per_epoch'`` and the scope already holds rows.
+    """
+    if stage_token is None:
+        raise ValueError(
+            "assert_stage_format_compatible needs the stage token this run "
+            "will write (dbwrite.join_stage_token(stage), or 'all' for an "
+            "unscoped run). Passing None would skip the check that a "
+            "re-detection under a DIFFERENT stage set appends a duplicate "
+            "set instead of replacing, and that failure is silent.")
+    if not _table_columns(conn, 'events'):
+        return 0
+
+    def _as_list(value):
+        """One-or-many to a list, without iterating a bare string's letters."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [str(v) for v in value]
+        return [str(value)]
+
+    method_list = [m for m in _as_list(methods) if m.strip()]
+    if not method_list:
+        # An empty list renders `method IN ()`, which SQLite accepts and
+        # evaluates as always-false: the guard would find nothing, return 0
+        # and let the write proceed unchecked. Exactly the silent downgrade
+        # stage_token is keyword-required to prevent, so it fails the same way.
+        raise ValueError(
+            f"assert_stage_format_compatible needs at least one non-blank "
+            f"method (got {methods!r}). An empty method list would render "
+            f"'method IN ()', which SQLite treats as always-false, so the "
+            f"guard would match no rows and silently allow a write that "
+            f"appends a duplicate set. Pass the run's constituent per-event "
+            f"method(s), as stored in events.method.")
+    at_risk = set()
+    if channels is not None:
+        at_risk = set(_as_list(channels)) - set(_as_list(replace_channels))
+        if not at_risk:
+            return 0
+
+    where = ["event_type = ?",
+             "method IN (%s)" % ",".join("?" * len(method_list)),
+             "freq_lower IS ?", "freq_upper IS ?"]
+    params = [str(event_type)] + method_list + [
+        None if freq_lower is None else float(freq_lower),
+        None if freq_upper is None else float(freq_upper)]
+    if at_risk:
+        chans = sorted(at_risk)
+        where.append("channel IN (%s)" % ",".join("?" * len(chans)))
+        params.extend(chans)
+    elif replace_channels:
+        reps = sorted(set(_as_list(replace_channels)))
+        where.append("channel NOT IN (%s)" % ",".join("?" * len(reps)))
+        params.extend(reps)
+    clause = " AND ".join(where)
+
+    scope = (f"{event_type} / method(s) {method_list} / "
+             f"{fmt_freq_token(freq_lower, freq_upper)}")
+    how_to_proceed = (
+        "To proceed: re-detect with replace_channels=<the channels above> so "
+        "the stale rows are DELETEd in the same transaction; or delete that "
+        "scope's rows first; or write this run to a different database. "
+        "Keeping both is not an option -- they overlap, so every count and "
+        "density over this scope would be inflated.")
+
+    # --- check 2: a different stage token in the same scope ---------------
+    # Unconditional, and independent of the marker: both sides can be 'joint',
+    # so the marker cannot see this case. stage_token is keyword-required
+    # precisely so this check cannot be skipped by omission.
+    tok_where = clause + " AND (stage IS NULL OR stage != ?)"
+    tok_params = params + [str(stage_token)]
+    n_rows, n_chans = conn.execute(
+        "SELECT COUNT(*), COUNT(DISTINCT channel) FROM events WHERE "
+        + tok_where, tok_params).fetchone()
+    n_rows = int(n_rows or 0)
+    if n_rows:
+        raw = [r[0] for r in conn.execute(
+            "SELECT DISTINCT stage FROM events WHERE " + tok_where,
+            tok_params)]
+        has_null = any(r is None for r in raw)
+        named = sorted(str(r) for r in raw if r is not None)
+        stored = (named + ['NULL (no stage at all)']) if has_null else named
+        chans_hit = [str(r[0]) for r in conn.execute(
+            "SELECT DISTINCT channel FROM events WHERE " + tok_where
+            + " ORDER BY channel LIMIT 10", tok_params)]
+        # The advice differs by what is actually stored, so that it is
+        # applicable rather than merely reassuring. A NULL stage is not a
+        # stale per-epoch label the migration can collapse by inference: the
+        # row records no stage at all.
+        advice = []
+        if named:
+            advice.append(
+                "The named token(s) are a different stage SET than this run's "
+                "-- either a pre-4.3 per-epoch stage, or an earlier run over "
+                "a different stage selection. "
+                "examples/migrate_stage_to_joint.py rewrites a pre-4.3 "
+                "per-epoch stage to the run's token; for an earlier run over "
+                "a genuinely different stage set, no migration can merge the "
+                "two and you must choose one.")
+        if has_null:
+            advice.append(
+                "The NULL-stage row(s) carry no stage at all -- a 4.2 event "
+                "whose scored epoch could not be resolved, or a CSV import "
+                "with no Stage column. Nothing can infer their stage set from "
+                "the row itself. examples/migrate_stage_to_joint.py labels "
+                "them with the run's own recorded stage token (which is what "
+                "events.stage means from 4.3: the run's scope, with the "
+                "per-epoch uncertainty kept in events.epoch_stage) when that "
+                "token is on record for their channel; otherwise re-detect "
+                "those channels with replace_channels, or delete them.")
+        raise ValueError(
+            f"{db_path or 'This database'} already holds {n_rows} "
+            f"{scope} row(s) across {int(n_chans or 0)} channel(s) under "
+            f"stage token(s) {stored}, and this run would write "
+            f"'{stage_token}'. The stage is part of both the event uuid5 "
+            f"and the event_chan_time UNIQUE constraint, so those rows "
+            f"would NOT be replaced: INSERT OR REPLACE would APPEND A "
+            f"COMPLETE DUPLICATE SET beside them. Channels affected "
+            f"(first 10): {chans_hit}. {how_to_proceed} "
+            + " ".join(advice))
+
+    # --- check 1: a pre-4.3 database, even when the tokens agree ----------
+    fmt = stage_format(conn)
+    if fmt == STAGE_FORMAT_JOINT:
+        return 0
+
+    n_rows, n_chans = conn.execute(
+        "SELECT COUNT(*), COUNT(DISTINCT channel) FROM events WHERE " + clause,
+        params).fetchone()
+    n_rows = int(n_rows or 0)
+    if not n_rows:
+        if logger is not None:
+            logger.debug(
+                "Stage-format check passed: this database carries no "
+                "'%s' marker but holds no %s rows, so a joint-token write "
+                "cannot duplicate anything.", STAGE_FORMAT_KEY, scope)
+        return 0
+
+    tokens = sorted({str(r[0]) for r in conn.execute(
+        "SELECT DISTINCT stage FROM events WHERE " + clause, params)
+        if r[0] is not None})
+    raise ValueError(
+        f"{db_path or 'This database'} was written before the joint stage "
+        f"token (db_meta.{STAGE_FORMAT_KEY} is {fmt!r}) and already holds "
+        f"{n_rows} {scope} row(s) across {int(n_chans or 0)} channel(s), "
+        f"stored under stage token(s) {tokens}. Those rows carry uuids "
+        f"computed under the old convention, so a re-detection cannot be "
+        f"proven to replace rather than duplicate them. Convert the database "
+        f"first with examples/migrate_stage_to_joint.py -- it rewrites the "
+        f"stored stages to the run's token where needed and stamps "
+        f"db_meta.{STAGE_FORMAT_KEY}='{STAGE_FORMAT_JOINT}', and is a "
+        f"near-no-op on a database whose rows already carry that token. "
+        f"{how_to_proceed}")
 
 
 def _fmt_freq_component(value):
@@ -2484,9 +3615,10 @@ def default_csv_path(output_dir, event_type, method, frequency, stage):
     freq_token = f"{_fmt_freq_component(lo)}-{_fmt_freq_component(hi)}Hz"
     # Normalise any accepted stage form (list, single, or joined token) to the
     # canonical joined token, so the filename is identical whichever form the
-    # caller passes.
-    stages = split_stage_token(stage)
-    stage_token = "".join(stages) if stages else ''
+    # caller passes AND identical to the token the same run stored in
+    # events.stage -- one function, so the filename and the database cannot
+    # drift into two spellings of one scope.
+    stage_token = join_stage_token(stage)
     fname = f"{prefix}_{method_token}_{freq_token}_{stage_token}.csv"
     return os.path.join(output_dir, fname)
 
@@ -2528,11 +3660,14 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
         ``None`` the band filter is skipped and the band is inferred from the
         matched rows for the filename.
     stage : list of str or str or None
-        Stage set of the run. Filters ``events.stage IN (...)`` (each row holds
-        its single resolved stage) and names the file. Accepts a list
-        (``['NREM2','NREM3']``), a single stage (``'NREM2'``) or the joined
-        scope token (``'NREM2NREM3'``) used in filenames -- the latter is split
-        via :func:`split_stage_token`. When ``None`` no stage filter is applied.
+        Stage set of the run, used both to filter and to name the file.
+        Accepts a list (``['NREM2','NREM3']``), a single stage (``'NREM2'``)
+        or the joined scope token (``'NREM2NREM3'``); all three are equivalent.
+        The filter is resolved through :func:`resolve_stage_tokens`, so it
+        matches a joint-token database and a per-epoch one alike. A request
+        for a strict subset of a stored joint token matches nothing and
+        raises, rather than exporting a slice that does not exist. When
+        ``None`` no stage filter is applied.
     csv_file : str or None
         Explicit output path. When ``None`` a path is built with
         :func:`default_csv_path` under ``output_dir``.
@@ -2601,9 +3736,22 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
             where.append("freq_lower = ? AND freq_upper = ?")
             params.extend([float(frequency[0]), float(frequency[1])])
         if stage_list is not None:
-            placeholders = ", ".join(["?"] * len(stage_list))
-            where.append(f"stage IN ({placeholders})")
-            params.extend(stage_list)
+            # Resolve to the tokens actually stored, so this works against a
+            # joint-token database ('NREM2NREM3') and a per-epoch one
+            # ('NREM2','NREM3') alike. Interpolating the requested stage list
+            # directly matched only the latter and returned nothing -- silently
+            # -- against everything written from 4.3 on.
+            stage_tokens = resolve_stage_tokens(
+                conn, stage_list, where=list(where), params=list(params))
+            if stage_tokens:
+                placeholders = ", ".join(["?"] * len(stage_tokens))
+                where.append(f"stage IN ({placeholders})")
+                params.extend(stage_tokens)
+            else:
+                # No stored token lies inside the requested set. This must
+                # match nothing -- dropping the predicate would export the
+                # whole scope under a filename claiming a narrower one.
+                where.append("1 = 0")
 
         sql = (f"SELECT {', '.join(db_columns)} FROM events "
                f"WHERE {' AND '.join(where)} ORDER BY channel, start_time")
@@ -2627,9 +3775,13 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
                     f"WHERE {' AND '.join(noscope_where)}", noscope_params)]
                 raise ValueError(
                     f"Stage filter {stage_list} matched 0 of {n_without_stage} "
-                    f"{event_type}/{method} events; available stages in this "
-                    f"scope are {sorted(str(s) for s in avail)}. Pass a stage "
-                    f"set that intersects them (a list is accepted).")
+                    f"{event_type}/{method} events; the stage token(s) stored "
+                    f"in this scope are {sorted(str(s) for s in avail)}. A "
+                    f"stored token is only exported when ALL of its stages "
+                    f"were asked for, because a joint token like 'NREM2NREM3' "
+                    f"labels a run that searched both stages as one segment "
+                    f"and its events cannot be attributed to one of them. Ask "
+                    f"for the full set (a list is accepted).")
     finally:
         conn.close()
 

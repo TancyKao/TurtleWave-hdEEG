@@ -11,7 +11,8 @@ from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
 from turtlewave_hdEEG import dbwrite
 from turtlewave_hdEEG.utils import derive_subject
-from turtlewave_hdEEG.eventprocessor import _build_epoch_lookup
+from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
+                                             assert_scoring_covers_stages)
 
 
 class ParalKC:
@@ -221,7 +222,10 @@ class ParalKC:
         # written here and any file_pattern a caller rebuilds later cannot
         # drift (see dbwrite.fmt_freq_token).
         freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
-        stages_str = "".join(stage) if stage else "all"
+        # ONE canonical token for the run's stage set, used for events.stage,
+        # the event_uuid5 stage argument, processing_status, the JSON dict and
+        # the filename -- so all three detectors agree on what a stage means.
+        stages_str = dbwrite.join_stage_token(stage) if stage else "all"
 
         self.logger.info(
             f"Detecting K-complexes (method={method_db}, "
@@ -278,6 +282,7 @@ class ParalKC:
             self.annotations, self.logger, required=write_db)
         _det_epoch_starts = [e[0] for e in _det_epochs]
         _n_null_stage = 0
+        _n_out_of_scope = 0
 
         def _stage_at(t):
             """Return the scored stage of the epoch containing time t, or None."""
@@ -287,6 +292,14 @@ class ParalKC:
             if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
                 return _det_epochs[idx][2]
             return None
+
+        # A requested stage with no scored epoch would otherwise be invisible:
+        # the joint token labels every row with the requested set whether or
+        # not the recording contains it. Fatal on the database path.
+        assert_scoring_covers_stages(
+            _det_epochs, stage, self.logger, required=write_db,
+            event_label='K-complex')
+        _requested_stages = set(str(s) for s in stage) if stage else set()
 
         # (Built BEFORE the database connection is opened: on the database
         # path an unusable scoring aborts the run, and doing it first means
@@ -349,6 +362,18 @@ class ParalKC:
                 dbwrite.assert_single_subject(
                     db_conn, db_subject, db_path=db_path, logger=self.logger)
 
+                # Refuse any write that would append a duplicate set rather
+                # than replace: the stage is part of both the uuid5 and the
+                # event_chan_time UNIQUE key, so rows stored under a DIFFERENT
+                # stage token (a pre-4.3 per-epoch stage, or an earlier run
+                # over a different stage set) would survive alongside this
+                # run's. stages_str is what makes the second case visible.
+                dbwrite.assert_stage_format_compatible(
+                    db_conn, self.EVENT_TYPE, methods, frequency[0],
+                    frequency[1], stage_token=stages_str, channels=chan,
+                    replace_channels=replace_channels, db_path=db_path,
+                    logger=self.logger)
+
                 dbwrite.record_run(
                     db_conn, run_id, self.EVENT_TYPE, method_db,
                     dbwrite.method_citation(method_db),
@@ -363,6 +388,14 @@ class ParalKC:
                     db_conn, db_subject, self.annotations, self.dataset, stage,
                     reject_artifacts, reject_arousals,
                     annotation_file=annot_file, logger=self.logger)
+
+                # Sleep cycles + stage durations, on this run's connection and
+                # WITHOUT touching the annotation XML. A no-op when they are
+                # already stored. events.cycle is tagged after the channel
+                # loop, scoped to this run.
+                dbwrite.ensure_cycles_populated(
+                    db_conn, self.annotations, db_subject, db_path=db_path,
+                    logger=self.logger)
 
                 if resume:
                     db_skip = dbwrite.resume_skip_channels(
@@ -458,21 +491,26 @@ class ParalKC:
                                 kc_start = float(kc.get('start', 0))
                                 kc_end = float(kc.get('end', 0))
                                 kc_dur = float(kc.get('dur', kc_end - kc_start))
-                                single_stage = _stage_at(kc_start)
-                                if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
-                                    single_stage = stage[0]
-                                if single_stage is None:
-                                    # No scored epoch contains this event; it has
-                                    # no denominator, so it can never contribute
-                                    # to a density. Reported after the loop.
+                                # events.stage is the RUN's stage token. The
+                                # epoch stage is kept beside it in the additive
+                                # epoch_stage column and used as the assertion
+                                # below.
+                                epoch_stage = _stage_at(kc_start)
+                                if epoch_stage is None:
+                                    # No scored epoch contains this event.
+                                    # Counted and reported after the loop.
                                     _n_null_stage += 1
+                                elif (_requested_stages
+                                        and epoch_stage not in _requested_stages):
+                                    _n_out_of_scope += 1
                                 morph = dbwrite.event_det_morphology(kc)
                                 ev = {
                                     'uuid': dbwrite.event_uuid5(
                                         self.EVENT_TYPE, ch, kc_start, meth,
-                                        frequency[0], frequency[1], single_stage),
+                                        frequency[0], frequency[1], stages_str),
                                     'start_time': kc_start, 'end_time': kc_end,
-                                    'duration': kc_dur, 'stage': single_stage,
+                                    'duration': kc_dur, 'stage': stages_str,
+                                    'epoch_stage': epoch_stage,
                                     'method': meth,
                                 }
                                 ev.update(morph)
@@ -480,7 +518,7 @@ class ParalKC:
                                 channel_param_segments.append(
                                     dbwrite.make_param_segment(
                                         processed_seg['data'], kc_start, kc_end,
-                                        self.EVENT_TYPE, single_stage, ch))
+                                        self.EVENT_TYPE, stages_str, ch))
 
                             # Legacy write_db=False path only
                             if write_json:
@@ -497,7 +535,14 @@ class ParalKC:
                                     'ptp': float(kc.get('ptp', 0)),
                                     'method': meth,
                                     'min_isolation': min_isolation,
-                                    'stage': stage,
+                                    # The run's canonical stage token, the same
+                                    # string the database stores, so the JSON
+                                    # and the database cannot disagree about
+                                    # what an event's stage means. Was the raw
+                                    # requested LIST.
+                                    'stage': stages_str,
+                                    'epoch_stage': _stage_at(
+                                        float(kc.get('start', 0))),
                                     'freq_range': frequency,
                                 })
 
@@ -567,12 +612,28 @@ class ParalKC:
         if write_db and _n_null_stage:
             self.logger.error(
                 "%d of %d detected K-complex(es) fall outside every scored "
-                "epoch, so their stage is NULL. A NULL-stage row has no "
-                "density denominator and is excluded from every per-stage and "
-                "pooled density. Check that the scoring covers the whole "
-                "recording.", _n_null_stage, len(all_kcs))
+                "epoch (events.epoch_stage is NULL). They still carry this "
+                "run's stage token '%s' and so still count towards its "
+                "density, but no scored epoch vouches for them. Check that the "
+                "scoring covers the whole recording.",
+                _n_null_stage, len(all_kcs), stages_str)
+        if write_db and _n_out_of_scope:
+            # The retained assertion: detection ran on segments fetched for the
+            # requested stages, so an event whose own epoch stage is outside
+            # that set means the stage token on its row is not the whole truth.
+            self.logger.warning(
+                "%d of %d detected K-complex(es) fall in a scored epoch "
+                "OUTSIDE the requested stage set %s (see events.epoch_stage). "
+                "They are labelled with this run's stage token '%s' like every "
+                "other row. A handful at segment boundaries is expected; a "
+                "large share means the fetch and the scoring disagree.",
+                _n_out_of_scope, len(all_kcs), sorted(_requested_stages),
+                stages_str)
 
         if write_db and db_conn is not None:
+            # events.cycle for THIS run's rows only, from the stored cycles.
+            dbwrite.tag_run_cycles(db_conn, db_subject, run_id=run_id,
+                                   logger=self.logger)
             try:
                 db_conn.close()
             except Exception:

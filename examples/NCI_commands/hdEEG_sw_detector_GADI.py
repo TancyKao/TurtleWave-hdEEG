@@ -12,7 +12,8 @@ import logging
 
 from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalSWA, CustomAnnotations, fmt_freq_token
+from turtlewave_hdEEG import (ParalSWA, CustomAnnotations, fmt_freq_token,
+                              join_stage_token)
 from turtlewave_hdEEG.dbwrite import verify_channel_coverage
 from turtlewave_hdEEG.density import event_density, format_density_table
 
@@ -151,7 +152,12 @@ def main():
     )
 
     freq_range = fmt_freq_token(f_lo, f_hi)
-    stages_str = "".join(test_stages)
+    # The canonical token the detectors stamp on events.stage and
+    # processing_status. A raw join of a non-canonically-ordered --stages
+    # (e.g. NREM3 NREM2) spells the same scope differently, and the
+    # coverage check below would then match no status row and report every
+    # channel as missing.
+    stages_str = join_stage_token(test_stages)
 
     def check_coverage_or_exit():
         """Verify the run reached the database, else log and exit non-zero.

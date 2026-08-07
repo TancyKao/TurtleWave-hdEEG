@@ -183,6 +183,34 @@ merged$density_per_min <- merged$n_events / (merged$analysed_seconds / 60)
 run used — they're part of `analysed_time`'s key, since a run that kept
 arousal epochs analysed more seconds than one that dropped them.
 
+### Density without Python: `v_event_density`
+
+If you're working entirely in R or `sqlite3` and don't want to shell out to
+`event_density`, query the `v_event_density` SQL view directly — it does the
+same stage-token pooling in SQL:
+
+```r
+density <- dbGetQuery(con, "
+    SELECT channel, event_type, stage, n_events, analysed_minutes,
+           density_per_min
+    FROM v_event_density
+    WHERE event_type = 'spindle' AND method = 'Moelle2011'
+")
+```
+
+Differences from `event_density` to know about before trusting a montage
+summary built from the view alone: it has **no honest zeros** (a channel that
+ran and detected nothing has no row, since there's nothing in `events` to
+join), **no per-identity stage scope** (it shows every
+`event_type`/`method`/`stage` combination that exists in `events`, not only
+the ones a particular run actually searched), and it **under-reports density
+for an out-of-vocabulary stage label** (something outside NREM1/NREM2/NREM3/
+REM/Wake, e.g. `'Undefined'`) even when `analysed_time` holds a matching row
+— `density_per_min` comes back `NULL` there rather than the number
+`event_density` would compute. See
+[Reference: `v_event_density`](../reference/api/density.md#v_event_density-density-in-plain-sql-for-r-and-non-python-callers)
+for the full column list and behaviour.
+
 !!! note "`missing=` only governs an EXPLICIT `stage=`"
     Omitting `stage` resolves the scope in two steps, both logged: it first
     tries the stage set the matching run actually searched (recovered from
@@ -208,6 +236,27 @@ arousal epochs analysed more seconds than one that dropped them.
     default) or returns `NaN` rows (`'nan'`) instead of being left out of
     scope. Pass `stage=` explicitly if you want a missing denominator to be
     an error rather than a `NaN` row you have to notice yourself.
+
+!!! note "A subset request against a PARTIALLY-migrated identity warns, and returns the narrower answer"
+    `stage=['NREM2']` against an `(event_type, method)` identity that holds
+    **only** a wider joint token (`'NREM2NREM3'`) returns no row — those
+    events can't be attributed to N2 alone. But if that identity holds
+    **both** a token the request covers (a per-epoch `'NREM2'` row, or an
+    earlier narrower run) **and** a non-covering one — the state a
+    partially-migrated database or a scope detected twice under different
+    stage sets is in — `event_density` does not refuse: it returns the
+    density computed over the covered rows only, and logs a warning naming
+    how many events were excluded:
+    ```text
+    WARNING stage=['NREM2'] does not cover stage token(s) ['NREM2NREM3'] that
+    event_type=spindle, method=Moelle2011 also holds, so 5760 event(s) are
+    EXCLUDED from this density and 945 are reported. ...
+    ```
+    Read the warning before trusting the number — a silently narrower
+    denominator looks identical to a clean result unless you're watching the
+    log. See
+    [`event_density` and a partially-covered identity](../reference/api/density.md#event_density-and-a-partially-covered-identity)
+    for the full rule.
 
 ## Read PAC results
 
@@ -248,5 +297,7 @@ once no detection job is actively writing.
 
 - [Reference: density module](../reference/api/density.md)
 - [Reference: dbwrite module](../reference/api/dbwrite.md)
-- [Write Detection Results Directly to the Database](direct-to-database-detection.md)
+- [Write Detection Results Directly to the Database](direct-to-database-detection.md) —
+  what `events.stage` means since 4.3, and the pre-4.3 refusal on a
+  duplicating re-detection.
 - [Review EEG Events](review-eeg-events.md)

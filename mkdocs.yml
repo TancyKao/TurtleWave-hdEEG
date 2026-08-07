@@ -107,8 +107,10 @@ nav:
     - Maintenance & Migration:
       - Back-fill PAC Results into the Database: how-to/backfill-pac-to-database.md
       - Run With the Database on a Network Drive: how-to/run-with-database-on-a-network-drive.md
+      - Migrate a Database to the Joint Stage Token: how-to/migrate-stage-to-joint.md
       - Upgrade to 4.0: how-to/upgrade-to-4.0.md
       - Upgrade to 4.2: how-to/upgrade-to-4.2.md
+      - Upgrade to 4.3: how-to/upgrade-to-4.3.md
 
   - Reference:
     - API Reference: reference/api/index.md

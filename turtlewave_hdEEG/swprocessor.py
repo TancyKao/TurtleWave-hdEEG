@@ -8,7 +8,9 @@ from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave as DetectSlowWave
 from turtlewave_hdEEG import dbwrite
 from turtlewave_hdEEG.utils import derive_subject
-from turtlewave_hdEEG.eventprocessor import _build_epoch_lookup
+from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
+                                             _json_event_stages,
+                                             assert_scoring_covers_stages)
 import json
 import datetime
 import logging
@@ -348,6 +350,7 @@ class ParalSWA:
             self.annotations, self.logger, required=write_db)
         _det_epoch_starts = [e[0] for e in _det_epochs]
         _n_null_stage = 0
+        _n_out_of_scope = 0
 
         def _stage_at(t):
             """Return the scored stage of the epoch containing time t, or None."""
@@ -362,10 +365,23 @@ class ParalSWA:
         # path an unusable scoring aborts the run, and doing it first means
         # that abort cannot leave a connection open.
 
+        # A requested stage with no scored epoch would otherwise be invisible:
+        # the joint token labels every row with the requested set whether or
+        # not the recording contains it. Fatal on the database path.
+        assert_scoring_covers_stages(
+            _det_epochs, stage, self.logger, required=write_db,
+            event_label=str(event_type).replace('_', ' '))
+        _requested_stages = set(str(s) for s in stage) if stage else set()
+
         # ------------------------------------------------------------------
         # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
         # ------------------------------------------------------------------
-        stages_key = "".join(stage) if stage else "all"
+        # ONE canonical token for the run's stage set, used for events.stage,
+        # the event_uuid5 stage argument, processing_status, the JSON dict and
+        # the filename -- so spindles, slow waves and K-complexes cannot
+        # disagree about what a stage means (which is what made the PAC
+        # self-join on sw.stage = sp.stage structurally unable to match).
+        stages_key = dbwrite.join_stage_token(stage) if stage else "all"
         db_conn = None
         run_id = None
         db_skip = set()
@@ -425,6 +441,18 @@ class ParalSWA:
                 dbwrite.assert_single_subject(
                     db_conn, db_subject, db_path=db_path, logger=self.logger)
 
+                # Refuse any write that would append a duplicate set rather
+                # than replace: the stage is part of both the uuid5 and the
+                # event_chan_time UNIQUE key, so rows stored under a DIFFERENT
+                # stage token (a pre-4.3 per-epoch stage, or an earlier run
+                # over a different stage set) would survive alongside this
+                # run's. stages_key is what makes the second case visible.
+                dbwrite.assert_stage_format_compatible(
+                    db_conn, event_type, method, frequency[0], frequency[1],
+                    stage_token=stages_key, channels=chan,
+                    replace_channels=replace_channels,
+                    db_path=db_path, logger=self.logger)
+
                 dbwrite.record_run(
                     db_conn, run_id, event_type, method_db, run_citation,
                     json.dumps(params_dict, default=str),
@@ -438,6 +466,14 @@ class ParalSWA:
                     db_conn, db_subject, self.annotations, self.dataset, stage,
                     reject_artifacts, reject_arousals,
                     annotation_file=annot_file, logger=self.logger)
+
+                # Sleep cycles + stage durations, on this run's connection and
+                # WITHOUT touching the annotation XML. A no-op when they are
+                # already stored. events.cycle is tagged after the channel
+                # loop, scoped to this run.
+                dbwrite.ensure_cycles_populated(
+                    db_conn, self.annotations, db_subject, db_path=db_path,
+                    logger=self.logger)
 
                 if resume:
                     db_skip = dbwrite.resume_skip_channels(
@@ -620,22 +656,26 @@ class ParalSWA:
                                     sw_start = float(sw.get('start', 0))
                                     sw_end = float(sw.get('end', 0))
                                     sw_dur = float(sw.get('dur', sw_end - sw_start))
-                                    single_stage = _stage_at(sw_start)
-                                    if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
-                                        single_stage = stage[0]
-                                    if single_stage is None:
-                                        # No scored epoch contains this event; it
-                                        # has no denominator, so it can never
-                                        # contribute to a density. Reported after
-                                        # the channel loop.
+                                    # events.stage is the RUN's stage token.
+                                    # The epoch stage is kept beside it in the
+                                    # additive epoch_stage column and used as
+                                    # the assertion below.
+                                    epoch_stage = _stage_at(sw_start)
+                                    if epoch_stage is None:
+                                        # No scored epoch contains this event.
+                                        # Counted and reported after the loop.
                                         _n_null_stage += 1
+                                    elif (_requested_stages
+                                            and epoch_stage not in _requested_stages):
+                                        _n_out_of_scope += 1
                                     morph = dbwrite.event_det_morphology(sw)
                                     ev = {
                                         'uuid': dbwrite.event_uuid5(
                                             event_type, ch, sw_start, meth,
-                                            frequency[0], frequency[1], single_stage),
+                                            frequency[0], frequency[1], stages_key),
                                         'start_time': sw_start, 'end_time': sw_end,
-                                        'duration': sw_dur, 'stage': single_stage,
+                                        'duration': sw_dur, 'stage': stages_key,
+                                        'epoch_stage': epoch_stage,
                                         'method': meth,
                                     }
                                     ev.update(morph)
@@ -643,7 +683,7 @@ class ParalSWA:
                                     channel_param_segments.append(
                                         dbwrite.make_param_segment(
                                             processed_seg['data'], sw_start, sw_end,
-                                            event_type, single_stage, ch))
+                                            event_type, stages_key, ch))
 
                                 # Add to JSON (legacy write_db=False path only)
                                 if write_json:
@@ -662,18 +702,14 @@ class ParalSWA:
                                         'method': meth
                                     }
                                     
-                                    # Attribute the wave to the single stage of
-                                    # the epoch it actually occurred in. Fall back
-                                    # to the requested stage only if the epoch
-                                    # lookup is unavailable, so behaviour degrades
-                                    # to the old (list) form rather than crashing.
-                                    actual_stage = _stage_at(sw_data['start_time'])
-                                    if actual_stage is not None:
-                                        sw_data['stage'] = actual_stage
-                                    elif isinstance(stage, (list, tuple)) and len(stage) == 1:
-                                        sw_data['stage'] = stage[0]
-                                    else:
-                                        sw_data['stage'] = stage
+                                    # The run's canonical stage token, the same
+                                    # string the database stores, so the JSON
+                                    # and the database cannot disagree about
+                                    # what an event's stage means. The wave's
+                                    # own scored epoch stage is kept alongside.
+                                    sw_data['stage'] = stages_key
+                                    sw_data['epoch_stage'] = _stage_at(
+                                        sw_data['start_time'])
                                     sw_data['freq_range'] = frequency
                                     
                                     channel_json_slow_waves.append(sw_data)
@@ -697,7 +733,7 @@ class ParalSWA:
                             f"Wrote {len(channel_db_events)} {event_type} rows for "
                             f"channel {ch} to the database")
 
-                    stages_str = "".join(stage) if stage else "all"
+                    stages_str = stages_key
                     if write_json:
                         try:
                             ch_json_file = os.path.join(json_dir,
@@ -731,7 +767,7 @@ class ParalSWA:
                         # apart from one that legitimately had no slow waves.
                         elif write_json:
                             try:
-                                stages_str = "".join(stage) if stage else "all"
+                                stages_str = stages_key
                                 ch_json_file = os.path.join(json_dir,
                                                         f"slowwaves_{method_str}_{freq_str}_{stages_str}_{ch}.json")
                                 with open(ch_json_file, 'w', encoding='utf-8') as f:
@@ -742,13 +778,29 @@ class ParalSWA:
 
         if write_db and _n_null_stage:
             self.logger.error(
-                "%d of %d detected %s(s) fall outside every scored epoch, so "
-                "their stage is NULL. A NULL-stage row has no density "
-                "denominator and is excluded from every per-stage and pooled "
-                "density. Check that the scoring covers the whole recording.",
-                _n_null_stage, len(all_slow_waves), event_type)
+                "%d of %d detected %s(s) fall outside every scored epoch "
+                "(events.epoch_stage is NULL). They still carry this run's "
+                "stage token '%s' and so still count towards its density, but "
+                "no scored epoch vouches for them. Check that the scoring "
+                "covers the whole recording.",
+                _n_null_stage, len(all_slow_waves), event_type, stages_key)
+        if write_db and _n_out_of_scope:
+            # The retained assertion: detection ran on segments fetched for the
+            # requested stages, so an event whose own epoch stage is outside
+            # that set means the stage token on its row is not the whole truth.
+            self.logger.warning(
+                "%d of %d detected %s(s) fall in a scored epoch OUTSIDE the "
+                "requested stage set %s (see events.epoch_stage). They are "
+                "labelled with this run's stage token '%s' like every other "
+                "row. A handful at segment boundaries is expected; a large "
+                "share means the fetch and the scoring disagree.",
+                _n_out_of_scope, len(all_slow_waves), event_type,
+                sorted(_requested_stages), stages_key)
 
         if write_db and db_conn is not None:
+            # events.cycle for THIS run's rows only, from the stored cycles.
+            dbwrite.tag_run_cycles(db_conn, db_subject, run_id=run_id,
+                                   logger=self.logger)
             try:
                 db_conn.close()
             except Exception:
@@ -1352,12 +1404,7 @@ class ParalSWA:
         for sw in all_slow_waves:
             if not isinstance(sw, dict) or 'stage' not in sw:
                 continue        
-            sw_stage = sw['stage']
-            if isinstance(sw_stage, list):
-                for s in sw_stage:
-                    wave_stages.add(str(s))
-            else:
-                wave_stages.add(str(sw_stage))
+            wave_stages.update(_json_event_stages(sw))
         
         # Determine stages to process
         if stage is None:
@@ -1396,16 +1443,19 @@ class ParalSWA:
             waves_by_chan[chan].append(sw)
             
             if not combined_stages:
-                sw_stages = []
-                if 'stage' in sw:
-                    sw_stages = sw['stage'] if isinstance(sw['stage'], list) else [sw['stage']]
-                sw_stages = [str(s) for s in sw_stages]
+                # From 4.3 the JSON carries the run's joint token
+                # ('NREM2NREM3'), not a single per-epoch label, so this splits
+                # rather than wrapping -- without it the token becomes a stage
+                # of its own, matching no requested stage and no denominator,
+                # and every per-stage density silently reads zero.
+                sw_stages = _json_event_stages(sw)
 
                 # If the event spans multiple requested stages, attribute it to
                 # the single stage of the epoch it actually occurred in, so it is
                 # not double-counted across stages.
                 if len(sw_stages) > 1:
-                    actual = _stage_at(sw.get('start_time', sw.get('start')))
+                    actual = sw.get('epoch_stage') or _stage_at(
+                        sw.get('start_time', sw.get('start')))
                     if actual in sw_stages:
                         sw_stages = [actual]
 
@@ -1436,8 +1486,9 @@ class ParalSWA:
                     for sw in all_chan_waves:
                         if 'stage' not in sw:
                             continue
-                        sw_stages = sw['stage'] if isinstance(sw['stage'], list) else [sw['stage']]
-                        sw_stages = set(str(s) for s in sw_stages)
+                        # A joint token is split into its components, see
+                        # _json_event_stages.
+                        sw_stages = set(_json_event_stages(sw))
 
                         if sw_stages.intersection(stages_set) and id(sw) not in seen_waves:
                             stage_waves.append(sw)

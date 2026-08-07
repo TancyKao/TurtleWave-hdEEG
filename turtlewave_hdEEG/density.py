@@ -262,7 +262,7 @@ def _method_components(stored):
     return [part for part in str(stored).split('_') if part]
 
 
-def _run_stage_scope(conn, event_type, method, freq_lower, freq_upper, log):
+def _run_stage_components(conn, event_type, method, freq_lower, freq_upper, log):
     """Recover the stage set the matching detection run(s) actually searched.
 
     ``analysed_time`` is keyed on ``(subject, stage, reject_*)`` with no event
@@ -275,6 +275,11 @@ def _run_stage_scope(conn, event_type, method, freq_lower, freq_upper, log):
     the joined stage token per processed channel, and ``detection_runs.stages``
     holds the requested list. Both are scoped by event type and method, so
     either recovers the truth.
+
+    Returns the individual **components** rather than the token: they are what
+    ``analysed_time`` is keyed on, and :func:`_identity_scope_tokens` decides
+    from them (plus what the events actually carry) whether this identity is
+    reported per component or under one joint token.
 
     Parameters
     ----------
@@ -365,6 +370,82 @@ def _table_exists(conn, name):
     return cur.fetchone() is not None
 
 
+def _components(token):
+    """Stage components of one stored token (lazy import of the primitive).
+
+    Parameters
+    ----------
+    token : str or None
+        Stage token as stored in ``events.stage``.
+
+    Returns
+    -------
+    list of str
+        Constituent stage labels; an unrecognised token is returned whole.
+    """
+    from .dbwrite import stage_components
+    return stage_components(token)
+
+
+def _identity_scope_tokens(observed, run_components, has_other_tokens,
+                           explicit):
+    """Decide which stage TOKENS one (event_type, method) is reported under.
+
+    Density's stage dimension is the run's stage **token**, not a single
+    stage. That one change makes both database shapes fall out of the same
+    code: a pre-4.3 row carries a one-component token (``'NREM2'``) and a 4.3
+    row carries the run's joint token (``'NREM2NREM3'``), so backward
+    compatibility is a special case of the general rule rather than a branch.
+
+    Parameters
+    ----------
+    observed : sequence of str
+        Stage tokens this identity's events actually carry, already narrowed
+        to the requested stage set.
+    run_components : sequence of str
+        Individual stages the run searched, from
+        :func:`_run_stage_components` (or the explicit ``stage=`` request).
+    has_other_tokens : bool
+        True when this identity has events under tokens the request does NOT
+        cover -- i.e. the requested stages are a strict subset of a stored
+        joint token.
+    explicit : bool
+        True when the caller named ``stage=``. An explicit request is honoured
+        as an error rather than reinterpreted.
+
+    Returns
+    -------
+    list of str
+        Tokens to report, in the order given by ``run_components`` (or by
+        first appearance for observed tokens).
+
+    Notes
+    -----
+    The three cases, in order:
+
+    1. **Joint storage** -- any observed token spans more than one stage. The
+       events carry the run's own token; report exactly those. A channel that
+       ran and fired nothing then gets its zero row under that same token.
+    2. **A slice of a joint token was asked for** -- nothing observed, but
+       this identity does have events under a token the request does not
+       cover. Report NOTHING. A joint row cannot be attributed to one of its
+       stages, so an ``'NREM2'`` row here would divide part of a joint count
+       by an N2-only denominator, which is a wrong number where the honest
+       answer is "not available at this resolution".
+    3. **Per-epoch storage, or nothing fired anywhere** -- report one token
+       per searched stage, which is exactly the pre-4.3 behaviour, including
+       the zero-event row for a stage that was searched and stayed silent.
+    """
+    from .dbwrite import stage_components
+
+    observed = [str(t) for t in observed]
+    if any(len(stage_components(t)) > 1 for t in observed):
+        return list(dict.fromkeys(observed))
+    if explicit and not observed and has_other_tokens:
+        return []
+    return list(dict.fromkeys(str(s) for s in run_components))
+
+
 def event_density(db_path, event_type=None, method=None, stage=None,
                   channel=None, freq_lower=None, freq_upper=None,
                   subject=None, reject_artifacts=True, reject_arousals=True,
@@ -392,15 +473,22 @@ def event_density(db_path, event_type=None, method=None, stage=None,
     stage : str or list of str or None, optional
         Stage(s) to report, in any form the pipeline uses: a list
         (``['NREM2', 'NREM3']``), a single stage (``'NREM2'``), or the joined
-        scope token that filenames and ``processing_status`` carry
-        (``'NREM2NREM3'``), which is split with
-        :func:`turtlewave_hdEEG.dbwrite.split_stage_token`. ``None`` (default)
-        uses the stages that have a stored denominator, falling back to the
-        stages present in the matching events.
+        scope token (``'NREM2NREM3'``). The three are equivalent -- all are
+        reduced to a set of stages and matched against the tokens the database
+        stores. ``None`` (default) uses the stages the run recorded searching,
+        falling back to the stages present in the matching events.
 
-        This list, not the set of stages that produced events, defines the
+        This set, not the set of stages that produced events, defines the
         scope: a stage that was analysed and fired nothing still contributes
         its analysed time to a pooled denominator.
+
+        **A strict subset of a stored joint token returns no row, not a
+        number.** A run over ``['NREM2', 'NREM3']`` searched them as one
+        concatenated segment and stores every event under ``'NREM2NREM3'``;
+        those events cannot be attributed to N2 or N3 individually, so
+        ``stage=['NREM2']`` is answered with a warning and no row rather than
+        by dividing part of a joint count by an N2-only denominator. Use
+        ``events.epoch_stage`` if the split is what you need.
     channel : str or list of str or None, optional
         Restrict to one or more channels. Default ``None`` (all).
     freq_lower, freq_upper : float or None, optional
@@ -437,8 +525,12 @@ def event_density(db_path, event_type=None, method=None, stage=None,
     Returns
     -------
     pandas.DataFrame
-        One row per (channel, event_type, method, stage) in scope, with
-        columns ``subject``, ``channel``, ``event_type``, ``method``,
+        One row per (channel, event_type, method, stage token) in scope. The
+        ``stage`` column is the run's stage **token** as stored: ``'NREM2'``
+        for a single-stage run or a pre-4.3 per-epoch row, ``'NREM2NREM3'``
+        for a joint run, and ``'NREM2+NREM3'`` for a ``combine_stages`` row
+        pooled across tokens. Columns are ``subject``, ``channel``,
+        ``event_type``, ``method``,
         ``stage``, ``n_events``, ``analysed_minutes``, ``density_per_min``,
         ``artefact_minutes_excluded``, ``mean_duration_sec``,
         ``reject_artifacts``, ``reject_arousals``, ``denominator_source``.
@@ -517,11 +609,41 @@ def event_density(db_path, event_type=None, method=None, stage=None,
             base_where.append("freq_upper = ?")
             base_params.append(float(freq_upper))
 
+        # Every distinct stage token in the scope, with its event count, before
+        # any stage filter. Needed three times: to resolve the requested stages
+        # to the tokens actually stored; to tell "this identity fired nothing"
+        # from "this identity fired only under tokens the request does not
+        # cover"; and to say HOW MANY events a request silently leaves out.
+        from .dbwrite import stage_tokens_covering
+        base_clause_pre = ((" WHERE " + " AND ".join(base_where))
+                           if base_where else "")
+        tokens_by_identity = {}
+        for et_, m_, tok_, n_ in conn.execute(
+                "SELECT event_type, method, stage, COUNT(*) FROM events"
+                + base_clause_pre
+                + " GROUP BY event_type, method, stage", base_params):
+            if tok_ is None:
+                continue
+            tokens_by_identity.setdefault(
+                (str(et_), str(m_)), {})[str(tok_)] = int(n_)
+
         where = list(base_where)
         params = list(base_params)
         if stage_list:
-            where.append("stage IN (%s)" % ",".join("?" * len(stage_list)))
-            params.extend(stage_list)
+            # Resolve the requested stages to the tokens the database holds:
+            # 'NREM2NREM3' is selected by a request for both its stages and by
+            # nothing narrower. Filtering on the raw request would match a
+            # per-epoch database only.
+            all_tokens = [t for toks in tokens_by_identity.values()
+                          for t in toks]
+            stage_tokens = stage_tokens_covering(all_tokens, stage_list)
+            if stage_tokens:
+                where.append("stage IN (%s)" % ",".join("?" * len(stage_tokens)))
+                params.extend(stage_tokens)
+            else:
+                # No stored token lies inside the requested stages. Match
+                # nothing: dropping the predicate would count every stage.
+                where.append("1 = 0")
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
         sql = (
@@ -663,16 +785,60 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         scope_by_identity = {}
         for ident in sorted(identities):
             et, m = ident
+            # Tokens this identity's events carry ({token: n_events}), and
+            # which of them the request leaves OUT. Testing "nothing observed"
+            # instead of "something excluded" is not equivalent: an identity
+            # holding both 'NREM2' (legacy per-epoch rows) and 'NREM2NREM3'
+            # (a later joint run) answers stage=['NREM2'] from the first token
+            # alone and silently drops every event under the second -- a
+            # number, not a missing row, and the one that looks most like an
+            # answer. That state is also what a partially-migrated database
+            # is in.
+            ident_tokens = tokens_by_identity.get(ident, {})
+            observed = stage_tokens_covering(list(ident_tokens), stage_list)
+            excluded = [t for t in ident_tokens if t not in set(observed)]
+            has_other_tokens = bool(excluded)
+            if excluded and observed:
+                log.warning(
+                    "stage=%s does not cover stage token(s) %s that "
+                    "event_type=%s, method=%s also holds, so %d event(s) are "
+                    "EXCLUDED from this density and %d are reported. A joint "
+                    "token is only selected when every one of its stages was "
+                    "asked for, because its events cannot be attributed to "
+                    "one of them. Ask for the full set to include them, or "
+                    "read events.epoch_stage for the per-epoch split. This "
+                    "usually means the scope was detected twice under "
+                    "different stage sets, or the database is only partly "
+                    "migrated to the joint token.",
+                    stage_list, sorted(excluded), et, m,
+                    sum(ident_tokens[t] for t in excluded),
+                    sum(ident_tokens[t] for t in observed))
+
             if stage_list:
-                # Explicitly requested: honoured as given for every identity.
-                scope_by_identity[ident] = list(dict.fromkeys(stage_list))
+                # Explicitly requested. The components are honoured as given;
+                # which TOKENS they map to depends on how this identity's
+                # events are stored.
+                tokens = _identity_scope_tokens(
+                    observed, list(dict.fromkeys(stage_list)),
+                    has_other_tokens, explicit=True)
+                if not tokens and has_other_tokens:
+                    log.warning(
+                        "stage=%s asked for a strict subset of the stage "
+                        "token(s) %s that event_type=%s, method=%s is stored "
+                        "under, so no row is returned for it. Those events "
+                        "were detected over the whole stage set as one "
+                        "segment and cannot be attributed to one of its "
+                        "stages; ask for the full set. (events.epoch_stage "
+                        "holds each event's own scored epoch if you need the "
+                        "split.)", stage_list, sorted(set(ident_tokens)), et, m)
+                scope_by_identity[ident] = tokens
                 continue
-            searched = _run_stage_scope(conn, et, m, freq_lower, freq_upper, log)
+
+            searched = _run_stage_components(
+                conn, et, m, freq_lower, freq_upper, log)
             if not searched:
-                searched = sorted({str(r.stage) for r in counts.itertuples()
-                                   if (str(r.event_type), str(r.method)) == ident
-                                   and r.stage is not None
-                                   and str(r.stage) != 'nan'})
+                searched = sorted({s for tok in observed
+                                   for s in _components(tok)})
                 if searched:
                     log.warning(
                         "stage=None and this database records no detection "
@@ -706,9 +872,15 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                         "settings (it is not keyed by them). Pass stage= "
                         "explicitly to make a missing denominator an error.",
                         et, m, undenominated, reject_artifacts, reject_arousals)
-            scope_by_identity[ident] = list(searched)
-            if searched:
-                log.debug("Stage scope for %s/%s: %s", et, m, searched)
+            # Components -> tokens. For a per-epoch database this is the
+            # identity mapping (one token per component) and the behaviour is
+            # unchanged; for a joint-token run it collapses to the one token
+            # the events actually carry.
+            scope_by_identity[ident] = _identity_scope_tokens(
+                observed, searched, has_other_tokens, explicit=False)
+            if scope_by_identity[ident]:
+                log.debug("Stage token scope for %s/%s: %s", et, m,
+                          scope_by_identity[ident])
     finally:
         conn.close()
 
@@ -773,14 +945,19 @@ def event_density(db_path, event_type=None, method=None, stage=None,
     poolable = {ident: stgs for ident, stgs in scope_by_identity.items()
                 if len(stgs) > 1}
     if combine_stages and not poolable:
-        # Asked for a pooled row and got none. Say so: the usual cause is that
-        # an implicit scope dropped an undenominated stage, leaving one stage
-        # per identity, and a silently un-pooled frame reads as if pooling had
-        # happened and produced these numbers.
-        log.warning(
-            "combine_stages=True was requested but no identity has more than "
-            "one stage in scope (%s), so nothing was pooled and the "
-            "per-stage rows are returned unchanged.",
+        # No identity has more than one stage TOKEN. For a joint-token run
+        # that is the normal case and a correct no-op -- the single token
+        # 'NREM2NREM3' already pools its stages in its denominator, which is
+        # exactly what combine_stages asks for. It is only worth attention
+        # when an identity has one stage because an implicit scope dropped an
+        # undenominated one. Reported at INFO, naming what each identity is
+        # over, so the two situations are told apart by reading it.
+        log.info(
+            "combine_stages=True: nothing further to pool. Each identity "
+            "already has a single stage token in scope (%s). For a run stored "
+            "under a joint token this is the expected no-op -- the token's "
+            "denominator is already the sum over its stages. The per-token "
+            "rows are returned unchanged.",
             "; ".join(f"{et}/{m}: {stgs or 'no stages'}"
                       for (et, m), stgs in sorted(scope_by_identity.items()))
             or 'no identities')
@@ -788,9 +965,10 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         skipped = {ident: stgs for ident, stgs in scope_by_identity.items()
                    if len(stgs) <= 1}
         if skipped:
-            log.warning(
-                "combine_stages=True: %s had only one stage in scope, so "
-                "their rows are per-stage rather than pooled.",
+            log.info(
+                "combine_stages=True: %s already had a single stage token in "
+                "scope, so their rows are returned per token rather than "
+                "pooled further.",
                 "; ".join(f"{et}/{m} ({stgs or 'no stages'})"
                           for (et, m), stgs in sorted(skipped.items())))
     if combine_stages and poolable:
@@ -805,8 +983,17 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                          & (counts['stage'].astype(object).isin(ident_stages))]
             if sel.empty:
                 continue
-            have_denom = [s for s in ident_stages if s in denom]
-            complete = len(have_denom) == len(ident_stages) and bool(ident_stages)
+            # Pool over the DEDUPLICATED UNION of the tokens' components, not
+            # over the tokens' pooled seconds. A database holding both
+            # 'NREM2' and 'NREM2NREM3' for one identity would otherwise count
+            # N2's analysed time twice and halve the pooled density.
+            union = []
+            for tok in ident_stages:
+                for comp in _components(tok):
+                    if comp not in union:
+                        union.append(comp)
+            have_denom = [s for s in union if s in denom]
+            complete = len(have_denom) == len(union) and bool(union)
             pooled_sec = sum(denom[s]['analysed_seconds'] for s in have_denom)
             pooled_artefact = sum((denom[s]['artefact_seconds_excluded'] or 0.0)
                                   for s in have_denom)
@@ -848,18 +1035,21 @@ def event_density(db_path, event_type=None, method=None, stage=None,
             log.warning("Nothing to pool for the requested scope.")
             return pd.DataFrame(columns=list(DENSITY_COLUMNS))
     else:
+        from .dbwrite import pooled_denominator
         rows = counts.copy()
+        # One denominator per stage TOKEN: for a one-component token this is
+        # that stage's stored row (unchanged from before); for a joint token
+        # it is the sum over its components, all-or-nothing.
+        pooled = [pooled_denominator(s, denom) if s is not None
+                  and str(s) != 'nan' else None
+                  for s in rows['stage']]
         rows['analysed_minutes'] = [
-            denom[str(s)]['analysed_seconds'] / 60.0 if str(s) in denom else np.nan
-            for s in rows['stage']]
+            np.nan if p is None else p.analysed_seconds / 60.0 for p in pooled]
         rows['artefact_minutes_excluded'] = [
-            (denom[str(s)]['artefact_seconds_excluded'] / 60.0
-             if str(s) in denom and denom[str(s)]['artefact_seconds_excluded'] is not None
-             else np.nan)
-            for s in rows['stage']]
+            np.nan if p is None else p.artefact_seconds_excluded / 60.0
+            for p in pooled]
         rows['denominator_source'] = [
-            denom[str(s)]['source'] if str(s) in denom else 'missing'
-            for s in rows['stage']]
+            'missing' if p is None else p.source for p in pooled]
 
     with np.errstate(divide='ignore', invalid='ignore'):
         rows['density_per_min'] = np.where(

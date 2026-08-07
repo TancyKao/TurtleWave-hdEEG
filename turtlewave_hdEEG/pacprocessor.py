@@ -535,15 +535,38 @@ class ParalPAC:
                                 query += " AND freq_lower >= ? AND freq_upper <= ?"
                                 params.extend(event_opts['sw_freq_range'])
 
-                            # Add stage filter if specified
+                            # Add stage filter if specified. Resolved to the
+                            # tokens the database actually holds, so this
+                            # matches a joint-token run ('NREM2NREM3') as well
+                            # as a per-epoch one ('NREM2','NREM3'). Passing the
+                            # requested list straight in matched only the
+                            # latter, and returned zero events -- silently --
+                            # against everything written from 4.3 on.
                             if stage and len(stage) > 0:
-                                placeholders = ', '.join(['?' for _ in stage])
-                                query += f" AND stage IN ({placeholders})"
-                                params.extend(stage)
-                                #params = [ch] + stage
-                            #else:
-                            #    params = [ch]
-                            
+                                sw_tokens = dbwrite.resolve_stage_tokens(
+                                    conn, list(stage),
+                                    where=["event_type = 'slow_wave'",
+                                           "channel = ?"],
+                                    params=[ch])
+                                if sw_tokens:
+                                    placeholders = ', '.join(['?' for _ in sw_tokens])
+                                    query += f" AND stage IN ({placeholders})"
+                                    params.extend(sw_tokens)
+                                else:
+                                    # No stored token lies inside the requested
+                                    # stages. Match nothing rather than drop
+                                    # the filter, which would couple events
+                                    # from stages the user excluded.
+                                    query += " AND 1 = 0"
+                                    logger.warning(
+                                        f"No slow-wave stage token in the "
+                                        f"database for channel {ch} lies "
+                                        f"inside the requested stages "
+                                        f"{list(stage)}; no events selected. "
+                                        f"A joint token such as 'NREM2NREM3' "
+                                        f"is only selected when every one of "
+                                        f"its stages was asked for.")
+
                             # Execute query
                             cursor.execute(query, params)
                             slow_wave_events = cursor.fetchall()
@@ -705,12 +728,28 @@ class ParalPAC:
                                 params.extend(event_opts['spindle_freq_range'])
 
 
-                            # Add stage filter if specified
+                            # Add stage filter if specified. Resolved to the
+                            # tokens the database actually holds (see the
+                            # slow-wave branch above), so a joint-token run is
+                            # matched instead of silently returning nothing.
                             if stage and len(stage) > 0:
-                                placeholders = ', '.join(['?' for _ in stage])
-                                query += f" AND stage IN ({placeholders})"
-                                params.extend(stage) 
-                            
+                                sp_tokens = dbwrite.resolve_stage_tokens(
+                                    conn, list(stage),
+                                    where=["event_type = 'spindle'",
+                                           "channel = ?"],
+                                    params=[ch])
+                                if sp_tokens:
+                                    placeholders = ', '.join(['?' for _ in sp_tokens])
+                                    query += f" AND stage IN ({placeholders})"
+                                    params.extend(sp_tokens)
+                                else:
+                                    query += " AND 1 = 0"
+                                    logger.warning(
+                                        f"No spindle stage token in the "
+                                        f"database for channel {ch} lies "
+                                        f"inside the requested stages "
+                                        f"{list(stage)}; no events selected.")
+
                             # Execute query
                             cursor.execute(query, params)
                             spindle_events = cursor.fetchall()
@@ -1015,7 +1054,12 @@ class ParalPAC:
         # The scope was resolved and validated at function entry, before any
         # analysis ran.
         if write_db:
-            stage_str = ''.join(stage) if isinstance(stage, list) else str(stage)
+            # The same canonical token the detectors write into events.stage,
+            # so a pac_coupling row can be joined back to the events it was
+            # computed from instead of carrying a differently-ordered spelling
+            # of the same stage set.
+            stage_str = (dbwrite.join_stage_token(stage) if stage
+                         else str(stage))
 
             if subject is None:
                 subject = derive_subject(root_dir=self.rootpath)

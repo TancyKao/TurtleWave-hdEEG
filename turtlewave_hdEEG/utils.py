@@ -897,19 +897,26 @@ class DensityDenominators:
         Parameters
         ----------
         chan_events : list of dict
-            Detected events for one channel; each has a ``'stage'`` (str or
-            list of str).
+            Detected events for one channel. Each has a ``'stage'``, which may
+            be a single label, a list of labels, or -- from 4.3 -- the run's
+            joint stage token (``'NREM2NREM3'``). The token is split into its
+            components before the comparison; comparing it whole would
+            intersect nothing and report every channel's whole-night count as
+            zero.
 
         Returns
         -------
         int
             Number of events whose stage(s) intersect the detected stages.
         """
+        from .dbwrite import stage_components
         n = 0
         for ev in chan_events:
             st = ev.get('stage')
-            st = st if isinstance(st, list) else [st]
-            if self.detected_stage_set.intersection(str(s) for s in st):
+            st = st if isinstance(st, (list, tuple)) else [st]
+            components = [c for value in st if value is not None
+                          for c in stage_components(str(value))]
+            if self.detected_stage_set.intersection(components):
                 n += 1
         return n
 
