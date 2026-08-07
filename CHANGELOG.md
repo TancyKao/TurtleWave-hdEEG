@@ -22,6 +22,7 @@ A database written before 4.3 must be migrated before it is re-detected — see
 - `events.epoch_stage`, keeping each event's own scored epoch stage beside the run's token.
 - Public API: `join_stage_token`, `split_stage_token`, `stage_components`, `stage_tokens_covering`, `resolve_stage_tokens`, `pooled_denominator`, `stage_format` and `assert_stage_format_compatible`, whose `stage_token` is keyword-only and has no default so the guard cannot be skipped by omission.
 - `db_meta` table, carrying a `stage_format` marker that distinguishes a joint-token database from a pre-4.3 one.
+- `idx_events_run` index on `events(run_id)`, so tagging a run's cycles visits only that run's rows instead of every run's events in the same time span.
 - `v_event_density` SQL view, so R and plain SQL read the same densities `event_density` computes.
 - `examples/migrate_stage_to_joint.py`: converts a pre-4.3 database and stamps the marker, dry-run by default, deriving the target token per channel group so channels searched over different stage sets are not collapsed into one.
 - Detection fills `sleep_cycles`, `stage_durations` and `events.cycle` on its own connection, without touching the annotation XML.
@@ -42,6 +43,8 @@ A database written before 4.3 must be migrated before it is re-detected — see
 ### Fixed
 
 - PAC was unusable on a database built by the 4.0.x CSV import route, where spindles carry the joined stage request and slow waves the per-epoch stage: the channel lookup joined the two on `stage`, which those spellings can never satisfy, so the channel list came back empty and every run failed with "No channels selected".
+- Detection to the database was drastically slower than it needed to be, because each detected event's measurement window was cut from the whole-night segment with a scan whose cost grew with the length of the recording. A five-channel slow-wave run that took over an hour now takes seconds. The events and their measurements are unchanged, so nothing needs re-running for correctness. This affects 4.2.0, which made the database the default path.
+- Ngo2015 slow-wave detection with adaptive thresholds failed on every channel with a `TypeError` and finished the run with zero events, in every released version. The sigma thresholds are read off the detector instance but were passed to its constructor, and the GUI prefills both fields, so the failure did not depend on typing a value.
 - `sleep_cycles`, `stage_durations` and `events.cycle` were never populated by a detection run; only the standalone cycle script filled them.
 - The GUI's post-run verification counted events by single stage, so a successful run would have reported "0 events written" once joint tokens landed.
 - The review GUI's QC density and the legacy JSON exporters treated a joint token as a stage of its own, which matches no denominator and reads as zero everywhere.

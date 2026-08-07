@@ -42,6 +42,9 @@ import sqlite3
 import subprocess
 import datetime
 from collections import namedtuple
+from weakref import WeakKeyDictionary
+
+import numpy as np
 
 from wonambi.trans import select
 from wonambi.trans.analyze import event_params
@@ -1758,11 +1761,14 @@ def read_analysed_time(db_path, subject=None, reject_artifacts=True,
 def ensure_direct_write_schema(conn, logger=None):
     """Additively migrate a database for the direct-write path.
 
-    Idempotent and safe on an already-current database. Performs three guarded
-    migrations, none of which touch existing rows or unrelated tables:
+    Idempotent and safe on an already-current database. Every step below is
+    guarded, and none touches existing rows or unrelated tables:
 
-    1. Add detector-own morphology columns (``det_trough`` etc.) and ``run_id``
-       to ``events`` (only the absent ones, via ``PRAGMA table_info``).
+    1. Add detector-own morphology columns (``det_trough`` etc.), ``run_id``
+       and ``epoch_stage`` to ``events`` (only the absent ones, via
+       ``PRAGMA table_info``), and create ``idx_events_run`` on ``run_id`` so
+       cycle tagging visits one run's rows rather than every run's events in
+       the same time span.
     2. Create the ``detection_runs`` provenance table if missing.
     3. Widen the ``processing_status`` primary key from
        ``(channel, event_type)`` to
@@ -1776,6 +1782,10 @@ def ensure_direct_write_schema(conn, logger=None):
     5. Create the ``analysed_time`` table via
        :func:`ensure_analysed_time_schema`, which holds the density
        denominator (artefact-free analysed seconds per stage).
+    6. Create ``db_meta`` and the ``v_event_density`` view, and stamp
+       ``stage_format='joint'`` only on a database holding no events — an
+       existing one keeps its unmarked state, which is the only evidence that
+       it predates 4.3 and must be migrated before it is re-detected into.
 
     Parameters
     ----------
@@ -1798,6 +1808,15 @@ def ensure_direct_write_schema(conn, logger=None):
                 added.append(col)
         if added and logger is not None:
             logger.info(f"Migrated events table: added columns {added}")
+
+        # (1a) events.run_id index. cycleprocessor.tag_run_cycles updates
+        # `start_time BETWEEN ... AND run_id = ?` once per cycle; without this
+        # index the only usable index is idx_timerange(start_time, end_time),
+        # so run_id is a residual and every OTHER run's events in the cycle's
+        # time span are read and discarded. Purely a lookup path -- it changes
+        # which rows are visited, never which rows match.
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id)')
 
     # (2) detection_runs provenance table ---------------------------------
     conn.execute('''
@@ -2498,9 +2517,210 @@ def compute_batched_params(param_segments, frequency, s_freq, n_fft_sec,
     return results
 
 
+# Per-``Data``-object memo of "is this trial's time axis strictly increasing?".
+#
+# ``fast_time_slice`` needs that verdict on EVERY event, but establishing it
+# costs O(n_samples); on a whole-night concatenated segment (~2 x 10^6 samples)
+# paying it per event would reintroduce a large part of the cost the index-based
+# slice exists to remove. The verdict is therefore computed once per (Data,
+# time-array) pair and memoised here.
+#
+# Keys are weak, so caching never keeps a night-length segment alive. The value
+# holds a strong reference to the time array it was computed from and the fast
+# path re-validates with ``is``, so replacing ``data.axis['time'][trial]`` (as
+# ``select``/``math`` do, by building a new Data) invalidates the entry rather
+# than silently reusing a verdict about a different array.
+_MONOTONIC_TIME_CACHE = WeakKeyDictionary()
+
+
+def _time_axis_is_strictly_increasing(data, trial=0):
+    """Whether a trial's time axis increases strictly, memoised per object.
+
+    Strict increase (no duplicated timestamps) is what makes an index range from
+    :func:`numpy.searchsorted` equivalent to Wonambi's value-based selection: a
+    repeated timestamp would make ``_get_indices`` resolve every copy to its
+    FIRST occurrence, which a contiguous slice does not reproduce.
+
+    Parameters
+    ----------
+    data : wonambi Data
+        Segment whose time axis is tested.
+    trial : int, optional
+        Trial index. Default 0.
+
+    Returns
+    -------
+    bool
+        True when the trial's time axis is non-empty and strictly increasing.
+    """
+    try:
+        time_values = data.axis['time'][trial]
+    except Exception:
+        return False
+    if not isinstance(time_values, np.ndarray) or time_values.ndim != 1:
+        return False
+
+    try:
+        cached = _MONOTONIC_TIME_CACHE.get(data)
+    except TypeError:  # unhashable / non-weakref-able Data subclass
+        cached = None
+        cacheable = False
+    else:
+        cacheable = True
+    if cached is not None:
+        cached_trial, cached_values, cached_ok = cached
+        if cached_trial == trial and cached_values is time_values:
+            return cached_ok
+
+    ok = bool(time_values.size > 0 and np.all(np.diff(time_values) > 0))
+    if cacheable:
+        try:
+            _MONOTONIC_TIME_CACHE[data] = (trial, time_values, ok)
+        except TypeError:
+            pass
+    return ok
+
+
+def fast_time_slice(data, t0, t1):
+    """Index-based equivalent of ``select(data, time=(t0, t1))``.
+
+    Wonambi's :func:`wonambi.trans.select.select` resolves a time range by
+    building the boolean mask ``(t0 <= values) & (values < t1)`` and then handing
+    the selected VALUES to ``Data.__call__``, which calls
+    ``wonambi.datatype._get_indices`` -- a Python loop that rescans the whole
+    trial's time axis once per requested timestamp ("probably not very fast, but
+    it's pretty robust"). On a whole-night concatenated segment that is
+    ``O(window_samples x night_samples)`` per event, which dominated the
+    direct-to-database detection path.
+
+    Because the time axis within a trial is monotonic, the same window is found
+    with two binary searches and taken as a contiguous slice:
+    ``O(log night + window)``.
+
+    Boundary convention
+    -------------------
+    HALF-OPEN, ``[t0, t1)`` -- start inclusive, end exclusive -- reproducing
+    ``wonambi/trans/select.py`` exactly. ``searchsorted(..., side='left')`` gives
+    the first index with ``value >= t0`` (the first sample the mask keeps) and
+    the first index with ``value >= t1`` (one past the last sample it keeps).
+    An off-by-one here shifts every measured window, so it is pinned by
+    ``test_fast_time_slice_boundary_is_half_open``.
+
+    Why the two agree exactly
+    -------------------------
+    ``searchsorted`` and Wonambi's mask perform the SAME float64 comparison on
+    the SAME values, so on a sorted axis they cannot disagree -- the equality is
+    structural, not a numerical coincidence. Every condition below exists to
+    establish one of the two premises (sortedness; a common float64 comparison
+    domain), and the function declines rather than approximating when it cannot:
+
+    * **strictly increasing** -- duplicated timestamps make
+      ``_get_indices`` resolve every copy to its FIRST occurrence, which a
+      contiguous slice does not reproduce (on ``t = [1, 2, 2, 3, 4]`` the two
+      genuinely return different data).
+    * **float64 time axis** -- with a float32 axis NumPy's value-based casting
+      evaluates ``t0 <= values`` in float32 while ``searchsorted`` compares in
+      float64, and the two disagree by one sample on roughly half of all
+      windows. No shipped reader produces one (``wonambi/dataset.py:409`` and
+      ``turtlewave_hdEEG/dataset.py:642`` both build float64), so this is a
+      guard, not a live case.
+    * **finite bounds** -- ``searchsorted`` sorts NaN LAST, so ``t1 = nan``
+      would return the whole remainder of the night where the mask
+      ``(values < nan)`` selects nothing. That is the one input where an
+      unguarded index slice yields a plausible-looking but physically wrong
+      measurement window instead of an empty one. Infinities happen to agree,
+      but are declined with NaN for one simple predicate.
+
+    Parameters
+    ----------
+    data : wonambi Data
+        Segment to slice. Only single-trial segments with a strictly increasing
+        float64 time axis take the fast path; anything else returns ``None`` so
+        the caller can fall back to :func:`select`.
+    t0, t1 : float
+        Window bounds in seconds from recording start. Must both be finite;
+        non-finite bounds are declined.
+
+    Returns
+    -------
+    wonambi Data or None
+        A new Data of the same class holding the sliced window, byte-identical
+        to ``select(data, time=(t0, t1))``; or ``None`` when the fast path does
+        not apply (multi-trial, no time axis, non-monotonic or duplicated
+        timestamps, a non-float64 time axis, a non-finite bound, or a data array
+        whose shape disagrees with its axes).
+    """
+    # Non-finite bounds: see "finite bounds" above. Checked FIRST because it is
+    # the only condition whose failure would otherwise produce a WRONG window
+    # rather than an exception or a mere inefficiency. A non-numeric bound
+    # (None, as in Wonambi's open-ended ``time=(None, t1)`` idiom) is declined
+    # here too rather than crashing in searchsorted.
+    try:
+        if not (np.isfinite(t0) and np.isfinite(t1)):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    # Multi-trial is not handled: ``select`` slices every trial and each trial
+    # carries its own time axis. Segments from wonambi's ``fetch(...).read_data``
+    # are always single-trial (one ChanTime per segment dict, whatever ``cat``
+    # is -- ``cat`` changes the NUMBER of segment dicts, not the trials inside
+    # one), so this is a safety net rather than an expected case.
+    try:
+        if data.number_of('trial') != 1:
+            return None
+    except Exception:
+        return None
+    if 'time' not in data.axis:
+        return None
+
+    time_values = data.axis['time'][0]
+    # float64 only: see "float64 time axis" above. Checked BEFORE the O(n)
+    # monotonicity scan so a declined axis costs nothing.
+    if (not isinstance(time_values, np.ndarray)
+            or time_values.dtype != np.float64):
+        return None
+    if not _time_axis_is_strictly_increasing(data, 0):
+        return None
+
+    array = data.data[0]
+    if not isinstance(array, np.ndarray):
+        return None
+    time_pos = data.index_of('time')
+    # An axis/data shape mismatch (e.g. the channel-concatenated segment that
+    # ``read_data(concat_chan=True)`` ravels, whose time axis no longer
+    # describes the data) must not be sliced by index.
+    if array.ndim != len(data.axis) or array.shape[time_pos] != time_values.size:
+        return None
+
+    lo = int(np.searchsorted(time_values, t0, side='left'))
+    hi = int(np.searchsorted(time_values, t1, side='left'))
+    if hi < lo:  # t1 < t0: the mask would be empty, so is the slice
+        hi = lo
+
+    # Rebuild the container the way ``select`` does: same class, same s_freq /
+    # start_time / attr, one trial, non-selected axes passed through by
+    # reference and the time axis replaced by a fresh (copied) array.
+    output = data._copy(axis=False)
+    for axis_name in data.axis:
+        output.axis[axis_name] = np.empty(1, dtype='O')
+        output.axis[axis_name][0] = data.axis[axis_name][0]
+    output.axis['time'][0] = time_values[lo:hi].copy()
+    output.data = np.empty(1, dtype='O')
+    index = [slice(None)] * array.ndim
+    index[time_pos] = slice(lo, hi)
+    output.data[0] = array[tuple(index)].copy()
+    return output
+
+
 def make_param_segment(data, start_time, end_time, event_type, stage,
                        chan, buffer=0.1):
     """Slice an in-memory Data window for one event, for batched measurement.
+
+    Uses :func:`fast_time_slice` (two binary searches + a contiguous slice) and
+    falls back to Wonambi's :func:`select` when the fast path does not apply.
+    The two produce byte-identical windows; see ``fast_time_slice`` for the
+    conditions and the half-open ``[t0, t1)`` boundary convention.
 
     Parameters
     ----------
@@ -2527,7 +2747,9 @@ def make_param_segment(data, start_time, end_time, event_type, stage,
     try:
         t0 = max(0.0, float(start_time) - buffer)
         t1 = float(end_time) + buffer
-        sub = select(data, time=(t0, t1))
+        sub = fast_time_slice(data, t0, t1)
+        if sub is None:
+            sub = select(data, time=(t0, t1))
         return {'data': sub, 'name': event_type, 'start': float(start_time),
                 'end': float(end_time), 'n_stitch': 0, 'stage': stage,
                 'cycle': None, 'chan': chan}

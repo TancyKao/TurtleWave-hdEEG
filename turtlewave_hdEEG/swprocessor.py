@@ -608,16 +608,6 @@ class ParalSWA:
                                 except Exception as e:
                                     self.logger.error(f"Error detrending data: {e}")
 
-                            # Special handling for Ngo2015 with adaptive thresholds
-                            detection_kwargs = {}
-                            if meth == 'Ngo2015' and peak_thresh_sigma is not None and ptp_thresh_sigma is not None:
-                                # Store sigma thresholds as class variables that the detector will use
-                                detection_kwargs = {
-                                    'peak_thresh': peak_thresh_sigma,
-                                    'ptp_thresh': ptp_thresh_sigma
-                                }
-                                self.logger.debug(f"Using custom adaptive thresholds: {detection_kwargs}")
-
                             # Define detection with parameters
                             detection = DetectSlowWave(
                                 meth,
@@ -629,8 +619,24 @@ class ParalSWA:
                                 min_dur=min_dur if meth not in ['Massimini2004', 'AASM/Massimini2004'] else None,
                                 max_dur=max_dur if meth not in ['Massimini2004', 'AASM/Massimini2004'] else None,
                                 polar=polar,
-                                **detection_kwargs  # Pass method-specific kwargs
                             )
+
+                            # Ngo2015's adaptive thresholds are ATTRIBUTES, not
+                            # constructor arguments: ImprovedDetectSlowWave sets
+                            # self.peak_thresh / self.ptp_thresh to 1.25 for this
+                            # method, and Wonambi's detect_Ngo2015 reads them off
+                            # the instance as opts.peak_thresh / opts.ptp_thresh.
+                            # Passing them to __init__ raised TypeError and lost
+                            # the whole channel, so an adaptive Ngo2015 run has
+                            # never worked. Override after construction instead.
+                            if (meth == 'Ngo2015' and peak_thresh_sigma is not None
+                                    and ptp_thresh_sigma is not None):
+                                detection.peak_thresh = peak_thresh_sigma
+                                detection.ptp_thresh = ptp_thresh_sigma
+                                self.logger.debug(
+                                    f"Ngo2015 adaptive thresholds: "
+                                    f"peak_thresh={peak_thresh_sigma}, "
+                                    f"ptp_thresh={ptp_thresh_sigma}")
 
                             # Run detection
                             slow_waves = detection(processed_seg['data'])

@@ -255,6 +255,312 @@ def test_slow_wave_polarity():
           "methods and K-complexes")
 
 
+def test_ngo2015_adaptive_thresholds_are_attributes():
+    """Ngo2015's adaptive thresholds are ATTRIBUTES, not constructor arguments.
+
+    ``ImprovedDetectSlowWave._set_method_params`` assigns ``self.peak_thresh``
+    and ``self.ptp_thresh`` (both 1.25) for Ngo2015, and Wonambi's
+    ``detect_Ngo2015`` reads them back off the instance as ``opts.peak_thresh``
+    / ``opts.ptp_thresh``. ``ParalSWA`` used to forward the user's sigma values
+    as ``__init__`` kwargs, which raised ``TypeError`` and lost the whole
+    channel -- and because the GUI prefills those spin boxes from the detector's
+    own 1.25 default, the values were never ``None`` and the failure fired on
+    EVERY Ngo2015 run. Adaptive Ngo2015 has therefore never worked in any
+    released version.
+
+    This is the project's recurring failure mode (custom configuration not
+    surviving ``super().__init__``), so it is pinned on three levels:
+
+    1. The constructor REJECTS the thresholds as kwargs -- the fact that made
+       the old call site fail.
+    2. Post-construction assignment survives and is not silently reset to 1.25
+       by ``_set_method_params``.
+    3. The override materially changes detection, so 1. and 2. are not vacuous.
+    """
+    print("\nTesting Ngo2015 adaptive thresholds survive construction:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    # (1) the thresholds are NOT constructor arguments
+    raised = None
+    try:
+        ImprovedDetectSlowWave('Ngo2015', frequency=(0.5, 2.0),
+                               peak_thresh=0.2, ptp_thresh=0.2)
+    except TypeError as e:
+        raised = str(e)
+    assert raised is not None, (
+        "peak_thresh/ptp_thresh became constructor arguments: the "
+        "set-after-construction workaround in ParalSWA is now wrong")
+    assert 'peak_thresh' in raised, raised
+    print(f"   [ok] __init__ still rejects them: {raised.split(':')[-1].strip()}")
+
+    # (2) the default, then an override that must survive
+    det = ImprovedDetectSlowWave('Ngo2015', frequency=(0.5, 2.0))
+    assert det.peak_thresh == 1.25 and det.ptp_thresh == 1.25, (
+        f"Ngo2015 default changed: {det.peak_thresh}, {det.ptp_thresh}")
+    det.peak_thresh = 0.2
+    det.ptp_thresh = 0.2
+    assert det.peak_thresh == 0.2 and det.ptp_thresh == 0.2, (
+        "post-construction override did not survive")
+    print("   [ok] default is 1.25/1.25; post-construction override survives")
+
+    # (3) the override must actually change what is detected
+    s_freq = 256.0
+    sig = _synthetic_slow_oscillation(s_freq=s_freq, duration=300.0, seed=3)
+
+    def n_events(peak, ptp):
+        d = ImprovedDetectSlowWave('Ngo2015', frequency=(0.5, 2.0),
+                                   polar='opposite')
+        d.peak_thresh = peak
+        d.ptp_thresh = ptp
+        return len(d(_make_chantime(sig, s_freq)))
+
+    lenient = n_events(0.2, 0.2)
+    default = n_events(1.25, 1.25)
+    assert lenient != default, (
+        f"the threshold override changes nothing ({lenient} vs {default}), so "
+        f"the assertions above cannot detect it being dropped")
+    print(f"   [ok] override is load-bearing: 0.2/0.2 -> {lenient} slow waves, "
+          f"1.25/1.25 -> {default}")
+
+
+def _gappy_chantime(s_freq=256.0, n_epoch=20, epoch=30.0, gap_every=5,
+                    n_chan=2, seed=7):
+    """A concatenated, discontinuous segment shaped like fetch(...).read_data().
+
+    Mirrors what ``wonambi.trans.select.Segments.read_data`` builds for
+    ``cat=(1, 1, 1, 0)``: one trial whose time axis is the hstack of the
+    retained epochs, so it is strictly increasing but NOT uniformly spaced.
+
+    Parameters
+    ----------
+    s_freq : float
+        Sampling frequency in Hz.
+    n_epoch : int
+        Number of retained epochs.
+    epoch : float
+        Epoch length in seconds.
+    gap_every : int
+        Drop one epoch in every ``gap_every``, creating the stitches.
+    n_chan : int
+        Number of channels.
+    seed : int
+        Seed for the sample values.
+
+    Returns
+    -------
+    instance of wonambi.datatype.ChanTime
+        Single-trial ChanTime with a gappy time axis.
+    """
+    from wonambi.datatype import ChanTime
+
+    rng = np.random.default_rng(seed)
+    kept = [i for i in range(n_epoch * 2) if i % gap_every][:n_epoch]
+    n = int(epoch * s_freq)
+    times = [e * epoch + np.arange(n) / s_freq for e in kept]
+
+    data = ChanTime()
+    data.s_freq = s_freq
+    data.axis['chan'] = np.empty(1, dtype='O')
+    data.axis['time'] = np.empty(1, dtype='O')
+    data.data = np.empty(1, dtype='O')
+    data.axis['chan'][0] = np.array([f'E{i + 1}' for i in range(n_chan)])
+    data.axis['time'][0] = np.hstack(times)
+    data.data[0] = rng.standard_normal(
+        (n_chan, n * len(kept))).astype('f') * 20.0
+    return data
+
+
+def test_fast_time_slice_boundary_is_half_open():
+    """Pin the window boundary of the index-based slice to Wonambi's ``select``.
+
+    ``dbwrite.make_param_segment`` slices each event's measurement window by
+    index (two ``numpy.searchsorted`` calls) instead of calling
+    ``wonambi.trans.select.select`` once per event, which rescans the whole
+    night's time axis per requested timestamp. The two MUST agree exactly: the
+    window feeds ``compute_batched_params``, so an off-by-one sample would move
+    every amplitude and spectral value in the database with no error anywhere.
+
+    Asserts, against a discontinuous concatenated segment:
+
+    1. The interval is HALF-OPEN, ``[t0, t1)`` -- start inclusive, end
+       exclusive, exactly ``(t0 <= values) & (values < t1)`` from
+       ``wonambi/trans/select.py:260-262``.
+    2. ``fast_time_slice`` and ``select`` return byte-identical data, time axis,
+       dtype and class, including for windows that straddle a stitch, fall
+       entirely inside a gap, or run off either end of the record.
+    3. The fast path DECLINES (returns None, so the caller falls back to
+       ``select``) on a multi-trial segment and on a time axis with duplicated
+       or non-monotonic timestamps, where a contiguous index range is not
+       equivalent to Wonambi's value-based selection.
+    """
+    print("\nTesting fast_time_slice boundary convention:")
+
+    from wonambi.datatype import ChanTime
+    from wonambi.trans import select
+    from turtlewave_hdEEG import dbwrite
+
+    data = _gappy_chantime()
+    t = data.axis['time'][0]
+    s_freq = data.s_freq
+
+    # (1) half-open: [t[k], t[k + m]) keeps exactly m samples, t[k]..t[k+m-1]
+    for k, m in [(0, 1), (0, 256), (137, 640), (int(29 * s_freq), 512)]:
+        t0, t1 = float(t[k]), float(t[k + m])
+        got = dbwrite.fast_time_slice(data, t0, t1).axis['time'][0]
+        assert got.size == m, (
+            f"[{t0}, {t1}) must keep {m} samples, kept {got.size}")
+        assert got[0] == t[k], "window start must be INCLUSIVE"
+        assert got[-1] == t[k + m - 1], "window end must be EXCLUSIVE"
+    print("   [ok] interval is half-open [t0, t1)")
+
+    # (2) byte-identical to select, including across stitches and off the ends
+    stitch = int(np.argmax(np.diff(t) > 2 / s_freq))
+    windows = [(float(t[0]), float(t[0]) + 1.0),
+               (float(t[stitch]) - 0.5, float(t[stitch + 1]) + 0.5),
+               (float(t[stitch]) + 1e-6, float(t[stitch + 1]) - 1e-6),
+               (-10.0, float(t[0]) + 0.25),
+               (float(t[-1]) - 0.25, float(t[-1]) + 10.0),
+               (1e9, 1e9 + 1.0),
+               (5.0, 5.0)]
+    for t0, t1 in windows:
+        fast = dbwrite.fast_time_slice(data, t0, t1)
+        ref = select(data, time=(t0, t1))
+        assert fast is not None, f"fast path declined a valid window {t0, t1}"
+        assert type(fast) is type(ref)
+        assert fast.s_freq == ref.s_freq
+        assert fast.data[0].dtype == ref.data[0].dtype, (t0, t1)
+        assert fast.data[0].shape == ref.data[0].shape, (t0, t1)
+        assert fast.data[0].tobytes() == ref.data[0].tobytes(), (
+            f"data bytes differ for window {t0, t1}")
+        assert fast.axis['time'][0].tobytes() == \
+            ref.axis['time'][0].tobytes(), (
+            f"time axis bytes differ for window {t0, t1}")
+        assert np.array_equal(fast.axis['chan'][0], ref.axis['chan'][0])
+    print(f"   [ok] byte-identical to select over {len(windows)} windows "
+          f"(stitch, gap, both ends, empty)")
+
+    # make_param_segment must agree with the select-based window it replaced
+    for start, end in [(float(t[300]), float(t[300]) + 0.8),
+                       (float(t[stitch]) - 0.2, float(t[stitch]) + 0.2)]:
+        seg = dbwrite.make_param_segment(data, start, end, 'spindle',
+                                         'NREM2', 'E1')
+        ref = select(data, time=(max(0.0, start - 0.1), end + 0.1))
+        assert seg['data'].data[0].tobytes() == ref.data[0].tobytes()
+        assert seg['data'].axis['time'][0].tobytes() == \
+            ref.axis['time'][0].tobytes()
+    print("   [ok] make_param_segment reproduces the select-based window "
+          "(0.1 s buffer)")
+
+    # (3a) a NaN end bound must DECLINE, not return the rest of the night.
+    # searchsorted sorts NaN last, so an unguarded `hi` would be len(t) while
+    # select's mask `(values < nan)` is all-False. This is the one input where
+    # the fast path would otherwise hand event_params a 50 s window and get a
+    # plausible-looking amplitude and power out of it instead of nothing.
+    for t0, t1 in [(float(t[10]), float('nan')), (float('nan'), float(t[500])),
+                   (float(t[10]), float('inf')), (float('-inf'), float(t[500])),
+                   (float(t[10]), None), (None, float(t[500]))]:
+        assert dbwrite.fast_time_slice(data, t0, t1) is None, (
+            f"non-finite bound {t0, t1} must decline, not slice")
+    nan_ref = select(data, time=(float(t[10]), float('nan')))
+    assert nan_ref.axis['time'][0].size == 0, (
+        "select's NaN behaviour changed; the guard's premise no longer holds")
+    nan_seg = dbwrite.make_param_segment(data, float(t[10]), float('nan'),
+                                         'spindle', 'NREM2', 'E1')
+    assert nan_seg['data'].axis['time'][0].size == 0, (
+        "a NaN event end produced a non-empty measurement window")
+    print("   [ok] non-finite bounds decline; a NaN end yields an EMPTY window, "
+          "matching select, not the rest of the recording")
+
+    # (3b) a non-float64 time axis must decline. NumPy 1.26 value-based casting
+    # evaluates select's `t0 <= values` in float32 while searchsorted compares
+    # in float64, so the two disagree by one sample on about half of windows.
+    f32 = ChanTime()
+    f32.s_freq = s_freq
+    for axis_name in ('chan', 'time'):
+        f32.axis[axis_name] = np.empty(1, dtype='O')
+    f32.data = np.empty(1, dtype='O')
+    f32.axis['chan'][0] = data.axis['chan'][0]
+    f32.axis['time'][0] = t.astype('float32')
+    f32.data[0] = data.data[0]
+    assert f32.axis['time'][0].dtype == np.float32
+    assert dbwrite.fast_time_slice(f32, float(t[10]), float(t[500])) is None, (
+        "a float32 time axis must decline: select compares in float32, "
+        "searchsorted in float64")
+    print("   [ok] non-float64 time axis declines (float32 casting divergence)")
+
+    # (3c) the axis/data shape guard. `read_data(concat_chan=True)` ravels the
+    # data to 1-D while leaving the full time axis in place, so the time axis
+    # no longer describes the array; slicing that by index silently returns
+    # samples from the wrong channel.
+    ravelled = ChanTime()
+    ravelled.s_freq = s_freq
+    for axis_name in ('chan', 'time'):
+        ravelled.axis[axis_name] = np.empty(1, dtype='O')
+    ravelled.data = np.empty(1, dtype='O')
+    ravelled.axis['chan'][0] = np.array([', '.join(data.axis['chan'][0])])
+    ravelled.axis['time'][0] = t
+    ravelled.data[0] = np.ravel(data.data[0])          # 1-D: ndim 1 vs 2 axes
+    assert dbwrite.fast_time_slice(
+        ravelled, float(t[10]), float(t[500])) is None, (
+        "a ravelled concat_chan segment must decline: its data is 1-D while "
+        "the segment still declares two axes")
+
+    short = ChanTime()
+    short.s_freq = s_freq
+    for axis_name in ('chan', 'time'):
+        short.axis[axis_name] = np.empty(1, dtype='O')
+    short.data = np.empty(1, dtype='O')
+    short.axis['chan'][0] = data.axis['chan'][0]
+    short.axis['time'][0] = t
+    short.data[0] = data.data[0][:, :t.size // 2]      # right ndim, wrong len
+    assert dbwrite.fast_time_slice(
+        short, float(t[10]), float(t[500])) is None, (
+        "a data array shorter than its time axis must decline")
+    print("   [ok] axis/data shape guard declines the ravelled concat_chan "
+          "segment and a short data array")
+
+    # (3) the fast path must decline where index slicing is not equivalent
+    multi = ChanTime()
+    multi.s_freq = s_freq
+    for axis_name in ('chan', 'time'):
+        multi.axis[axis_name] = np.empty(2, dtype='O')
+    multi.data = np.empty(2, dtype='O')
+    for i in range(2):
+        multi.axis['chan'][i] = data.axis['chan'][0]
+        multi.axis['time'][i] = t[:1000] + i * 1000.0
+        multi.data[i] = data.data[0][:, :1000]
+    assert dbwrite.fast_time_slice(multi, float(t[10]), float(t[500])) is None, (
+        "multi-trial segment must fall back to select")
+
+    dup = ChanTime()
+    dup.s_freq = s_freq
+    for axis_name in ('chan', 'time'):
+        dup.axis[axis_name] = np.empty(1, dtype='O')
+    dup.data = np.empty(1, dtype='O')
+    dup.axis['chan'][0] = data.axis['chan'][0]
+    dup.axis['time'][0] = np.concatenate([t[:1000], t[:1000]])
+    dup.data[0] = np.hstack([data.data[0][:, :1000]] * 2)
+    assert dbwrite.fast_time_slice(dup, float(t[10]), float(t[500])) is None, (
+        "duplicated timestamps must fall back to select")
+    # ...and make_param_segment still returns a usable window via select
+    fallback = dbwrite.make_param_segment(dup, float(t[10]), float(t[500]),
+                                          'spindle', 'NREM2', 'E1')
+    assert fallback is not None and fallback['data'].axis['time'][0].size > 0
+    print("   [ok] declines multi-trial and duplicated-timestamp axes, "
+          "caller falls back to select")
+
+    # the monotonicity memo must not survive its time array being replaced
+    assert dbwrite.fast_time_slice(data, float(t[10]), float(t[500])) \
+        is not None
+    data.axis['time'][0] = np.concatenate([t[:1000], t[:1000]])
+    data.data[0] = np.hstack([data.data[0][:, :1000]] * 2)
+    assert dbwrite.fast_time_slice(data, float(t[10]), float(t[500])) is None, (
+        "cached monotonicity verdict outlived the time axis it described")
+    print("   [ok] monotonicity memo invalidates when the time axis is "
+          "replaced")
+
+
 def test_package_structure():
     """Test the overall package structure"""
     print("\n6. Testing package structure:")
