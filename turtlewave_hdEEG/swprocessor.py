@@ -128,9 +128,9 @@ class ParalSWA:
 
 
     def detect_slow_waves(self, method='Massimini2004', chan=None, ref_chan=[], grp_name='eeg',
-                     frequency=(0.1, 4), trough_duration=(0.3, 1.5), 
-                     neg_peak_thresh=-80.0,  
-                     p2p_thresh=140.0,  
+                     frequency=(0.1, 4), trough_duration=None,
+                     neg_peak_thresh=None,
+                     p2p_thresh=None,
                      min_dur=None, max_dur=None,
                      detrend=False,
                      polar='normal', # normal vs opposite 
@@ -159,16 +159,42 @@ class ParalSWA:
             Group name for channel selection
         frequency : tuple
             Frequency range for slow wave detection (min, max)
-        trough_duration : tuple
-            Duration range for slow wave trough in seconds (min, max)
-        neg_peak_thresh : float
-            Minimum negative peak threshold in μV
-        p2p_thresh : float
-            Minimum peak-to-peak amplitude threshold in μV
+        trough_duration : tuple or None
+            Min/max duration of the NEGATIVE HALF-WAVE in seconds --
+            Massimini's *"a negative zero crossing and a subsequent positive
+            zero crossing separated by 0.3-1.0 sec"*. It does **not** bound
+            the whole wave: a 0.7 Hz slow wave has a ~0.7 s half-wave and a
+            ~1.4 s total duration, so a (0.3, 1.0) window here accepts it.
+            ``None`` (default) uses each method's published window --
+            (0.3, 1.0) s for Massimini2004, (0.25, 1.0) s for
+            AASM/Massimini2004. Ignored by Ngo2015 and Staresina2015, which
+            take ``min_dur``/``max_dur`` instead.
+        neg_peak_thresh : float or None
+            Depth the negative peak must reach, in µV (Massimini: −80 µV;
+            AASM: −40 µV). The sign is ignored. ``None`` (default) uses the
+            method's published value. For Ngo2015/Staresina2015 this feeds
+            only the legacy post-hoc filter and ``None`` keeps that filter's
+            historical −80.0.
+        p2p_thresh : float or None
+            Minimum negative-to-positive peak-to-peak amplitude in µV
+            (Massimini: 140 µV; AASM: 75 µV). ``None`` (default) uses the
+            method's published value. For Ngo2015/Staresina2015 this feeds
+            only the legacy post-hoc filter and ``None`` keeps that filter's
+            historical 140.0 -- it is NOT Staresina's percentile, which is
+            not settable from here.
         min_dur : float or None
-            Minimum event duration in seconds (method-dependent override)
+            Minimum duration of the WHOLE wave in seconds, for the Massimini
+            family: it bounds the two joined half-waves and is unbounded by
+            default. Distinct from ``trough_duration``.
+
+            For Ngo2015/Staresina2015 it reaches the detection band but NOT
+            ``find_intervals``, which gates on the method's published
+            zero-crossing interval (0.833-2.0 s and 0.8-2.0 s). Wiring it
+            through would move two published methods' output, so it is left
+            as it is; see ``ImprovedDetectSlowWave._set_method_params``.
         max_dur : float or None
-            Maximum event duration in seconds (method-dependent override)
+            Maximum duration of the WHOLE wave in seconds, same distinction
+            and the same Ngo2015/Staresina2015 caveat.
         detrend : bool
             Whether to detrend the signal before detection
         polar : str
@@ -412,7 +438,13 @@ class ParalSWA:
                 run_id = str(_uuid_mod.uuid4())
                 params_dict = {
                     'frequency': list(frequency),
-                    'trough_duration': list(trough_duration),
+                    # None means "the method's published criterion"; the
+                    # method is recorded alongside, so the run is still fully
+                    # reconstructible. A list would claim a value the caller
+                    # never chose.
+                    'trough_duration': (list(trough_duration)
+                                        if trough_duration is not None
+                                        else None),
                     'neg_peak_thresh': neg_peak_thresh,
                     'p2p_thresh': p2p_thresh,
                     'min_dur': min_dur, 'max_dur': max_dur,
@@ -608,16 +640,50 @@ class ParalSWA:
                                 except Exception as e:
                                     self.logger.error(f"Error detrending data: {e}")
 
-                            # Define detection with parameters
+                            # Define detection with parameters.
+                            #
+                            # `trough_duration` is Massimini's negative
+                            # half-wave window (0.3-1.0 s in the paper), NOT
+                            # the duration of the whole wave. It used to be
+                            # forwarded as Wonambi's `duration`, which bounds
+                            # the whole wave and left the real half-wave limit
+                            # hardcoded -- so the AASM window (0.25, 1.0)
+                            # rejected every wave slower than 1 Hz and the
+                            # method returned zero events. See
+                            # ImprovedDetectSlowWave for the two arguments'
+                            # separate meanings.
+                            is_massimini = meth in ['Massimini2004',
+                                                    'AASM/Massimini2004']
+                            # For the Massimini family None means "use the
+                            # method's published thresholds", so AASM gets
+                            # -40/75 and Massimini2004 gets -80/140 without
+                            # the caller having to know which is which.
+                            # Ngo2015/Staresina2015 do not read these at all;
+                            # they only reach the legacy post-hoc filter, so
+                            # None resolves to the values this processor used
+                            # to hardcode and their yield is unchanged.
+                            meth_neg = neg_peak_thresh
+                            meth_p2p = p2p_thresh
+                            if not is_massimini:
+                                if meth_neg is None:
+                                    meth_neg = -80.0
+                                if meth_p2p is None:
+                                    meth_p2p = 140.0
                             detection = DetectSlowWave(
                                 meth,
                                 frequency=frequency,
-                                # Use appropriate duration parameter based on method
-                                duration=trough_duration if meth in ['Massimini2004', 'AASM/Massimini2004'] else None,
-                                neg_peak_thresh=neg_peak_thresh,
-                                p2p_thresh=p2p_thresh,
-                                min_dur=min_dur if meth not in ['Massimini2004', 'AASM/Massimini2004'] else None,
-                                max_dur=max_dur if meth not in ['Massimini2004', 'AASM/Massimini2004'] else None,
+                                trough_duration=(trough_duration
+                                                 if is_massimini else None),
+                                neg_peak_thresh=meth_neg,
+                                p2p_thresh=meth_p2p,
+                                # min_dur/max_dur bound the WHOLE wave for
+                                # every method, including the Massimini
+                                # family, where they used to be dropped --
+                                # leaving `duration` as the only way to
+                                # bound it and inviting the trough window to
+                                # be passed there.
+                                min_dur=min_dur,
+                                max_dur=max_dur,
                                 polar=polar,
                             )
 

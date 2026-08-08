@@ -12,6 +12,39 @@ Before detecting slow waves, ensure you have:
 
 If you haven't done these steps, refer to the [Getting Started tutorial](../tutorials/getting-started.md).
 
+!!! warning "Slow-wave counts and densities change substantially in this release — do not pool with older runs"
+    The Massimini-family detectors (`Massimini2004`, `AASM/Massimini2004`) now
+    implement Massimini et al. 2004's published criteria correctly — see
+    [Massimini, M. et al. J Neurosci 24(31), 6862-70 (2004)](https://doi.org/10.1523/JNEUROSCI.1614-04.2004),
+    Methods. Previously `trough_duration` was passed to Wonambi as the bound
+    on the *whole* wave instead of the negative half-wave the paper actually
+    constrains, which made the published AASM window (0.25, 1.0 s) reject
+    every event. On a deterministic synthetic signal with 216 injected slow
+    waves, scored event-wise, this raises recall from 2.5-4.6% to
+    53-76% at essentially unchanged precision (~0.99-1.00) — see
+    `tests/test_turtlewave.py::test_permissive_search_recall_against_injected_ground_truth`,
+    which you can re-run yourself. **The ground truth there is synthetic, not
+    expert-scored**: it shows the fix recovers waves matching its own
+    injected morphology at high precision, which is not the same claim as
+    clinical validation against a real, AASM-scored night — treat the recall
+    figure as evidence the fix works as intended, not as validated
+    performance on human sleep, until that check is done.
+
+    `Ngo2015` and `Staresina2015` detection is unchanged: the detected set,
+    `det_trough`, `det_peak`, `det_trough_time`, `det_peak_time`, `min_amp`,
+    `max_amp`, `peak2peak_amp`, `start_time`, `end_time` and `duration` are
+    all identical to before. The one exception is `det_ptp`, which — like
+    every other method — now reports real microvolts instead of Wonambi's
+    sample count; see [Interpreting Results](#interpreting-results) below.
+    Counts and densities for these two methods are safe to pool across the
+    upgrade.
+
+    **Do not pool Massimini-family or K-complex counts/densities detected
+    before this release with ones detected after it.** Before trusting any
+    between-group comparison, sanity-check a first production run against the
+    expected N3 slow-wave density (roughly 5-15 events/min) — a run that
+    lands far outside that range is worth investigating before you use it.
+
 ## Using the GUI
 
 ### Basic Detection
@@ -42,18 +75,43 @@ To customize slow wave detection for your specific needs:
 
 Typical slow wave frequencies are 0.5-4 Hz, but you may adjust based on your research requirements.
 
-**Trough Duration:**
+**Trough Duration:** (Massimini-family methods only — see below)
 
 1. Find the **"Trough Duration (Negative Half-Wave)"** group
-2. Set the minimum and maximum trough duration in seconds (default: 0.3-1.5 s)
+2. Set the minimum and maximum duration of the NEGATIVE half-wave, in seconds
+   (default for `Massimini2004`: 0.3-1.0 s; `AASM/Massimini2004`: 0.25-1.0 s,
+   matching Massimini et al. 2004's published window)
 
-**Amplitude Thresholds:**
+**Amplitude Thresholds:** (Massimini-family methods only)
 
 1. Locate the **"Amplitude Thresholds"** group
-2. Set the negative peak threshold in µV (default: -80 µV)
-3. Set the peak-to-peak threshold in µV (default: 140 µV)
+2. Set the negative peak threshold in µV (default: -80 µV for
+   `Massimini2004`, -40 µV for `AASM/Massimini2004`)
+3. Set the peak-to-peak threshold in µV (default: 140 µV for
+   `Massimini2004`, 75 µV for `AASM/Massimini2004`)
 
 More negative/higher values make detection more stringent.
+
+**Method Selection:**
+
+The method dropdown offers `Massimini2004`, `AASM/Massimini2004`, `Ngo2015`
+and `Staresina2015`. `Ngo2015` and `Staresina2015` show different controls —
+a **Lowpass Filter** group and a **Slow Wave Duration** group (`min_dur` /
+`max_dur`) instead of trough duration and amplitude thresholds. Two
+limitations to know about on those two methods:
+
+- **`Staresina2015`'s "Peak-to-peak Selection" control is a percentile, not a
+  µV floor.** It sets `opts.ptp_thresh` to a percentile of all candidate
+  amplitudes on the channel (published default 75, keeping the top 25% by
+  amplitude) — there is no absolute microvolt threshold for this method. The
+  control is read-only in the GUI because nothing else it sends reaches this
+  percentile.
+- **The "Slow Wave Duration" control does not reach `Ngo2015` /
+  `Staresina2015`'s actual detection gate.** It moves the displayed frequency
+  band (`det_filt['freq']`, cosmetic) but not `find_intervals`, the criterion
+  that actually accepts or rejects a candidate wave. This is a known
+  limitation of the current release, not something you can work around from
+  the GUI.
 
 **Channel Selection:**
 
@@ -90,7 +148,7 @@ slow_waves = event_processor.detect_slow_waves(
     method='Massimini2004',
     chan=['E110', 'E111', 'E112'],
     frequency=(0.5, 1.25),
-    trough_duration=(0.3, 1.5),
+    trough_duration=(0.3, 1.0),  # negative half-wave, in seconds — Massimini's published window
     neg_peak_thresh=-75.0,
     p2p_thresh=75.0,
     stage=['NREM2', 'NREM3'],
@@ -123,7 +181,10 @@ slow_waves = pd.read_sql_query(
 )
 ```
 
-and report density from the database directly — its denominator is the
+`det_trough` and `det_peak` now always come out with a negative trough and a
+positive peak, whichever method wrote the row.
+
+And report density from the database directly — its denominator is the
 artefact-free in-stage time this run actually analysed, stored automatically
 in `analysed_time`:
 
@@ -137,6 +198,14 @@ density_df = event_density(
 )
 print(format_density_table(density_df))
 ```
+
+`peak2peak_amp` (re-measured from the signal) has always been microvolts and
+is unaffected by any of this. `det_ptp` is a separate story: from this
+release it is a real microvolt peak-to-peak amplitude, but a database written
+before this release holds Wonambi's sample count in that same column instead
+— check `turtlewave_hdEEG.dbwrite.ptp_units(conn)` before comparing `det_ptp`
+values across an older and a newer database; see
+[Write Detection Results Directly to the Database](direct-to-database-detection.md#what-lands-in-the-database).
 
 See [Read the database with pandas and R](read-database-with-pandas-and-r.md)
 for more query patterns, including how to pull a flat CSV back out with

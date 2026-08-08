@@ -324,6 +324,1232 @@ def test_ngo2015_adaptive_thresholds_are_attributes():
           f"1.25/1.25 -> {default}")
 
 
+def _biphasic_wave(s_freq=256.0, duration=300.0, freq=0.7, amp=100.0):
+    """A clean negative-going-first slow wave with known amplitude and period.
+
+    At ``freq`` Hz each half-wave lasts ``1 / (2 * freq)`` s and the whole
+    wave ``1 / freq`` s, so the negative half-wave window and the whole-wave
+    window are numerically distinguishable — which is the point: Massimini's
+    0.3-1.0 s criterion is on the half-wave, and applying it to the whole
+    wave rejects everything below 1 Hz.
+
+    Parameters
+    ----------
+    s_freq : float
+        Sampling frequency in Hz.
+    duration : float
+        Length of the signal in seconds.
+    freq : float
+        Slow-wave frequency in Hz. 0.7 Hz gives a 0.71 s half-wave and a
+        1.43 s whole wave.
+    amp : float
+        Peak amplitude in µV, so the trough is -amp, the peak +amp and the
+        peak-to-peak amplitude 2 * amp.
+
+    Returns
+    -------
+    ndarray
+        Signal in microvolts, shape (int(duration * s_freq),).
+    """
+    t = np.arange(int(duration * s_freq)) / s_freq
+    return -amp * np.sin(2 * np.pi * freq * t)
+
+
+def test_massimini_criteria_are_the_published_ones():
+    """The three Massimini criteria must reach the detector, in their units.
+
+    Massimini et al. 2004 (J Neurosci 24(31):6862-70), Methods: *"(1) a
+    negative zero crossing and a subsequent positive zero crossing separated
+    by 0.3-1.0 sec, (2) a negative peak between the two zero crossings with
+    voltage less than -80 µV, and (3) a negative-to-positive peak-to-peak
+    amplitude >=140 µV."*
+
+    Wonambi keeps these in ``trough_duration`` / ``max_trough_amp`` /
+    ``min_ptp`` and hardcodes all three in its constructor. turtlewave used
+    to forward the caller's trough window as Wonambi's ``duration`` instead,
+    which bounds the WHOLE wave, and to store the caller's amplitudes under
+    names Wonambi never reads. The consequences, both silent:
+
+    * the AASM window (0.25, 1.0) rejected every wave slower than 1 Hz, i.e.
+      most slow waves, and the method returned zero events;
+    * a user "tightening the threshold" changed nothing.
+
+    Each criterion is asserted twice — once accepting the known wave, once
+    rejecting it — so no assertion can pass because the gate is inert.
+    """
+    print("\nTesting the Massimini criteria reach the detector in their units:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    s_freq = 256.0
+    # 0.7 Hz, +/-100 uV: half-wave 0.71 s, whole wave 1.43 s, ptp 200 uV.
+    sig = _biphasic_wave(s_freq=s_freq)
+
+    def n_events(**kw):
+        det = ImprovedDetectSlowWave(method='Massimini2004',
+                                     frequency=(0.1, 4), **kw)
+        return len(det(_make_chantime(sig, s_freq)))
+
+    published = n_events()
+    assert published > 0, (
+        "the published Massimini criteria find nothing on a 0.7 Hz, 200 uV "
+        "peak-to-peak wave, so every assertion below is vacuous")
+    print(f"   published criteria (-80 uV, 140 uV, 0.3-1.0 s) -> "
+          f"{published} events")
+
+    # --- (1) the trough window bounds the HALF-wave -----------------------
+    # 0.71 s half-wave: inside (0.3, 1.0), outside (0.3, 0.5) and (0.75, 1.0).
+    # The whole wave is 1.43 s, so a window of (0.3, 1.0) read as a
+    # whole-wave bound would reject everything -- which is the old bug.
+    assert n_events(trough_duration=(0.3, 1.0)) == published, (
+        "the paper's own 0.3-1.0 s window rejects a 0.71 s half-wave: it is "
+        "still being applied to the whole 1.43 s wave")
+    assert n_events(trough_duration=(0.25, 1.0)) == published, \
+        "the AASM 0.25-1.0 s window rejects a 0.71 s half-wave"
+    assert n_events(trough_duration=(0.3, 0.5)) == 0, \
+        "a window ending before the 0.71 s half-wave still accepted it"
+    assert n_events(trough_duration=(0.75, 1.0)) == 0, \
+        "a window starting after the 0.71 s half-wave still accepted it"
+    print("   [ok] trough_duration bounds the 0.71 s half-wave, not the "
+          "1.43 s wave: (0.3,1.0) and (0.25,1.0) keep all "
+          f"{published}, (0.3,0.5) and (0.75,1.0) keep 0")
+
+    # --- (2) the amplitude-depth criterion --------------------------------
+    # Swept rather than asserted at one point: the yield must fall smoothly
+    # from "all" to "none" as the criterion crosses the wave's own 100 uV
+    # amplitude. A single equality could pass on an inert gate that happened
+    # to keep everything; a graded response cannot.
+    depth_sweep = [-50.0, -90.0, -99.0, -104.0, -110.0, -150.0]
+    depth_counts = [n_events(neg_peak_thresh=t) for t in depth_sweep]
+    assert depth_counts[0] == published, (
+        f"a -50 uV criterion on a 100 uV wave dropped events: "
+        f"{depth_counts[0]} vs {published}")
+    assert depth_counts[-1] == 0, (
+        f"a -150 uV criterion on a 100 uV wave kept {depth_counts[-1]} "
+        f"events: neg_peak_thresh never reaches Wonambi's max_trough_amp")
+    assert depth_counts == sorted(depth_counts, reverse=True), \
+        f"yield is not monotone in the depth criterion: {depth_counts}"
+    assert any(0 < c < published for c in depth_counts), \
+        f"the depth criterion is on/off, not graded: {depth_counts}"
+    # The sign is a depth, not a direction: +150 must gate like -150.
+    assert n_events(neg_peak_thresh=150.0) == 0, \
+        "a positive neg_peak_thresh silently inverted the criterion"
+    print(f"   [ok] neg_peak_thresh gates amplitude depth in uV: "
+          f"{list(zip(depth_sweep, depth_counts))}; +150 keeps 0 too")
+
+    # --- (3) the peak-to-peak criterion -----------------------------------
+    ptp_sweep = [100.0, 180.0, 199.0, 205.0, 215.0, 250.0]
+    ptp_counts = [n_events(p2p_thresh=t) for t in ptp_sweep]
+    assert ptp_counts[0] == published, (
+        f"a 100 uV peak-to-peak criterion on a 200 uV wave dropped events: "
+        f"{ptp_counts[0]} vs {published}")
+    assert ptp_counts[-1] == 0, (
+        f"a 250 uV peak-to-peak criterion on a 200 uV wave kept "
+        f"{ptp_counts[-1]} events: p2p_thresh never reaches Wonambi's "
+        f"min_ptp")
+    assert ptp_counts == sorted(ptp_counts, reverse=True), \
+        f"yield is not monotone in the peak-to-peak criterion: {ptp_counts}"
+    assert any(0 < c < published for c in ptp_counts), \
+        f"the peak-to-peak criterion is on/off, not graded: {ptp_counts}"
+    print(f"   [ok] p2p_thresh gates peak-to-peak in uV: "
+          f"{list(zip(ptp_sweep, ptp_counts))}")
+
+    # --- the published defaults are the published numbers ------------------
+    defaults = {
+        'Massimini2004': ((0.3, 1.0), -80, 140),
+        'AASM/Massimini2004': ((0.25, 1.0), -40, 75),
+    }
+    for method, (window, trough, ptp) in defaults.items():
+        det = ImprovedDetectSlowWave(method=method)
+        assert det.trough_duration == window, \
+            f"{method}: trough_duration {det.trough_duration} != {window}"
+        assert det.max_trough_amp == trough, \
+            f"{method}: max_trough_amp {det.max_trough_amp} != {trough}"
+        assert det.min_ptp == ptp, \
+            f"{method}: min_ptp {det.min_ptp} != {ptp}"
+        # Wonambi's separate whole-wave bound must NOT pick up the trough
+        # window: it stays at (min_dur, max_dur) unless a caller sets it.
+        assert det.duration == (0, None), \
+            f"{method}: duration {det.duration} is not the whole-wave default"
+    print("   [ok] published defaults survive super().__init__: "
+          "Massimini2004 (0.3,1.0)/-80/140, AASM (0.25,1.0)/-40/75, "
+          "whole-wave duration left at (0, None)")
+
+    # --- the two duration bounds are independent --------------------------
+    # The whole wave is 1.43 s. min_dur/max_dur bound THAT, and must not be
+    # confused with the 0.71 s half-wave window; both have to be reachable
+    # separately or the next caller will pass one as the other again.
+    assert n_events(max_dur=2.0) == published, \
+        "a 2.0 s whole-wave ceiling rejected a 1.43 s wave"
+    assert n_events(max_dur=1.0) == 0, \
+        "a 1.0 s whole-wave ceiling accepted a 1.43 s wave: min_dur/max_dur " \
+        "never reach Wonambi's duration"
+    assert n_events(min_dur=2.0) == 0, \
+        "a 2.0 s whole-wave floor accepted a 1.43 s wave"
+    assert n_events(trough_duration=(0.3, 1.0), max_dur=2.0) == published, (
+        "the published half-wave window plus a 2.0 s whole-wave ceiling "
+        "rejects a 0.71 s / 1.43 s wave: the two bounds are still conflated")
+    print("   [ok] whole-wave min_dur/max_dur are separate from the trough "
+          "window: max_dur=2.0 keeps all 209, max_dur=1.0 keeps 0, and "
+          "(0.3,1.0) + max_dur=2.0 keeps all 209")
+
+
+def _lopsided_wave(s_freq=256.0, duration=600.0, period=2.0,
+                   neg_fraction=0.68, amp=150.0):
+    """Biphasic wave whose two half-waves have DIFFERENT durations.
+
+    A half-sine of ``neg_fraction * period`` going negative, then a half-sine
+    of the remainder going positive; both are smooth and meet at zero, so the
+    zero crossings sit exactly where the fractions say. The amplitude-
+    asymmetric generator :func:`_synthetic_slow_oscillation` cannot be used
+    for duration tests because its half-waves are the same length.
+
+    Note the 0.1-4 Hz detection band pulls the two halves back towards each
+    other — a raw 0.72/0.28 split at a 1.6 s period measures 0.95/0.65 after
+    filtering — so the ratio here is chosen from the FILTERED durations, not
+    the nominal ones. At the defaults the negative half-wave measures ~1.16 s
+    (outside a 0.3-1.0 s window) while the positive measures ~0.83 s (inside
+    it), which is exactly the case Massimini's criterion separates and
+    Wonambi's cannot.
+
+    Parameters
+    ----------
+    s_freq : float
+        Sampling frequency in Hz.
+    duration : float
+        Length of the signal in seconds.
+    period : float
+        Cycle length in seconds.
+    neg_fraction : float
+        Fraction of each cycle spent below zero, before filtering.
+    amp : float
+        Peak amplitude in µV before filtering.
+
+    Returns
+    -------
+    ndarray
+        Signal in microvolts.
+    """
+    t = np.arange(int(duration * s_freq)) / s_freq
+    ph = (t % period) / period
+    neg = -amp * np.sin(np.pi * ph / neg_fraction)
+    pos = amp * np.sin(np.pi * (ph - neg_fraction) / (1.0 - neg_fraction))
+    return np.where(ph < neg_fraction, neg, pos)
+
+
+def test_trough_duration_criterion_gates_the_negative_half_wave():
+    """``trough_duration`` must bound the NEGATIVE half-wave, per the paper.
+
+    Massimini: *"a negative zero crossing and a subsequent positive zero
+    crossing separated by 0.3-1.0 sec"*. Wonambi applies that window with
+    ``within_duration`` to the ABOVE-zero run, because
+    ``detect_Massimini2004`` searches for the positive excursion first, so
+    the published criterion lands on the positive half-wave.
+
+    The negative half-wave is readable straight off the event dict:
+    ``_add_halfwave`` sets ``ev[4]`` to the first zero crossing after
+    ``ev[2]`` and puts the trough between them, and ``make_slow_waves``
+    exposes those as ``zero_time`` and ``end``. So its duration is
+    ``end - zero_time`` — one sample short, by the same convention
+    ``within_duration`` already uses on the other half-wave.
+
+    Asserted on a wave whose half-waves differ in length (where it must
+    bite), on one where they match (where it must not), and across two
+    windows (so it follows the criterion rather than being a fixed cutoff).
+    """
+    print("\nTesting trough_duration bounds the negative half-wave:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    class _NoDurationRegate(ImprovedDetectSlowWave):
+        """The behaviour before this gate: depth re-gated, duration not."""
+
+        def _meets_trough_duration(self, evt):
+            return True
+
+    s_freq = 256.0
+    # neg ~1.16 s / pos ~0.83 s after filtering: the negative half-wave is
+    # outside a 0.3-1.0 s window while the positive one is inside it.
+    lopsided = _lopsided_wave(s_freq=s_freq)
+    # Half-waves of equal length: nothing may be removed.
+    balanced = _synthetic_slow_oscillation(s_freq=s_freq)
+
+    for method in ('Massimini2004', 'AASM/Massimini2004'):
+        def run(sig, window):
+            kw = dict(method=method, frequency=(0.1, 4),
+                      trough_duration=window)
+            before = _NoDurationRegate(**kw)(
+                _make_chantime(sig, s_freq)).events
+            after = ImprovedDetectSlowWave(**kw)(
+                _make_chantime(sig, s_freq)).events
+            return before, after
+
+        # --- the window is honoured -----------------------------------
+        for sig, name in ((lopsided, 'lopsided'), (balanced, 'balanced')):
+            for window in ((0.3, 1.0), (0.25, 1.0), (0.3, 1.5)):
+                before, after = run(sig, window)
+                assert before, f"{method}/{name}/{window}: no candidates"
+                outside = [e for e in after
+                           if not (window[0]
+                                   <= e['end'] - e['zero_time']
+                                   <= window[1])]
+                assert not outside, (
+                    f"{method}/{name}/{window}: {len(outside)} accepted "
+                    f"events have a negative half-wave outside the window, "
+                    f"worst {max(e['end'] - e['zero_time'] for e in outside):.3f} s")
+                kept = {round(float(e['start']), 6) for e in after}
+                assert kept <= {round(float(e['start']), 6) for e in before}, \
+                    f"{method}/{name}/{window}: the gate invented an event"
+
+        # --- it bites where the paper says it should ------------------
+        before, after = run(lopsided, (0.3, 1.0))
+        neg = np.median([e['end'] - e['zero_time'] for e in before])
+        pos = np.median([e['zero_time'] - e['start'] for e in before])
+        assert neg > 1.0 > pos, (
+            f"{method}: the lopsided wave is not lopsided after filtering "
+            f"(neg {neg:.3f} s, pos {pos:.3f} s), so this test is vacuous")
+        assert len(after) < len(before), (
+            f"{method}: the gate removed nothing from a wave whose negative "
+            f"half-wave is {neg:.3f} s under a 0.3-1.0 s criterion, so it "
+            f"is inert")
+        print(f"   [ok] {method:<21} lopsided (neg {neg:.3f} s / pos "
+              f"{pos:.3f} s) window (0.3,1.0): {len(before)} -> "
+              f"{len(after)} ({len(before) - len(after)} removed, "
+              f"{100 * (len(before) - len(after)) / len(before):.0f}%)")
+
+        # --- widening the window keeps them, so it tracks the criterion
+        before_w, after_w = run(lopsided, (0.3, 1.5))
+        assert len(after_w) == len(before_w), (
+            f"{method}: a 0.3-1.5 s window still rejected a {neg:.3f} s "
+            f"negative half-wave, so the gate is a fixed cutoff")
+        print(f"   [ok] {method:<21} same wave, window (0.3,1.5): "
+              f"{len(before_w)} -> {len(after_w)} (none removed, so the "
+              f"gate follows the window)")
+
+        # --- it removes exactly the events outside the window, no others ---
+        # Necessary AND sufficient, so the gate cannot be either over- or
+        # under-inclusive. Asserted on the balanced signal, where the vast
+        # majority of half-waves are inside the window and a spurious
+        # rejection would show up immediately.
+        before_b, after_b = run(balanced, (0.3, 1.0))
+        kept_b = {round(float(e['start']), 6) for e in after_b}
+        removed_b = [e for e in before_b
+                     if round(float(e['start']), 6) not in kept_b]
+        wrongly_removed = [e for e in removed_b
+                           if 0.3 <= e['end'] - e['zero_time'] <= 1.0]
+        assert not wrongly_removed, (
+            f"{method}: the gate removed {len(wrongly_removed)} events whose "
+            f"negative half-wave IS inside 0.3-1.0 s, e.g. "
+            f"{wrongly_removed[0]['end'] - wrongly_removed[0]['zero_time']:.3f} s")
+        assert len(removed_b) / len(before_b) < 0.05, (
+            f"{method}: the gate removed "
+            f"{100 * len(removed_b) / len(before_b):.0f}% of a signal whose "
+            f"half-waves are the same length, which is not a stray candidate")
+        print(f"   [ok] {method:<21} balanced half-waves: {len(before_b)} -> "
+              f"{len(after_b)}; the {len(removed_b)} removed are exactly "
+              f"those outside the window, none inside it")
+
+    # The span must be the same number before and after _as_negative_first,
+    # which swaps trough/peak but not zero_time/end. Checked, not assumed.
+    det = ImprovedDetectSlowWave(method='Massimini2004', frequency=(0.1, 4))
+    raw = ImprovedDetectSlowWave.__mro__[1].__call__(
+        det, _make_chantime(balanced, s_freq)).events
+    pre = [round(e['end'] - e['zero_time'], 9) for e in raw]
+    post = [round(ImprovedDetectSlowWave._as_negative_first(dict(e))['end']
+                  - e['zero_time'], 9) for e in raw]
+    assert pre == post and pre, (
+        "the negative half-wave span changed across the relabel, so the "
+        "gate depends on where in __call__ it runs")
+    print(f"   [ok] end - zero_time is identical before and after the "
+          f"relabel ({len(pre)} events)")
+
+
+def _eeg_with_injected_slow_waves(s_freq=256.0, duration=600.0, seed=1):
+    """Synthetic EEG with slow waves at KNOWN times, widths and amplitudes.
+
+    Ground truth is constructed rather than assumed: a 1/f background (which
+    is what makes the up-state irregular, and therefore what the pre-4.3
+    detector was implicitly selecting on), plus sigma-band bursts, plus
+    biphasic slow waves injected at recorded positions. Deterministic for a
+    given seed.
+
+    Each injected wave is a full cycle of a sine of width ``w`` starting
+    negative, so its negative half-wave is the first ``w / 2`` seconds and
+    its peak-to-peak amplitude is ``2 * amp``.
+
+    Parameters
+    ----------
+    s_freq : float, optional
+        Sampling frequency in Hz. Default ``256.0``.
+    duration : float, optional
+        Length of the signal in seconds. Default ``600.0``.
+    seed : int, optional
+        Seed for the background, the wave parameters and the spindle times.
+        Default ``1``.
+
+    Returns
+    -------
+    sig : ndarray
+        Signal in microvolts, shape ``(int(duration * s_freq),)``.
+    truth : list of dict
+        One entry per injected wave with ``start``, ``end``, ``neg_dur``
+        (negative half-wave duration, s) and ``amp`` (peak amplitude, µV,
+        BEFORE band-pass filtering).
+    """
+    rng = np.random.default_rng(seed)
+    n = int(duration * s_freq)
+    t = np.arange(n) / s_freq
+
+    # 1/f background at 25 uV RMS.
+    white = rng.standard_normal(n)
+    spec = np.fft.rfft(white)
+    freqs = np.fft.rfftfreq(n, 1 / s_freq)
+    spec[1:] /= np.sqrt(freqs[1:])
+    bg = np.fft.irfft(spec, n)
+    sig = bg / bg.std() * 25.0
+
+    truth = []
+    tt = 1.0
+    while tt < duration - 3.0:
+        w = rng.uniform(0.9, 1.8)
+        amp = rng.uniform(50.0, 180.0)
+        m = (t >= tt) & (t < tt + w)
+        sig[m] += -amp * np.sin(2 * np.pi * (t[m] - tt) / w)
+        truth.append({'start': tt, 'end': tt + w, 'neg_dur': w / 2.0,
+                      'amp': amp})
+        tt += w + rng.uniform(0.3, 2.5)
+
+    for _ in range(200):
+        t0 = rng.uniform(0.0, duration - 1.0)
+        m = (t >= t0) & (t < t0 + 0.8)
+        sig[m] += 20.0 * np.sin(2 * np.pi * 13.5 * (t[m] - t0))
+
+    return sig, truth
+
+
+def _score_events(detected, truth, min_frac=0.2):
+    """Event-wise precision / recall / F1 against a ground-truth list.
+
+    A detected event counts as a true positive when it overlaps an unclaimed
+    truth event by at least ``min_frac`` of the DETECTED event's duration —
+    the ≥20% temporal-overlap rule commonly used for MODA-style spindle
+    scoring. Each truth event can be claimed once, so two detections over one
+    wave give one true positive and one false positive.
+
+    This is by-EVENT, not by-sample; the two give different numbers.
+
+    Parameters
+    ----------
+    detected : sequence of dict
+        Detector output; each entry needs ``start`` and ``end``.
+    truth : sequence of dict
+        Ground truth; each entry needs ``start`` and ``end``.
+    min_frac : float, optional
+        Minimum fraction of the detected event that must overlap. Default
+        ``0.2``.
+
+    Returns
+    -------
+    dict
+        ``tp``, ``fp``, ``fn``, ``precision``, ``recall``, ``f1``.
+    """
+    claimed = set()
+    tp = 0
+    for d in detected:
+        d0, d1 = float(d['start']), float(d['end'])
+        best, best_ov = None, 0.0
+        for i, g in enumerate(truth):
+            if i in claimed:
+                continue
+            ov = max(0.0, min(d1, g['end']) - max(d0, g['start']))
+            if ov > best_ov:
+                best, best_ov = i, ov
+        if best is not None and best_ov >= min_frac * max(d1 - d0, 1e-9):
+            claimed.add(best)
+            tp += 1
+    fp = len(detected) - tp
+    fn = len(truth) - tp
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-9)
+    return {'tp': tp, 'fp': fp, 'fn': fn, 'precision': precision,
+            'recall': recall, 'f1': f1}
+
+
+def test_permissive_search_recall_against_injected_ground_truth():
+    """The recall the permissive search buys, and the precision it must keep.
+
+    This is the evidence for the most consequential change in the release,
+    and it belongs in the repository rather than in a report: a future edit
+    that quietly loosens the detector has to fail here.
+
+    ``detect_Massimini2004`` used to pre-reject candidates by applying the
+    paper's trough-duration window and depth criterion to the ABOVE-zero run
+    — the up-state — before any post-detection re-gate could see them. On
+    clean synthetics that barely shows, because their up-states are regular.
+    On a 1/f background it is devastating: the up-state's duration and peak
+    vary enough that almost every genuine slow wave was discarded on a
+    quantity Massimini does not constrain at all.
+
+    Scored against waves injected at known times, the strict path reached
+    recall 0.02-0.05. The permissive one reaches 0.5-0.8 at essentially
+    unchanged precision, so this is recovery of genuine waves and not a
+    looser detector inventing them.
+
+    Floors, not exact figures, so the test is not brittle:
+
+    * precision >= 0.95 — the property that must never degrade;
+    * recall >= 0.40 and at least 5x the strict path — the recovery claim;
+    * plus the character properties: a strict superset of the old output,
+      zero criterion violations measured from each event's own dict, and no
+      overlapping negative half-waves.
+
+    Recall is well under 1.0 by construction: the ground truth records each
+    wave's amplitude BEFORE the 0.1-4 Hz detection band attenuates it, so
+    some waves counted as "meeting the criteria" no longer do by the time the
+    detector sees them. The floor is set with that in mind.
+    """
+    print("\nTesting slow-wave recall against injected ground truth:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    class _Strict(ImprovedDetectSlowWave):
+        """Pre-4.3 behaviour: Wonambi still pre-rejects on the up-state."""
+
+        def _permissive_search(self):
+            return self
+
+    s_freq = 256.0
+    sig, truth = _eeg_with_injected_slow_waves(s_freq=s_freq)
+    print(f"   {len(truth)} slow waves injected into 600 s of 1/f background")
+
+    for method, depth, min_ptp, window in (
+            ('Massimini2004', -80.0, 140.0, (0.3, 1.0)),
+            ('AASM/Massimini2004', -40.0, 75.0, (0.25, 1.0))):
+        # Score only against waves that meet the criteria being ASKED for.
+        # Penalising a detector for missing waves its own criteria exclude
+        # would measure the wrong thing.
+        gt = [g for g in truth
+              if g['amp'] >= abs(depth)
+              and window[0] <= g['neg_dur'] <= window[1]]
+        assert len(gt) >= 50, (
+            f"{method}: only {len(gt)} injected waves meet the criteria, too "
+            f"few to score against")
+
+        kw = dict(method=method, frequency=(0.1, 4))
+        strict = _Strict(**kw)(_make_chantime(sig, s_freq)).events
+        new = ImprovedDetectSlowWave(**kw)(_make_chantime(sig, s_freq)).events
+
+        s_score = _score_events(strict, gt)
+        n_score = _score_events(new, gt)
+        print(f"   {method:<21} strict     n={len(strict):>4}  "
+              f"precision={s_score['precision']:.3f} "
+              f"recall={s_score['recall']:.3f} F1={s_score['f1']:.3f}")
+        print(f"   {method:<21} permissive n={len(new):>4}  "
+              f"precision={n_score['precision']:.3f} "
+              f"recall={n_score['recall']:.3f} F1={n_score['f1']:.3f}   "
+              f"(ground truth: {len(gt)})")
+
+        # --- precision must not degrade -----------------------------------
+        assert n_score['precision'] >= 0.95, (
+            f"{method}: precision fell to {n_score['precision']:.3f} "
+            f"({n_score['fp']} false positives out of {len(new)} events). "
+            f"The looser search is inventing events, not recovering them")
+
+        # --- recall must improve substantially ----------------------------
+        assert n_score['recall'] >= 0.40, (
+            f"{method}: recall is only {n_score['recall']:.3f}; the "
+            f"up-state pre-rejection appears to be back")
+        assert n_score['recall'] >= 5 * s_score['recall'], (
+            f"{method}: recall {n_score['recall']:.3f} is not a substantial "
+            f"gain over the strict path's {s_score['recall']:.3f}, so this "
+            f"test is no longer measuring the change it exists for")
+
+        # --- character: superset, criteria, non-overlapping half-waves ----
+        s_starts = {round(float(e['start']), 6) for e in strict}
+        n_starts = {round(float(e['start']), 6) for e in new}
+        assert s_starts <= n_starts, (
+            f"{method}: the permissive search LOST "
+            f"{len(s_starts - n_starts)} events the strict one found")
+
+        for e in new:
+            neg_dur = e['end'] - e['zero_time']
+            assert window[0] <= neg_dur <= window[1], (
+                f"{method}: negative half-wave {neg_dur:.3f} s outside "
+                f"{window}")
+            assert e['trough_val'] <= depth, (
+                f"{method}: trough {e['trough_val']:.1f} uV does not reach "
+                f"{depth} uV")
+            assert e['ptp'] >= min_ptp - 1e-6, (
+                f"{method}: peak-to-peak {e['ptp']:.1f} uV is under "
+                f"{min_ptp} uV")
+
+        spans = sorted((float(e['zero_time']), float(e['end'])) for e in new)
+        for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+            assert a1 <= b0, (
+                f"{method}: negative half-waves [{a0:.3f}, {a1:.3f}] and "
+                f"[{b0:.3f}, {b1:.3f}] overlap, so one wave is being counted "
+                f"twice")
+        print(f"   [ok] {method:<21} precision >= 0.95, recall >= 0.40 and "
+              f">= 5x strict, strict superset, {len(new)} events with 0 "
+              f"criterion violations and 0 overlapping half-waves")
+
+
+def test_permissive_search_recovers_paper_valid_waves():
+    """Wonambi must not pre-reject a wave on its UP-state.
+
+    ``detect_Massimini2004`` applies two of the paper's criteria to the
+    ABOVE-zero run before any post-detection re-gate can see the candidate:
+    ``within_duration`` requires the POSITIVE half-wave to fall inside
+    ``trough_duration``, and ``select_peaks`` requires the POSITIVE peak to
+    reach ``max_trough_amp``. A re-gate can only remove, never recover, so
+    those two silently biased which slow waves survived by their up-state
+    duration and amplitude — quantities Massimini does not constrain at all.
+    A wave with a 0.45 s negative half-wave (valid under any window) and a
+    1.15 s positive one returned zero events.
+
+    ``_permissive_search`` hands Wonambi a copy that pre-rejects on neither,
+    leaving the published criteria to be enforced on the negative half-wave
+    where they belong. ``min_ptp`` is deliberately NOT widened: it is already
+    applied in genuine microvolts to the true negative-to-positive excursion.
+
+    Asserts the recovery, that it is a strict superset (nothing is lost),
+    that every survivor still satisfies all three published criteria, that no
+    two events claim the same negative half-wave, and that the search copy
+    leaves the user-facing attributes alone.
+    """
+    print("\nTesting the search no longer pre-rejects on the up-state:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    class _Strict(ImprovedDetectSlowWave):
+        """The previous state: Wonambi still pre-rejects on the up-state."""
+
+        def _permissive_search(self):
+            return self
+
+    s_freq = 256.0
+    # 0.45 s negative half-wave, 1.15 s positive one: paper-valid, but the
+    # up-state is outside the very window the paper applies to the down-state.
+    up_state_too_long = _lopsided_wave(s_freq=s_freq, period=2.0,
+                                       neg_fraction=0.28, amp=150.0)
+    balanced = _synthetic_slow_oscillation(s_freq=s_freq)
+
+    for method, depth, ptp, window in (
+            ('Massimini2004', -80.0, 140.0, (0.3, 1.0)),
+            ('AASM/Massimini2004', -40.0, 75.0, (0.25, 1.0))):
+        kw = dict(method=method, frequency=(0.1, 4))
+
+        # --- the recovery -------------------------------------------------
+        strict = _Strict(**kw)(_make_chantime(up_state_too_long, s_freq)).events
+        new = ImprovedDetectSlowWave(**kw)(
+            _make_chantime(up_state_too_long, s_freq)).events
+        assert not strict, (
+            f"{method}: the strict search already found {len(strict)} events "
+            f"on a wave with a 1.15 s up-state, so this test no longer "
+            f"demonstrates the pre-rejection")
+        assert new, (
+            f"{method}: a wave with a paper-valid 0.45 s negative half-wave "
+            f"is still undetected because its up-state is 1.15 s long")
+        neg = np.median([e['end'] - e['zero_time'] for e in new])
+        print(f"   [ok] {method:<21} up-state 1.15 s, down-state "
+              f"{neg:.3f} s: {len(strict)} -> {len(new)} events")
+
+        # --- nothing is lost, on a signal both can handle -----------------
+        s_bal = _Strict(**kw)(_make_chantime(balanced, s_freq)).events
+        n_bal = ImprovedDetectSlowWave(**kw)(
+            _make_chantime(balanced, s_freq)).events
+        s_starts = {round(float(e['start']), 6) for e in s_bal}
+        n_starts = {round(float(e['start']), 6) for e in n_bal}
+        assert s_bal, f"{method}: the strict search found nothing to compare"
+        assert s_starts <= n_starts, (
+            f"{method}: the permissive search LOST "
+            f"{len(s_starts - n_starts)} events the strict one found; it must "
+            f"only ever add")
+        print(f"   [ok] {method:<21} balanced wave: {len(s_bal)} -> "
+              f"{len(n_bal)}, a strict superset")
+
+        # --- and what it adds still satisfies the paper -------------------
+        for sig, name in ((up_state_too_long, 'up-state too long'),
+                          (balanced, 'balanced')):
+            events = ImprovedDetectSlowWave(**kw)(
+                _make_chantime(sig, s_freq)).events
+            for e in events:
+                neg_dur = e['end'] - e['zero_time']
+                assert window[0] <= neg_dur <= window[1], (
+                    f"{method}/{name}: negative half-wave {neg_dur:.3f} s "
+                    f"outside {window}")
+                assert e['trough_val'] <= depth, (
+                    f"{method}/{name}: trough {e['trough_val']:.1f} uV does "
+                    f"not reach {depth} uV")
+                assert e['ptp'] >= ptp - 1e-6, (
+                    f"{method}/{name}: peak-to-peak {e['ptp']:.1f} uV is "
+                    f"under {ptp} uV -- min_ptp must NOT be widened")
+            spans = [(round(e['zero_time'], 6), round(e['end'], 6))
+                     for e in events]
+            assert len(spans) == len(set(spans)), (
+                f"{method}/{name}: two events claim the same negative "
+                f"half-wave, so the looser search is double-counting")
+        print(f"   [ok] {method:<21} every survivor meets the window "
+              f"{window}, {depth} uV trough and {ptp} uV peak-to-peak; no "
+              f"duplicate half-waves")
+
+    # --- the search copy must not disturb the real detector ---------------
+    det = ImprovedDetectSlowWave(method='Massimini2004', frequency=(0.1, 4))
+    before = (det.trough_duration, det.max_trough_amp, det.min_ptp,
+              det.duration)
+    search = det._permissive_search()
+    after = (det.trough_duration, det.max_trough_amp, det.min_ptp,
+             det.duration)
+    assert before == after, (
+        f"_permissive_search mutated the detector: {before} -> {after}. The "
+        f"GUI prefills its spin boxes from these attributes and the re-gates "
+        f"read them back")
+    assert search is not det, "_permissive_search returned the detector itself"
+    assert search.trough_duration == (None, None), search.trough_duration
+    assert search.max_trough_amp == 0, search.max_trough_amp
+    # min_ptp is correct in uV inside _add_halfwave and must survive intact,
+    # as must the separate whole-wave bound.
+    assert search.min_ptp == det.min_ptp == 140, search.min_ptp
+    assert search.duration == det.duration == (0, None), search.duration
+    print("   [ok] the search copy relaxes only trough_duration and "
+          "max_trough_amp; min_ptp (140 uV) and the whole-wave duration are "
+          "untouched, and the detector itself is unchanged")
+
+
+def test_trough_depth_criterion_gates_the_negative_peak():
+    """The depth criterion must gate the NEGATIVE trough, per the paper.
+
+    Massimini: *"a negative peak between the two zero crossings with voltage
+    less than -80 µV"*. Wonambi enforces it with ``select_peaks``, which
+    tests the extremum of the FIRST half-wave; because
+    ``detect_Massimini2004`` searches for the above-zero run first, that is
+    the POSITIVE peak. On a symmetric wave the two numbers are equal and
+    nothing shows. On a physiological slow wave — sharp deep negative half,
+    broad shallow positive half — they are not: events were accepted whose
+    negative trough was 1.1 µV against a -40 µV criterion.
+
+    ``ImprovedDetectSlowWave._meets_trough_depth`` re-gates after detection
+    rather than inverting the signal, so Wonambi's search order and its
+    candidate set are untouched and only the published criterion is added.
+
+    Asserted on the asymmetric signal, where it bites, and on a symmetric one,
+    where it must not.
+    """
+    print("\nTesting the depth criterion gates the negative trough:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    class _NoRegate(ImprovedDetectSlowWave):
+        """The behaviour before the re-gate: relabelled but not re-gated."""
+
+        def _meets_trough_depth(self, evt):
+            return True
+
+    s_freq = 256.0
+    signals = {
+        'asymmetric': _synthetic_slow_oscillation(s_freq=s_freq),
+        'symmetric': _biphasic_wave(s_freq=s_freq),
+    }
+
+    for method, thresh in (('Massimini2004', -80.0),
+                           ('AASM/Massimini2004', -40.0)):
+        for name, sig in signals.items():
+            kw = dict(method=method, frequency=(0.1, 4),
+                      neg_peak_thresh=thresh)
+            before = _NoRegate(**kw)(_make_chantime(sig, s_freq)).events
+            after = ImprovedDetectSlowWave(**kw)(
+                _make_chantime(sig, s_freq)).events
+            assert before, f"{method}/{name}: nothing detected at all"
+
+            # Every survivor meets the criterion. This is the whole point.
+            shallow = [e for e in after if e['trough_val'] > thresh]
+            assert not shallow, (
+                f"{method}/{name}: {len(shallow)} accepted events have a "
+                f"trough shallower than {thresh} uV, worst "
+                f"{max(e['trough_val'] for e in shallow):+.1f} uV")
+
+            # The re-gate only ever removes: it cannot invent an event, and
+            # it must not perturb the ones it keeps.
+            kept = {round(float(e['start']), 6) for e in after}
+            candidates = {round(float(e['start']), 6) for e in before}
+            assert kept <= candidates, \
+                f"{method}/{name}: the re-gate produced an unseen event"
+
+            dropped = len(before) - len(after)
+            if name == 'symmetric':
+                # Both extrema are the same +/-100 uV, so gating on either
+                # half-wave gives the same answer and nothing may be lost.
+                assert dropped == 0, (
+                    f"{method}/{name}: the re-gate dropped {dropped} events "
+                    f"from a symmetric wave, where both half-waves have the "
+                    f"same amplitude")
+            else:
+                assert dropped > 0, (
+                    f"{method}/{name}: the re-gate dropped nothing from an "
+                    f"asymmetric wave, so it is inert and the assertion "
+                    f"above is vacuous")
+                worst = max(e['trough_val'] for e in before
+                            if round(float(e['start']), 6) not in kept)
+                print(f"   [ok] {method:<21} {name:<11} {len(before):>4} -> "
+                      f"{len(after):>4} ({dropped} removed, "
+                      f"{100 * dropped / len(before):.0f}%); shallowest "
+                      f"trough removed {worst:+.1f} uV vs a {thresh} uV "
+                      f"criterion")
+        print(f"   [ok] {method:<21} {'symmetric':<11} unchanged, as it must "
+              f"be when both half-waves match")
+
+
+def test_slow_wave_ptp_is_microvolts_not_samples():
+    """``ptp`` must be an amplitude, not a sample count — for ALL FOUR methods.
+
+    ``make_slow_waves`` computes ``'ptp': abs(ev[3] - ev[1])`` on sample
+    INDICES, and it is shared by every slow-wave method, so the defect is not
+    confined to the Massimini family. The value scales with sampling rate and
+    is independent of amplitude — 300 µV gave 160 at 256 Hz, 62 at 100 Hz,
+    and 90 µV gave 312 at 500 Hz — while Wonambi's own ``SlowWaves``
+    docstring promises "peak-to-peak (difference between highest and lowest
+    value)" and ``neural_events.db`` stores it in a column labelled
+    ``det_ptp`` (uV). In the user's live database Staresina2015 rows averaged
+    ``det_ptp`` 375.8 against a real ``peak2peak_amp`` of 95.3 µV.
+
+    The direct inverse of that evidence, per method:
+
+    * the same wave gives the same ptp at every sampling rate;
+    * scaling the recording by 1.5 scales ptp by 1.5;
+    * ``ptp == peak_val - trough_val`` for every single event;
+    * on a synthetic wave of known amplitude, ptp is that amplitude.
+
+    Each method is measured with a signal and thresholds under which its own
+    detected set is scale-invariant, so the ratio test isolates the reported
+    value rather than a change in which events were found.
+    """
+    print("\nTesting slow-wave ptp is microvolts for all four methods:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    rates = (256.0, 500.0, 1000.0)
+
+    # Massimini's criteria are absolute in uV, so scaling the signal would
+    # change its detected set; the thresholds below sit far enough under a
+    # 100 uV wave that both 1.0x and 1.5x are fully accepted.
+    # Ngo2015/Staresina2015 are relative, so their detected set is already
+    # scale-invariant -- but the legacy post-hoc filter's `min_neg_amp`
+    # default of +40 is NOT, so it is given a negative value (its historical
+    # no-op form) to keep the comparison about ptp alone.
+    cases = {
+        'Massimini2004': (lambda sf, amp: _biphasic_wave(s_freq=sf, amp=amp),
+                          dict(neg_peak_thresh=-50.0, p2p_thresh=100.0),
+                          True),
+        'AASM/Massimini2004': (
+            lambda sf, amp: _biphasic_wave(s_freq=sf, amp=amp),
+            dict(neg_peak_thresh=-50.0, p2p_thresh=100.0), True),
+        'Ngo2015': (
+            lambda sf, amp: _synthetic_slow_oscillation(s_freq=sf)
+            * (amp / 100.0),
+            dict(neg_peak_thresh=-75.0, p2p_thresh=75.0), False),
+        'Staresina2015': (
+            lambda sf, amp: _synthetic_slow_oscillation(s_freq=sf)
+            * (amp / 100.0),
+            dict(neg_peak_thresh=-75.0, p2p_thresh=75.0), False),
+    }
+
+    for method, (gen, kw, known_amp) in cases.items():
+        by_rate = {}
+        for s_freq in rates:
+            for amp in (100.0, 150.0):
+                det = ImprovedDetectSlowWave(method=method,
+                                             frequency=(0.1, 4), **kw)
+                events = det(_make_chantime(gen(s_freq, amp), s_freq))
+                assert len(events), (
+                    f"{method} found nothing at {s_freq} Hz / {amp} scale")
+
+                for e in events:
+                    assert abs(e['ptp']
+                               - (e['peak_val'] - e['trough_val'])) < 1e-6, (
+                        f"{method}: ptp {e['ptp']} != peak_val - trough_val")
+                    assert e['ptp'] > 0, f"{method}: non-positive ptp"
+
+                by_rate[(s_freq, amp)] = float(
+                    np.mean([e['ptp'] for e in events]))
+
+        # Sampling-rate invariance. A sample count would rise ~4x from
+        # 256 Hz to 1000 Hz.
+        for amp in (100.0, 150.0):
+            vals = [by_rate[(s, amp)] for s in rates]
+            spread = (max(vals) - min(vals)) / np.mean(vals)
+            assert spread < 0.02, (
+                f"{method}: ptp varies {spread:.1%} across "
+                f"{rates} Hz ({[round(v, 1) for v in vals]}), so it is still "
+                f"a sample count")
+
+        # Amplitude proportionality.
+        for s_freq in rates:
+            ratio = by_rate[(s_freq, 150.0)] / by_rate[(s_freq, 100.0)]
+            assert abs(ratio - 1.5) < 0.02, (
+                f"{method} at {s_freq} Hz: a 1.5x louder recording gave a "
+                f"ptp ratio of {ratio:.3f}, so ptp does not track amplitude")
+
+        if known_amp:
+            # The synthetic wave's peak-to-peak amplitude is exactly 2 * amp.
+            for (s_freq, amp), ptp in by_rate.items():
+                assert abs(ptp - 2 * amp) / (2 * amp) < 0.02, (
+                    f"{method} at {s_freq} Hz: ptp {ptp:.1f} is not the "
+                    f"true {2 * amp:.0f} uV peak-to-peak")
+
+        print(f"   [ok] {method:<21} "
+              + "  ".join(f"{s:.0f}Hz={by_rate[(s, 100.0)]:.1f}"
+                          for s in rates)
+              + f"  |  1.5x -> {by_rate[(256.0, 150.0)]:.1f} "
+                f"(x{by_rate[(256.0, 150.0)] / by_rate[(256.0, 100.0)]:.2f})")
+
+
+def test_det_trough_is_negative_for_every_method():
+    """``trough_val`` negative and ``peak_val`` positive, for all four methods.
+
+    ``detect_Massimini2004`` detects an ABOVE-zero run first and stores that
+    run's maximum as ``trough_val`` and the following minimum as
+    ``peak_val``, the opposite of the zero-crossing methods Ngo2015 and
+    Staresina2015 and the opposite of Wonambi's own ``SlowWaves`` docstring
+    ("trough_val: the lowest value"). Measured on one signal before the fix:
+    Massimini ``trough_val=+295``, Staresina ``trough_val=-101``. Every
+    cross-method comparison of ``det_trough`` / ``min_amp`` in
+    ``neural_events.db`` was therefore comparing opposite quantities.
+
+    Also asserts ``ptp == peak_val - trough_val`` for every method, so the
+    three fields cannot drift apart and no method can quietly go back to
+    Wonambi's sample count.
+    """
+    print("\nTesting det_trough is negative and det_peak positive everywhere:")
+
+    from turtlewave_hdEEG.extensions import (ImprovedDetectSlowWave,
+                                             ImprovedDetectKComplex)
+
+    s_freq = 256.0
+    # The jittered oscillation, so Ngo2015's relative thresholds have a
+    # spread to work against; a pure sine gives it nothing above 1.25 x mean.
+    sig = _synthetic_slow_oscillation(s_freq=s_freq)
+    data = _make_chantime(sig, s_freq)
+    band = np.asarray(sig, dtype='f')
+
+    cases = [(ImprovedDetectSlowWave, m, {}) for m in
+             ('Massimini2004', 'AASM/Massimini2004', 'Ngo2015',
+              'Staresina2015')]
+    cases.append((ImprovedDetectKComplex, 'AASM/Massimini2004',
+                  {'min_isolation': 1.0}))
+
+    for cls, method, kwargs in cases:
+        events = cls(method=method, **kwargs)(data)
+        label = f"{cls.__name__.replace('ImprovedDetect', '')}/{method}"
+        assert len(events), f"{label}: no events, assertions would be vacuous"
+
+        troughs = np.array([e['trough_val'] for e in events])
+        peaks = np.array([e['peak_val'] for e in events])
+        assert (troughs < 0).all(), (
+            f"{label}: {int((troughs >= 0).sum())}/{len(troughs)} events have "
+            f"a non-negative trough_val (max {troughs.max():+.1f} uV)")
+        assert (peaks > 0).all(), (
+            f"{label}: {int((peaks <= 0).sum())}/{len(peaks)} events have a "
+            f"non-positive peak_val (min {peaks.min():+.1f} uV)")
+
+        for e in events:
+            # Both times must lie inside the event, whichever half-wave came
+            # first, so trough_time/peak_time cannot be swapped away from
+            # their own values or off the end of the record.
+            for key in ('trough_time', 'peak_time'):
+                assert e['start'] <= e[key] <= e['end'], (
+                    f"{label}: {key} {e[key]} outside "
+                    f"[{e['start']}, {e['end']}]")
+                idx = int(round(e[key] * s_freq))
+                assert 0 <= idx < len(band), f"{label}: {key} off the record"
+            assert abs(e['ptp']
+                       - (e['peak_val'] - e['trough_val'])) < 1e-6, (
+                f"{label}: ptp {e['ptp']} != peak_val - trough_val -- this "
+                f"method has gone back to Wonambi's sample count")
+
+        ptps = np.array([e['ptp'] for e in events])
+        print(f"   [ok] {label:<28} n={len(events):>4} "
+              f"trough_val<0 (mean {troughs.mean():+7.1f}), "
+              f"peak_val>0 (mean {peaks.mean():+7.1f}), "
+              f"ptp = peak-trough (median {np.median(ptps):6.1f} uV)")
+
+
+def test_staresina_and_ngo_are_untouched():
+    """Staresina2015 and Ngo2015 must not move by a single event.
+
+    They are published methods with hundreds of thousands of rows already in
+    the user's databases, and the criteria changes here are aimed only at the
+    Massimini family. Staresina's peak-to-peak gate is
+    ``percentile(ptp, opts.ptp_thresh)`` — a relative criterion that always
+    keeps ~25 % of candidates and has no absolute amplitude floor — and it
+    stays exactly that. The legacy post-hoc amplitude filter also stays on
+    these two methods, unit confusion and all, and it runs BEFORE the
+    reported ``ptp`` is converted to microvolts, so that conversion cannot
+    move their detected set.
+
+    Pins the published constants and the relative-threshold behaviour that
+    depends on them.
+    """
+    print("\nTesting Staresina2015 / Ngo2015 configuration is unchanged:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    star = ImprovedDetectSlowWave(method='Staresina2015')
+    assert star.ptp_thresh == 75, (
+        f"Staresina2015 ptp_thresh is {star.ptp_thresh}, not the published "
+        f"75th percentile")
+    assert (star.min_dur, star.max_dur) == (0.8, 2.0), \
+        f"Staresina2015 duration {(star.min_dur, star.max_dur)} != (0.8, 2.0)"
+    assert star.duration == (0.8, 2.0), \
+        f"Staresina2015 zero-crossing interval {star.duration} != (0.8, 2.0)"
+    assert star.lowpass['freq'] == 1.25, star.lowpass
+
+    ngo = ImprovedDetectSlowWave(method='Ngo2015')
+    assert (ngo.peak_thresh, ngo.ptp_thresh) == (1.25, 1.25), \
+        f"Ngo2015 thresholds {(ngo.peak_thresh, ngo.ptp_thresh)} != 1.25"
+    assert (ngo.min_dur, ngo.max_dur) == (0.833, 2.0), \
+        f"Ngo2015 duration {(ngo.min_dur, ngo.max_dur)} != (0.833, 2.0)"
+    assert ngo.duration == (0.833, 2.0), \
+        f"Ngo2015 zero-crossing interval {ngo.duration} != (0.833, 2.0)"
+
+    # The percentile is relative, so raising the recording's amplitudes must
+    # NOT change the yield -- that is the property that makes it a published
+    # method rather than an absolute uV criterion, and the reason it is not
+    # being "fixed" here.
+    s_freq = 256.0
+    sig = _synthetic_slow_oscillation(s_freq=s_freq)
+    n_1x = len(ImprovedDetectSlowWave(method='Staresina2015',
+                                      neg_peak_thresh=-75.0,
+                                      p2p_thresh=75.0)(
+        _make_chantime(sig, s_freq)))
+    n_3x = len(ImprovedDetectSlowWave(method='Staresina2015',
+                                      neg_peak_thresh=-75.0,
+                                      p2p_thresh=75.0)(
+        _make_chantime(sig * 3.0, s_freq)))
+    assert n_1x == n_3x and n_1x > 0, (
+        f"Staresina2015 became amplitude-sensitive: {n_1x} events at 1x, "
+        f"{n_3x} at 3x. Its 75 is a percentile, not microvolts")
+    print(f"   [ok] Staresina2015 75 is still a percentile: {n_1x} events at "
+          f"1x amplitude, {n_3x} at 3x")
+    print("   [ok] published constants intact: Staresina 0.8-2.0 s / p75, "
+          "Ngo 0.833-2.0 s / 1.25x")
+
+    # ------------------------------------------------------------------
+    # min_dur / max_dur must NOT reach the zero-crossing gate.
+    # ------------------------------------------------------------------
+    # This is the one path that moved, and the earlier version of this test
+    # could not see it: it only checked default-constructed detectors, and
+    # the identity check that accompanied it passed min_dur=0.8/max_dur=2.0 --
+    # the published values -- so the recompute it was meant to catch was a
+    # no-op by construction.
+    #
+    # `_set_method_params` overwrites self.min_dur/self.max_dur for these two
+    # methods, but `find_intervals` gates on self.duration, which Wonambi's
+    # constructor fixed from the published defaults beforehand. Recomputing
+    # self.duration from the overridden values would be arguably more correct
+    # -- the GUI's "Slow Wave Duration" control currently reaches only
+    # det_filt['freq'] -- and it is deliberately NOT done, because it moves
+    # two published methods that already have hundreds of thousands of rows
+    # in the user's databases.
+    #
+    # It needs no exotic input to bite: frontend/turtlewave_gui.py prefills
+    # the control with setValue(detector.min_dur) on a 2-decimal spin box, so
+    # Ngo2015's 0.833 s default reads back as 0.83 and every zero-crossing
+    # interval in [0.830, 0.833) would flip from rejected to accepted on a
+    # GUI run with nothing typed.
+    published = {'Staresina2015': (0.8, 2.0), 'Ngo2015': (0.833, 2.0)}
+    # p2p_thresh=0 and a negative neg_peak_thresh make both arms of the
+    # legacy post-hoc filter no-ops, so what is compared is the gate itself.
+    isolate = dict(neg_peak_thresh=-75.0, p2p_thresh=0.0)
+
+    for method, (pub_lo, pub_hi) in published.items():
+        for s_freq, lo, hi in ((200.0, 0.83, 2.0), (256.0, 0.85, 2.0),
+                               (500.0, 0.90, 1.5), (256.0, 0.5, 3.0)):
+            sig = _synthetic_slow_oscillation(s_freq=s_freq)
+            det = ImprovedDetectSlowWave(method=method, min_dur=lo,
+                                         max_dur=hi, **isolate)
+            assert det.duration == (pub_lo, pub_hi), (
+                f"{method}: min_dur={lo}/max_dur={hi} reached self.duration "
+                f"({det.duration}); find_intervals now gates on the caller's "
+                f"values instead of the published {(pub_lo, pub_hi)}")
+
+            base = ImprovedDetectSlowWave(method=method, **isolate)
+            with_over = det(_make_chantime(sig, s_freq))
+            without = base(_make_chantime(sig, s_freq))
+            starts_over = [round(float(e['start']), 6) for e in with_over]
+            starts_none = [round(float(e['start']), 6) for e in without]
+            assert starts_over == starts_none, (
+                f"{method} at {s_freq} Hz: passing min_dur={lo}/max_dur={hi} "
+                f"changed the detected set ({len(starts_over)} vs "
+                f"{len(starts_none)} events). These two methods must produce "
+                f"exactly what they did before")
+            assert starts_none, (
+                f"{method} at {s_freq} Hz: no events, so the comparison is "
+                f"vacuous")
+        print(f"   [ok] {method:<14} min_dur/max_dur leave self.duration at "
+              f"{(pub_lo, pub_hi)} and the detected set unchanged, at "
+              f"200/256/500 Hz")
+
+    # The exact GUI case: Ngo2015's 0.833 default through a 2-decimal spin box.
+    s_freq = 256.0
+    sig = _synthetic_slow_oscillation(s_freq=s_freq)
+    rounded = ImprovedDetectSlowWave(method='Ngo2015', min_dur=0.83,
+                                     max_dur=2.0, **isolate)
+    default = ImprovedDetectSlowWave(method='Ngo2015', **isolate)
+    # Asserted on the gate itself, not only on a count: whether 0.83 vs 0.833
+    # changes the yield depends on whether the recording happens to contain a
+    # zero-crossing interval in [0.830, 0.833), which a synthetic may not.
+    # The mechanism is signal-independent, so pin that.
+    assert rounded.duration == (0.833, 2.0), (
+        f"Ngo2015 built the way the GUI builds it gates on "
+        f"{rounded.duration}, not the published (0.833, 2.0): the spin box "
+        f"rounds 0.833 to 0.83 and that is reaching find_intervals")
+    n_round = [round(float(e['start']), 6)
+               for e in rounded(_make_chantime(sig, s_freq))]
+    n_def = [round(float(e['start']), 6)
+             for e in default(_make_chantime(sig, s_freq))]
+    assert n_round == n_def, (
+        f"Ngo2015 run from the GUI with nothing typed ({len(n_round)} events) "
+        f"differs from its published default ({len(n_def)})")
+    print(f"   [ok] Ngo2015 via the GUI's 2-decimal spin box (0.833 -> 0.83) "
+          f"still gates on (0.833, 2.0) and gives the published "
+          f"{len(n_def)} events")
+
+    # ------------------------------------------------------------------
+    # "Unchanged" is true of the DETECTED SET and of every reported field
+    # except one: `ptp`, which is now microvolts for every method.
+    # ------------------------------------------------------------------
+    # `_as_negative_first` runs for all four methods, so it is worth pinning
+    # WHY the sign swap cannot move these two. Ngo2015 and Staresina2015 go
+    # through find_peaks_in_slowwwave, which sets column 1 from ``argmin``
+    # and column 3 from ``argmax`` over the same interval, so
+    # trough_val <= peak_val holds structurally and the conditional swap is
+    # never taken. det_trough, det_peak, det_trough_time and det_peak_time
+    # therefore do not move; only det_ptp does.
+    for method in ('Staresina2015', 'Ngo2015'):
+        for s_freq in (256.0, 500.0):
+            sig = _synthetic_slow_oscillation(s_freq=s_freq)
+            raw = ImprovedDetectSlowWave.__mro__[1].__call__(
+                ImprovedDetectSlowWave(method=method, **isolate),
+                _make_chantime(sig, s_freq)).events
+            assert raw, f"{method} at {s_freq} Hz: nothing to check"
+            swapped = [e for e in raw
+                       if float(e['trough_val']) > float(e['peak_val'])]
+            assert not swapped, (
+                f"{method} at {s_freq} Hz: {len(swapped)} raw events have "
+                f"trough_val > peak_val, so _as_negative_first WOULD swap "
+                f"them and det_trough/det_peak move for this method after "
+                f"all")
+            # And the fields the swap would have touched come through intact.
+            final = ImprovedDetectSlowWave(method=method, **isolate)(
+                _make_chantime(sig, s_freq)).events
+            for before, after in zip(raw, final):
+                for key in ('trough_val', 'peak_val', 'trough_time',
+                            'peak_time'):
+                    assert abs(float(before[key])
+                               - float(after[key])) < 1e-9, (
+                        f"{method}: {key} moved between the parent's output "
+                        f"and ours")
+                assert abs(float(after['ptp'])
+                           - (float(after['peak_val'])
+                              - float(after['trough_val']))) < 1e-6, (
+                    f"{method}: ptp is not peak_val - trough_val")
+    print("   [ok] the sign swap is never taken for either method, so "
+          "det_trough/det_peak/det_trough_time/det_peak_time are untouched; "
+          "det_ptp is the one field that moves (samples -> uV)")
+
+
+def test_kcomplex_trough_duration_bounds_the_half_wave():
+    """The K-complex path shares the trough/whole-wave conflation — pin it.
+
+    ``ParalKC.detect_kcomplexes`` used to forward its ``trough_duration``
+    into ``ImprovedDetectKComplex(duration=...)``, i.e. Wonambi's whole-wave
+    bound, while the real half-wave limit stayed hardcoded. Its own default
+    (0.25, 1.0) therefore rejected every K-complex whose full waveform ran
+    past 1 s, which is most of them, and the AASM defaults could return
+    nothing at all.
+
+    Asserted at both levels: the detector stores the window where Wonambi
+    reads it, and a real ``ParalKC`` run over the published AASM window
+    writes K-complexes into the database with a negative trough and a
+    peak-to-peak amplitude in microvolts.
+    """
+    print("\nTesting the K-complex trough window bounds the half-wave:")
+
+    import logging
+    from turtlewave_hdEEG import ParalKC
+    from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
+
+    # --- detector level ---------------------------------------------------
+    det = ImprovedDetectKComplex(method='AASM/Massimini2004',
+                                 trough_duration=(0.25, 1.0))
+    assert det.trough_duration == (0.25, 1.0), (
+        f"trough_duration is {det.trough_duration}: the KC window is not "
+        f"reaching Wonambi's half-wave limit")
+    assert det.duration == (0, None), (
+        f"duration is {det.duration}: the KC trough window is still being "
+        f"applied to the whole wave")
+
+    s_freq = 256.0
+    sig = _biphasic_wave(s_freq=s_freq)  # 0.71 s half-wave, 1.43 s wave
+    data = _make_chantime(sig, s_freq)
+
+    def n_kc(window):
+        return len(ImprovedDetectKComplex(
+            method='AASM/Massimini2004', frequency=(0.1, 4),
+            trough_duration=window, min_isolation=0.0)(data))
+
+    inside = n_kc((0.25, 1.0))
+    assert inside > 0, (
+        "the AASM 0.25-1.0 s window finds no K-complex on a 0.71 s "
+        "half-wave: it is still bounding the 1.43 s whole wave")
+    assert n_kc((0.25, 0.5)) == 0, \
+        "a window ending before the 0.71 s half-wave still accepted it"
+    print(f"   [ok] detector: AASM (0.25, 1.0) -> {inside} KCs, "
+          f"(0.25, 0.5) -> 0, whole-wave duration left at (0, None)")
+
+    # --- processor level, end to end into the database --------------------
+    tmp = tempfile.mkdtemp(prefix='tw_kc_window_')
+    try:
+        dataset, annot = _synthetic_recording(tmp, ('NREM2', 'NREM2'))
+        out = os.path.join(tmp, 'wonambi')
+        os.makedirs(out, exist_ok=True)
+        db = os.path.join(out, 'neural_events.db')
+
+        kcs = ParalKC(dataset, annot,
+                      log_level=logging.CRITICAL).detect_kcomplexes(
+            method='AASM/Massimini2004', chan=['Cz'], frequency=(0.5, 4),
+            trough_duration=(0.25, 1.0), stage=['NREM2'], json_dir=out,
+            db_path=db, subject='sub-KC', cat=(1, 1, 1, 0))
+        assert kcs, (
+            "a K-complex run with the published AASM window found nothing; "
+            "before the fix this window was applied to the whole wave")
+
+        conn = sqlite3.connect(db)
+        try:
+            rows = conn.execute(
+                "SELECT det_trough, det_peak, det_ptp FROM events "
+                "WHERE event_type = 'k_complex'").fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == len(kcs), f"{len(rows)} rows for {len(kcs)} KCs"
+        assert all(t is not None and t < 0 for t, _, _ in rows), (
+            "det_trough is not negative for every K-complex row: the "
+            "Massimini relabel is not reaching the database")
+        assert all(p is not None and p > 0 for _, p, _ in rows), \
+            "det_peak is not positive for every K-complex row"
+        for t, p, ptp in rows:
+            assert abs(ptp - (p - t)) < 1e-4, (
+                f"det_ptp {ptp} is not det_peak - det_trough ({p - t}): it "
+                f"is still Wonambi's sample count")
+        print(f"   [ok] processor: {len(rows)} K-complex rows in "
+              f"neural_events.db, det_trough all < 0 "
+              f"(median {sorted(r[0] for r in rows)[len(rows) // 2]:.1f} uV), "
+              f"det_ptp = det_peak - det_trough")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _gappy_chantime(s_freq=256.0, n_epoch=20, epoch=30.0, gap_every=5,
                     n_chan=2, seed=7):
     """A concatenated, discontinuous segment shaped like fetch(...).read_data().
@@ -1164,22 +2390,17 @@ def test_detectors_write_joint_stage_token():
             n['spindle'] = len(ParalEvents(
                 dataset, annot, log_level=logging.CRITICAL).detect_spindles(
                     method='Moelle2011', frequency=(11, 16), **kw))
-            # AASM thresholds explicitly: detect_slow_waves defaults to
-            # Massimini2004's -80 uV / 140 uV, which this synthetic wave (a
-            # sharp -110 uV negative half against a broad +60 uV positive
-            # one) does not reach on peak-to-peak.
+            # Both run on their method's published criteria: with
+            # trough_duration/neg_peak_thresh/p2p_thresh left unset,
+            # AASM/Massimini2004 resolves to its own (0.25, 1.0) s /
+            # -40 uV / 75 uV. What is under test here is the stage
+            # bookkeeping, not the morphology criteria.
             n['slow_wave'] = len(ParalSWA(
                 dataset, annot, log_level=logging.CRITICAL).detect_slow_waves(
-                    method='AASM/Massimini2004', frequency=(0.5, 4),
-                    neg_peak_thresh=-37.0, p2p_thresh=75.0, **kw))
-            # trough_duration widened from the AASM KC window (0.25-1.0 s):
-            # the negative half-wave of this synthetic oscillation measures
-            # longer than that once band-passed, and what is under test here
-            # is the stage bookkeeping, not the KC morphology criteria.
+                    method='AASM/Massimini2004', frequency=(0.5, 4), **kw))
             n['k_complex'] = len(ParalKC(
                 dataset, annot, log_level=logging.CRITICAL).detect_kcomplexes(
-                    method='AASM/Massimini2004', frequency=(0.5, 4),
-                    trough_duration=(0.3, 1.5), **kw))
+                    method='AASM/Massimini2004', frequency=(0.5, 4), **kw))
             return n
 
         # --- two-stage run: exactly one token, on every event type ---------
@@ -3188,6 +4409,16 @@ if __name__ == "__main__":
     test_xlannotations_class()
     test_improved_detect_spindle()
     test_slow_wave_polarity()
+    test_ngo2015_adaptive_thresholds_are_attributes()
+    test_massimini_criteria_are_the_published_ones()
+    test_trough_duration_criterion_gates_the_negative_half_wave()
+    test_permissive_search_recovers_paper_valid_waves()
+    test_permissive_search_recall_against_injected_ground_truth()
+    test_trough_depth_criterion_gates_the_negative_peak()
+    test_slow_wave_ptp_is_microvolts_not_samples()
+    test_det_trough_is_negative_for_every_method()
+    test_staresina_and_ngo_are_untouched()
+    test_kcomplex_trough_duration_bounds_the_half_wave()
     test_package_structure()
     test_density_with_bare_subject_id()
     test_density_identity_axis()

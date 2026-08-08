@@ -62,6 +62,8 @@ NAMESPACE = uuid.UUID('b9d0f1a2-3c4d-5e6f-8a9b-0c1d2e3f4a5b')
 _DET_MORPH_COLUMNS = (
     ('det_trough', 'REAL'),       # detector's own negative-peak amplitude (uV)
     ('det_peak', 'REAL'),         # detector's own positive-peak amplitude (uV)
+    # uV from 4.3 on; Wonambi's sample COUNT before that. db_meta.det_ptp_units
+    # (PTP_UNITS_KEY) records which, because the two ranges overlap.
     ('det_ptp', 'REAL'),          # detector's own peak-to-peak amplitude (uV)
     ('det_trough_time', 'REAL'),  # time of detector trough (s from rec start)
     ('det_peak_time', 'REAL'),    # time of detector peak (s from rec start)
@@ -1916,14 +1918,36 @@ def ensure_direct_write_schema(conn, logger=None):
     # duplicating re-detection, and stamping it here would destroy that
     # evidence on the very databases the guard exists to protect.
     ensure_db_meta_schema(conn)
+    n_events = 0
+    if _table_columns(conn, 'events'):
+        try:
+            n_events = conn.execute(
+                "SELECT COUNT(*) FROM events").fetchone()[0]
+        except sqlite3.OperationalError:
+            n_events = 0
+
+    # (7) det_ptp units ---------------------------------------------------
+    # Same rule and the same reason as stage_format: seed the marker ONLY on
+    # a database with no events. An existing database's slow-wave and
+    # K-complex rows hold Wonambi's sample count, and the microvolt values
+    # this release writes overlap that range numerically (102-113 samples vs
+    # 125-171 uV on the same recordings), so stamping 'microvolts' over
+    # pre-4.3 rows would assert something false about them and destroy the
+    # only evidence that they are a different quantity. An unmarked database
+    # that already holds events stays unmarked and is reported once.
+    if ptp_units(conn) is None:
+        if not n_events:
+            set_db_meta(conn, PTP_UNITS_KEY, PTP_UNITS_MICROVOLTS)
+        elif logger is not None:
+            logger.info(
+                "This database holds %d event row(s) and carries no "
+                "db_meta.%s marker, so its slow-wave and K-complex det_ptp "
+                "values are Wonambi's SAMPLE COUNT, not microvolts. Rows "
+                "written from 4.3 on are microvolts. Do not pool det_ptp "
+                "across the two; peak2peak_amp is microvolts throughout and "
+                "is unaffected.", n_events, PTP_UNITS_KEY)
+
     if stage_format(conn) is None:
-        n_events = 0
-        if _table_columns(conn, 'events'):
-            try:
-                n_events = conn.execute(
-                    "SELECT COUNT(*) FROM events").fetchone()[0]
-            except sqlite3.OperationalError:
-                n_events = 0
         if not n_events:
             set_db_meta(conn, STAGE_FORMAT_KEY, STAGE_FORMAT_JOINT)
         elif logger is not None:
@@ -1935,7 +1959,7 @@ def ensure_direct_write_schema(conn, logger=None):
                 "examples/migrate_stage_to_joint.py.", n_events,
                 STAGE_FORMAT_KEY)
 
-    # (7) v_event_density: density in plain SQL, for R and sqlite3 callers.
+    # (8) v_event_density: density in plain SQL, for R and sqlite3 callers.
     ensure_density_view(conn, logger=logger)
 
     conn.commit()
@@ -3415,6 +3439,23 @@ STAGE_FORMAT_JOINT = 'joint'
 #: Value a migration stamps (or a reader infers) for pre-4.3 databases.
 STAGE_FORMAT_PER_EPOCH = 'per_epoch'
 
+#: ``db_meta`` key recording what ``events.det_ptp`` holds. Before 4.3 every
+#: slow-wave method stored Wonambi's ``abs(ev[3] - ev[1])`` on sample INDICES
+#: -- a sampling-rate-dependent count, in a column named for microvolts. From
+#: 4.3 it is the real peak-to-peak amplitude, ``det_peak - det_trough``.
+#:
+#: The two ranges OVERLAP (observed: sample counts 102-113 against microvolt
+#: values 125-171 on the same recordings), so nothing in the numbers
+#: themselves tells a query which it is holding. This marker is that
+#: evidence, in the same spirit as :data:`STAGE_FORMAT_KEY`.
+PTP_UNITS_KEY = 'det_ptp_units'
+
+#: Value written for databases this release's detectors populate.
+PTP_UNITS_MICROVOLTS = 'microvolts'
+
+#: Value a reader infers for a pre-4.3 database (absent marker + rows).
+PTP_UNITS_SAMPLES = 'samples'
+
 
 def ensure_db_meta_schema(conn):
     """Create the ``db_meta`` key/value table if absent.
@@ -3505,6 +3546,34 @@ def stage_format(conn):
         entirely from the CSV importers.
     """
     return get_db_meta(conn, STAGE_FORMAT_KEY, None)
+
+
+def ptp_units(conn):
+    """Report what ``events.det_ptp`` holds in this database.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+
+    Returns
+    -------
+    str or None
+        :data:`PTP_UNITS_MICROVOLTS`, or ``None`` when the database carries
+        no marker. ``None`` means the units were never recorded, which is
+        true of every database written before 4.3: those hold Wonambi's
+        sample count (:data:`PTP_UNITS_SAMPLES`) for slow waves and
+        K-complexes. A database can also be MIXED -- rows written before and
+        after 4.3 under one marker-less history -- which is exactly what the
+        marker exists to make visible.
+
+    Notes
+    -----
+    ``peak2peak_amp`` is unaffected and has always been microvolts: it is
+    re-measured from the signal by ``compute_batched_params`` rather than
+    taken from the detector.
+    """
+    return get_db_meta(conn, PTP_UNITS_KEY, None)
 
 
 def assert_stage_format_compatible(conn, event_type, methods, freq_lower,

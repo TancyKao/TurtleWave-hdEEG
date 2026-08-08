@@ -37,9 +37,23 @@ def main():
                     help="Slow-wave detection method.")
     ap.add_argument("--stages", default="NREM2,NREM3")
     ap.add_argument("--freq", default="0.1,4.0")
-    ap.add_argument("--trough_duration", default="0.8,2.0")
-    ap.add_argument("--neg_peak_thresh", default="-20.0")
-    ap.add_argument("--p2p_thresh", default="40.0")
+    # Massimini's criteria. Left unset they resolve to the values the chosen
+    # method publishes, which is the only default that is correct for all
+    # four methods. trough_duration bounds the NEGATIVE HALF-WAVE (Massimini
+    # 0.3-1.0 s, AASM 0.25-1.0 s), not the whole wave; the old "0.8,2.0"
+    # default was a whole-wave figure and is wrong under either reading.
+    ap.add_argument("--trough_duration", default=None,
+                    help="min,max duration of the negative half-wave in "
+                         "seconds. Massimini family only. Default: the "
+                         "method's published window.")
+    ap.add_argument("--neg_peak_thresh", default=None,
+                    help="trough depth in uV (sign ignored). Default: the "
+                         "method's published value (-80 Massimini2004, "
+                         "-40 AASM/Massimini2004).")
+    ap.add_argument("--p2p_thresh", default=None,
+                    help="minimum peak-to-peak amplitude in uV. Default: the "
+                         "method's published value (140 Massimini2004, "
+                         "75 AASM/Massimini2004).")
     ap.add_argument("--polar", default="normal", choices=["normal", "opposite"])
     ap.add_argument("--reject_artifacts", action="store_true", default=True)
     ap.add_argument("--reject_arousals", action="store_true", default=False)
@@ -117,9 +131,31 @@ def main():
     test_method_str = str(test_method).replace("/", "_")
     test_stages = [s.strip() for s in args.stages.split(",") if s.strip()]
     f_lo, f_hi = [float(x) for x in args.freq.split(",")]
-    td_lo, td_hi = [float(x) for x in args.trough_duration.split(",")]
-    neg_peak_thresh = float(args.neg_peak_thresh)
-    p2p_thresh = float(args.p2p_thresh)
+
+    # Massimini2004 / AASM/Massimini2004 read these as the published
+    # criteria, so leaving them unset must mean "the published values", not
+    # some arbitrary CLI number. Ngo2015 and Staresina2015 ignore
+    # trough_duration entirely and use the amplitudes only in ParalSWA's
+    # legacy post-hoc filter, so their historical defaults are preserved
+    # verbatim there and those two methods' yields are unchanged.
+    is_massimini = test_method in ("Massimini2004", "AASM/Massimini2004")
+    if args.trough_duration:
+        td_lo, td_hi = [float(x) for x in args.trough_duration.split(",")]
+        trough_duration = (td_lo, td_hi)
+    else:
+        trough_duration = None
+    if args.neg_peak_thresh is not None:
+        neg_peak_thresh = float(args.neg_peak_thresh)
+    else:
+        neg_peak_thresh = None if is_massimini else -20.0
+    if args.p2p_thresh is not None:
+        p2p_thresh = float(args.p2p_thresh)
+    else:
+        p2p_thresh = None if is_massimini else 40.0
+    logger.info(
+        f"Criteria: trough_duration={trough_duration}, "
+        f"neg_peak_thresh={neg_peak_thresh}, p2p_thresh={p2p_thresh} "
+        f"(None = the method's published value)")
 
     # Load dataset and annotations
     logger.info("Loading dataset and annotations...")
@@ -133,7 +169,7 @@ def main():
         method=test_method,
         chan=test_channels,
         frequency=(f_lo, f_hi),
-        trough_duration=(td_lo, td_hi),
+        trough_duration=trough_duration,
         neg_peak_thresh=neg_peak_thresh,
         p2p_thresh=p2p_thresh,
         polar=args.polar,

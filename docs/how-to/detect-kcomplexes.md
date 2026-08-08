@@ -13,6 +13,29 @@ Before detecting K-complexes, ensure you have:
 
 If you haven't done these steps, refer to the [Getting Started tutorial](../tutorials/getting-started.md).
 
+!!! warning "K-complex counts and densities change in this release — do not pool with older runs"
+    `ImprovedDetectKComplex` moved on two axes: the `'AASM/Massimini2004'`
+    amplitude defaults changed from `neg_peak_thresh=-37.0` /
+    `p2p_thresh=70.0` (which matched no published criterion) to Wonambi's own
+    published `-40.0` / `75.0`, and `min_isolation` is now measured between
+    successive **negative** peaks instead of positive ones. Both change which
+    events are kept and how many. Do not pool K-complex counts or densities
+    detected before this release with ones detected after it — re-run
+    detection on any scope you need to compare across.
+
+## Using the GUI
+
+Starting a new K-complex detection run from the **K-Complex Detection** tab
+in `turtlewave_gui` is turned off in this release, at the user's request. The
+tab itself, its parameter controls, and everything that reads
+already-detected K-complexes out of the database (event review, **Export
+CSV**) stay available — only the **Detect K-Complexes** button is disabled,
+with a tooltip explaining why.
+
+This switch is GUI-only. It does not gate the library: scripted and cluster
+code that calls `ParalKC.detect_kcomplexes` directly runs exactly as before,
+with the changed defaults and isolation measurement described above.
+
 ## Using the Python API
 
 K-complex detection follows the same `Paral*` shape as spindles and slow
@@ -37,8 +60,8 @@ kcomplexes = event_processor.detect_kcomplexes(
     chan=['E110', 'E111', 'E112'],
     frequency=(0.1, 4.0),
     trough_duration=(0.25, 1.0),
-    neg_peak_thresh=-37.0,
-    p2p_thresh=70.0,
+    neg_peak_thresh=-40.0,
+    p2p_thresh=75.0,
     min_isolation=1.0,
     polar='normal',
     stage=['NREM2'],
@@ -54,15 +77,17 @@ kcomplexes = event_processor.detect_kcomplexes(
 `method` accepts `'AASM/Massimini2004'` (default) or `'Massimini2004'`. No
 other Wonambi slow-wave methods are exposed here, since they target slow
 oscillations rather than the isolated K-complex morphology. The AASM defaults
-(`neg_peak_thresh=-37.0`, `p2p_thresh=70.0`, `trough_duration=(0.25, 1.0)`)
-are the parameters shown above.
+(`neg_peak_thresh=-40.0`, `p2p_thresh=75.0`, `trough_duration=(0.25, 1.0)`)
+are the parameters shown above — Wonambi's own published `'AASM/Massimini2004'`
+values, not `turtlewave_hdEEG`'s pre-4.3 `-37.0`/`70.0` defaults, which
+matched no published criterion.
 
 `min_isolation` is K-complex-specific: it is the minimum gap, in seconds,
-required between successive K-complex trough times. It is what distinguishes
-an isolated K-complex from one cycle of a continuous N3 slow-oscillation
-train — set it to `0` to disable the isolation filter. K-complexes are
-typically scored in N2 only; pass `stage=['NREM2', 'NREM3']` to also include
-N3.
+required between successive K-complex trough times — measured between the
+**negative** peaks. It is what distinguishes an isolated K-complex from one
+cycle of a continuous N3 slow-oscillation train — set it to `0` to disable
+the isolation filter. K-complexes are typically scored in N2 only; pass
+`stage=['NREM2', 'NREM3']` to also include N3.
 
 ## Interpreting Results
 
@@ -161,7 +186,7 @@ If you want to detect more K-complexes:
 
 If you want only unambiguous, AASM-conforming K-complexes:
 
-- Use the AASM defaults: `neg_peak_thresh=-37.0`, `p2p_thresh=70.0`,
+- Use the AASM defaults: `neg_peak_thresh=-40.0`, `p2p_thresh=75.0`,
   `trough_duration=(0.25, 1.0)`
 - Keep `min_isolation=1.0` so consecutive slow-oscillation cycles in N3 are
   not double-counted as separate K-complexes

@@ -96,9 +96,10 @@ if _cli.channels:
     print(f"Channels from --channels: {len(test_channels)}")
 test_stages = ['NREM2']                   # default; add 'NREM3' if needed
 test_frequency = (0.1, 4.0)
+# Min/max duration of the NEGATIVE HALF-WAVE, not of the whole K-complex.
 test_trough_duration = (0.25, 1.0)
-test_neg_peak_thresh = -37.0              # µV (AASM KC default)
-test_p2p_thresh = 70.0                    # µV (AASM KC default)
+test_neg_peak_thresh = -40.0              # µV trough depth (AASM/Massimini2004)
+test_p2p_thresh = 75.0                    # µV peak-to-peak (AASM/Massimini2004)
 test_min_isolation = 1.0                  # seconds between successive KC troughs
 
 

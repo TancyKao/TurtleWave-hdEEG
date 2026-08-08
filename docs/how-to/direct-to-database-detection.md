@@ -159,7 +159,20 @@ Each event row in `events` carries:
   `det_trough_time`, `det_peak_time`: the values the detector itself decided
   on (trough/peak/peak-to-peak amplitude and their timestamps). Spindle events
   are oscillatory rather than trough-based, so these are typically `NULL` for
-  spindles and populated for slow waves / K-complexes.
+  spindles and populated for slow waves / K-complexes. `det_trough` /
+  `det_peak` are signed consistently (trough negative, peak positive) across
+  every slow-wave and K-complex method. `det_ptp` is a real microvolt
+  peak-to-peak amplitude on a database this release or later populates; a
+  database written before it holds Wonambi's sample count in that same
+  column instead — the two ranges overlap numerically, so nothing in the
+  number itself tells you which it is. `dbwrite.ptp_units(conn)` reports
+  `'microvolts'`, `None` (unmarked — treat as sample count if the database
+  already holds slow-wave/K-complex rows), from the `db_meta.det_ptp_units`
+  marker, seeded the same way as `db_meta.stage_format` below: only on a
+  database with no events yet, since stamping an existing database would
+  assert something false about rows already in it. `peak2peak_amp` is
+  unaffected either way — it is re-measured from the signal, not read off
+  the detector.
 - **Re-measured spectral/RMS columns** — `rms`, `power`, `peak_power_freq`,
   `energy`, `peak_energy_freq`, plus `min_amp` / `max_amp` / `peak2peak_amp`:
   computed once per channel over all of that channel's in-memory event windows

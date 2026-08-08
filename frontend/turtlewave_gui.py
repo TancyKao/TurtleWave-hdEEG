@@ -568,6 +568,18 @@ class TurtleWaveGUI(QMainWindow):
         self.update_sw_params_for_method(self.sw_method_combo.currentText())    
 
 
+    #: Staresina2015 selects on a percentile of peak-to-peak amplitude, not on
+    #: an absolute voltage. One constant so the box, its note and the run log
+    #: cannot describe it differently.
+    STARESINA_PTP_TOOLTIP = (
+        "Keep candidate waves whose peak-to-peak amplitude is at or above "
+        "this percentile of all candidates on the channel — 75 keeps the top "
+        "25%. This method has no absolute microvolt floor; the cut-off is "
+        "relative to each channel's own amplitude distribution.\n\n"
+        "Read-only: nothing the GUI can send reaches this percentile "
+        "(ParalSWA.detect_slow_waves has no parameter for it), so it is held "
+        "at Staresina's published 75.")
+
     def update_sw_params_for_method(self, method_name):
         """Update slow wave detection parameters based on selected method"""
         # Clear previous parameter widgets
@@ -654,15 +666,22 @@ class TurtleWaveGUI(QMainWindow):
                 
                 trough_duration = detector.trough_duration
                 
+                # Same millisecond resolution as the duration pair below. No
+                # current default needs it (0.3/0.25/1.0 all fit in 2
+                # decimals), but these are seconds-valued boxes wired to a
+                # detection criterion, and 10 ms granularity is not a property
+                # anyone chose.
                 trough_layout.addWidget(QLabel("Min (s):"))
                 min_trough_spin = QDoubleSpinBox()
+                min_trough_spin.setDecimals(3)
                 min_trough_spin.setRange(0.01, 5.0)
                 min_trough_spin.setSingleStep(0.05)
                 min_trough_spin.setValue(trough_duration[0])
                 trough_layout.addWidget(min_trough_spin)
-                
+
                 trough_layout.addWidget(QLabel("Max (s):"))
                 max_trough_spin = QDoubleSpinBox()
+                max_trough_spin.setDecimals(3)
                 max_trough_spin.setRange(0.1, 10.0)
                 max_trough_spin.setSingleStep(0.1)
                 max_trough_spin.setValue(trough_duration[1])
@@ -744,15 +763,24 @@ class TurtleWaveGUI(QMainWindow):
                 dur_group = QGroupBox("Slow Wave Duration")
                 dur_layout = QHBoxLayout()
                 
+                # Durations are in seconds and need millisecond resolution:
+                # QDoubleSpinBox defaults to 2 decimals, which cannot hold
+                # Ngo2015's published min_dur of 0.833 -- setValue(0.833) then
+                # value() returned 0.83, so the tab sent a duration the method
+                # never specified, and the derived band (1/min_dur) with it,
+                # without the user touching anything. setDecimals must precede
+                # setValue: it rounds the value already stored.
                 dur_layout.addWidget(QLabel("Min (s):"))
                 min_dur_spin = QDoubleSpinBox()
+                min_dur_spin.setDecimals(3)
                 min_dur_spin.setRange(0.01, 5.0)
                 min_dur_spin.setSingleStep(0.05)
                 min_dur_spin.setValue(detector.min_dur)
                 dur_layout.addWidget(min_dur_spin)
-                
+
                 dur_layout.addWidget(QLabel("Max (s):"))
                 max_dur_spin = QDoubleSpinBox()
+                max_dur_spin.setDecimals(3)
                 max_dur_spin.setRange(0.1, 10.0)
                 max_dur_spin.setSingleStep(0.1)
                 max_dur_spin.setValue(detector.max_dur)
@@ -835,17 +863,43 @@ class TurtleWaveGUI(QMainWindow):
                     self.sw_param_widgets["ptp_thresh"] = ptp_spin
                     
                 elif method_name == "Staresina2015":
-                    # MODIFIED: Get p2p threshold from detector
-                    ptp_group = QGroupBox("Amplitude Threshold")
+                    # `detector.ptp_thresh` is a PERCENTILE, not microvolts:
+                    # wonambi/detect/slowwave.py:351 does
+                    # `ptp_thresh = percentile(ptp, opts.ptp_thresh)` and keeps
+                    # `ptp >= ptp_thresh`, so the published 75 keeps the top
+                    # 25% of candidates on each channel. The box used to be
+                    # labelled "(μV)" while holding this number, and its value
+                    # went out as `p2p_thresh`, which for this method reaches
+                    # neither `opts.ptp_thresh` nor any microvolt gate — it
+                    # lands in the legacy post-hoc filter in
+                    # ImprovedDetectSlowWave.__call__, compared against
+                    # Wonambi's sample-count `ptp`.
+                    #
+                    # It is shown read-only at the published 75 rather than
+                    # made editable: ParalSWA.detect_slow_waves() exposes no
+                    # parameter that reaches `opts.ptp_thresh` (its only
+                    # assignment is guarded by `meth == 'Ngo2015'`), so nothing
+                    # the GUI can send would change the percentile. Fixing it
+                    # at 75 sends exactly the value the box sent before, so
+                    # existing Staresina yields are untouched.
+                    ptp_group = QGroupBox("Peak-to-Peak Selection")
                     ptp_layout = QHBoxLayout()
-                    ptp_layout.addWidget(QLabel("Peak-to-Peak Threshold (μV):"))
+                    ptp_layout.addWidget(QLabel("Peak-to-peak percentile:"))
                     ptp_spin = QDoubleSpinBox()
-                    ptp_spin.setRange(0, 1000)
+                    ptp_spin.setRange(0, 100)
                     ptp_spin.setValue(detector.ptp_thresh)
+                    ptp_spin.setEnabled(False)
+                    ptp_spin.setToolTip(self.STARESINA_PTP_TOOLTIP)
                     ptp_layout.addWidget(ptp_spin)
+                    ptp_note = QLabel(
+                        "Fixed at the published 75 — relative cut-off, not µV.")
+                    ptp_note.setWordWrap(True)
+                    ptp_note.setStyleSheet("color: #888888;")
+                    ptp_note.setToolTip(self.STARESINA_PTP_TOOLTIP)
+                    ptp_layout.addWidget(ptp_note)
                     ptp_group.setLayout(ptp_layout)
                     self.method_params_layout.addWidget(ptp_group)
-                    
+
                     # Store ptp threshold widget
                     self.sw_param_widgets["ptp_thresh"] = ptp_spin
             
@@ -970,8 +1024,22 @@ class TurtleWaveGUI(QMainWindow):
                 
                     
                 else:  # Staresina2015
-                    # Get threshold in μV
-                    neg_peak_thresh = -75.0  # Default value 
+                    # Neither of these is a microvolt criterion for this
+                    # method. Staresina selects on a percentile
+                    # (opts.ptp_thresh, not settable from here); both values
+                    # below only reach the legacy post-hoc filter in
+                    # ImprovedDetectSlowWave.__call__.
+                    #
+                    # -75.0 is inert there: the filter tests
+                    # `abs(trough_val) >= min_neg_amp`, and an absolute value
+                    # is always >= a negative number. It is kept at exactly
+                    # this value rather than dropped because passing None
+                    # would make the processor substitute its own -80.0
+                    # default, and a changed argument is a changed run record.
+                    neg_peak_thresh = -75.0  # inert; see above
+                    # The percentile box is read-only, so this is always
+                    # Staresina's published 75 — the same value this tab has
+                    # always sent.
                     p2p_thresh = self.sw_param_widgets["ptp_thresh"].value()
                     peak_thresh_sigma = None
                     ptp_thresh_sigma = None
@@ -999,8 +1067,26 @@ class TurtleWaveGUI(QMainWindow):
             else:
                 self.write_log(f"Duration range: {min_dur:.2f}-{max_dur:.2f} s")
                 
-            self.write_log(f"Negative peak threshold: {neg_peak_thresh} μV")
-            self.write_log(f"Peak-to-peak threshold: {p2p_thresh} μV")
+            # Only the Massimini family reads these as microvolt criteria; for
+            # Ngo2015/Staresina2015 they reach the legacy post-hoc filter, so
+            # logging them as "μV" would put a false record in the log tab.
+            if self.sw_method in ["Massimini2004", "AASM/Massimini2004"]:
+                self.write_log(f"Negative peak threshold: {neg_peak_thresh} μV")
+                self.write_log(f"Peak-to-peak threshold: {p2p_thresh} μV")
+            elif self.sw_method == "Staresina2015":
+                self.write_log(
+                    f"Peak-to-peak percentile: {p2p_thresh:g} "
+                    f"(keeps the top {100 - p2p_thresh:g}% by amplitude; "
+                    f"no absolute μV floor)")
+                self.write_log(
+                    f"Amplitude arguments sent to the detector: "
+                    f"neg_peak_thresh={neg_peak_thresh}, "
+                    f"p2p_thresh={p2p_thresh} (legacy filter only)")
+            else:
+                self.write_log(
+                    f"Amplitude arguments sent to the detector: "
+                    f"neg_peak_thresh={neg_peak_thresh}, "
+                    f"p2p_thresh={p2p_thresh} (legacy filter only)")
 
             if self.sw_method == "Ngo2015":
                 self.write_log(f"Adaptive peak threshold: {peak_thresh_sigma} σ")
@@ -1261,6 +1347,42 @@ class TurtleWaveGUI(QMainWindow):
     # The method combo is restricted to Massimini2004 / AASM/Massimini2004;
     # Ngo2015 and Staresina2015 target slow oscillations and are not
     # appropriate for KC scoring.
+    #
+    # Starting a K-complex run is gated off for this release, at the user's
+    # request. The tab, its parameters and everything that reads
+    # already-detected K-complexes out of the database stay available; only
+    # launching a new detection is blocked. The switch is GUI-only: nothing
+    # here gates ParalKC, so scripted and cluster callers keep working.
+    # Setting KC_DETECTION_ENABLED back to True restores every control, so the
+    # decision lives in one place.
+    #
+    # The reason text says nothing about why the release turned it off -- that
+    # is a decision, not a defect, and defect-specific wording goes stale. It
+    # does state what changed for scripted callers, because "not gated" is not
+    # the same as "unchanged": ImprovedDetectKComplex moved the
+    # AASM/Massimini2004 defaults to -40/75 uV and now measures the isolation
+    # gap between negative peaks, so their counts move.
+
+    KC_DETECTION_ENABLED = False
+
+    KC_DISABLED_REASON = (
+        "K-complex detection is turned off in this release.\n\n"
+        "K-complexes already stored in the database are unaffected: you can "
+        "still view them in the event review GUI and write them out with "
+        "Export CSV on this tab.\n\n"
+        "This switch gates the GUI only — scripted and cluster code can still "
+        "call ParalKC.detect_kcomplexes. What that returns does change in "
+        "this release: the AASM/Massimini2004 defaults moved from -37/70 µV "
+        "to Wonambi's published -40/75 µV, and the isolation gap is now "
+        "measured between negative peaks rather than positive ones. Counts "
+        "move on both axes, so do not pool new runs with K-complexes detected "
+        "by an earlier version.")
+
+    KC_DISABLED_SHORT = (
+        "K-complex detection is turned off in this release. Stored "
+        "K-complexes can still be reviewed and exported. Scripted ParalKC "
+        "runs are not gated by this switch, but what they detect changes in "
+        "this release — hover for detail.")
 
     def setup_kcomplex_tab(self):
         """Setup the K-complex detection tab"""
@@ -1294,6 +1416,7 @@ class TurtleWaveGUI(QMainWindow):
         iso_layout = QHBoxLayout()
         iso_layout.addWidget(QLabel("Min isolation (s):"))
         self.kc_min_isolation_spin = QDoubleSpinBox()
+        self.kc_min_isolation_spin.setDecimals(3)  # seconds; see the SW tab
         self.kc_min_isolation_spin.setRange(0.0, 5.0)
         self.kc_min_isolation_spin.setSingleStep(0.1)
         self.kc_min_isolation_spin.setValue(1.0)
@@ -1382,11 +1505,24 @@ class TurtleWaveGUI(QMainWindow):
         self.detect_kc_btn = QPushButton("Detect K-Complexes")
         self.detect_kc_btn.clicked.connect(self.detect_kc_thread)
         self.detect_kc_btn.setStyleSheet("font-weight: bold;")
+        # Greyed out for this release - see KC_DISABLED_REASON. A disabled
+        # button takes no mouse click and no Space/Return from the keyboard,
+        # so detect_kc_thread() cannot be reached through it either way.
+        if not self.KC_DETECTION_ENABLED:
+            self.detect_kc_btn.setEnabled(False)
+            self.detect_kc_btn.setToolTip(self.KC_DISABLED_REASON)
         action_layout.addWidget(self.detect_kc_btn)
 
         self.view_kc_results_btn = QPushButton("View Results")
         self.view_kc_results_btn.clicked.connect(self.view_kc_results)
+        # Stays disabled: it reads wonambi/kc_results/*.csv, the legacy
+        # per-channel directory that 4.2.0 stopped writing, so enabling it
+        # would point at files this version never produces.
         self.view_kc_results_btn.setEnabled(False)
+        self.view_kc_results_btn.setToolTip(
+            "Unavailable: this reads the legacy kc_results/*.csv directory, "
+            "which this version no longer writes. Use Export CSV on this tab "
+            "or the event review GUI — both read the database.")
         action_layout.addWidget(self.view_kc_results_btn)
 
         # See the slow wave tab: the flat file is produced on demand from the
@@ -1398,6 +1534,23 @@ class TurtleWaveGUI(QMainWindow):
         self.export_kc_csv_btn.clicked.connect(self.export_kc_csv)
         action_layout.addWidget(self.export_kc_csv_btn)
         layout.addLayout(action_layout)
+
+        if not self.KC_DETECTION_ENABLED:
+            # A disabled button accepts no click, so the reason has to be
+            # readable without one: it sits on the page as well as in the
+            # button's tooltip.
+            self.kc_disabled_notice = QLabel(self.KC_DISABLED_SHORT)
+            self.kc_disabled_notice.setWordWrap(True)
+            self.kc_disabled_notice.setToolTip(self.KC_DISABLED_REASON)
+            self.kc_disabled_notice.setStyleSheet("color: #888888;")
+            layout.addWidget(self.kc_disabled_notice)
+
+            # Grey the tab label to match, and carry the explanation there too.
+            kc_tab_index = self.tabs.indexOf(self.kcomplex_tab)
+            if kc_tab_index != -1:
+                self.tabs.setTabToolTip(kc_tab_index, self.KC_DISABLED_REASON)
+                self.tabs.tabBar().setTabTextColor(
+                    kc_tab_index, QtGui.QColor("#888888"))
 
         self.update_kc_params_for_method(self.kc_method_combo.currentText())
 
@@ -1473,14 +1626,17 @@ class TurtleWaveGUI(QMainWindow):
             trough_group = QGroupBox("Trough Duration (Negative Half-Wave)")
             trough_layout = QHBoxLayout()
             trough_duration = detector.trough_duration
+            # Millisecond resolution, as on the slow wave tab.
             trough_layout.addWidget(QLabel("Min (s):"))
             min_trough_spin = QDoubleSpinBox()
+            min_trough_spin.setDecimals(3)
             min_trough_spin.setRange(0.01, 5.0)
             min_trough_spin.setSingleStep(0.05)
             min_trough_spin.setValue(trough_duration[0])
             trough_layout.addWidget(min_trough_spin)
             trough_layout.addWidget(QLabel("Max (s):"))
             max_trough_spin = QDoubleSpinBox()
+            max_trough_spin.setDecimals(3)
             max_trough_spin.setRange(0.1, 10.0)
             max_trough_spin.setSingleStep(0.1)
             max_trough_spin.setValue(trough_duration[1])
@@ -1537,6 +1693,16 @@ class TurtleWaveGUI(QMainWindow):
 
     def detect_kc_thread(self):
         """Start K-complex detection in a separate thread."""
+        # Second gate behind the disabled button: anything that still reaches
+        # this slot gets the reason, not a downstream error about parameters or
+        # channels that would blame the user for a block the GUI imposed.
+        if not self.KC_DETECTION_ENABLED:
+            QMessageBox.information(
+                self, "K-complex detection unavailable",
+                self.KC_DISABLED_REASON)
+            self.write_log("K-complex detection is disabled in this release.")
+            return
+
         if not self.dataset:
             QMessageBox.critical(self, "Error", "No dataset loaded. Please load a dataset first.")
             return
@@ -1736,10 +1902,11 @@ class TurtleWaveGUI(QMainWindow):
             QtCore.QMetaObject.invokeMethod(
                 self, "show_error", QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, f"Failed to detect K-complexes: {e}"))
-            QtCore.QMetaObject.invokeMethod(
-                self.detect_kc_btn, "setEnabled",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, True))
+            if self.KC_DETECTION_ENABLED:
+                QtCore.QMetaObject.invokeMethod(
+                    self.detect_kc_btn, "setEnabled",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(bool, True))
             QtCore.QMetaObject.invokeMethod(
                 self.progress, "setVisible",
                 QtCore.Qt.QueuedConnection,
@@ -1748,8 +1915,12 @@ class TurtleWaveGUI(QMainWindow):
     @QtCore.pyqtSlot()
     def finish_kc_detection(self):
         """Finish K-complex detection."""
-        self.detect_kc_btn.setEnabled(True)
-        self.view_kc_results_btn.setEnabled(True)
+        # Do not resurrect the run button while detection is gated off.
+        if self.KC_DETECTION_ENABLED:
+            self.detect_kc_btn.setEnabled(True)
+        # `view_kc_results_btn` is NOT enabled here: nothing writes
+        # wonambi/kc_results/*.csv any more, so a run produces nothing for it
+        # to show. Export CSV and the review GUI read the database instead.
         self.progress.setVisible(False)
         self.statusBar().showMessage("K-complex detection completed")
         self.show_run_finished_dialog("K-complex")

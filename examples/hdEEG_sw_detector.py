@@ -113,10 +113,20 @@ if _cli.channels:
     print(f"Channels from --channels: {len(test_channels)}")
 test_stages = ['NREM2','NREM3'] # ['NREM2', 'NREM3']
 test_frequency = (0.5, 1.25)  # Frequency range for slow waves
-test_trough_duration = (0.3, 1.5)  # Min and max trough duration
+# Min/max duration of the NEGATIVE HALF-WAVE (Massimini's 0.3-1.0 s), not of
+# the whole wave. None = the chosen method's published window, which is the
+# only setting that is right for all four methods. Ignored by Ngo2015 and
+# Staresina2015, which use min_dur/max_dur instead.
+test_trough_duration = None
+# For Massimini2004 / AASM/Massimini2004 these ARE the paper's amplitude
+# criteria and they override it: set both to None to run the published values
+# (-80/140 uV and -40/75 uV respectively). The values below are kept because
+# this example's method is Staresina2015, which does not read them as
+# amplitude criteria at all -- they only feed ParalSWA's legacy post-hoc
+# filter. Change the method above and you should change these too.
 test_amplitude = {
-     'neg_peak_threshold': -75.0,  # Negative peak threshold (μV)
-     'peak_to_peak_threshold': 75.0  # Min Peak-to-peak amplitude threshold (μV)
+     'neg_peak_threshold': -75.0,  # trough depth (μV); sign ignored
+     'peak_to_peak_threshold': 75.0  # min peak-to-peak amplitude (μV)
 }
 
 

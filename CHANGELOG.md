@@ -17,12 +17,21 @@ run now also fills sleep cycles and stage durations, which no run had ever done.
 A database written before 4.3 must be migrated before it is re-detected — see
 **Upgrading**.
 
+The Massimini slow-wave and K-complex detectors also now implement the criteria
+they document. The published duration and depth limits were applied to the wrong
+half-wave, and the AASM window rejected every wave longer than a second, so those
+methods returned few events or none. Slow-wave and K-complex counts change
+substantially and must not be pooled across this release; Staresina2015 and
+Ngo2015 are unaffected. Reference: Massimini et al. 2004, J Neurosci 24(31),
+6862-70.
+
 ### Added
 
 - `events.epoch_stage`, keeping each event's own scored epoch stage beside the run's token.
 - Public API: `join_stage_token`, `split_stage_token`, `stage_components`, `stage_tokens_covering`, `resolve_stage_tokens`, `pooled_denominator`, `stage_format` and `assert_stage_format_compatible`, whose `stage_token` is keyword-only and has no default so the guard cannot be skipped by omission.
 - `db_meta` table, carrying a `stage_format` marker that distinguishes a joint-token database from a pre-4.3 one.
 - `idx_events_run` index on `events(run_id)`, so tagging a run's cycles visits only that run's rows instead of every run's events in the same time span.
+- `db_meta.det_ptp_units`, recording whether `det_ptp` holds microvolts or a pre-4.3 sample count, seeded only on a database with no events because the two ranges overlap numerically.
 - `v_event_density` SQL view, so R and plain SQL read the same densities `event_density` computes.
 - `examples/migrate_stage_to_joint.py`: converts a pre-4.3 database and stamps the marker, dry-run by default, deriving the target token per channel group so channels searched over different stage sets are not collapsed into one.
 - Detection fills `sleep_cycles`, `stage_durations` and `events.cycle` on its own connection, without touching the annotation XML.
@@ -39,18 +48,33 @@ A database written before 4.3 must be migrated before it is re-detected — see
 - `event_density` reports one row per stage token, and refuses a request for a strict subset of a stored joint token rather than returning a number it cannot attribute.
 - The deprecated per-channel JSON carries the run's stage token plus a new `epoch_stage` field; the deprecated density exporters split the token, so their per-stage numbers are unchanged.
 - The PAC channel lookup intersects two per-side queries instead of self-joining on stage, so a genuine stage mismatch is reported and confirmable rather than fatal.
+- `AASM/Massimini2004` uses Wonambi's published -40 µV and 75 µV thresholds, replacing the -37 / 70 pair, which matches no published criterion.
+- K-complex isolation is measured between successive negative peaks rather than positive ones.
+- K-complex detection is turned off in the GUI for this release. Stored K-complexes stay reviewable and exportable, and `ParalKC.detect_kcomplexes` still runs, but what it returns moves with the two changes above.
+- The Staresina2015 peak-to-peak control is labelled as the percentile it always was and made read-only, since nothing the GUI could send ever reached it. The values passed to the library are identical, so Staresina yields do not move.
 
 ### Fixed
 
 - PAC was unusable on a database built by the 4.0.x CSV import route, where spindles carry the joined stage request and slow waves the per-epoch stage: the channel lookup joined the two on `stage`, which those spellings can never satisfy, so the channel list came back empty and every run failed with "No channels selected".
 - Detection to the database was drastically slower than it needed to be, because each detected event's measurement window was cut from the whole-night segment with a scan whose cost grew with the length of the recording. A five-channel slow-wave run that took over an hour now takes seconds. The events and their measurements are unchanged, so nothing needs re-running for correctness. This affects 4.2.0, which made the database the default path.
 - Ngo2015 slow-wave detection with adaptive thresholds failed on every channel with a `TypeError` and finished the run with zero events, in every released version. The sigma thresholds are read off the detector instance but were passed to its constructor, and the GUI prefills both fields, so the failure did not depend on typing a value.
+- `trough_duration` now bounds the negative half-wave, as Massimini et al. 2004 define it, instead of being passed as the whole-wave duration. The published AASM window rejected every wave running past one second, which is most of them, so those runs returned no events at all.
+- `neg_peak_thresh` and `p2p_thresh` now reach the detector; they were stored under attribute names Wonambi never reads, so neither threshold had any effect.
+- The depth criterion is applied to the negative trough rather than the positive peak, so an accepted wave really is as deep as the threshold says.
+- Candidates are no longer pre-rejected on the duration or amplitude of their positive half-wave, which the paper does not constrain. Against 216 slow waves injected into a synthetic 1/f background, recall rises from 0.025 to 0.525 for Massimini2004 and from 0.046 to 0.764 for AASM/Massimini2004, with precision holding above 0.98; re-run it as `test_permissive_search_recall_against_injected_ground_truth`. That ground truth is synthetic rather than expert-scored, so it shows recovery at high precision and is not a clinical validation.
+- `det_ptp` holds peak-to-peak microvolts for all four methods, replacing a sample count that scaled with sampling rate and ignored amplitude despite the column being named for microvolts.
+- `det_trough` and `det_peak` mean the same thing across methods: the negative extremum and the positive one. They were opposite between the Massimini family and the zero-crossing methods, so comparing them across methods compared opposite quantities.
+- The GUI's duration spin boxes keep 3 decimals, so an Ngo2015 run with nothing typed no longer sends 0.83 s in place of the method's 0.833 s default and detects on a slightly shifted band.
 - `sleep_cycles`, `stage_durations` and `events.cycle` were never populated by a detection run; only the standalone cycle script filled them.
 - The GUI's post-run verification counted events by single stage, so a successful run would have reported "0 events written" once joint tokens landed.
 - The review GUI's QC density and the legacy JSON exporters treated a joint token as a stage of its own, which matches no denominator and reads as zero everywhere.
 
 ### Upgrading
 
+- Slow-wave and K-complex counts and densities change substantially, so rows detected before and after 4.3 must never be pooled and any comparison spanning the two is invalid. Re-detect rather than mix.
+- Check a first production run before trusting it: N3 slow-wave density should land at roughly 5-15/min. A result far outside that means the run is misconfigured, not that the detector changed.
+- Staresina2015 and Ngo2015 are unaffected: the same events, the same counts and densities, and every morphology column identical except `det_ptp`, which changes from a sample count to microvolts. That holds for scripted runs; a Ngo2015 run started from the GUI now filters on a band 0.4% lower, because the duration box can finally hold the method's own 0.833 s default, and no stored data is affected because GUI Ngo2015 runs raised `TypeError` and wrote nothing before 4.3.
+- `det_ptp` written before 4.3 is a sample count rather than microvolts, and `db_meta.det_ptp_units` records which a database holds. `peak2peak_amp` was and remains microvolts and is unaffected.
 - Detection refuses a pre-4.3 database that already holds rows for the scope it is about to write. `event_uuid5` hashes the stage, so the new token changes every event's identity and `INSERT OR REPLACE` appends a duplicate set instead of replacing it, doubling every count and density in that scope with no error. Run `examples/migrate_stage_to_joint.py`, or detect into a fresh database.
 - Every row written by detection before 4.3 carries a per-epoch stage, spindles included, so a 4.1 or 4.2 database needs migrating in full. Only a database imported from CSV by 4.0.x already carries joint spindle tokens, and there the migration just stamps the marker.
 - The migration reads `processing_status` to find which channels were searched over which stages, and warns when one scope needs more than one token. Check that warning before applying: relabelling a channel searched over N2 alone with a wider token divides its events by a larger denominator from then on.

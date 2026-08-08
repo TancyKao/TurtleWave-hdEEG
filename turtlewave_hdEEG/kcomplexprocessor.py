@@ -62,7 +62,7 @@ class ParalKC:
                           ref_chan=None, grp_name='eeg',
                           frequency=(0.1, 4.0),
                           trough_duration=(0.25, 1.0),
-                          neg_peak_thresh=-37.0, p2p_thresh=70.0,
+                          neg_peak_thresh=-40.0, p2p_thresh=75.0,
                           min_isolation=1.0,
                           detrend=False, polar='normal',
                           reject_artifacts=True, reject_arousals=True,
@@ -85,13 +85,19 @@ class ParalKC:
         frequency : tuple
             Bandpass for KC detection. AASM KC default is (0.1, 4.0) Hz —
             wider than the SO band so the full KC waveform is captured.
-        trough_duration : tuple
-            Min/max negative half-wave duration (s). AASM KC default
-            (0.25, 1.0).
-        neg_peak_thresh : float
-            Minimum trough amplitude in µV (negative). AASM KC default −37 µV.
-        p2p_thresh : float
-            Minimum peak-to-peak amplitude in µV. AASM KC default 70 µV.
+        trough_duration : tuple or None
+            Min/max duration of the NEGATIVE HALF-WAVE (s), AASM KC default
+            (0.25, 1.0). It bounds the half-wave, not the whole K-complex --
+            a KC with a 0.5 s negative half-wave typically runs ~1 s in
+            total. ``None`` uses the method's published window.
+        neg_peak_thresh : float or None
+            Depth the trough must reach in µV; the sign is ignored. ``None``
+            uses the method's published value. Default −40 µV, matching
+            Wonambi's own ``AASM/Massimini2004`` configuration.
+        p2p_thresh : float or None
+            Minimum peak-to-peak amplitude in µV. ``None`` uses the method's
+            published value. Default 75 µV -- the AASM slow-wave-activity
+            figure, and Wonambi's ``AASM/Massimini2004`` value.
         min_isolation : float
             Minimum gap in seconds between successive KC trough times. KCs
             closer than this are dropped — this is what distinguishes a KC
@@ -337,7 +343,9 @@ class ParalKC:
                 run_id = str(uuid.uuid4())
                 params_dict = {
                     'frequency': list(frequency),
-                    'trough_duration': list(trough_duration),
+                    'trough_duration': (list(trough_duration)
+                                        if trough_duration is not None
+                                        else None),
                     'neg_peak_thresh': neg_peak_thresh,
                     'p2p_thresh': p2p_thresh,
                     'min_isolation': min_isolation,
@@ -467,10 +475,17 @@ class ParalKC:
                                 self.logger.error(
                                     f"Error detrending segment {i + 1}: {e}")
 
+                        # `trough_duration` is the NEGATIVE HALF-WAVE window,
+                        # not the whole-wave duration. It used to be forwarded
+                        # as Wonambi's `duration`, which bounds the whole wave
+                        # while the real half-wave limit stayed hardcoded --
+                        # so the AASM window (0.25, 1.0) rejected every
+                        # K-complex whose full waveform ran past 1 s, which is
+                        # most of them.
                         detector = ImprovedDetectKComplex(
                             method=meth,
                             frequency=frequency,
-                            duration=trough_duration,
+                            trough_duration=trough_duration,
                             neg_peak_thresh=neg_peak_thresh,
                             p2p_thresh=p2p_thresh,
                             polar=polar,
