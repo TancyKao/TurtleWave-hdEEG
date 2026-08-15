@@ -119,6 +119,7 @@ nav:
     - Sleep Cycle Plotting: reference/api/cycleplot.md
     - PAC Processor: reference/api/pacprocessor.md
     - Direct-to-Database Write: reference/api/dbwrite.md
+    - Journal-Mode CLI (turtlewave_set_journal_mode): reference/api/cli.md
     - Scoped Re-detection: reference/api/rerun.md
     - Utilities: reference/api/utils.md
     - GUI Components: reference/api/gui.md

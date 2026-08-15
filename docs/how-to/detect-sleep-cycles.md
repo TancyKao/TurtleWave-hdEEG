@@ -236,8 +236,11 @@ detection first.
 `finalize_cycles_and_durations` / `backfill_cycles.py` opens several
 connections to `neural_events.db` per subject, so if that database lives on a
 mapped network drive or a Dropbox-/OneDrive-synced folder, it's the most
-likely place to hit `sqlite3.OperationalError: disk I/O error` — SQLite's
-default WAL journal mode does not work over a network filesystem. See
+likely place to hit `sqlite3.OperationalError: disk I/O error` — this means
+the database is stuck in SQLite's WAL journal mode, which does not work over
+a network filesystem. A database created since 4.0.2 defaults to the
+network-safe `DELETE` mode, so this now points at a database that predates
+4.0.2 or was explicitly created with `TURTLEWAVE_SQLITE_JOURNAL=WAL`. See
 [How to run with the database on a network drive](run-with-database-on-a-network-drive.md)
 for the fix.
 

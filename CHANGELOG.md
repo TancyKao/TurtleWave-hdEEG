@@ -5,7 +5,7 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.2] — 2026-08-06
+## [4.0.2] — Unreleased
 
 Fixes `disk I/O error` when `neural_events.db` lives on a mapped network drive
 or a synced folder. The databases were permanently in SQLite WAL journal mode,
@@ -16,14 +16,16 @@ database's journal mode alone, so converting a database once is enough — see
 
 ### Added
 
-- `TURTLEWAVE_SQLITE_JOURNAL` environment variable imposing a SQLite journal mode on every database this package opens, overriding the preserve rule in both directions.
+- `TURTLEWAVE_SQLITE_JOURNAL` environment variable imposing a SQLite journal mode on every database this package opens, overriding the preserve rule in both directions; a blank value counts as unset, so a job template exporting an unset variable is harmless.
 - Public API: `set_journal_mode`, converting an existing database to another journal mode, and `VALID_JOURNAL_MODES`, the accepted mode names.
+- `turtlewave_set_journal_mode`: console script converting existing databases to another journal mode, reachable from a pip install where `examples/` is not. A directory argument converts `neural_events.db` files only; `--glob` reaches any other name.
 - `examples/set_db_journal_mode.py`: converts one database or a whole `ROOT/*/wonambi/neural_events.db` tree.
 - Docs: [Run with a database on a network drive](docs/how-to/run-with-database-on-a-network-drive.md) and [Database concurrency and journalling](docs/explanation/database-concurrency-and-journalling.md).
 
 ### Changed
 
-- The package no longer overrides a journal mode you chose deliberately: `open_write_connection` preserves an existing database's mode and logs it, and applies WAL only to a database it creates. A database on local disk is already WAL and stays WAL.
+- The package no longer overrides a journal mode you chose deliberately: `open_write_connection` preserves an existing database's mode and logs it, and picks a mode only for a database it creates. A database created before 4.0.2 is already WAL and stays WAL, wherever it lives.
+- A database this package creates now starts in `DELETE` journal mode instead of `WAL`, so a database created straight onto a network drive or a synced folder works from its first write; `journal=` and `TURTLEWAVE_SQLITE_JOURNAL` still override it.
 - `finalize_cycles_and_durations` and `ParalCycles.run` raise `FileNotFoundError` when the database does not exist instead of creating one; they annotate an existing `neural_events.db` and a missing file means a wrong path or detection that never ran.
 - `open_write_connection` gains optional `journal` and `logger` arguments; existing calls are unaffected.
 - `store_cycles_to_database`, `store_stage_durations`, `tag_events_with_cycles` and `ParalCycles.run` gain an optional trailing `conn` argument for sharing one connection.
@@ -32,7 +34,7 @@ database's journal mode alone, so converting a database once is enough — see
 ### Fixed
 
 - A detection run or a review GUI silently converted a database back to WAL, undoing a conversion made to keep it working on a network drive.
-- The review GUIs no longer force `journal_mode=WAL` and `mmap_size`, both unusable over a network filesystem, and the detection GUI's connections now set a lock timeout.
+- The review GUIs no longer force `journal_mode=WAL` and `mmap_size`, both unusable over a network filesystem, and the detection GUI's connections now set a lock timeout. Outside WAL they set `synchronous=FULL`, since `NORMAL` is only corruption-safe under WAL.
 - `open_write_connection` now checks that an imposed journal mode was actually applied and warns when it was not, instead of assuming the pragma took effect.
 - The CSV importers, the PAC writers and several readers wait up to 60 seconds for a lock instead of five, so a reader and a writer on a `DELETE`-mode database no longer collide.
 - A mistyped `db_path` in the cycle backfill wrote a stray empty database and then failed with `no such table: main.events`; it now fails immediately naming the path.
@@ -41,10 +43,11 @@ database's journal mode alone, so converting a database once is enough — see
 
 ### Upgrading
 
-- Journal mode is a persistent property of the database file, so a database created before 4.0.2 is in WAL until you convert it. Close every GUI and convert once with `examples/set_db_journal_mode.py`; from 4.0.2 the choice sticks, and later runs will not switch it back. See [Run with a database on a network drive](docs/how-to/run-with-database-on-a-network-drive.md).
-- Set `TURTLEWAVE_SQLITE_JOURNAL=DELETE` only if you are creating *new* databases on the share; a database created there would otherwise be created in WAL and fail the same way.
+- Journal mode is a persistent property of the database file, so a database created before 4.0.2 is in WAL until you convert it. Close every GUI and convert once with `turtlewave_set_journal_mode`; from 4.0.2 the choice sticks, and later runs will not switch it back. See [Run with a database on a network drive](docs/how-to/run-with-database-on-a-network-drive.md).
+- New databases need no conversion, so `TURTLEWAVE_SQLITE_JOURNAL` is now only for opting *into* WAL, or for forcing `DELETE` on machines still running an older version.
+- On Windows, set that variable with `setx TURTLEWAVE_SQLITE_JOURNAL DELETE` so it persists; a `$env:` assignment lives only until the shell closes.
 - A cycle backfill pointed at a database that does not exist now raises `FileNotFoundError` instead of creating an empty one. Any script relying on that database being created must run detection first.
-- Databases on local disk need no action.
+- Databases on local disk need no action, but a database created from 4.0.2 onward is in `DELETE` mode and loses WAL's concurrent reads: a review GUI opened during a detection run waits on the 60-second lock timeout instead of reading straight away. Set `TURTLEWAVE_SQLITE_JOURNAL=WAL` to keep the old behaviour.
 
 ## [4.0.1] — 2026-08-05
 

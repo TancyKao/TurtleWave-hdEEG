@@ -59,8 +59,16 @@ class EventDatabase:
         cursor = self.conn.cursor()
         # journal_mode is deliberately absent -- it is decided once, in
         # frontend/db_connect.py.
+        # synchronous=NORMAL is only corruption-safe under WAL; every other
+        # journal mode (DELETE included) needs FULL, SQLite's safe default.
+        try:
+            journal_mode = cursor.execute("PRAGMA journal_mode").fetchone()[0]
+        except (sqlite3.Error, TypeError):
+            journal_mode = ""
+        synchronous = "NORMAL" if str(journal_mode).lower() == "wal" else "FULL"
+
         optimizations = [
-            "PRAGMA synchronous=NORMAL",
+            f"PRAGMA synchronous={synchronous}",
             "PRAGMA cache_size=-64000",
             "PRAGMA temp_store=MEMORY",
         ]

@@ -13,6 +13,7 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 ### Database & Provenance
 
 - [**Direct-to-Database Write**](dbwrite.md) - `write_db=True` detection path, `detection_runs` provenance, DB → CSV export
+- [**Journal-Mode CLI**](cli.md) - `turtlewave_set_journal_mode` console script for converting a database's SQLite journal mode
 - [**Re-run Guards**](rerun.md) - Correctness guards for scoped channel re-detection
 - [**Utilities**](utils.md) - Artefact-free density denominators and other shared helpers
 
