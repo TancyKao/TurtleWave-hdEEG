@@ -29,9 +29,14 @@ data is required. Two cycle definitions are supported via ``method``:
 """
 
 import logging
-import sqlite3
+import os
 
 import numpy as np
+
+# Database writes go through dbwrite.open_write_connection so this module picks
+# up the journal-mode override and the busy timeout (it used to call
+# sqlite3.connect directly, with neither).
+from . import dbwrite
 
 
 # Numeric hypnogram codes as produced by ``XLAnnotations.get_hypnogram()``:
@@ -293,6 +298,33 @@ def compute_stage_durations(hypnogram, epoch_length=30):
     }
 
 
+def _require_existing_db(db_path):
+    """Refuse to run a backfill against a database that does not exist.
+
+    Cycle detection and stage-duration accounting are *post-detection* steps:
+    they annotate an existing ``neural_events.db``, they never originate one.
+    Without this check a mistyped path is silently created as an empty database
+    (``sqlite3.connect`` creates the file), the run then dies on
+    ``no such table: main.events``, and a stray file is left behind -- on a
+    network share, in whatever journal mode the creating call chose.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the ``neural_events.db`` SQLite database.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no file exists at ``db_path``.
+    """
+    if not os.path.isfile(db_path):
+        raise FileNotFoundError(
+            f"No database at {db_path}. Sleep-cycle backfill annotates an "
+            f"existing neural_events.db and never creates one -- run event "
+            f"detection first, or correct the path.")
+
+
 class ParalCycles:
     """Detect sleep cycles and persist them to the DB and annotation XML.
 
@@ -476,14 +508,40 @@ class ParalCycles:
             'CREATE INDEX IF NOT EXISTS idx_cycle ON events(cycle)')
 
     def store_cycles_to_database(self, cycles, db_path, subject=None,
-                                 method=None):
+                                 method=None, conn=None):
         """Insert detected cycles into the ``sleep_cycles`` table.
 
         Existing rows for the same ``(subject, method)`` are replaced so reruns
         stay idempotent.
+
+        Parameters
+        ----------
+        cycles : list of dict
+            Detected cycles, as returned by :meth:`detect`.
+        db_path : str
+            Path to the ``neural_events.db`` SQLite database.
+        subject : str, optional
+            Subject identifier. Falls back to ``self.subject`` (then ``''``).
+        method : str, optional
+            Cycle definition, used only when ``cycles`` is empty.
+        conn : sqlite3.Connection, optional
+            An already-open connection **on ``db_path``** (not checked at
+            runtime; it is a caller contract). When supplied, the caller owns
+            closing it and this method neither opens nor closes a connection,
+            which is what lets a whole subject share one connection. When
+            ``None`` a connection is opened via
+            :func:`~turtlewave_hdEEG.dbwrite.open_write_connection` and closed
+            here.
+
+        Returns
+        -------
+        int
+            Number of cycles written.
         """
         subject = subject if subject is not None else (self.subject or '')
-        conn = sqlite3.connect(db_path)
+        own = conn is None
+        if own:
+            conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
             method_vals = {c['method'] for c in cycles} or {method}
@@ -509,7 +567,8 @@ class ParalCycles:
                 f"Stored {len(cycles)} cycle(s) for subject "
                 f"'{subject}' in {db_path}.")
         finally:
-            conn.close()
+            if own:
+                conn.close()
         return len(cycles)
 
     @staticmethod
@@ -534,7 +593,8 @@ class ParalCycles:
             PRIMARY KEY (subject)
         )''')
 
-    def store_stage_durations(self, stage_durations, db_path, subject=None):
+    def store_stage_durations(self, stage_durations, db_path, subject=None,
+                              conn=None):
         """Upsert per-stage sleep durations into the ``stage_durations`` table.
 
         The existing row for ``subject`` is deleted then re-inserted so reruns
@@ -549,6 +609,12 @@ class ParalCycles:
         subject : str, optional
             Subject identifier. Falls back to ``self.subject`` (then ``''``)
             exactly like the cycle-storage methods.
+        conn : sqlite3.Connection, optional
+            An already-open connection **on ``db_path``** (not checked at
+            runtime; it is a caller contract). When supplied, the caller owns
+            closing it. When ``None`` a connection is opened via
+            :func:`~turtlewave_hdEEG.dbwrite.open_write_connection` and closed
+            here.
 
         Returns
         -------
@@ -556,7 +622,9 @@ class ParalCycles:
             Number of rows written (always 1).
         """
         subject = subject if subject is not None else (self.subject or '')
-        conn = sqlite3.connect(db_path)
+        own = conn is None
+        if own:
+            conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_stage_durations_table(conn)
             conn.execute(
@@ -581,20 +649,41 @@ class ParalCycles:
                 f"Stored stage durations for subject '{subject}' in {db_path} "
                 f"(total {stage_durations['total_min']:.1f} min).")
         finally:
-            conn.close()
+            if own:
+                conn.close()
         return 1
 
-    def tag_events_with_cycles(self, cycles, db_path):
+    def tag_events_with_cycles(self, cycles, db_path, conn=None):
         """Assign a cycle number to each event in the ``events`` table.
 
         Each event is tagged by testing its ``start_time`` against the cycle
         spans. Events outside every cycle keep ``cycle=NULL``. The full cycle
         span (NREM start .. next cycle start, or recording end) is used so
         events in the inter-NREM segment are tagged too.
+
+        Parameters
+        ----------
+        cycles : list of dict
+            Detected cycles, as returned by :meth:`detect`.
+        db_path : str
+            Path to the ``neural_events.db`` SQLite database.
+        conn : sqlite3.Connection, optional
+            An already-open connection **on ``db_path``** (not checked at
+            runtime; it is a caller contract). When supplied, the caller owns
+            closing it. When ``None`` a connection is opened via
+            :func:`~turtlewave_hdEEG.dbwrite.open_write_connection` and closed
+            here.
+
+        Returns
+        -------
+        int
+            Number of event rows tagged.
         """
         if not cycles:
             return 0
-        conn = sqlite3.connect(db_path)
+        own = conn is None
+        if own:
+            conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
             total = 0
@@ -613,11 +702,13 @@ class ParalCycles:
             conn.commit()
             self.logger.info(f"Tagged {total} event(s) with a cycle number.")
         finally:
-            conn.close()
+            if own:
+                conn.close()
         return total
 
     def run(self, db_path, method='2022', write_xml=True, subject=None,
-            epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10):
+            epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
+            conn=None):
         """Detect cycles, then persist to XML and the database.
 
         This single entry point serves both backfilling an existing
@@ -626,10 +717,26 @@ class ParalCycles:
         when no cycles are detected, since an all-wake or unscorable night still
         has stage durations.
 
+        Parameters
+        ----------
+        conn : sqlite3.Connection, optional
+            An already-open connection **on ``db_path``** (not checked at
+            runtime; it is a caller contract), passed straight through to the
+            three storage methods so one whole run shares one connection. When
+            supplied the caller owns closing it; when ``None`` this method
+            opens one connection for the three writes and closes it on exit.
+
         Returns
         -------
         list of dict
             The detected cycles (also stored in the DB).
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``db_path`` does not exist and no ``conn`` was supplied. This is
+            a post-detection step; it annotates an existing database and never
+            creates one.
         """
         if self.annotations is None:
             raise ValueError("annotations are required for cycle detection")
@@ -642,29 +749,41 @@ class ParalCycles:
             method=method, epoch_length=epoch_length, wake_thresh=wake_thresh,
             nrem_min=nrem_min, rem_min=rem_min, hypnogram=hypnogram)
 
-        if cycles:
-            if write_xml:
-                try:
-                    self.write_cycle_markers(cycles)
-                except Exception as e:
-                    self.logger.warning(f"Cycle-marker writing skipped: {e}")
-            self.store_cycles_to_database(cycles, db_path, subject=subject,
-                                          method=method)
-            self.tag_events_with_cycles(cycles, db_path)
-        else:
-            self.logger.info(
-                "No cycles detected; writing stage durations only.")
+        own = conn is None
+        if own:
+            # Backfill onto an existing database only; never create one.
+            # Skipped when the caller supplied a connection: they already
+            # opened the database, so it exists by construction.
+            _require_existing_db(db_path)
+            conn = dbwrite.open_write_connection(db_path)
+        try:
+            if cycles:
+                if write_xml:
+                    try:
+                        self.write_cycle_markers(cycles)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Cycle-marker writing skipped: {e}")
+                self.store_cycles_to_database(cycles, db_path, subject=subject,
+                                              method=method, conn=conn)
+                self.tag_events_with_cycles(cycles, db_path, conn=conn)
+            else:
+                self.logger.info(
+                    "No cycles detected; writing stage durations only.")
 
-        # Stage durations are written regardless of the cycle count, so long as
-        # the hypnogram itself is non-empty.
-        if hypnogram:
-            stage_durations = compute_stage_durations(
-                hypnogram, epoch_length=epoch_length)
-            self.store_stage_durations(
-                stage_durations, db_path, subject=subject)
-        else:
-            self.logger.warning(
-                "Empty hypnogram; no stage durations stored.")
+            # Stage durations are written regardless of the cycle count, so
+            # long as the hypnogram itself is non-empty.
+            if hypnogram:
+                stage_durations = compute_stage_durations(
+                    hypnogram, epoch_length=epoch_length)
+                self.store_stage_durations(
+                    stage_durations, db_path, subject=subject, conn=conn)
+            else:
+                self.logger.warning(
+                    "Empty hypnogram; no stage durations stored.")
+        finally:
+            if own:
+                conn.close()
 
         return cycles
 
@@ -734,6 +853,14 @@ def finalize_cycles_and_durations(
         ``{method: [cycle dicts]}`` for every method in ``methods``, in the
         original ``methods`` order (not the reordered execution order).
 
+    Raises
+    ------
+    FileNotFoundError
+        If ``db_path`` does not exist. This is the post-detection finalize
+        step: it annotates an existing ``neural_events.db`` and never creates
+        one, so a missing file is a wrong path rather than a database to
+        create. Checked before connecting, since connecting would create it.
+
     Notes
     -----
     Only ``tag_method`` writes XML markers, so the XML never ends up with two
@@ -757,13 +884,28 @@ def finalize_cycles_and_durations(
     else:
         run_order = list(methods)
 
+    # One connection for the whole subject: every method's cycle storage, event
+    # tagging and stage-duration write share it. Previously each of the three
+    # storage methods opened and closed its own untimed connection per method
+    # (six connect/close cycles for the default two methods), and on a WAL
+    # database each close deletes and each connect recreates the -wal/-shm
+    # sidecars -- the operation that fails on a network share.
     cycles_by_method = {}
-    for m in run_order:
-        cycles = pc.run(
-            db_path, method=m, write_xml=(write_xml and m == tag_method),
-            subject=subject, epoch_length=epoch_length,
-            wake_thresh=wake_thresh, nrem_min=nrem_min, rem_min=rem_min)
-        cycles_by_method[m] = cycles
+    # Fail fast before connecting: connecting would create the file. This is a
+    # backfill onto an existing neural_events.db, so a missing one is a wrong
+    # path, not a database to create.
+    _require_existing_db(db_path)
+    conn = dbwrite.open_write_connection(db_path, logger=pc.logger)
+    try:
+        for m in run_order:
+            cycles = pc.run(
+                db_path, method=m, write_xml=(write_xml and m == tag_method),
+                subject=subject, epoch_length=epoch_length,
+                wake_thresh=wake_thresh, nrem_min=nrem_min, rem_min=rem_min,
+                conn=conn)
+            cycles_by_method[m] = cycles
+    finally:
+        conn.close()
 
     # Return in the caller's requested method order for stable plotting.
     cycles_by_method = {m: cycles_by_method[m] for m in methods}

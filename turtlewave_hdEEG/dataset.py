@@ -1,11 +1,18 @@
 import numpy as np
 import json
+import logging
 import scipy.io
 import h5py
 from pathlib import Path
 from datetime import datetime
 from wonambi import Dataset as WonambiDataset
 
+#: Module logger. EEGLAB metadata extraction is verbose per-field bookkeeping,
+#: so it is logged at DEBUG and stays out of a default run; only decisions that
+#: change what is loaded (skipped large datasets, memory-map creation) and real
+#: problems are logged at INFO or above. Attach a handler to the parent
+#: ``'turtlewave_hdEEG'`` logger to see any of it.
+logger = logging.getLogger('turtlewave_hdEEG.dataset')
 
 
 class LargeDataset:
@@ -55,7 +62,7 @@ class LargeDataset:
             is_h5py = False
         except NotImplementedError:
             # Handle MATLAB v7.3 files using h5py
-            print("MATLAB v7.3 file detected. Using h5py to load the file.")
+            logger.info("MATLAB v7.3 file detected. Using h5py to load the file.")
             with h5py.File(self.filename, 'r') as f:
                 eeglab_data = self._load_hdf5_data(f)
             is_h5py = True
@@ -69,7 +76,7 @@ class LargeDataset:
                 self._process_scipy_metadata(eeglab_data)
             result[0] = eeglab_data
         except Exception as e:
-            print(f"Error extracting EEGLAB metadata: {e}")
+            logger.error(f"Error extracting EEGLAB metadata: {e}")
             error[0] = e
           
       
@@ -82,7 +89,7 @@ class LargeDataset:
     # Access the EEG structure
         eeg = eeglab_data.get('EEG', None)
         if eeg is None:
-            print("Warning: Could not find EEG structure in the EEGLAB file")
+            logger.warning("Could not find EEG structure in the EEGLAB file")
             return
             
         # Extract additional metadata from the EEG structure
@@ -111,7 +118,7 @@ class LargeDataset:
             
             # Parse the date string into a datetime object
             if hasattr(eeg, 'etc') and hasattr(eeg.etc, 'rec_startdate'):
-                print(f"Found rec_startdate in EEG.etc: {eeg.etc.rec_startdate}")
+                logger.debug(f"Found rec_startdate in EEG.etc: {eeg.etc.rec_startdate}")
                 parsed_date = self._parse_start_date(eeg.etc.rec_startdate)
 
                 # Make sure we update both places where the start time might be stored
@@ -119,22 +126,22 @@ class LargeDataset:
                     self.original_dataset.start_time = parsed_date
                     
         except Exception as e: 
-            print(f"Error processing scipy metadata: {e}")
+            logger.error(f"Error processing scipy metadata: {e}")
 
     def _process_h5py_metadata(self, eeglab_data):
         """Process metadata from h5py structure"""
         # Access the EEG structure
         eeg = eeglab_data.get('EEG', None)
         if eeg is None:
-            print("Warning: Could not find EEG structure in the EEGLAB file")
+            logger.warning("Could not find EEG structure in the EEGLAB file")
             return
             
         # Extract additional metadata from the EEG structure
         try:
-            print("Processing EEG metadata...")
+            logger.debug("Processing EEG metadata...")
             for attr in ['group', 'condition', 'session']:
                 if attr in eeg:
-                    print(f"Extracting field: {attr}")
+                    logger.debug(f"Extracting field: {attr}")
                     value = eeg[attr]
                     # Resolve HDF5 references
                     value = self._resolve_h5py_value(value)
@@ -143,7 +150,7 @@ class LargeDataset:
                     
             # Extract stages if available
             if 'etc' in eeg and 'stages' in eeg['etc']:
-                print("Extracting stages")
+                logger.debug("Extracting stages")
                 stages = eeg['etc']['stages']
                 stages = self._resolve_h5py_value(stages)
                 if stages is not None:
@@ -152,7 +159,7 @@ class LargeDataset:
                         
             # Extract events if available
             if 'event' in eeg:
-                print("Processing events...")
+                logger.debug("Processing events...")
                 events = eeg['event']
                 annotations = {
                     'onsets': [], 'types': [], 'durations': [], 'isreject': [],
@@ -168,25 +175,25 @@ class LargeDataset:
         
             # Parse the date string into a datetime object                
             if 'etc' in eeg and 'rec_startdate' in eeg['etc']:
-                print("Extracting rec_startdate")
+                logger.debug("Extracting rec_startdate")
                 rec_startdate = self._resolve_h5py_value(eeg['etc']['rec_startdate'])
                 if rec_startdate:
                     self._parse_start_date(rec_startdate)
         
         except Exception as e:
-            print(f"Error processing h5py metadata: {e}")
+            logger.error(f"Error processing h5py metadata: {e}")
 
     def _parse_start_date(self, rec_startdate):
         """Parse the recording start date with multiple format attempts"""
         try:
             # Print debug information
-            print(f"Original rec_startdate type: {type(rec_startdate)}")
+            logger.debug(f"Original rec_startdate type: {type(rec_startdate)}")
             if isinstance(rec_startdate, np.ndarray):
-                print(f"Array shape: {rec_startdate.shape}, dtype: {rec_startdate.dtype}")
+                logger.debug(f"Array shape: {rec_startdate.shape}, dtype: {rec_startdate.dtype}")
             
             # Special handling for uint16 arrays
             if isinstance(rec_startdate, np.ndarray) and rec_startdate.dtype == np.uint16:
-                print("Processing uint16 date array")
+                logger.debug("Processing uint16 date array")
                 # Convert uint16 to characters, filtering out zeros
                 chars = []
                 # Flatten array if it's multi-dimensional
@@ -203,7 +210,7 @@ class LargeDataset:
             
                 # Join characters into a string
                 date_str = ''.join(chars)
-                print(f"Converted date string: {date_str}")
+                logger.debug(f"Converted date string: {date_str}")
                 
                 # Continue with the normal date parsing using the converted string
                 rec_startdate = date_str
@@ -230,7 +237,7 @@ class LargeDataset:
                         char_array = [chr(int(x)) for x in rec_startdate if x != 0]
                     
                     rec_startdate = ''.join(char_array)
-                    print(f"Converted character array to string: {rec_startdate}")
+                    logger.debug(f"Converted character array to string: {rec_startdate}")
 
             
             # Handle bytes
@@ -239,10 +246,11 @@ class LargeDataset:
                 
             # Make sure we have a string at this point
             if not isinstance(rec_startdate, str):
-                print(f"Warning: Could not parse date, unexpected type after conversion: {type(rec_startdate)}")
+                logger.warning(f"Could not parse recording start date: unexpected type "
+                               f"after conversion: {type(rec_startdate)}")
                 return
 
-            print(f"Converted date string: {rec_startdate}")
+            logger.debug(f"Converted date string: {rec_startdate}")
             
             # Try common EEGLAB date formats
             date_formats = [
@@ -259,7 +267,7 @@ class LargeDataset:
                 import dateutil.parser
                 parsed_date = dateutil.parser.parse(rec_startdate)
                 self.header['start_time'] = parsed_date
-                print(f"Updated header start_time to: {parsed_date}")
+                logger.debug(f"Updated header start_time to: {parsed_date}")
                 return parsed_date
             except (ImportError, ValueError):
                 pass
@@ -274,15 +282,15 @@ class LargeDataset:
                     continue
             
             if parsed_date is None:
-                print(f"Warning: Could not parse date format: {rec_startdate}")
+                logger.warning(f"Could not parse recording start date format: {rec_startdate}")
                 return
             
             # Update the header with the correct start time
             self.header['start_time'] = parsed_date
-            print(f"Updated header start_time to: {parsed_date}")
+            logger.debug(f"Updated header start_time to: {parsed_date}")
             
         except Exception as e:
-            print(f"Error parsing start date: {e} (type: {type(rec_startdate)})")
+            logger.error(f"Error parsing start date: {e} (type: {type(rec_startdate)})")
             # Store as string if we couldn't process it
             if isinstance(rec_startdate, np.ndarray):
                 try:
@@ -312,7 +320,7 @@ class LargeDataset:
         """
         # Guard against excessive recursion
         if depth >= max_depth:
-            print(f"Maximum recursion depth reached at {path}, stopping recursion")
+            logger.warning(f"Maximum recursion depth reached at {path}, stopping recursion")
             return {"max_depth_reached": True}
 
         result = {}
@@ -333,7 +341,7 @@ class LargeDataset:
                         size_mb = np.prod(item.shape) * item.dtype.itemsize / (1024*1024) if hasattr(item, 'shape') else 0
                         
                         if size_mb > 100:  # Skip loading datasets larger than 100MB
-                            print(f"Skipping large dataset {new_path}: {size_mb:.2f} MB")
+                            logger.info(f"Skipping large dataset {new_path}: {size_mb:.2f} MB")
                             result[key] = {
                                 "shape": item.shape,
                                 "dtype": str(item.dtype),
@@ -342,7 +350,7 @@ class LargeDataset:
                             }
                         elif item.dtype == h5py.ref_dtype and item.size > 10000:
                             # Handle large reference arrays
-                            print(f"Large reference array detected at {new_path}: {item.size} references")
+                            logger.info(f"Large reference array detected at {new_path}: {item.size} references")
                             result[key] = {
                                 "shape": item.shape,
                                 "dtype": str(item.dtype),
@@ -354,12 +362,12 @@ class LargeDataset:
                             result[key] = item[()]
                 except Exception as e:
                     # Handle errors for specific items
-                    print(f"Error loading {path}/{key}: {e}")
+                    logger.error(f"Error loading {path}/{key}: {e}")
                     result[key] = {"error": str(e)}
         
         except Exception as e:
             # Handle errors for the entire group
-            print(f"Error processing HDF5 group at {path}: {e}")
+            logger.error(f"Error processing HDF5 group at {path}: {e}")
             return {"error": str(e)}
 
         return result
@@ -389,7 +397,7 @@ class LargeDataset:
         """
         # Circuit breaker to prevent infinite recursion
         if _depth > _max_depth:
-            print(f"WARNING: Maximum recursion depth reached ({_depth}/{_max_depth}), stopping resolution")
+            logger.warning(f"Maximum recursion depth reached ({_depth}/{_max_depth}), stopping resolution")
             return None
 
         try:
@@ -443,7 +451,7 @@ class LargeDataset:
             return value
 
         except Exception as e:
-            print(f"Error resolving HDF5 value: {e}")
+            logger.error(f"Error resolving HDF5 value: {e}")
             return value
 
     def _resolve_single_reference(self, reference):
@@ -511,7 +519,7 @@ class LargeDataset:
                 return data
         
         except Exception as e:
-            print(f"Error resolving single HDF5 reference: {e}")
+            logger.error(f"Error resolving single HDF5 reference: {e}")
             return None
 
     def create_memmap(self, memmap_dir=None):
@@ -538,21 +546,21 @@ class LargeDataset:
         chunk_size = 60 * self.sampling_rate  # 1 minute of data
         chunks = n_samples // chunk_size + (1 if n_samples % chunk_size > 0 else 0)
         
-        print(f"Creating memory map with {chunks} chunks...")
+        logger.info(f"Creating memory map with {chunks} chunks...")
         for i in range(chunks):
             start_sample = i * chunk_size
             end_sample = min((i + 1) * chunk_size, n_samples)
             start_time = start_sample / self.sampling_rate
             end_time = end_sample / self.sampling_rate
             
-            print(f"Processing chunk {i+1}/{chunks}: {start_time:.1f}s - {end_time:.1f}s")
+            logger.debug(f"Processing chunk {i+1}/{chunks}: {start_time:.1f}s - {end_time:.1f}s")
             
             # Read chunk from original data
             try:
                 data = self.original_dataset.read_data(begtime=start_time, endtime=end_time)
                 mmap[:, start_sample:end_sample] = data.data[0]
             except Exception as e:
-                print(f"Error processing chunk {i+1}: {e}")
+                logger.error(f"Error processing chunk {i+1}: {e}")
         
         # Flush to disk
         mmap.flush()
@@ -570,7 +578,7 @@ class LargeDataset:
         with open(info_path, 'w', encoding='utf-8') as f:
             json.dump(self.memmap_info, f)
         
-        print(f"Memory map created at {memmap_path}")
+        logger.info(f"Memory map created at {memmap_path}")
         return self.memmap_info
     
     def read_data(self, begtime=None, endtime=None, chan=None):

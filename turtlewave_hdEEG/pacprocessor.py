@@ -25,6 +25,9 @@ from matplotlib.figure import Figure
 import pandas as pd
 from datetime import datetime
 
+from .utils import derive_subject
+from . import dbwrite
+
 
 # ---------------------------------------------------------------------------
 # Canonical PAC metric columns and their aliases.
@@ -174,7 +177,8 @@ class ParalPAC:
                 use_detected_events=True, event_type='slow_wave',
                 pair_with_spindles=False, time_window=0.5,
                 db_path=None, out_dir=None, progress=False,
-                subject=None, write_db=False):
+                subject=None, write_db=False,
+                stored_event_type=None, stored_method=None):
         """
         Analyze phase-amplitude coupling (PAC) in the dataset.
         
@@ -239,19 +243,58 @@ class ParalPAC:
             the ``pac_coupling`` table in ``db_path`` after analysis (see
             :meth:`store_pac_to_database`). Default False, so existing callers
             are unaffected.
+        stored_event_type : str or None
+            Value written to ``pac_coupling.event_type``. Normally derived
+            from ``event_type`` / ``pair_with_spindles``, which only works on
+            the event-locked path. On the continuous path
+            (``use_detected_events=False``, e.g. theta-gamma coupling) there
+            is no event scope to derive, so this must be given explicitly
+            (e.g. ``'continuous'``) or the write is refused.
+        stored_method : str or None
+            Value written to ``pac_coupling.method``. Normally derived from
+            ``event_opts['sw_method']`` / ``['spindle_method']``. Must be given
+            explicitly whenever those are absent, e.g. ``'theta_gamma'`` for a
+            continuous run.
 
         Returns
         -------
         dict
             Dictionary containing PAC results
+
+        Raises
+        ------
+        ValueError
+            If ``write_db`` is truthy but the stored scope cannot be named --
+            no ``stored_event_type``/``stored_method`` and no derivable event
+            scope. Writing a continuous result under the derived defaults
+            would store it as ``event_type='slow_wave', method='unknown'``,
+            i.e. a theta-gamma result indistinguishable from slow-wave
+            coupling, so it is refused rather than mislabelled.
         """
         from tensorpac import Pac
         import sys
         import sqlite3
-        
+
         # Set up logger
         logger = self.logger
-        
+
+        # Fail fast: resolve and validate the scope the rows would be stored
+        # under BEFORE any analysis runs. Doing this at the end would burn
+        # minutes of per-channel computation on this data before telling the
+        # caller the scope cannot be named.
+        resolved_event_type = resolved_method = None
+        if write_db:
+            resolved_event_type, resolved_method = self._resolve_pac_scope(
+                event_type=event_type,
+                pair_with_spindles=pair_with_spindles,
+                event_opts=event_opts,
+                use_detected_events=use_detected_events,
+                stored_event_type=stored_event_type,
+                stored_method=stored_method)
+            logger.info(
+                f"PAC results will be stored as event_type="
+                f"'{resolved_event_type}', method='{resolved_method}'")
+
         # Get method descriptions
         pac_list = self.pac_method(0, 0, 0, list_methods=True)
         methods = pac_list[0]
@@ -285,13 +328,13 @@ class ParalPAC:
             }
         
         logger.info("")
-        logger.info("""                    
+        logger.info(r"""
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             ___  ___ _____ ___________ _    _____
             / _ \/ __/_  _/__  / __/ _ | |/|/ / _ \\
         / // / _/  / /  _/ /_\ \/ __ |    / ___/
-        /____/___/ /_/  /___/___/_/ |_/_/|_/_/    
-        
+        /____/___/ /_/  /___/___/_/ |_/_/|_/_/
+
         Phase-Amplitude Coupling Analysis
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         """)
@@ -396,10 +439,14 @@ class ParalPAC:
                     # Get events from SQLite database
                     logger.info(f"Using detected {event_type} events from database")
                     
-                    # Connect to database
+                    # Connect to database. Read-only use, but with the same 60 s
+                    # busy timeout as the writers: under DELETE journal mode
+                    # (network drives) a writer blocks readers, and Python's 5 s
+                    # default would fail this query while a detection export is
+                    # mid-write.
                     conn = None
                     try:
-                        conn = sqlite3.connect(db_path)
+                        conn = sqlite3.connect(db_path, timeout=60.0)
                         cursor = conn.cursor()
                         
                         # Construct SQL query based on parameters
@@ -652,9 +699,7 @@ class ParalPAC:
                         logger.info(f"Created {len(segments)} segments for PAC analysis")
 
                     except Exception as e:
-                        logger.error(f"Error accessing database: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.error(f"Error accessing database: {e}", exc_info=True)
                         continue
                     finally:
                         # Always release the DB handle, including on the
@@ -869,9 +914,7 @@ class ParalPAC:
                 }
             
             except Exception as e:
-                logger.error(f"Error processing channel {ch}: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error processing channel {ch}: {e}", exc_info=True)
                 flag += 1
                 continue
             
@@ -891,38 +934,120 @@ class ParalPAC:
             logger.warning(f"Phase-amplitude coupling analysis finished with {flag} warnings/errors")
 
         # Optional direct-to-DB write of the in-memory per-channel results.
+        # The scope was resolved and validated at function entry, before any
+        # analysis ran.
         if write_db:
-            # Resolve the stored event type and the method/stage tokens exactly
-            # as used for the on-disk directory names, so the DB columns mirror
-            # the {event_type}_{method}_{freq}_{stages} naming convention.
-            sw_method = event_opts.get('sw_method', 'unknown') if event_opts else 'unknown'
-            spindle_method = event_opts.get('spindle_method', 'unknown') if event_opts else 'unknown'
-            if pair_with_spindles and event_type == 'slow_wave':
-                stored_event_type = 'sw_spindle'
-                method_name = f"{sw_method}_paired_{spindle_method}"
-            else:
-                stored_event_type = event_type
-                method_name = sw_method if event_type == 'slow_wave' else spindle_method
             stage_str = ''.join(stage) if isinstance(stage, list) else str(stage)
 
             if subject is None:
-                subject = os.path.basename(os.path.normpath(self.rootpath))
+                subject = derive_subject(root_dir=self.rootpath)
                 logger.warning(
                     f"write_db=True but no subject given; derived subject "
                     f"'{subject}' from rootpath. Pass subject= explicitly to be safe.")
 
-            try:
-                db_stats = self.store_pac_to_database(
-                    db_path=db_path, subject=subject,
-                    event_type=stored_event_type, method=method_name,
-                    stage=stage_str, phase_freq=phase_freq, amp_freq=amp_freq,
-                    idpac=idpac, ref_chan=ref_chan, invert=invert,
-                    results=tracking['event_pac'])
-                logger.info(f"PAC results written to database: {db_stats}")
-            except Exception as e:
-                logger.error(f"Failed to write PAC results to database: {e}")
+            # Deliberately NOT wrapped in try/except: a database write that
+            # fails must not return normally with the analysis "successful".
+            # The CSV/.npy artefacts are already on disk at this point, so
+            # raising loses no results.
+            db_stats = self.store_pac_to_database(
+                db_path=db_path, subject=subject,
+                event_type=resolved_event_type, method=resolved_method,
+                stage=stage_str, phase_freq=phase_freq, amp_freq=amp_freq,
+                idpac=idpac, ref_chan=ref_chan, invert=invert,
+                results=tracking['event_pac'])
+            logger.info(f"PAC results written to database: {db_stats}")
 
         return tracking['event_pac']
+
+    def _resolve_pac_scope(self, event_type, pair_with_spindles, event_opts,
+                           use_detected_events, stored_event_type=None,
+                           stored_method=None):
+        """Resolve the ``(event_type, method)`` a PAC row will be stored under.
+
+        ``pac_coupling`` keys on ``(subject, channel, event_type, method,
+        stage, phase/amp bounds)``, so these two strings are what make a
+        stored result identifiable. Deriving them only works on the
+        event-locked path, where ``event_opts`` carries the detector methods.
+        On the continuous path (``use_detected_events=False``, e.g.
+        theta-gamma) there is nothing to derive: the previous code fell
+        through to ``event_type='slow_wave', method='unknown'``, which stores
+        a theta-gamma result as slow-wave coupling and reads back as a valid
+        row. This method refuses instead.
+
+        Parameters
+        ----------
+        event_type : str
+            Event type analysed (``'slow_wave'`` / ``'spindle'``).
+        pair_with_spindles : bool
+            Whether slow waves were paired with spindles.
+        event_opts : dict or None
+            Event options; ``'sw_method'`` / ``'spindle_method'`` are read.
+        use_detected_events : bool
+            False for the continuous (non-event-locked) path.
+        stored_event_type, stored_method : str or None
+            Caller overrides. Each wins over derivation independently.
+
+        Returns
+        -------
+        tuple of str
+            ``(event_type, method)`` to store.
+
+        Raises
+        ------
+        ValueError
+            If either component is neither supplied nor derivable.
+        """
+        resolved_type = (str(stored_event_type)
+                         if stored_event_type is not None else None)
+        resolved_method = (str(stored_method)
+                           if stored_method is not None else None)
+
+        if resolved_type is not None and resolved_method is not None:
+            return resolved_type, resolved_method
+
+        if not use_detected_events:
+            raise ValueError(
+                "analyze_pac(write_db=True, use_detected_events=False) cannot "
+                "name the scope of the row it would store: there is no "
+                "detected-event method to derive it from, and the derived "
+                "defaults would file this continuous result as "
+                "event_type='slow_wave', method='unknown'. Pass "
+                "stored_event_type= and stored_method= explicitly "
+                "(e.g. stored_event_type='continuous', "
+                "stored_method='theta_gamma'), or set write_db=False.")
+
+        sw_method = (event_opts or {}).get('sw_method') or 'unknown'
+        spindle_method = (event_opts or {}).get('spindle_method') or 'unknown'
+
+        if pair_with_spindles and event_type == 'slow_wave':
+            derived_type = 'sw_spindle'
+            derived_method = f"{sw_method}_paired_{spindle_method}"
+            components = {'sw_method': sw_method,
+                          'spindle_method': spindle_method}
+        else:
+            derived_type = event_type
+            if event_type == 'slow_wave':
+                derived_method = sw_method
+                components = {'sw_method': sw_method}
+            else:
+                derived_method = spindle_method
+                components = {'spindle_method': spindle_method}
+
+        if resolved_type is None:
+            resolved_type = derived_type
+        if resolved_method is None:
+            missing = [k for k, v in components.items() if v == 'unknown']
+            if missing:
+                raise ValueError(
+                    f"analyze_pac(write_db=True) cannot name the method of the "
+                    f"row it would store: event_opts is missing {missing} and "
+                    f"the derived method would be {derived_method!r}, which "
+                    f"records the run as coming from an unidentifiable "
+                    f"detector. Pass stored_method= explicitly, or supply "
+                    f"event_opts={{'sw_method': ..., 'spindle_method': ...}}.")
+            resolved_method = derived_method
+
+        return resolved_type, resolved_method
     
     def _mean_amp(self, pha, amp, nbins=18):
         """
@@ -1084,7 +1209,9 @@ class ParalPAC:
                         # Fall back without n_perm if there's a parameter conflict
                         pac = Pac(idpac=idpac, verbose='ERROR')
                         comod = pac.filterfit(s_freq, data_array, p_freqs, a_freqs, verbose=False)
-                        print("Warning: Statistical testing disabled due to parameter conflict")
+                        logger.warning(
+                            "Statistical testing disabled due to a parameter "
+                            "conflict; comodulogram computed without surrogates")
                     else:
                         logger.error(f"Error in filterfit: {e}")
                         raise e
@@ -1151,9 +1278,7 @@ class ParalPAC:
                 return None
             
         except Exception as e:
-            logger.error(f"Error generating comodulogram: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error generating comodulogram: {e}", exc_info=True)
             return None
     
     def compare_conditions(self, condition1, condition2, test_type='watson_williams', 
@@ -1311,9 +1436,7 @@ class ParalPAC:
                     }
                 
                 except Exception as e:
-                    logger.error(f"Error performing Watson-Williams test: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"Error performing Watson-Williams test: {e}", exc_info=True)
                     return None
             
             elif test_type == 'permutation':
@@ -1326,9 +1449,7 @@ class ParalPAC:
                 return None
         
         except Exception as e:
-            logger.error(f"Error comparing conditions: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error comparing conditions: {e}", exc_info=True)
             return None
     
     def export_pac_parameters_to_csv(self, json_dir=None, csv_file=None, 
@@ -1469,7 +1590,7 @@ class ParalPAC:
                                 
                                 all_data.append(data_row)
                                 
-                        logger.info(f"Processed data from {file}")
+                        logger.debug(f"Processed data from {file}")
                     except Exception as e:
                         logger.error(f"Error processing {file}: {e}")
                 
@@ -1526,9 +1647,7 @@ class ParalPAC:
                     return None
                     
             except Exception as e:
-                logger.error(f"Error creating summary from files: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error creating summary from files: {e}", exc_info=True)
         
         # Second approach: Use tracking data if available and no files were found
         elif 'event_pac' in self.tracking and self.tracking['event_pac']:
@@ -1679,9 +1798,7 @@ class ParalPAC:
                     logger.warning("No PAC data to export")
                     return None
             except Exception as e:
-                logger.error(f"Error exporting PAC parameters from tracking: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error exporting PAC parameters from tracking: {e}", exc_info=True)
                 return None
         else:
             logger.warning("No PAC results in tracking dictionary or individual files")
@@ -1707,12 +1824,11 @@ class ParalPAC:
         """
         Create the ``pac_coupling`` table and its indexes if absent.
 
-        This is purely additive: it never touches ``events``,
-        ``processing_status``, ``sleep_cycles`` or ``stage_durations``. The
-        primary key is the natural key of a PAC result (subject, channel,
-        event type, method, stage, and the phase/amplitude frequency bounds),
-        so a re-run with identical parameters replaces its own row rather than
-        inserting a duplicate.
+        Delegates to :func:`turtlewave_hdEEG.dbwrite.ensure_pac_schema`, which
+        owns the DDL. The same function is called from
+        ``dbwrite.ensure_direct_write_schema``, so the table exists on any
+        database a detector has touched even when PAC has never been run and
+        a reader never faces a missing table.
 
         Parameters
         ----------
@@ -1724,52 +1840,8 @@ class ParalPAC:
         -------
         None
         """
-        conn.execute('''
-        CREATE TABLE IF NOT EXISTS pac_coupling (
-            -- Natural key
-            subject TEXT NOT NULL,
-            channel TEXT NOT NULL,
-            event_type TEXT NOT NULL,       -- 'slow_wave', 'spindle', 'sw_spindle'
-            method TEXT NOT NULL,           -- detector / pairing method token
-            stage TEXT NOT NULL,            -- combined stage string (e.g. 'NREM2NREM3')
-            phase_freq_lower REAL NOT NULL,
-            phase_freq_upper REAL NOT NULL,
-            amp_freq_lower REAL NOT NULL,
-            amp_freq_upper REAL NOT NULL,
-
-            -- Coupling metrics (NaN stored as NULL)
-            mi_raw REAL,
-            mi_norm REAL,
-            median_mi_pval REAL,
-            preferred_phase_rad REAL,
-            preferred_phase_deg REAL,
-            mean_vector_length REAL,
-            rho REAL,
-            rayleigh_z REAL,
-            rayleigh_p REAL,
-
-            -- Number of artefact-free segments/events actually coupled.
-            -- NOT NULL by design: a row with an unrecoverable event count is
-            -- rejected upstream and flagged for re-run, never stored as 0/NULL.
-            n_events INTEGER NOT NULL,
-
-            -- Provenance
-            idpac TEXT,                     -- str(tuple) of (method, surrogate, correction)
-            ref_chan TEXT,
-            invert INTEGER,                 -- 0/1 polarity flag actually used
-            turtlewave_version TEXT,
-            processing_timestamp TEXT,
-            source_path TEXT,
-
-            PRIMARY KEY (subject, channel, event_type, method, stage,
-                         phase_freq_lower, phase_freq_upper,
-                         amp_freq_lower, amp_freq_upper)
-        )''')
-
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_subject ON pac_coupling(subject)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_channel ON pac_coupling(channel)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_method_stage ON pac_coupling(method, stage)')
-        conn.commit()
+        from turtlewave_hdEEG import dbwrite
+        dbwrite.ensure_pac_schema(conn)
 
     def _pac_version(self):
         """
@@ -1985,7 +2057,9 @@ class ParalPAC:
 
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            # Writer: routed through dbwrite so it gets the 60 s busy timeout
+            # and the preserve-existing-journal-mode behaviour.
+            conn = dbwrite.open_write_connection(db_path, logger=logger)
             self._init_pac_table(conn)
 
             for ch, ch_results in results.items():
@@ -2053,13 +2127,17 @@ class ParalPAC:
                 f"store_pac_to_database: {stats['added']} added, "
                 f"{stats['updated']} updated, {stats['skipped']} skipped")
         except Exception as e:
-            logger.error(f"store_pac_to_database failed: {e}")
-            import traceback
-            traceback.print_exc()
+            # Re-raise. Returning the untouched stats dict here made a failed
+            # database write indistinguishable from a run that stored nothing
+            # because there was nothing to store -- the same silent-loss shape
+            # as the event importers.
+            logger.error(f"store_pac_to_database failed: {e}", exc_info=True)
+            raise
         finally:
             if conn is not None:
                 conn.close()
 
+        stats['ok'] = True
         return stats
 
     def _infer_pac_context_from_path(self, csv_path):
@@ -2232,7 +2310,9 @@ class ParalPAC:
 
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
+            # Writer: routed through dbwrite so it gets the 60 s busy timeout
+            # and the preserve-existing-journal-mode behaviour.
+            conn = dbwrite.open_write_connection(db_path, logger=logger)
             self._init_pac_table(conn)
 
             for _, r in df.iterrows():
@@ -2316,13 +2396,16 @@ class ParalPAC:
                 f"{stats['updated']} updated, {stats['skipped']} skipped, "
                 f"{stats['n_events_missing']} rejected (n_events missing)")
         except Exception as e:
-            logger.error(f"import_pac_csv_to_database failed for {csv_path}: {e}")
-            import traceback
-            traceback.print_exc()
+            # Re-raise for the same reason as store_pac_to_database. The batch
+            # walker (backfill_pac_directory) catches per file so one bad CSV
+            # still does not abort a whole back-fill.
+            logger.error(f"import_pac_csv_to_database failed for {csv_path}: {e}", exc_info=True)
+            raise
         finally:
             if conn is not None:
                 conn.close()
 
+        stats['ok'] = True
         return stats
 
     def backfill_pac_directory(self, root_dir, db_path, subject_from='folder'):
@@ -2350,18 +2433,22 @@ class ParalPAC:
         -------
         dict
             ``{'files': int, 'added': int, 'updated': int, 'skipped': int,
-            'n_events_missing': int}``.
+            'n_events_missing': int, 'failed': int}``. ``failed`` counts CSVs
+            whose import raised; those are logged and skipped rather than
+            aborting the walk.
         """
         logger = self.logger
 
         if subject_from == 'folder':
-            subject = os.path.basename(os.path.normpath(root_dir))
+            # Shared resolver, so a folder-derived subject keys the database
+            # the same way every other path does ('sub-10sd', not '10sd').
+            subject = derive_subject(root_dir=root_dir)
         else:
             subject = str(subject_from)
         logger.info(f"Back-filling PAC results under {root_dir} for subject '{subject}'")
 
         totals = {'files': 0, 'added': 0, 'updated': 0,
-                  'skipped': 0, 'n_events_missing': 0}
+                  'skipped': 0, 'n_events_missing': 0, 'failed': 0}
 
         for dirpath, _dirs, filenames in os.walk(root_dir):
             per_chan = sorted(
@@ -2385,12 +2472,25 @@ class ParalPAC:
                 # and pass it explicitly, so the importer is not the sole line
                 # of defense against underscore-containing channel labels.
                 ctx = self._infer_pac_context_from_path(csv_path)
-                r = self.import_pac_csv_to_database(
-                    csv_path, db_path, subject, channel=ctx['channel'])
                 totals['files'] += 1
+                # import_pac_csv_to_database now raises on failure; catch per
+                # file so one unreadable CSV does not abort a whole back-fill,
+                # and count it so the caller sees a non-zero failure tally
+                # instead of a silently short run.
+                try:
+                    r = self.import_pac_csv_to_database(
+                        csv_path, db_path, subject, channel=ctx['channel'])
+                except Exception as e:
+                    totals['failed'] += 1
+                    logger.error(f"Back-fill failed for {csv_path}: {e}")
+                    continue
                 for k in ('added', 'updated', 'skipped', 'n_events_missing'):
                     totals[k] += r.get(k, 0)
 
+        if totals['failed']:
+            logger.warning(
+                f"PAC back-fill finished with {totals['failed']} failed "
+                f"file(s) out of {totals['files']}")
         logger.info(f"PAC back-fill complete: {totals}")
         return totals
 

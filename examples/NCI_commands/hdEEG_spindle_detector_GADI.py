@@ -7,7 +7,8 @@ import logging
 
 from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalEvents, CustomAnnotations
+from turtlewave_hdEEG import ParalEvents, CustomAnnotations, fmt_freq_token
+from turtlewave_hdEEG.dbwrite import verify_channel_coverage
 
 def find_one(patterns):
     """Return the first existing path matched by any of the glob patterns, else None."""
@@ -126,23 +127,78 @@ def main():
         resume              = args.resume,
     )
 
-    freq_range = f"{f_lo:.1f}-{f_hi:.1f}Hz"
+    # MUST use the same helper the detector used to name its JSON files.
+    # The old f"{f_lo:.1f}" here rounded 1.25 Hz to '1.2', matched zero files,
+    # and produced an empty run that still reported success.
+    freq_range = fmt_freq_token(f_lo, f_hi)
     stages_str = "".join(test_stages)
-    file_pattern = f"spindles_{test_method}_{freq_range}_{stages_str}"
+    # --method is free-form here, so a slashed method would otherwise put a
+    # path separator into file_pattern and the CSV names below, pointing
+    # them at a directory that does not exist. Escape for filenames only;
+    # the database still gets the unescaped test_method.
+    test_method_str = test_method.replace("/", "_")
+    file_pattern = f"spindles_{test_method_str}_{freq_range}_{stages_str}"
+
+    def check_coverage_or_exit():
+        """Verify the run reached the database, else log and exit non-zero.
+
+        An unconditional success message here is what let a zero-match
+        ``file_pattern`` lose an entire subject's spindles without anyone
+        noticing; PBS only sees the exit status.
+        """
+        coverage = verify_channel_coverage(
+            db_path            = db_path,
+            event_type         = "spindle",
+            method             = test_method,
+            requested_channels = test_channels,
+            freq_lower         = f_lo,
+            freq_upper         = f_hi,
+            stage_key          = stages_str,
+            logger             = logger,
+        )
+        logger.info(
+            f"Database coverage: {coverage['covered']}/{coverage['requested']} "
+            f"channels accounted for ({coverage['with_events']} with events) "
+            f"for event_type=spindle, method={test_method}, band={freq_range}, "
+            f"stages={stages_str}"
+            f"{'' if coverage['scoped_status'] else ' [unscoped status check]'}")
+        if coverage['failed']:
+            logger.error(
+                f"{len(coverage['failed'])} channel(s) recorded a FAILURE for "
+                f"this exact scope: {', '.join(coverage['failed'][:20])}")
+        if not coverage['complete']:
+            missing = coverage['missing']
+            logger.error(
+                f"{len(missing)} requested channel(s) have no events and no "
+                f"successful processing_status record for this scope in "
+                f"{db_path}: {', '.join(missing[:20])}"
+                f"{' ...' if len(missing) > 20 else ''}")
+            sys.exit(1)
+        if coverage['events_only']:
+            # events.stage is per-epoch, so these rows cannot be proven to
+            # come from THIS run's stage set. Say so rather than claim clean.
+            logger.warning(
+                f"{len(coverage['events_only'])} channel(s) are accounted for "
+                f"by existing event rows only, with no processing_status "
+                f"record for this exact scope; their events may predate this "
+                f"run: {', '.join(coverage['events_only'][:20])}"
+                f"{' ...' if len(coverage['events_only']) > 20 else ''}")
+        logger.info("All done: every requested channel is accounted for in "
+                    "the database")
 
     if args.write_db:
         # Events are already in neural_events.db (with det_* + spectral columns
         # and provenance). The JSON->CSV->import steps are not needed. A flat CSV
         # can be produced on demand from the DB with export_events_to_csv.
         logger.info(f"Direct-to-DB run complete; events written to {db_path}")
-        logger.info("All done (direct-to-DB)")
+        check_coverage_or_exit()
         return
 
     logger.info("Initializing SQLite database...")
     event_processor.initialize_sqlite_database(db_path)
 
-    params_csv = os.path.join(json_dir, f"spindle_parameters_{test_method}_{freq_range}_{stages_str}.csv")
-    dens_csv   = os.path.join(json_dir, f"spindle_density_{test_method}_{freq_range}_{stages_str}.csv")
+    params_csv = os.path.join(json_dir, f"spindle_parameters_{test_method_str}_{freq_range}_{stages_str}.csv")
+    dens_csv   = os.path.join(json_dir, f"spindle_density_{test_method_str}_{freq_range}_{stages_str}.csv")
 
     logger.info("Exporting parameters CSV...")
     event_processor.export_spindle_parameters_to_csv(
@@ -152,20 +208,32 @@ def main():
     )
 
     logger.info("Importing parameters into SQLite...")
-    event_processor.import_parameters_csv_to_database(
-        csv_file = params_csv,
-        db_path  = db_path
+    # Pass event_type/method explicitly: the importer would otherwise take
+    # filename.split('_')[2], which stamps one method on every row.
+    import_stats = event_processor.import_parameters_csv_to_database(
+        csv_file   = params_csv,
+        db_path    = db_path,
+        event_type = "spindle",
+        method     = test_method
     )
+    logger.info(f"Import stats: {import_stats}")
 
     logger.info("Exporting density CSV...")
+    # Forward the run's own rejection settings. The density denominator is
+    # the recording time the detector actually analysed; leaving these to the
+    # exporter's assumption (both True) while detection ran with
+    # --reject_arousals off subtracts arousal time the detector never
+    # excluded, which biases every density downward.
     event_processor.export_spindle_density_to_csv(
-        json_input   = json_dir,
-        csv_file     = dens_csv,
-        stage        = test_stages,
-        file_pattern = file_pattern
+        json_input       = json_dir,
+        csv_file         = dens_csv,
+        stage            = test_stages,
+        file_pattern     = file_pattern,
+        reject_artifacts = args.reject_artifacts,
+        reject_arousals  = args.reject_arousals
     )
 
-    logger.info("All done ✓")
+    check_coverage_or_exit()
 
 if __name__ == "__main__":
     main()

@@ -20,8 +20,13 @@ python examples/backfill_pac_to_db.py \
     --db   /path/to/SUBJECT/wonambi/neural_events.db
 ```
 
-By default the subject id is the basename of `--root`'s parent chain; override
-it explicitly if that's not what you want:
+By default (`--subject` omitted, or `folder`) the subject id is resolved by
+the shared [`derive_subject`](../reference/api/utils.md) with `root_dir=--root`
+— the basename of `--root` itself, prefixed with `sub-` if it doesn't already
+have one. Because `--root` in the example above points at the `pac_results`
+leaf directory rather than the subject folder, that default resolves to
+`sub-pac_results`, which is almost never what you want here — pass `--subject`
+explicitly whenever `--root` isn't itself the subject directory:
 
 ```bash
 python examples/backfill_pac_to_db.py \
@@ -78,6 +83,14 @@ The script exits non-zero if any row was rejected for a missing event count,
 so a batch harness can flag files needing attention. Investigate any
 `n_events_missing` rows — they need their sibling `*_mean_amps.npy` restored,
 or a re-run of that channel's PAC analysis.
+
+`backfill_pac_directory` (the function underneath the script) also returns a
+`failed` count of CSVs whose import raised an exception. A per-file failure
+is caught and logged so one bad CSV doesn't abort the whole walk, but it no
+longer disappears into a printed traceback — it is tallied and the walk logs
+a warning if `failed` is non-zero. `examples/backfill_pac_to_db.py`'s summary
+does not currently print this field; call `backfill_pac_directory` directly
+(see below) if you need to check it programmatically.
 
 ## Programmatic equivalent
 

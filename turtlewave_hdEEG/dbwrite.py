@@ -37,6 +37,7 @@ JSON + CSV pipeline is unaffected.
 import os
 import csv
 import uuid
+import logging
 import sqlite3
 import subprocess
 import datetime
@@ -236,32 +237,707 @@ def provenance():
     return versions
 
 
-def open_write_connection(db_path):
-    """Open a single-writer SQLite connection tuned for the qsub-per-subject model.
+# Environment variable overriding the SQLite journal mode for every database
+# this process opens. Exists because WAL cannot work on a network filesystem.
+_JOURNAL_ENV = 'TURTLEWAVE_SQLITE_JOURNAL'
 
-    WAL journalling plus a long busy timeout let a per-subject writer coexist
-    with concurrent readers without ``database is locked`` errors. This does not
-    make concurrent *writers* safe; the pipeline runs one writer per subject.
+# Journal modes SQLite accepts. A value outside this set is a user typo and is
+# rejected loudly rather than silently leaving the database in the wrong mode.
+# Public so CLIs (turtlewave_set_journal_mode) can validate up front against the
+# same list instead of keeping their own copy.
+VALID_JOURNAL_MODES = ('DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF')
+
+# Journal mode given to a database this package CREATES when neither the caller
+# nor the environment asked for one. DELETE, not WAL: WAL needs a memory-mapped
+# -shm sidecar that SMB/NFS/mapped drives and cloud-sync clients (Dropbox,
+# OneDrive) cannot provide, and a database born in WAL on such a share is broken
+# from its first write ('disk I/O error', or a sync client corrupting the
+# sidecars into 'database disk image is malformed'). DELETE works everywhere at
+# the cost of readers and the writer blocking each other; that is the right
+# trade for a pipeline that runs one writer per subject. Set
+# TURTLEWAVE_SQLITE_JOURNAL=WAL to get WAL back on fast local disk.
+DEFAULT_NEW_DB_JOURNAL_MODE = 'DELETE'
+
+
+def _is_blank(value):
+    """Return True for ``None`` or a string that is empty/whitespace-only.
+
+    Parameters
+    ----------
+    value : str or None
+        Candidate journal-mode value from an argument or the environment.
+
+    Returns
+    -------
+    bool
+        ``True`` when the value expresses no preference at all.
+    """
+    return value is None or not str(value).strip()
+
+
+def _resolve_journal_mode(requested=None):
+    """Resolve an explicitly *requested* journal mode, or ``None`` if unstated.
+
+    Precedence is the explicit argument, then the ``TURTLEWAVE_SQLITE_JOURNAL``
+    environment variable. This function itself applies no default: ``None``
+    means "the caller expressed no preference", which lets
+    :func:`open_write_connection` preserve whatever mode an existing database is
+    already in instead of imposing one on it, and fall back to
+    :data:`DEFAULT_NEW_DB_JOURNAL_MODE` only for a database it creates.
+
+    An empty or whitespace-only value counts as *unset*, at either level. This
+    matters because blanking a variable rather than unsetting it is ordinary
+    POSIX practice -- a PBS/bash job template that does
+    ``export TURTLEWAVE_SQLITE_JOURNAL="$SOMETHING_UNSET"`` exports an empty
+    string, and treating that as a mode would make every database open in the
+    job fail with a ``ValueError`` about an unrecognised mode ``''``.
+
+    Parameters
+    ----------
+    requested : str or None, optional
+        Explicit mode. When ``None`` (or blank) the environment variable is
+        consulted.
+
+    Returns
+    -------
+    str or None
+        Upper-case journal mode (one of :data:`VALID_JOURNAL_MODES`), or
+        ``None`` when neither the argument nor the environment variable named
+        one (including when either is set but blank).
+
+    Raises
+    ------
+    ValueError
+        If a non-blank value *was* given but is not a recognised SQLite journal
+        mode. This is deliberately fatal: a typo that fell through to a default
+        would leave the user in WAL believing they had left it.
+    """
+    mode = requested
+    if _is_blank(mode):
+        mode = os.environ.get(_JOURNAL_ENV)
+    if _is_blank(mode):
+        # Nothing (or nothing but whitespace) requested at either level.
+        return None
+    mode = str(mode).strip().upper()
+    if mode not in VALID_JOURNAL_MODES:
+        raise ValueError(
+            f"Unrecognised SQLite journal mode {mode!r}. Valid modes are "
+            f"{', '.join(VALID_JOURNAL_MODES)}. Check the value of the "
+            f"{_JOURNAL_ENV} environment variable (or the 'journal' argument).")
+    return mode
+
+
+def _explain_io_error(exc, db_path):
+    """Attach the network-drive diagnosis to a SQLite ``disk I/O error``.
+
+    ``SQLITE_IOERR`` reaches the user as a bare
+    ``sqlite3.OperationalError: disk I/O error`` that names neither the file nor
+    the cause, and the overwhelmingly common cause in this pipeline is a
+    WAL-mode database on a network filesystem. This rewrites the message to say
+    so and to point at the fix.
+
+    Deliberately fail-open: anything that is not the I/O error is returned
+    unchanged, so a lock, a missing table or a corrupt file is never
+    mis-diagnosed as a network problem.
+
+    Parameters
+    ----------
+    exc : sqlite3.OperationalError
+        The original exception.
+    db_path : str
+        Database the operation was against, named in the new message.
+
+    Returns
+    -------
+    Exception
+        Either ``exc`` unchanged, or a new ``sqlite3.OperationalError`` (same
+        class, so existing ``except`` clauses still match) chained to ``exc``.
+    """
+    if 'disk i/o error' not in str(exc).lower():
+        return exc
+    explained = sqlite3.OperationalError(
+        f"disk I/O error on {db_path}. The usual cause is a database on a "
+        f"network/mapped drive or a synced folder (Dropbox, OneDrive) while in "
+        f"WAL journal mode: WAL needs a shared-memory (-shm) file that such "
+        f"filesystems cannot provide. Fix: close every GUI, then convert the "
+        f"database once with "
+        f"turtlewave_hdEEG.set_journal_mode(r'{db_path}') -- or run "
+        f"turtlewave_set_journal_mode \"{db_path}\" from the command line "
+        f"(it also takes a directory or --glob to convert a whole tree). If "
+        f"that write also "
+        f"fails, copy the database WITH its -wal/-shm sidecars to local disk, "
+        f"convert it there and copy it back. See "
+        f"docs/how-to/run-with-database-on-a-network-drive.md.")
+    # Chained by hand: 'raise X from Y' is only valid on a raise statement, and
+    # this helper returns the exception for the caller to raise.
+    explained.__cause__ = exc
+    return explained
+
+
+def open_write_connection(db_path, journal=None, logger=None):
+    """Open a connection that preserves an existing database's journal mode.
+
+    A database this call *creates* is set to
+    :data:`DEFAULT_NEW_DB_JOURNAL_MODE` (``'DELETE'``, the only mode that works
+    on a network or cloud-synced drive); an existing database keeps whatever
+    mode it is already in, unless ``journal`` or
+    ``TURTLEWAVE_SQLITE_JOURNAL`` explicitly names one. Every connection also
+    gets a 60 s busy timeout, which is what lets a per-subject writer coexist
+    with concurrent readers (e.g. the review GUI) without ``database is
+    locked`` errors; it does not make concurrent *writers* safe -- the
+    pipeline runs one writer per subject.
+
+    See ``docs/explanation/database-concurrency-and-journalling.md`` for why a
+    new database is created in DELETE rather than WAL, why journal mode is a
+    persistent on-disk property, and why that makes an unconditional default
+    dangerous; see ``docs/how-to/run-with-database-on-a-network-drive.md`` for
+    the task-oriented fix.
 
     Parameters
     ----------
     db_path : str
         Path to the SQLite database file.
+    journal : str or None, optional
+        Journal mode to impose. ``None`` (the default) falls back to the
+        ``TURTLEWAVE_SQLITE_JOURNAL`` environment variable and, failing that, to
+        preserving an existing database's mode /
+        :data:`DEFAULT_NEW_DB_JOURNAL_MODE` for a new one.
+    logger : logging.Logger or None, optional
+        Logger for the mode-in-force INFO line and the not-applied warning.
+        Defaults to this module's logger.
 
     Returns
     -------
     sqlite3.Connection
-        Open connection with ``journal_mode=WAL`` and ``busy_timeout=60000`` ms.
+        Open connection with a 60 s busy timeout and, when SQLite accepted
+        it, the requested journal mode.
+
+    Raises
+    ------
+    ValueError
+        If ``journal`` or ``TURTLEWAVE_SQLITE_JOURNAL`` names a mode SQLite
+        does not recognise.
+
+    Notes
+    -----
+    The contract a caller needs:
+
+    * An existing database's mode is read and left alone unless ``journal``
+      or ``TURTLEWAVE_SQLITE_JOURNAL`` names one explicitly -- an explicit
+      request always overrides, in either direction (including converting a
+      ``DELETE``-mode database back to ``WAL``). To convert a database once
+      and have it stick, use :func:`set_journal_mode` instead of relying on
+      an env var on every run.
+    * A database this call creates gets :data:`DEFAULT_NEW_DB_JOURNAL_MODE`
+      (``'DELETE'``) when nothing else is requested, so a database created
+      straight onto a share or a synced folder is usable from its first write.
+      ``TURTLEWAVE_SQLITE_JOURNAL=WAL`` opts back into WAL on local disk.
+    * Existence is checked with :func:`os.path.exists` *before* connecting
+      (connecting would otherwise create the file). A zero-byte placeholder
+      file therefore counts as existing and is left in SQLite's reported
+      ``delete`` mode.
+    * The 60 s ``timeout`` passed to :func:`sqlite3.connect` is the busy
+      timeout, already in force before any pragma runs -- leaving WAL takes
+      an exclusive lock and would otherwise fail instantly with
+      ``database is locked``.
+    * When a mode *is* imposed and SQLite does not honour it, this **warns,
+      not raises** -- so a detection run survives another process
+      legitimately holding the database. :func:`set_journal_mode` is the
+      version of this check that raises, for callers whose only job is the
+      conversion.
+    * A ``disk I/O error`` raised while opening is re-raised with the
+      network-filesystem diagnosis and the fix attached; see
+      :func:`_explain_io_error`. ``WAL`` needs a memory-mapped shared-memory
+      file that SMB/NFS/mapped-drive/cloud-synced filesystems generally
+      cannot provide, which is what SQLite reports as this error.
+    * ``OFF`` disables the rollback journal entirely -- a crash or power
+      loss mid-transaction leaves the database corrupt, with no atomicity.
+      Do not use it on data you cannot regenerate.
     """
+    mode = _resolve_journal_mode(journal)
+    log = logger if logger is not None else logging.getLogger(__name__)
+    # Tested before connect(): connecting creates the file.
+    existed = os.path.exists(db_path)
+    conn = None
+    try:
+        # timeout= IS the busy timeout: sqlite3.connect passes it to
+        # sqlite3_busy_timeout, so it is already in force before any pragma
+        # below. That ordering matters because leaving WAL takes an exclusive
+        # lock and would otherwise fail instantly with 'database is locked'.
+        conn = sqlite3.connect(db_path, timeout=60.0)
+
+        if mode is None:
+            if existed:
+                # No mode requested and the database is not ours to re-mode.
+                # Read (never set) the current mode and report it, so a run
+                # against a DELETE-mode database is visible in the log rather
+                # than silent.
+                current = str(conn.execute(
+                    'PRAGMA journal_mode').fetchone()[0]).lower()
+                log.info(
+                    f"SQLite journal_mode={current} in force for {db_path} "
+                    f"(existing database; mode preserved, not overridden). "
+                    f"Set {_JOURNAL_ENV} or pass journal= to impose one.")
+                return conn
+            # This call is creating the database, so the choice is ours, and it
+            # is DELETE: a database born in WAL on a share or a synced folder is
+            # unusable (see DEFAULT_NEW_DB_JOURNAL_MODE). Logged, because it is
+            # the one place this package decides a persistent on-disk property.
+            mode = DEFAULT_NEW_DB_JOURNAL_MODE
+            log.info(
+                f"Creating {db_path} with SQLite journal_mode={mode.lower()} "
+                f"(default for a new database; network- and sync-safe). Set "
+                f"{_JOURNAL_ENV}=WAL for WAL on local disk.")
+
+        actual = conn.execute(f'PRAGMA journal_mode={mode}').fetchone()[0]
+        if str(actual).upper() != mode:
+            log.warning(
+                f"Requested SQLite journal_mode={mode} for {db_path} but the "
+                f"database is in {str(actual).upper()}. Another connection is "
+                f"probably holding it. Set {_JOURNAL_ENV} and/or run "
+                f"set_journal_mode() with every other process closed.")
+        return conn
+    except sqlite3.OperationalError as e:
+        if conn is not None:
+            conn.close()
+        raise _explain_io_error(e, db_path)
+
+
+def set_journal_mode(db_path, mode='DELETE', logger=None):
+    """Convert an existing database to a different journal mode, permanently.
+
+    The repair for a ``neural_events.db`` stuck in WAL on a network drive: WAL
+    is a persistent on-disk property, so a database created by an earlier run
+    stays in WAL for every later connection until it is explicitly converted.
+    The conversion sticks: :func:`open_write_connection` preserves an existing
+    database's mode, so a later detection run will not silently undo this.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database file.
+    mode : str, optional
+        Target journal mode (default ``'DELETE'``, the network-safe choice).
+        Passing ``None`` falls back to ``TURTLEWAVE_SQLITE_JOURNAL`` and raises
+        if that is unset too -- unlike :func:`open_write_connection` there is
+        nothing sensible to preserve here.
+    logger : logging.Logger or None, optional
+        Logger for the blocked-checkpoint warning. Defaults to this module's
+        logger.
+
+    Returns
+    -------
+    str
+        The journal mode SQLite reports after the change, lower-case as SQLite
+        spells it (e.g. ``'delete'``).
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not a recognised SQLite journal mode, or resolves to
+        nothing at all.
+    RuntimeError
+        If the mode did not change. Leaving WAL requires an exclusive lock, so
+        another open connection blocks the conversion. SQLite signals this two
+        different ways -- ``SQLITE_BUSY`` ("database is locked"), or returning
+        the *current* mode, i.e. output shaped like success for what was a
+        no-op. Both become this one error, because converting is this
+        function's only job. Close every review GUI and other process first.
+        A ``sqlite3.OperationalError`` that is *not* a lock (notably
+        ``disk I/O error``) keeps its class and propagates, so the
+        network-filesystem failure is never mis-reported as a lock; only its
+        message is rewritten, with the diagnosis and fix, by
+        :func:`_explain_io_error`. That applies to the pre-conversion
+        checkpoint as much as to the conversion itself -- on a failing share
+        the checkpoint is the first write and so usually fails first.
+
+    Notes
+    -----
+    Checkpointing is not optional here. When the database is in WAL, committed
+    data can live in the ``-wal`` sidecar rather than the ``.db`` file, so this
+    runs ``PRAGMA wal_checkpoint(TRUNCATE)`` first and checks the returned
+    ``(busy, log, checkpointed)`` row. A non-zero ``busy`` means the checkpoint
+    was blocked, the ``-wal`` file still holds committed transactions, and a
+    later copy of ``neural_events.db`` alone would silently discard them; that
+    case is warned about explicitly.
+
+    On a share that is *already* failing, this conversion is itself a write and
+    may fail with the same ``disk I/O error``. The reliable recipe is then:
+    copy the database to local disk **together with its ``-wal``/``-shm``
+    sidecars** (or checkpoint it first), convert it locally, and copy it back.
+    Never copy a WAL database without its sidecars.
+    """
+    mode = _resolve_journal_mode(mode)
+    if mode is None:
+        # Only reachable via an explicit mode=None with no environment
+        # variable. Unlike open_write_connection there is no sane "preserve"
+        # fallback here: converting is the entire job.
+        raise ValueError(
+            f"set_journal_mode needs a target mode: pass mode= (one of "
+            f"{', '.join(VALID_JOURNAL_MODES)}) or set {_JOURNAL_ENV}.")
+    log = logger if logger is not None else logging.getLogger(__name__)
+    # timeout= is the busy timeout; no separate PRAGMA busy_timeout needed.
     conn = sqlite3.connect(db_path, timeout=60.0)
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA busy_timeout=60000')
-    return conn
+    try:
+        # The mode probe and the checkpoint both run BEFORE the journal_mode
+        # pragma below, and on a failing share the checkpoint is the first
+        # *write* attempted -- so it, not the conversion, is where 'disk I/O
+        # error' usually surfaces. Translate it here too, or the user gets the
+        # bare error with none of the network-drive guidance. _explain_io_error
+        # fails open, so a lock here still propagates unchanged as before.
+        try:
+            before = str(conn.execute(
+                'PRAGMA journal_mode').fetchone()[0]).lower()
+            if before == 'wal':
+                row = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                if row is not None and row[0]:
+                    log.warning(
+                        f"wal_checkpoint(TRUNCATE) was blocked on {db_path} "
+                        f"(busy={row[0]}): committed data may still sit in the "
+                        f"-wal sidecar. Copying the .db file alone would lose "
+                        f"it.")
+        except sqlite3.OperationalError as e:
+            raise _explain_io_error(e, db_path)
+        try:
+            after = str(conn.execute(
+                f'PRAGMA journal_mode={mode}').fetchone()[0]).lower()
+        except sqlite3.OperationalError as e:
+            # A held lock is the expected "another process has it open" case and
+            # becomes a RuntimeError with the same actionable message as the
+            # silent-no-op case. Anything else -- notably 'disk I/O error', the
+            # network-share failure this whole feature exists for -- must
+            # propagate unchanged rather than be mis-diagnosed as a lock.
+            msg = str(e).lower()
+            if 'lock' not in msg and 'busy' not in msg:
+                # Still an OperationalError, but with the network-drive
+                # diagnosis attached when it is the disk I/O error.
+                raise _explain_io_error(e, db_path)
+            raise RuntimeError(
+                f"Failed to set journal_mode={mode} on {db_path}: {e}. "
+                f"Another connection is holding the database. Close every "
+                f"GUI/process using it and retry.") from e
+        if after != mode.lower():
+            raise RuntimeError(
+                f"Failed to set journal_mode={mode} on {db_path}: still in "
+                f"{after!r}. Another connection is holding the database "
+                f"(SQLite reports the current mode instead of erroring). "
+                f"Close every GUI/process using it and retry.")
+        return after
+    finally:
+        conn.close()
 
 
 def _table_columns(conn, table):
     cur = conn.execute(f"PRAGMA table_info({table})")
     return {row[1] for row in cur.fetchall()}
+
+
+def verify_channel_coverage(db_path, event_type, method, requested_channels,
+                            freq_lower, freq_upper, stage_key, logger=None):
+    """Check that every requested channel is accounted for in the database.
+
+    A detection run is complete only if each requested channel either has
+    events stored for the run's scope, or carries a ``processing_status`` row
+    for that same scope recording ``success = 1``. Counting events alone would
+    flag a genuinely event-free channel as a failure; counting status alone
+    would miss a channel whose events never reached ``events``. The union of
+    the two is the honest check, and it is what lets a batch driver exit
+    non-zero instead of printing "All done" over an empty database.
+
+    Two properties are load-bearing, and getting either wrong reproduces the
+    silent-success bug this function exists to catch:
+
+    * **``success = 1``, not ``processed = 1``.** ``upsert_processing_status``
+      hardcodes ``processed = 1`` and encodes the outcome in ``success``, so
+      :func:`record_channel_failure` writes ``processed = 1, success = 0``.
+      Filtering on ``processed`` would count a channel that crashed
+      mid-detection as covered.
+    * **The full scope, not just the event type.** Without the
+      method/band/stage columns, a status row left by an earlier run of a
+      different method or band masks a channel that never ran in the current
+      one.
+
+    The ``events`` half cannot be scoped by stage: ``events.stage`` records
+    each event's own epoch stage, not the run's joined stage key, so
+    filtering on it would discard valid rows. Two things limit the resulting
+    blind spot. A channel with an in-scope ``success = 0`` row is excluded
+    whatever events exist for it, which closes the case where a re-run over a
+    narrower stage set crashes on a channel an earlier run had populated. And
+    channels vouched for by events alone are returned in ``events_only`` so a
+    caller can report how much of its "complete" rests on the weaker
+    evidence. A channel killed outright (no status row written at all) whose
+    events predate the run is the residual case ``events_only`` exists to
+    surface.
+
+    The unscoped fallback fires only on ``sqlite3.OperationalError``, i.e. a
+    ``processing_status`` table not yet widened to the per-scope primary key
+    by :func:`ensure_direct_write_schema` — the same condition and the same
+    handling as :func:`resume_skip_channels`. It still requires
+    ``success = 1``.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the SQLite database.
+    event_type : str
+        Event type of the run (``'spindle'``, ``'slow_wave'``, ...).
+    method : str
+        Detection method as stored in ``events.method`` (the unescaped string,
+        e.g. ``'AASM/Massimini2004'``).
+    requested_channels : list of str
+        Channels the run was asked to process.
+    freq_lower, freq_upper : float
+        Band bounds of the run. Required: they are part of the scope.
+    stage_key : str
+        Joined stage set of the run (e.g. ``'NREM2NREM3'``). Required: it is
+        part of the scope.
+    logger : logging.Logger or None, optional
+        Logger used to report when the unscoped fallback was taken.
+
+    Returns
+    -------
+    dict
+        ``{'requested': int, 'with_events': int, 'covered': int,
+        'missing': list of str, 'complete': bool, 'scoped_status': bool,
+        'failed': list of str, 'events_only': list of str}``.
+        ``scoped_status`` is False when the unscoped fallback was used;
+        ``failed`` lists channels with an in-scope failure; ``events_only``
+        lists channels credited by event rows alone, whose evidence cannot be
+        stage-scoped. A caller reporting success should report
+        ``events_only`` too.
+    """
+    requested = [str(c) for c in (requested_channels or [])]
+    result = {'requested': len(requested), 'with_events': 0, 'covered': 0,
+              'missing': list(requested), 'complete': False,
+              'scoped_status': True}
+
+    if not os.path.exists(db_path):
+        return result
+
+    # Read-only, but with the writers' 60 s busy timeout: under DELETE journal
+    # mode a writer blocks readers, so Python's 5 s default would fail this
+    # coverage check whenever a detection run is mid-write.
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    try:
+        # NOTE: the events half cannot be scoped by stage. events.stage holds
+        # the per-epoch stage of each event ('NREM2'), not the run's joined
+        # stage key ('NREM2NREM3'), so filtering on it would reject valid
+        # rows. Two mitigations below: an in-scope FAILURE always wins over
+        # event evidence, and channels credited by events alone are counted
+        # and reported.
+        with_events = {str(r[0]) for r in conn.execute('''
+            SELECT DISTINCT channel FROM events
+            WHERE event_type = ? AND method = ?
+              AND freq_lower = ? AND freq_upper = ?
+            ''', (event_type, method, float(freq_lower),
+                  float(freq_upper))).fetchall()}
+
+        try:
+            succeeded = {str(r[0]) for r in conn.execute('''
+                SELECT channel FROM processing_status
+                WHERE event_type = ? AND method = ? AND freq_lower = ?
+                  AND freq_upper = ? AND stage = ? AND success = 1
+                ''', (event_type, method, float(freq_lower), float(freq_upper),
+                      stage_key)).fetchall()}
+            # A channel that FAILED in exactly this scope is never covered,
+            # whatever events an earlier run over a different stage set left
+            # behind. This is what closes the stage-scope leak: run A over
+            # NREM2+NREM3 leaves Cz events; run B over NREM3 only crashes on
+            # Cz; run B must not be credited by run A's rows.
+            failed = {str(r[0]) for r in conn.execute('''
+                SELECT channel FROM processing_status
+                WHERE event_type = ? AND method = ? AND freq_lower = ?
+                  AND freq_upper = ? AND stage = ? AND success = 0
+                ''', (event_type, method, float(freq_lower), float(freq_upper),
+                      stage_key)).fetchall()}
+        except sqlite3.OperationalError:
+            # processing_status not yet migrated to the wide schema; the scope
+            # columns do not exist. Same fallback as resume_skip_channels.
+            result['scoped_status'] = False
+            if logger is not None:
+                logger.warning(
+                    "processing_status has no per-scope columns (unmigrated "
+                    "database); falling back to an event_type-only status "
+                    "check. A status row from a different method or band "
+                    "cannot be distinguished.")
+            succeeded = {str(r[0]) for r in conn.execute(
+                "SELECT channel FROM processing_status "
+                "WHERE event_type = ? AND success = 1",
+                (event_type,)).fetchall()}
+            failed = {str(r[0]) for r in conn.execute(
+                "SELECT channel FROM processing_status "
+                "WHERE event_type = ? AND success = 0",
+                (event_type,)).fetchall()} - succeeded
+    finally:
+        conn.close()
+
+    covered = (with_events | succeeded) - failed
+    missing = [c for c in requested if c not in covered]
+    # Channels vouched for by events alone, with no status row for this exact
+    # scope. Their events may predate this run (they cannot be stage-scoped),
+    # so this is the weaker half of the evidence and the caller should say so.
+    events_only = [c for c in requested
+                   if c in covered and c not in succeeded]
+    result.update({
+        'with_events': len(with_events & set(requested)),
+        'covered': len(requested) - len(missing),
+        'missing': missing,
+        'complete': not missing,
+        'failed': sorted(failed & set(requested)),
+        'events_only': events_only,
+    })
+    return result
+
+
+def guard_run_id(conn, event_type, method, freq_lower=None, freq_upper=None,
+                 force=False, logger=None):
+    """Refuse a CSV import that would blank direct-written provenance.
+
+    The CSV importers write with ``INSERT OR REPLACE`` keyed on a
+    deterministic event UUID, and their column list has no ``run_id``. So
+    re-importing a CSV over rows that the direct-to-database path wrote
+    replaces those rows with ``run_id = NULL``, severing them from their
+    ``detection_runs`` provenance without any error. This guard detects that
+    situation before the write loop starts.
+
+    A database with no ``run_id`` column at all (one built entirely by the
+    legacy CSV path) has nothing to protect: the function returns 0 rather
+    than raising an ``OperationalError`` on the missing column.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection to the target database.
+    event_type : str
+        Event type being imported (``'spindle'``, ``'slow_wave'``, ...).
+    method : str
+        Detection method being imported.
+    freq_lower, freq_upper : float or None, optional
+        Band bounds narrowing the scope. Omitted from the check when None.
+    force : bool, optional
+        Proceed (with a warning) instead of raising.
+    logger : logging.Logger or None, optional
+        Logger for the warning emitted when ``force`` is True.
+
+    Returns
+    -------
+    int
+        Number of direct-written rows found in the scope (0 when the column
+        is absent or nothing matches).
+
+    Raises
+    ------
+    RuntimeError
+        If direct-written rows exist in the scope and ``force`` is False.
+    """
+    if 'run_id' not in _table_columns(conn, 'events'):
+        return 0
+
+    sql = ("SELECT COUNT(*) FROM events "
+           "WHERE run_id IS NOT NULL AND event_type = ? AND method = ?")
+    params = [event_type, method]
+    if freq_lower is not None:
+        sql += " AND freq_lower = ?"
+        params.append(float(freq_lower))
+    if freq_upper is not None:
+        sql += " AND freq_upper = ?"
+        params.append(float(freq_upper))
+
+    n_rows = conn.execute(sql, params).fetchone()[0]
+    if not n_rows:
+        return 0
+
+    band = ''
+    if freq_lower is not None and freq_upper is not None:
+        band = f" {fmt_freq_token(freq_lower, freq_upper)}"
+    scope = f"event_type={event_type!r}, method={method!r}{band}"
+
+    if force:
+        if logger is not None:
+            logger.warning(
+                f"force=True: importing over {n_rows} direct-written row(s) "
+                f"({scope}); their run_id provenance will be cleared.")
+        return n_rows
+
+    raise RuntimeError(
+        f"Refusing to import: {n_rows} row(s) in this scope ({scope}) were "
+        f"written by the direct-to-database path and carry a run_id linking "
+        f"them to detection_runs. A CSV import is INSERT OR REPLACE and would "
+        f"blank that run_id. Re-run detection with write_db=True to update "
+        f"them, or pass force=True to overwrite and lose the provenance link.")
+
+
+def ensure_pac_schema(conn):
+    """Create the ``pac_coupling`` table and its indexes if absent.
+
+    Purely additive: it never touches ``events``, ``processing_status``,
+    ``sleep_cycles`` or ``stage_durations``. The primary key is the natural
+    key of a PAC result (subject, channel, event type, method, stage, and the
+    phase/amplitude frequency bounds), so a re-run with identical parameters
+    replaces its own row rather than inserting a duplicate.
+
+    This lives in ``dbwrite`` rather than ``pacprocessor`` so that
+    :func:`ensure_direct_write_schema` can create the table on every detection
+    run. A reader (review GUI, analysis notebook) then never hits
+    ``OperationalError: no such table: pac_coupling`` on a database where PAC
+    has not been run yet — it sees an empty table, which is the truth.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. The caller owns the connection lifecycle;
+        this function commits but does not close.
+
+    Returns
+    -------
+    None
+    """
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS pac_coupling (
+        -- Natural key
+        subject TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        event_type TEXT NOT NULL,       -- 'slow_wave', 'spindle', 'sw_spindle'
+        method TEXT NOT NULL,           -- detector / pairing method token
+        stage TEXT NOT NULL,            -- combined stage string (e.g. 'NREM2NREM3')
+        phase_freq_lower REAL NOT NULL,
+        phase_freq_upper REAL NOT NULL,
+        amp_freq_lower REAL NOT NULL,
+        amp_freq_upper REAL NOT NULL,
+
+        -- Coupling metrics (NaN stored as NULL)
+        mi_raw REAL,
+        mi_norm REAL,
+        median_mi_pval REAL,
+        preferred_phase_rad REAL,
+        preferred_phase_deg REAL,
+        mean_vector_length REAL,
+        rho REAL,
+        rayleigh_z REAL,
+        rayleigh_p REAL,
+
+        -- Number of artefact-free segments/events actually coupled.
+        -- NOT NULL by design: a row with an unrecoverable event count is
+        -- rejected upstream and flagged for re-run, never stored as 0/NULL.
+        n_events INTEGER NOT NULL,
+
+        -- Provenance
+        idpac TEXT,                     -- str(tuple) of (method, surrogate, correction)
+        ref_chan TEXT,
+        invert INTEGER,                 -- 0/1 polarity flag actually used
+        turtlewave_version TEXT,
+        processing_timestamp TEXT,
+        source_path TEXT,
+
+        PRIMARY KEY (subject, channel, event_type, method, stage,
+                     phase_freq_lower, phase_freq_upper,
+                     amp_freq_lower, amp_freq_upper)
+    )''')
+
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_subject ON pac_coupling(subject)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_channel ON pac_coupling(channel)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_pac_method_stage ON pac_coupling(method, stage)')
+    conn.commit()
 
 
 def ensure_direct_write_schema(conn, logger=None):
@@ -280,6 +956,8 @@ def ensure_direct_write_schema(conn, logger=None):
        absence of the ``method`` column). Legacy rows copy across with the new
        scope columns defaulted to ``''`` / ``0`` so the coarse CSV-import
        markers remain idempotent.
+    4. Create the ``pac_coupling`` table via :func:`ensure_pac_schema`, so a
+       reader never hits a missing table on a database where PAC has not run.
 
     Parameters
     ----------
@@ -373,6 +1051,10 @@ def ensure_direct_write_schema(conn, logger=None):
         FROM processing_status''')
         conn.execute('DROP TABLE processing_status')
         conn.execute('ALTER TABLE processing_status_new RENAME TO processing_status')
+
+    # (4) pac_coupling: created eagerly so a reader never faces a missing
+    # table on a database where PAC has not (yet) been run.
+    ensure_pac_schema(conn)
 
     conn.commit()
 
@@ -550,7 +1232,9 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
         s = str(col)
         return None if s == 'None' else s
 
-    conn = sqlite3.connect(db_path)
+    # Read-only; 60 s busy timeout for the same reason as the writers (a
+    # DELETE-mode database lets a writer block this read).
+    conn = sqlite3.connect(db_path, timeout=60.0)
     try:
         try:
             cur = conn.execute('''
@@ -947,7 +1631,9 @@ def write_channel_events(conn, run_id, event_type, channel, method,
         Number of event rows written.
     """
     now = datetime.datetime.now().isoformat()
-    freq_band = f"{freq_lower}-{freq_upper}Hz"
+    # Same helper the detectors use for the JSON filename token, so this is
+    # the last place the two spellings could drift apart.
+    freq_band = fmt_freq_token(freq_lower, freq_upper)
     placeholders = ', '.join(['?'] * len(EVENT_INSERT_COLUMNS))
     sql = (f"INSERT OR REPLACE INTO events ({', '.join(EVENT_INSERT_COLUMNS)}) "
            f"VALUES ({placeholders})")
@@ -1178,6 +1864,49 @@ def _fmt_freq_component(value):
     return str(int(v)) if v.is_integer() else repr(v)
 
 
+def fmt_freq_token(lo, hi):
+    """Format a detection band as the ``{freq_lo}-{freq_hi}Hz`` filename token.
+
+    This is the single source of truth for the frequency component of the
+    project naming convention
+    ``{event_type}_{method}_{freq_lo}-{freq_hi}Hz_{stages_joined}``. It must
+    be used on *both* sides of the filename round-trip: where a detector
+    writes its per-channel JSON, and where a caller rebuilds the
+    ``file_pattern`` to find those files again.
+
+    It is deliberately the plain historical expression ``f"{lo}-{hi}Hz"`` and
+    applies no normalisation, so existing result directories keep matching.
+    The bug it fixes was never the format but the *divergence*: a driver that
+    re-derived the token with a different formatter (``f"{lo:.1f}"``, which
+    turns a 1.25 Hz bound into ``1.2``) matched zero files and produced an
+    empty run that still reported success. Feeding one function the same
+    ``frequency`` tuple the detector used removes that failure mode whatever
+    the format is.
+
+    Parameters
+    ----------
+    lo : float or int
+        Lower band bound in Hz.
+    hi : float or int
+        Upper band bound in Hz.
+
+    Returns
+    -------
+    str
+        The band token, e.g. ``'0.5-1.25Hz'``, ``'11-16Hz'``, ``'9.0-12.0Hz'``.
+
+    Examples
+    --------
+    >>> fmt_freq_token(0.5, 1.25)
+    '0.5-1.25Hz'
+    >>> fmt_freq_token(11, 16)
+    '11-16Hz'
+    >>> fmt_freq_token(9.0, 12.0)
+    '9.0-12.0Hz'
+    """
+    return f"{lo}-{hi}Hz"
+
+
 def default_csv_path(output_dir, event_type, method, frequency, stage):
     """Build the standard parameter-CSV path for a detection scope.
 
@@ -1210,6 +1939,11 @@ def default_csv_path(output_dir, event_type, method, frequency, stage):
     prefix = _CSV_PREFIX.get(str(event_type), f"{event_type}_parameters")
     method_token = str(method).replace('/', '_')
     lo, hi = frequency
+    # NOTE: this deliberately keeps _fmt_freq_component's normalisation
+    # (9.0 -> '9'), which DIVERGES from fmt_freq_token ('9.0-12.0Hz'). The
+    # divergence predates the Stage A work and is left alone here because
+    # changing it would rename CSVs users already have on disk. Closing it is
+    # scheduled for Stage B, when the file round-trip goes away entirely.
     freq_token = f"{_fmt_freq_component(lo)}-{_fmt_freq_component(hi)}Hz"
     # Normalise any accepted stage form (list, single, or joined token) to the
     # canonical joined token, so the filename is identical whichever form the
@@ -1302,7 +2036,10 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
     """
     stage_list = split_stage_token(stage)  # may raise on a malformed token
 
-    conn = sqlite3.connect(db_path)
+    # Read-only, 60 s busy timeout. This is the reader most likely to meet a
+    # writer: it runs straight after detection, and under DELETE journal mode
+    # a writer blocks readers (under WAL it would not).
+    conn = sqlite3.connect(db_path, timeout=60.0)
     try:
         present = _table_columns(conn, 'events')
         if not present:

@@ -23,9 +23,36 @@ import os
 import sys
 from turtlewave_hdEEG.utils import read_channels_from_csv
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalSWA, CustomAnnotations
+from turtlewave_hdEEG import ParalSWA, CustomAnnotations, fmt_freq_token
 import logging
 import argparse as _ap
+
+# Give the library's handler-less module loggers somewhere to write.
+#
+# The Paral* processors build their own console handler in `_setup_logger`, so
+# their records already reach the terminal exactly once. The module-level
+# loggers (`turtlewave_hdEEG.dataset`, `turtlewave_hdEEG.utils`) have no
+# handler of their own, so without this their records go nowhere and the
+# script looks silent while it loads the recording.
+#
+# The handler deliberately goes on those two loggers, not on the root via
+# `logging.basicConfig` and not on the `turtlewave_hdEEG` parent. Both of
+# those print every processor line TWICE, because a processor logger both
+# handles its own records and propagates them upward; the root additionally
+# pulls in INFO chatter from third-party libraries. Propagation is switched
+# off here so a root handler installed later by another import cannot
+# reintroduce the duplication.
+for _tw_name in ('turtlewave_hdEEG.dataset', 'turtlewave_hdEEG.utils'):
+    _tw_log = logging.getLogger(_tw_name)
+    if not any(getattr(h, 'name', None) == 'turtlewave-console'
+               for h in _tw_log.handlers):
+        _tw_console = logging.StreamHandler()
+        _tw_console.name = 'turtlewave-console'
+        _tw_console.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        _tw_log.addHandler(_tw_console)
+    _tw_log.setLevel(logging.INFO)
+    _tw_log.propagate = False
 
 # Optional CLI overrides (backward-compatible: no args => unchanged behaviour).
 # Used by the eeg_review_gui "Export Re-run Package" QC handoff.
@@ -114,7 +141,7 @@ slow_waves = event_processor.detect_slow_waves(
 # Export results
 test_method_str = "_".join(test_method).replace('/', '_') if isinstance(test_method, list) else str(test_method).replace('/', '_')
 
-freq_range = f"{test_frequency[0]}-{test_frequency[1]}Hz"
+freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
 file_pattern = f"slowwaves_{test_method_str}_{freq_range}_{stages_str}"
 
@@ -135,17 +162,29 @@ else:
         file_pattern=file_pattern
     )
 
+    # Pass the same rejection settings the detection call used: the density
+    # denominator must be the recording time the detector actually analysed,
+    # otherwise every density is biased.
     density2CSV = event_processor.export_slow_wave_density_to_csv(
         json_input=json_dir,
         csv_file=os.path.join(json_dir, f'sw_density_{test_method_str}_{freq_range}_{stages_str}.csv'),
         stage=test_stages,
-        file_pattern=file_pattern
+        file_pattern=file_pattern,
+        reject_artifacts=True,
+        reject_arousals=True
     )
 
+    # Pass the UNESCAPED method. test_method_str ('AASM_Massimini2004') is the
+    # filesystem-safe form used in filenames only; the direct-write path and
+    # the other drivers store the original 'AASM/Massimini2004'. Storing both
+    # spellings splits one run across two methods with no UNIQUE collision,
+    # which double-counts densities and hides half the events from any
+    # method-scoped query.
     csv2db = event_processor.import_parameters_csv_to_database(
         csv_file     = os.path.join(json_dir, f'sw_parameters_{test_method_str}_{freq_range}_{stages_str}.csv'),
         db_path      = db_path,
-        method       = test_method_str
+        event_type   = 'slow_wave',
+        method       = test_method
         )
 
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")

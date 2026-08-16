@@ -4,7 +4,6 @@ TurtleWave Data Manager - Core Intelligence Layer
 Provides three-level caching, intelligent prefetching, and optimized data access
 """
 
-import sqlite3
 import numpy as np
 import pandas as pd
 from collections import OrderedDict
@@ -13,6 +12,11 @@ from queue import Queue
 import time
 from typing import Dict, List, Optional, Tuple, Set
 import logging
+
+try:
+    from frontend.db_connect import connect_events_db
+except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
+    from db_connect import connect_events_db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -354,9 +358,15 @@ class DataManager:
         logger.info("DataManager initialized")
     
     def connect(self):
-        """Connect to database"""
+        """Connect to database.
+
+        Read-only, hence ``write=False``: see
+        :func:`frontend.db_connect.connect_events_db` for why no journal-mode
+        pragma is issued and why the busy timeout is 60 s rather than Python's
+        5 s default. Nothing in this module writes.
+        """
         if not self.db_conn:
-            self.db_conn = sqlite3.connect(self.db_path)
+            self.db_conn = connect_events_db(self.db_path)
             logger.info(f"Connected to database: {self.db_path}")
     
     def disconnect(self):

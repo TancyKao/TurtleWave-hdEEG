@@ -72,8 +72,11 @@ structurally identical to slow-wave parameters), so `export_kc_parameters_to_csv
 / `export_kc_density_to_csv` pass the K-complex event type through for you:
 
 ```python
-method_str = 'AASM_Massimini2004'  # method with '/' replaced by '_'
-freq_range = '0.1-4.0Hz'
+from turtlewave_hdEEG.dbwrite import fmt_freq_token
+
+method_db = 'AASM/Massimini2004'   # canonical, unescaped — the value used in the DB
+method_str = method_db.replace('/', '_')  # filesystem-safe — filenames/patterns ONLY
+freq_range = fmt_freq_token(0.1, 4.0)     # must match the `frequency` passed to detect_kcomplexes
 stages_str = 'NREM2'
 file_pattern = f'kcomplex_{method_str}_{freq_range}_{stages_str}'
 
@@ -98,15 +101,23 @@ event_processor.initialize_sqlite_database('wonambi/neural_events.db')
 event_processor.import_parameters_csv_to_database(
     csv_file=param_csv,
     db_path='wonambi/neural_events.db',
-    method='AASM/Massimini2004',  # pass the ORIGINAL method string explicitly
+    method=method_db,  # the canonical, UNESCAPED method string — never method_str
 )
 ```
 
 !!! warning
     Always pass `method=` explicitly to `ParalKC.import_parameters_csv_to_database`
-    with the original method string (e.g. `'AASM/Massimini2004'`, not the
-    filename-escaped `'AASM_Massimini2004'`). The importer's filename parser
-    breaks on the escaped form and would otherwise record just `'AASM'`.
+    with `method_db`, the original unescaped method string (e.g.
+    `'AASM/Massimini2004'`, not the filename-escaped `'AASM_Massimini2004'`).
+    The importer's filename parser breaks on the escaped form and would
+    otherwise record just `'AASM'`. `method_db` (canonical, unescaped, for the
+    database) vs. `method_str` (filesystem-safe, filenames only) is a
+    project-wide convention — see
+    [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md).
+
+    It also now raises rather than returning `{"error": ..., "added": 0}` on
+    failure, and refuses to import over rows already written by the
+    direct-to-database path unless you pass `force=True`.
 
 The parameters CSV includes start/end time, channel, sleep stage, amplitude,
 duration, and frequency for each K-complex, tagged with the `'k_complex'`

@@ -105,6 +105,7 @@ nav:
     - Re-run Detection on Reviewer-Selected Channels: how-to/rerun-detection-on-channels.md
     - Maintenance & Migration:
       - Back-fill PAC Results into the Database: how-to/backfill-pac-to-database.md
+      - Run With the Database on a Network Drive: how-to/run-with-database-on-a-network-drive.md
       - Upgrade to 4.0: how-to/upgrade-to-4.0.md
 
   - Reference:
@@ -118,6 +119,7 @@ nav:
     - Sleep Cycle Plotting: reference/api/cycleplot.md
     - PAC Processor: reference/api/pacprocessor.md
     - Direct-to-Database Write: reference/api/dbwrite.md
+    - Journal-Mode CLI (turtlewave_set_journal_mode): reference/api/cli.md
     - Scoped Re-detection: reference/api/rerun.md
     - Utilities: reference/api/utils.md
     - GUI Components: reference/api/gui.md
@@ -125,6 +127,8 @@ nav:
 
   - Explanation:
     - Overview: explanation/overview.md
+    - Naming, Subject Identity & Provenance Conventions: explanation/naming-and-identity-conventions.md
+    - Database Concurrency and Journalling: explanation/database-concurrency-and-journalling.md
     - EEG Review GUI Architecture: explanation/eeg-review-gui-architecture.md
 
 extra:

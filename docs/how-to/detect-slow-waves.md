@@ -107,7 +107,9 @@ Detection writes one JSON file per channel to `json_dir`. Aggregate them into
 CSV, then import into the database:
 
 ```python
-freq_range = "0.5-1.25Hz"
+from turtlewave_hdEEG.dbwrite import fmt_freq_token
+
+freq_range = fmt_freq_token(0.5, 1.25)  # must match the `frequency` passed to detect_slow_waves
 stages_str = "NREM2NREM3"
 file_pattern = f"slowwaves_Massimini2004_{freq_range}_{stages_str}"
 
@@ -131,9 +133,24 @@ event_processor.import_parameters_csv_to_database(
 )
 ```
 
+!!! note
+    Build `file_pattern`'s frequency segment with `fmt_freq_token`, not a
+    hand-written f-string — a formatter that doesn't match what
+    `detect_slow_waves` wrote matches zero JSON files and, by default, raises
+    `FileNotFoundError` rather than silently exporting an empty CSV
+    (`strict=True` is the default on all three exporters; pass
+    `strict=False` to restore the old placeholder-CSV behaviour). See
+    [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md).
+
 The parameters CSV includes start/end time, channel, sleep stage, amplitude,
 and frequency for each slow wave. Load it with pandas for statistical
 analysis, or query `neural_events.db` directly once imported.
+
+`import_parameters_csv_to_database` now raises rather than returning
+`{"error": ..., "added": 0}` on failure (a missing CSV, a bad scope), and
+refuses to import over rows already written by the direct-to-database path
+unless you pass `force=True` — see
+[Write Detection Results Directly to the Database](direct-to-database-detection.md#pull-a-csv-back-out-of-the-database).
 
 Alternatively, pass `write_db=True` and `db_path=...` to `detect_slow_waves`
 to skip the JSON→CSV→import round-trip and write events straight into the

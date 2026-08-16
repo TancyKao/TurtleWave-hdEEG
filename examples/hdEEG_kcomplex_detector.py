@@ -10,10 +10,38 @@ Override `test_stages` to also include N3 if needed.
 """
 
 import os
+import logging
 import argparse as _ap
 
+# Give the library's handler-less module loggers somewhere to write.
+#
+# The Paral* processors build their own console handler in `_setup_logger`, so
+# their records already reach the terminal exactly once. The module-level
+# loggers (`turtlewave_hdEEG.dataset`, `turtlewave_hdEEG.utils`) have no
+# handler of their own, so without this their records go nowhere and the
+# script looks silent while it loads the recording.
+#
+# The handler deliberately goes on those two loggers, not on the root via
+# `logging.basicConfig` and not on the `turtlewave_hdEEG` parent. Both of
+# those print every processor line TWICE, because a processor logger both
+# handles its own records and propagates them upward; the root additionally
+# pulls in INFO chatter from third-party libraries. Propagation is switched
+# off here so a root handler installed later by another import cannot
+# reintroduce the duplication.
+for _tw_name in ('turtlewave_hdEEG.dataset', 'turtlewave_hdEEG.utils'):
+    _tw_log = logging.getLogger(_tw_name)
+    if not any(getattr(h, 'name', None) == 'turtlewave-console'
+               for h in _tw_log.handlers):
+        _tw_console = logging.StreamHandler()
+        _tw_console.name = 'turtlewave-console'
+        _tw_console.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        _tw_log.addHandler(_tw_console)
+    _tw_log.setLevel(logging.INFO)
+    _tw_log.propagate = False
+
 from wonambi.dataset import Dataset as WonambiDataset
-from turtlewave_hdEEG import ParalKC, CustomAnnotations
+from turtlewave_hdEEG import ParalKC, CustomAnnotations, fmt_freq_token
 
 # Optional CLI overrides (backward-compatible: no args => unchanged behaviour).
 # Used by the eeg_review_gui "Export Re-run Package" QC handoff.
@@ -94,7 +122,7 @@ kcomplexes = event_processor.detect_kcomplexes(
 
 # 6. Export ------------------------------------------------------------
 method_str = str(test_method).replace('/', '_')
-freq_range = f"{test_frequency[0]}-{test_frequency[1]}Hz"
+freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
 file_pattern = f"kcomplex_{method_str}_{freq_range}_{stages_str}"
 
@@ -118,9 +146,12 @@ else:
         json_input=json_dir, csv_file=param_csv, file_pattern=file_pattern,
         frequency=test_frequency,
     )
+    # Same rejection settings as the detection call above, so the density
+    # denominator matches the recording time actually analysed.
     event_processor.export_kc_density_to_csv(
         json_input=json_dir, csv_file=density_csv, stage=test_stages,
         file_pattern=file_pattern,
+        reject_artifacts=True, reject_arousals=True,
     )
     event_processor.initialize_sqlite_database(db_path)
     event_processor.import_parameters_csv_to_database(

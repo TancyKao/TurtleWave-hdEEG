@@ -44,10 +44,10 @@ failing never aborts the whole run.
 
 import glob
 import os
-import re
 import traceback
 
 from turtlewave_hdEEG import CustomAnnotations, finalize_cycles_and_durations
+from turtlewave_hdEEG.utils import derive_subject as _derive_subject
 
 # ===========================================================================
 # CONFIG  --  edit these two lines only
@@ -63,9 +63,6 @@ SUBJECTS = []  # e.g. ["10sd", "11xy"]
 # ===========================================================================
 # End of CONFIG
 # ===========================================================================
-
-SUBJECT_RE = re.compile(r"sub-[A-Za-z0-9]+")
-
 
 def discover_subjects(root):
     """Return subject folder names under ``root`` that have a detection DB.
@@ -136,6 +133,10 @@ def resolve_paths(subj_dir):
 def derive_subject(subj_dir, xml_path):
     """Derive the subject id (``sub-XXXX``) from the XML stem or folder name.
 
+    Thin positional wrapper around
+    :func:`turtlewave_hdEEG.utils.derive_subject` so this script and the
+    library share one implementation of subject resolution.
+
     Parameters
     ----------
     subj_dir : str
@@ -148,13 +149,7 @@ def derive_subject(subj_dir, xml_path):
     str
         Subject identifier, e.g. ``"sub-10sd"``.
     """
-    stem = os.path.basename(xml_path)
-    m = SUBJECT_RE.search(stem)
-    if m:
-        return m.group(0)
-    # Fall back to the folder name, prefixing sub- if absent.
-    folder = os.path.basename(subj_dir.rstrip(os.sep))
-    return folder if folder.startswith("sub-") else f"sub-{folder}"
+    return _derive_subject(annotation_path=xml_path, root_dir=subj_dir)
 
 
 def main():

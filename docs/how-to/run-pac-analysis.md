@@ -118,6 +118,25 @@ If `subject` is omitted, it is derived from the root path basename (with a
 warning) — pass it explicitly to avoid an ambiguous subject id in
 `pac_coupling`.
 
+!!! warning "`write_db=True` must be able to name what it stores"
+    `analyze_pac` only writes to `pac_coupling` when `write_db=True` is
+    passed explicitly — there is no implicit database write. On the
+    event-locked path above (`use_detected_events=True`), the stored
+    `event_type`/`method` are derived automatically from `event_type` /
+    `pair_with_spindles` / `event_opts`. If you instead run **continuous**
+    PAC (`use_detected_events=False`, e.g. theta-gamma coupling with no
+    anchoring event), there is no event scope to derive a label from, so you
+    must pass `stored_event_type=` and `stored_method=` yourself (e.g.
+    `stored_event_type='continuous'`, `stored_method='theta_gamma'`).
+    `analyze_pac` raises `ValueError` at entry — before running any
+    analysis — rather than storing a continuous result under a guessed
+    label that would be indistinguishable from event-locked coupling.
+
+    The database write itself (`store_pac_to_database`) also now raises on
+    failure instead of logging a traceback and returning as if nothing had
+    gone wrong — a failed write can no longer look like a successful one that
+    happened to store zero rows.
+
 ## Export results to CSV
 
 Whether or not you used `write_db=True`, you can export the summary CSV from

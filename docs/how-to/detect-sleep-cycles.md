@@ -135,6 +135,15 @@ python examples/backfill_cycles.py
 Edit its `ROOT` (and optional `SUBJECTS` allowlist) constants at the top of
 the file before running.
 
+!!! note
+    `finalize_cycles_and_durations` (and `ParalCycles.run`) are strictly
+    post-detection: they annotate an existing `neural_events.db` and never
+    create one. If `db_path` doesn't exist — most often a mistyped `ROOT` in
+    `backfill_cycles.py` — they raise `FileNotFoundError` naming the path
+    rather than silently creating an empty database that would only fail
+    later, on `no such table: main.events`. Run event detection first, or
+    correct the path.
+
 ## What lands in the database
 
 - **`sleep_cycles`** — one row per `(subject, method, cycle_number)`: NREM/REM
@@ -204,6 +213,36 @@ If `cycles_by_method[method]` comes back empty:
 This happens only if `tag_method` is not included in `methods` — the XML gate
 never fires but `events.cycle` is still overwritten by the last method run.
 Keep `tag_method` within `methods` (the default already satisfies this).
+
+### `FileNotFoundError: No database at ...`
+
+```text
+FileNotFoundError: No database at /path/to/wonambi/neural_events.db. Sleep-cycle
+backfill annotates an existing neural_events.db and never creates one -- run
+event detection first, or correct the path.
+```
+
+The realistic trigger is a mistyped `ROOT` in `backfill_cycles.py` (or a
+subject folder that hasn't had spindle/slow-wave/K-complex detection run
+yet). Before this check existed, a bad path was silently created as an
+empty database and the run died later on `no such table: main.events`,
+leaving a stray file behind — on a network share, in whatever journal mode
+the creating call chose. Fix `ROOT`/`db_path` so it points at a
+`neural_events.db` that event detection has already populated, or run
+detection first.
+
+### "disk I/O error" writing to the database
+
+`finalize_cycles_and_durations` / `backfill_cycles.py` opens several
+connections to `neural_events.db` per subject, so if that database lives on a
+mapped network drive or a Dropbox-/OneDrive-synced folder, it's the most
+likely place to hit `sqlite3.OperationalError: disk I/O error` — this means
+the database is stuck in SQLite's WAL journal mode, which does not work over
+a network filesystem. A database created since 4.0.2 defaults to the
+network-safe `DELETE` mode, so this now points at a database that predates
+4.0.2 or was explicitly created with `TURTLEWAVE_SQLITE_JOURNAL=WAL`. See
+[How to run with the database on a network drive](run-with-database-on-a-network-drive.md)
+for the fix.
 
 ## Next Steps
 
