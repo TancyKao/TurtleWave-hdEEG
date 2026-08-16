@@ -39,7 +39,8 @@ def connect_events_db(db_path, write=False):
     database's mode and imposes one only when ``journal=`` or
     ``TURTLEWAVE_SQLITE_JOURNAL`` says to, so a converted database stays
     converted, a WAL database stays WAL, and the environment variable still
-    overrides either way.
+    overrides either way. A database it *creates* starts in ``DELETE``, the
+    mode that works on a network drive.
 
     **No ``mmap_size`` either.** Memory mapping is precisely what fails on
     SMB/NFS shares, which is the failure this whole change exists to fix.
@@ -80,9 +81,10 @@ def connect_events_db(db_path, write=False):
     Notes
     -----
     A non-existent `db_path` is created by either path, as ``sqlite3.connect``
-    always has been. Only the writer path chooses a journal mode for a database
-    it creates (WAL, per ``open_write_connection``); the reader path leaves a
-    newly created file in SQLite's own ``DELETE`` default.
+    always has been, and both paths leave it in ``DELETE``: that is SQLite's own
+    default on the reader path, and ``open_write_connection``'s default for a
+    database it creates on the writer path. Passing ``journal=`` (writer path
+    only) or setting ``TURTLEWAVE_SQLITE_JOURNAL`` overrides that default.
     """
     if write and open_write_connection is not None:
         return open_write_connection(db_path)

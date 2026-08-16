@@ -63,6 +63,9 @@ Issues = "https://github.com/TancyKao/TurtleWave-hdEEG/issues"
 [project.scripts]
 turtlewave_gui = "frontend.turtlewave_gui:main"
 eeg_review_gui = "frontend.eeg_review_gui:main"
+# Journal-mode repair tool. A console script because examples/ is not shipped
+# in the wheel, so a pip user cannot reach examples/set_db_journal_mode.py.
+turtlewave_set_journal_mode = "turtlewave_hdEEG.cli:main"
 
 # Both the library package and the GUI frontend are shipped in the wheel.
 [tool.setuptools.packages.find]

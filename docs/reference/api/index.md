@@ -14,6 +14,7 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 
 - [**Direct-to-Database Write**](dbwrite.md) - the `write_db=None` (default) detection path, `detection_runs` provenance, DB → CSV export
 - [**Event Density**](density.md) - per-channel density derived on read from `neural_events.db`
+- [**Journal-Mode CLI**](cli.md) - `turtlewave_set_journal_mode` console script for converting a database's SQLite journal mode
 - [**Re-run Guards**](rerun.md) - Correctness guards for scoped channel re-detection
 - [**Utilities**](utils.md) - Artefact-free density denominators and other shared helpers
 

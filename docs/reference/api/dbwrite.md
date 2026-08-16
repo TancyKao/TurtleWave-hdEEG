@@ -48,27 +48,32 @@ A few of these primitives are worth knowing about even outside a detection call:
   and friends) consults before writing: it refuses to blank the `run_id`
   provenance link on rows the direct-write path already wrote, unless the
   caller passes `force=True`.
-- **`open_write_connection` preserves an existing database's journal mode; it
-  only imposes `WAL` on a database it creates.** Converting a database with
-  `set_journal_mode` therefore sticks — a later detection run or review-GUI
-  connection will not silently flip it back. See
+- **`open_write_connection` preserves an existing database's journal mode; a
+  database it *creates* gets `DEFAULT_NEW_DB_JOURNAL_MODE` (`'DELETE'`), not
+  `WAL`.** `DELETE` needs no shared-memory sidecar, so a database created
+  straight on a network share or a synced cloud folder is usable from its
+  first write. Converting an existing database with `set_journal_mode`
+  sticks either way — a later detection run or review-GUI connection will
+  not silently flip it back. See
   [Database concurrency and journalling](../../explanation/database-concurrency-and-journalling.md#why-open_write_connection-preserves-rather-than-imposes)
   for the rationale.
 - **`TURTLEWAVE_SQLITE_JOURNAL`** is an explicit override in either
   direction — it forces the named mode on every database the process opens,
-  including ones it creates, and beats the preserve rule above. Its main
-  remaining job is forcing `DELETE` on a *brand-new* `neural_events.db`
-  created directly on a mapped/network drive or synced cloud folder, since
-  there's nothing yet on disk to preserve. See
+  including ones it creates, and beats both the `DELETE` default and the
+  preserve rule above. Its main remaining job is opting a fresh database
+  *into* `WAL` on fast local disk (`TURTLEWAVE_SQLITE_JOURNAL=WAL`), or
+  handling a colleague still on a pre-4.0.2 install whose databases default
+  to `WAL`. Precedence is: an explicit `journal=`/`mode=` argument, then this
+  environment variable, then `DEFAULT_NEW_DB_JOURNAL_MODE`. See
   [Run with the database on a network drive](../../how-to/run-with-database-on-a-network-drive.md)
   and `set_journal_mode` for converting an existing database permanently.
 - **`VALID_JOURNAL_MODES`** is the public tuple of journal modes SQLite
   accepts (`DELETE, TRUNCATE, PERSIST, MEMORY, WAL, OFF`) — both
   `TURTLEWAVE_SQLITE_JOURNAL` and the `journal`/`mode` arguments of
   `open_write_connection`/`set_journal_mode` are validated against it, and
-  `examples/set_db_journal_mode.py` uses it directly as its `--mode`
-  argparse `choices`, so a typo is rejected at the CLI before any database is
-  touched.
+  the [`turtlewave_set_journal_mode` console script](cli.md) uses it directly
+  as its `--mode` argparse `choices`, so a typo is rejected at the CLI before
+  any database is touched.
 
 ### Stage tokens
 

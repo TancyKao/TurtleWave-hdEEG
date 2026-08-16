@@ -267,43 +267,81 @@ def provenance():
 _JOURNAL_ENV = 'TURTLEWAVE_SQLITE_JOURNAL'
 
 # Journal modes SQLite accepts. A value outside this set is a user typo and is
-# rejected loudly rather than silently leaving the database in WAL. Public so
-# CLIs (examples/set_db_journal_mode.py) can validate up front against the same
-# list instead of keeping their own copy.
+# rejected loudly rather than silently leaving the database in the wrong mode.
+# Public so CLIs (turtlewave_set_journal_mode) can validate up front against the
+# same list instead of keeping their own copy.
 VALID_JOURNAL_MODES = ('DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY', 'WAL', 'OFF')
+
+# Journal mode given to a database this package CREATES when neither the caller
+# nor the environment asked for one. DELETE, not WAL: WAL needs a memory-mapped
+# -shm sidecar that SMB/NFS/mapped drives and cloud-sync clients (Dropbox,
+# OneDrive) cannot provide, and a database born in WAL on such a share is broken
+# from its first write ('disk I/O error', or a sync client corrupting the
+# sidecars into 'database disk image is malformed'). DELETE works everywhere at
+# the cost of readers and the writer blocking each other; that is the right
+# trade for a pipeline that runs one writer per subject. Set
+# TURTLEWAVE_SQLITE_JOURNAL=WAL to get WAL back on fast local disk.
+DEFAULT_NEW_DB_JOURNAL_MODE = 'DELETE'
+
+
+def _is_blank(value):
+    """Return True for ``None`` or a string that is empty/whitespace-only.
+
+    Parameters
+    ----------
+    value : str or None
+        Candidate journal-mode value from an argument or the environment.
+
+    Returns
+    -------
+    bool
+        ``True`` when the value expresses no preference at all.
+    """
+    return value is None or not str(value).strip()
 
 
 def _resolve_journal_mode(requested=None):
     """Resolve an explicitly *requested* journal mode, or ``None`` if unstated.
 
     Precedence is the explicit argument, then the ``TURTLEWAVE_SQLITE_JOURNAL``
-    environment variable. There is deliberately no default: ``None`` means "the
-    caller expressed no preference", which lets
+    environment variable. This function itself applies no default: ``None``
+    means "the caller expressed no preference", which lets
     :func:`open_write_connection` preserve whatever mode an existing database is
-    already in instead of imposing one on it.
+    already in instead of imposing one on it, and fall back to
+    :data:`DEFAULT_NEW_DB_JOURNAL_MODE` only for a database it creates.
+
+    An empty or whitespace-only value counts as *unset*, at either level. This
+    matters because blanking a variable rather than unsetting it is ordinary
+    POSIX practice -- a PBS/bash job template that does
+    ``export TURTLEWAVE_SQLITE_JOURNAL="$SOMETHING_UNSET"`` exports an empty
+    string, and treating that as a mode would make every database open in the
+    job fail with a ``ValueError`` about an unrecognised mode ``''``.
 
     Parameters
     ----------
     requested : str or None, optional
-        Explicit mode. When ``None`` the environment variable is consulted.
+        Explicit mode. When ``None`` (or blank) the environment variable is
+        consulted.
 
     Returns
     -------
     str or None
         Upper-case journal mode (one of :data:`VALID_JOURNAL_MODES`), or
-        ``None`` when neither the argument nor the environment variable was set.
+        ``None`` when neither the argument nor the environment variable named
+        one (including when either is set but blank).
 
     Raises
     ------
     ValueError
-        If a value *was* given but is not a recognised SQLite journal mode.
-        This is deliberately fatal: a typo that fell through to a default would
-        leave the user in WAL believing they had left it.
+        If a non-blank value *was* given but is not a recognised SQLite journal
+        mode. This is deliberately fatal: a typo that fell through to a default
+        would leave the user in WAL believing they had left it.
     """
     mode = requested
-    if mode is None:
+    if _is_blank(mode):
         mode = os.environ.get(_JOURNAL_ENV)
-    if mode is None:
+    if _is_blank(mode):
+        # Nothing (or nothing but whitespace) requested at either level.
         return None
     mode = str(mode).strip().upper()
     if mode not in VALID_JOURNAL_MODES:
@@ -349,7 +387,9 @@ def _explain_io_error(exc, db_path):
         f"filesystems cannot provide. Fix: close every GUI, then convert the "
         f"database once with "
         f"turtlewave_hdEEG.set_journal_mode(r'{db_path}') -- or run "
-        f"examples/set_db_journal_mode.py over the tree. If that write also "
+        f"turtlewave_set_journal_mode \"{db_path}\" from the command line "
+        f"(it also takes a directory or --glob to convert a whole tree). If "
+        f"that write also "
         f"fails, copy the database WITH its -wal/-shm sidecars to local disk, "
         f"convert it there and copy it back. See "
         f"docs/how-to/run-with-database-on-a-network-drive.md.")
@@ -362,19 +402,21 @@ def _explain_io_error(exc, db_path):
 def open_write_connection(db_path, journal=None, logger=None):
     """Open a connection that preserves an existing database's journal mode.
 
-    Only a database this call *creates* is set to ``WAL``; an existing
-    database keeps whatever mode it is already in, unless ``journal`` or
+    A database this call *creates* is set to
+    :data:`DEFAULT_NEW_DB_JOURNAL_MODE` (``'DELETE'``, the only mode that works
+    on a network or cloud-synced drive); an existing database keeps whatever
+    mode it is already in, unless ``journal`` or
     ``TURTLEWAVE_SQLITE_JOURNAL`` explicitly names one. Every connection also
     gets a 60 s busy timeout, which is what lets a per-subject writer coexist
     with concurrent readers (e.g. the review GUI) without ``database is
     locked`` errors; it does not make concurrent *writers* safe -- the
     pipeline runs one writer per subject.
 
-    See ``docs/explanation/database-concurrency-and-journalling.md`` for why
-    WAL was chosen, why journal mode is a persistent on-disk property, and
-    why that makes an unconditional default dangerous; see
-    ``docs/how-to/run-with-database-on-a-network-drive.md`` for the
-    task-oriented fix.
+    See ``docs/explanation/database-concurrency-and-journalling.md`` for why a
+    new database is created in DELETE rather than WAL, why journal mode is a
+    persistent on-disk property, and why that makes an unconditional default
+    dangerous; see ``docs/how-to/run-with-database-on-a-network-drive.md`` for
+    the task-oriented fix.
 
     Parameters
     ----------
@@ -383,7 +425,8 @@ def open_write_connection(db_path, journal=None, logger=None):
     journal : str or None, optional
         Journal mode to impose. ``None`` (the default) falls back to the
         ``TURTLEWAVE_SQLITE_JOURNAL`` environment variable and, failing that, to
-        preserving an existing database's mode / ``'WAL'`` for a new one.
+        preserving an existing database's mode /
+        :data:`DEFAULT_NEW_DB_JOURNAL_MODE` for a new one.
     logger : logging.Logger or None, optional
         Logger for the mode-in-force INFO line and the not-applied warning.
         Defaults to this module's logger.
@@ -410,12 +453,14 @@ def open_write_connection(db_path, journal=None, logger=None):
       ``DELETE``-mode database back to ``WAL``). To convert a database once
       and have it stick, use :func:`set_journal_mode` instead of relying on
       an env var on every run.
-    * A database this call creates gets ``'WAL'`` when nothing else is
-      requested.
+    * A database this call creates gets :data:`DEFAULT_NEW_DB_JOURNAL_MODE`
+      (``'DELETE'``) when nothing else is requested, so a database created
+      straight onto a share or a synced folder is usable from its first write.
+      ``TURTLEWAVE_SQLITE_JOURNAL=WAL`` opts back into WAL on local disk.
     * Existence is checked with :func:`os.path.exists` *before* connecting
       (connecting would otherwise create the file). A zero-byte placeholder
       file therefore counts as existing and is left in SQLite's reported
-      ``delete`` mode rather than promoted to ``WAL``.
+      ``delete`` mode.
     * The 60 s ``timeout`` passed to :func:`sqlite3.connect` is the busy
       timeout, already in force before any pragma runs -- leaving WAL takes
       an exclusive lock and would otherwise fail instantly with
@@ -459,8 +504,15 @@ def open_write_connection(db_path, journal=None, logger=None):
                     f"(existing database; mode preserved, not overridden). "
                     f"Set {_JOURNAL_ENV} or pass journal= to impose one.")
                 return conn
-            # This call is creating the database, so the choice is ours: WAL.
-            mode = 'WAL'
+            # This call is creating the database, so the choice is ours, and it
+            # is DELETE: a database born in WAL on a share or a synced folder is
+            # unusable (see DEFAULT_NEW_DB_JOURNAL_MODE). Logged, because it is
+            # the one place this package decides a persistent on-disk property.
+            mode = DEFAULT_NEW_DB_JOURNAL_MODE
+            log.info(
+                f"Creating {db_path} with SQLite journal_mode={mode.lower()} "
+                f"(default for a new database; network- and sync-safe). Set "
+                f"{_JOURNAL_ENV}=WAL for WAL on local disk.")
 
         actual = conn.execute(f'PRAGMA journal_mode={mode}').fetchone()[0]
         if str(actual).upper() != mode:
@@ -517,8 +569,12 @@ def set_journal_mode(db_path, mode='DELETE', logger=None):
         no-op. Both become this one error, because converting is this
         function's only job. Close every review GUI and other process first.
         A ``sqlite3.OperationalError`` that is *not* a lock (notably
-        ``disk I/O error``) propagates unchanged, so the network-filesystem
-        failure is never mis-reported as a lock.
+        ``disk I/O error``) keeps its class and propagates, so the
+        network-filesystem failure is never mis-reported as a lock; only its
+        message is rewritten, with the diagnosis and fix, by
+        :func:`_explain_io_error`. That applies to the pre-conversion
+        checkpoint as much as to the conversion itself -- on a failing share
+        the checkpoint is the first write and so usually fails first.
 
     Notes
     -----
@@ -548,14 +604,25 @@ def set_journal_mode(db_path, mode='DELETE', logger=None):
     # timeout= is the busy timeout; no separate PRAGMA busy_timeout needed.
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
-        before = str(conn.execute('PRAGMA journal_mode').fetchone()[0]).lower()
-        if before == 'wal':
-            row = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
-            if row is not None and row[0]:
-                log.warning(
-                    f"wal_checkpoint(TRUNCATE) was blocked on {db_path} "
-                    f"(busy={row[0]}): committed data may still sit in the "
-                    f"-wal sidecar. Copying the .db file alone would lose it.")
+        # The mode probe and the checkpoint both run BEFORE the journal_mode
+        # pragma below, and on a failing share the checkpoint is the first
+        # *write* attempted -- so it, not the conversion, is where 'disk I/O
+        # error' usually surfaces. Translate it here too, or the user gets the
+        # bare error with none of the network-drive guidance. _explain_io_error
+        # fails open, so a lock here still propagates unchanged as before.
+        try:
+            before = str(conn.execute(
+                'PRAGMA journal_mode').fetchone()[0]).lower()
+            if before == 'wal':
+                row = conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                if row is not None and row[0]:
+                    log.warning(
+                        f"wal_checkpoint(TRUNCATE) was blocked on {db_path} "
+                        f"(busy={row[0]}): committed data may still sit in the "
+                        f"-wal sidecar. Copying the .db file alone would lose "
+                        f"it.")
+        except sqlite3.OperationalError as e:
+            raise _explain_io_error(e, db_path)
         try:
             after = str(conn.execute(
                 f'PRAGMA journal_mode={mode}').fetchone()[0]).lower()
