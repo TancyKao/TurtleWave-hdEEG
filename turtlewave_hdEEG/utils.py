@@ -146,6 +146,57 @@ def write_empty_params_csv(csv_file, event_type, channels=None, logger=None):
     return True
 
 
+def normalize_subject(subject):
+    """Put a subject identifier into the one canonical ``sub-`` form.
+
+    Every subject-keyed table in ``neural_events.db`` (``analysed_time``,
+    ``pac_coupling``, ``sleep_cycles``, ``stage_durations``) is joined on this
+    string, so two spellings of one recording are two recordings as far as
+    SQL is concerned. The directory-name and annotation-filename branches of
+    :func:`derive_subject` have always produced the ``sub-`` form; a caller
+    passing ``--subject 10sd`` on the command line produced a bare ``10sd``,
+    and the two ended up in the same database as separate subjects. That made
+    ``event_density(db)`` (which refuses to pick between subjects) raise
+    forever, and silently broke every join to the PAC and cycle tables.
+
+    Normalising here, at the single point every caller already goes through,
+    is what keeps them identical.
+
+    Parameters
+    ----------
+    subject : str or None
+        Subject identifier in any spelling.
+
+    Returns
+    -------
+    str or None
+        ``subject`` with a ``sub-`` prefix added when absent, whitespace
+        stripped. ``None`` and the empty string pass through unchanged, and
+        the ``'unknown_subject'`` placeholder is left alone so it stays
+        recognisable.
+
+    Examples
+    --------
+    >>> normalize_subject('10sd')
+    'sub-10sd'
+    >>> normalize_subject('sub-10sd')
+    'sub-10sd'
+    >>> normalize_subject('unknown_subject')
+    'unknown_subject'
+    """
+    if subject is None:
+        return None
+    s = str(subject).strip()
+    if not s or s == 'unknown_subject' or s.startswith('sub-'):
+        return s
+    logger.info(
+        "Subject '%s' normalised to 'sub-%s' so it matches the id every other "
+        "entry point writes (derive_subject's directory/annotation branches "
+        "and the PAC, cycle and stage-duration tables all use the 'sub-' "
+        "form).", s, s)
+    return f"sub-{s}"
+
+
 def derive_subject(annotation_path=None, root_dir=None, explicit=None):
     """Resolve the subject identifier for a recording.
 
@@ -182,7 +233,10 @@ def derive_subject(annotation_path=None, root_dir=None, explicit=None):
         added when absent.
     explicit : str or None, optional
         Caller-supplied subject id. Any truthy value short-circuits the
-        search and is returned stripped.
+        search. It is returned stripped and normalised through
+        :func:`normalize_subject`, so ``'10sd'`` and ``'sub-10sd'`` both key
+        the database as ``'sub-10sd'`` -- a command-line ``--subject 10sd``
+        and the GUI's derived id must not become two subjects.
 
     Returns
     -------
@@ -192,6 +246,8 @@ def derive_subject(annotation_path=None, root_dir=None, explicit=None):
     Examples
     --------
     >>> derive_subject(explicit='sub-10sd')
+    'sub-10sd'
+    >>> derive_subject(explicit='10sd')     # normalised, not two subjects
     'sub-10sd'
     >>> derive_subject(annotation_path='/data/w/sub-10sd_ses-1_eeg.xml')
     'sub-10sd'
@@ -205,7 +261,7 @@ def derive_subject(annotation_path=None, root_dir=None, explicit=None):
     """
     try:
         if explicit is not None and str(explicit).strip():
-            subject = str(explicit).strip()
+            subject = normalize_subject(str(explicit).strip())
             logger.info(f"Subject '{subject}' resolved from: explicit argument")
             return subject
 
@@ -841,19 +897,26 @@ class DensityDenominators:
         Parameters
         ----------
         chan_events : list of dict
-            Detected events for one channel; each has a ``'stage'`` (str or
-            list of str).
+            Detected events for one channel. Each has a ``'stage'``, which may
+            be a single label, a list of labels, or -- from 4.3 -- the run's
+            joint stage token (``'NREM2NREM3'``). The token is split into its
+            components before the comparison; comparing it whole would
+            intersect nothing and report every channel's whole-night count as
+            zero.
 
         Returns
         -------
         int
             Number of events whose stage(s) intersect the detected stages.
         """
+        from .dbwrite import stage_components
         n = 0
         for ev in chan_events:
             st = ev.get('stage')
-            st = st if isinstance(st, list) else [st]
-            if self.detected_stage_set.intersection(str(s) for s in st):
+            st = st if isinstance(st, (list, tuple)) else [st]
+            components = [c for value in st if value is not None
+                          for c in stage_components(str(value))]
+            if self.detected_stage_set.intersection(components):
                 n += 1
         return n
 
@@ -967,6 +1030,83 @@ def build_density_denominators(annotations, dataset, reject_artifacts=None,
                                stages_present, epoch_len=epoch_len,
                                extra_artefact_intervals=extra_artefact_intervals,
                                logger_=logger)
+
+
+def warn_csv_import_deprecated(what, logger_=None):
+    """Emit the deprecation notice for the CSV -> database importers.
+
+    Detection writes straight into ``neural_events.db``, so the
+    JSON -> CSV -> import round-trip only exists for the legacy
+    ``write_db=False`` path and for recovering historical files. Every
+    filename round-trip in this pipeline has cost data at least once (the band
+    token, the slashed method), which is why the route is going away.
+
+    Both a :class:`DeprecationWarning` **and** a ``logger.warning`` are
+    emitted: deprecation warnings are invisible by default and these users run
+    scripts, not test suites.
+
+    Parameters
+    ----------
+    what : str
+        Name of the deprecated method, used in the message.
+    logger_ : logging.Logger or None, optional
+        Logger to warn on. ``None`` (default) uses the
+        ``turtlewave_hdEEG.utils`` module logger.
+
+    Returns
+    -------
+    None
+    """
+    import warnings
+    msg = (
+        f"{what} is deprecated and will be removed in 5.0. Detection writes "
+        f"events straight into neural_events.db since 4.2, so this CSV import "
+        f"step is only needed for the legacy write_db=False path and for "
+        f"recovering historical CSV files. Run detection without "
+        f"write_db=False (or without --legacy-json) and the events are already "
+        f"in the database.")
+    warnings.warn(msg, DeprecationWarning, stacklevel=3)
+    (logger_ or logger).warning(msg)
+
+
+def warn_density_csv_deprecated(what, logger_=None):
+    """Emit the deprecation notice for the JSON-backed density exporters.
+
+    Density now comes from the database
+    (:func:`turtlewave_hdEEG.density.event_density`), whose denominator is the
+    ``analysed_time`` row the detection run stored. The
+    ``export_*_density_to_csv`` methods read per-channel JSON, which detection
+    no longer writes unless it is run on the legacy ``write_db=False`` path.
+
+    Both a :class:`DeprecationWarning` **and** a ``logger.warning`` are
+    emitted: deprecation warnings are invisible by default, and these users
+    run scripts rather than test suites, so a warnings-only notice would never
+    be seen.
+
+    Parameters
+    ----------
+    what : str
+        Name of the deprecated method, used in the message.
+    logger_ : logging.Logger or None, optional
+        Logger to warn on. ``None`` (default) uses the
+        ``turtlewave_hdEEG.utils`` module logger.
+
+    Returns
+    -------
+    None
+    """
+    import warnings
+    msg = (
+        f"{what} is deprecated and will be removed in 5.0. It reads the "
+        f"per-channel JSON files that detection no longer writes (the "
+        f"database is the store of record since 4.2). Use "
+        f"turtlewave_hdEEG.density.event_density(db_path, ...) instead, which "
+        f"derives density from neural_events.db using the artefact-free "
+        f"analysed_time denominator the detection run stored. This method "
+        f"still works against a legacy JSON directory produced with "
+        f"write_db=False.")
+    warnings.warn(msg, DeprecationWarning, stacklevel=3)
+    (logger_ or logger).warning(msg)
 
 
 # Function to read channels from CSV file

@@ -63,7 +63,8 @@ from wonambi.dataset import Dataset as WonambiDataset
 from turtlewave_hdEEG import (CustomAnnotations, ParalEvents, ParalSWA, ParalKC,
                               dbwrite)
 from turtlewave_hdEEG.rerun import (RerunGuardError, verify_rater_match,
-                                    channel_clean_gate, resolve_rerun_params)
+                                    channel_clean_gate, resolve_rerun_params,
+                                    resolve_sw_amplitude_thresholds)
 from turtlewave_hdEEG.utils import read_channels_from_csv
 
 
@@ -215,7 +216,6 @@ def main(argv=None):
                   reject_artifacts=args.reject_artifacts,
                   reject_arousals=args.reject_arousals,
                   save_to_annotations=False, json_dir=None,
-                  create_empty_json=False,
                   write_db=True, db_path=db_path, resume=False,
                   replace_channels=redetect)
 
@@ -229,13 +229,27 @@ def main(argv=None):
         proc = ParalSWA(dataset=data, annotations=annot)
         sw_kwargs = dict(common)
         # Reuse the original detector thresholds/durations when recorded.
-        for key in ('trough_duration', 'neg_peak_thresh', 'p2p_thresh',
-                    'min_dur', 'max_dur', 'detrend',
+        for key in ('trough_duration', 'min_dur', 'max_dur', 'detrend',
                     'peak_thresh_sigma', 'ptp_thresh_sigma'):
             if orig_params.get(key) is not None:
                 sw_kwargs[key] = (tuple(orig_params[key])
                                   if key == 'trough_duration'
                                   else orig_params[key])
+        # The two amplitude thresholds go through the version-aware resolver:
+        # for Ngo2015/Staresina2015 a pre-4.3.0 run recorded a value that was
+        # compared against a sample count, so replaying it verbatim would
+        # impose a microvolt floor the original run never applied.
+        neg_thr, p2p_thr = resolve_sw_amplitude_thresholds(
+            args.method,
+            orig_params.get('neg_peak_thresh'),
+            orig_params.get('p2p_thresh'),
+            recorded_version=(resolved['recovered'] or {}).get(
+                'turtlewave_version'),
+            logger=LOG)
+        if neg_thr is not None:
+            sw_kwargs['neg_peak_thresh'] = neg_thr
+        if p2p_thr is not None:
+            sw_kwargs['p2p_thresh'] = p2p_thr
         proc.detect_slow_waves(method=args.method, **sw_kwargs)
     else:  # k_complex
         proc = ParalKC(dataset=data, annotations=annot)
@@ -260,7 +274,11 @@ def main(argv=None):
         backup = args.backup or os.path.dirname(os.path.abspath(args.annot))
         dbwrite.record_rerun(
             conn, str(_uuid.uuid4()), new_run_id, args.event_type, args.method,
-            freq[0], freq[1], ''.join(args.stages), selected, redetect,
+            # The same canonical token the detectors stamp on events.stage and
+            # processing_status, so this provenance row names the scope in the
+            # one spelling everything else uses.
+            freq[0], freq[1], dbwrite.join_stage_token(args.stages),
+            selected, redetect,
             dropped, os.path.abspath(args.annot), backup, args.requested_by)
     finally:
         conn.close()

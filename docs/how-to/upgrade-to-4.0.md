@@ -228,7 +228,8 @@ A few 4.0 capabilities are opt-in and don't require any of the steps above:
 - **Sleep cycles and stage durations** — `finalize_cycles_and_durations`
   populates `sleep_cycles` and `stage_durations` and backfills `events.cycle`.
 - **Direct-to-database detection** — pass `write_db=True` to skip the
-  JSON → CSV → import round-trip. See
+  JSON → CSV → import round-trip. (Since 4.2 this is the default behaviour,
+  not just an opt-in — see [Upgrade to 4.2](upgrade-to-4.2.md).) See
   [Write Detection Results Directly to the Database](direct-to-database-detection.md).
 - **Re-run detection on reviewer-selected channels** — re-detect only the
   channels flagged in the review GUI, with a scoped replace. See
@@ -236,6 +237,8 @@ A few 4.0 capabilities are opt-in and don't require any of the steps above:
 
 ## Related
 
+- [Upgrade to 4.2](upgrade-to-4.2.md) — the next boundary: direct-to-database
+  detection becomes the *default*, not just an opt-in.
 - [Event Density is Artefact-Free](../explanation/overview.md#event-density-is-artefact-free)
 - [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md)
 - [Back-fill PAC Results into the Database](backfill-pac-to-database.md)

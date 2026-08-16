@@ -13,6 +13,29 @@ Before detecting K-complexes, ensure you have:
 
 If you haven't done these steps, refer to the [Getting Started tutorial](../tutorials/getting-started.md).
 
+!!! warning "K-complex counts and densities change in this release — do not pool with older runs"
+    `ImprovedDetectKComplex` moved on two axes: the `'AASM/Massimini2004'`
+    amplitude defaults changed from `neg_peak_thresh=-37.0` /
+    `p2p_thresh=70.0` (which matched no published criterion) to Wonambi's own
+    published `-40.0` / `75.0`, and `min_isolation` is now measured between
+    successive **negative** peaks instead of positive ones. Both change which
+    events are kept and how many. Do not pool K-complex counts or densities
+    detected before this release with ones detected after it — re-run
+    detection on any scope you need to compare across.
+
+## Using the GUI
+
+Starting a new K-complex detection run from the **K-Complex Detection** tab
+in `turtlewave_gui` is turned off in this release, at the user's request. The
+tab itself, its parameter controls, and everything that reads
+already-detected K-complexes out of the database (event review, **Export
+CSV**) stay available — only the **Detect K-Complexes** button is disabled,
+with a tooltip explaining why.
+
+This switch is GUI-only. It does not gate the library: scripted and cluster
+code that calls `ParalKC.detect_kcomplexes` directly runs exactly as before,
+with the changed defaults and isolation measurement described above.
+
 ## Using the Python API
 
 K-complex detection follows the same `Paral*` shape as spindles and slow
@@ -30,14 +53,15 @@ annot = CustomAnnotations('subject001_annotations.xml')
 # Create the processor
 event_processor = ParalKC(dataset=data, annotations=annot)
 
-# Run detection
+# Run detection. write_db defaults to None (AUTO): events go straight into
+# neural_events.db resolved from json_dir; no per-channel JSON is written.
 kcomplexes = event_processor.detect_kcomplexes(
     method='AASM/Massimini2004',
     chan=['E110', 'E111', 'E112'],
     frequency=(0.1, 4.0),
     trough_duration=(0.25, 1.0),
-    neg_peak_thresh=-37.0,
-    p2p_thresh=70.0,
+    neg_peak_thresh=-40.0,
+    p2p_thresh=75.0,
     min_isolation=1.0,
     polar='normal',
     stage=['NREM2'],
@@ -46,88 +70,107 @@ kcomplexes = event_processor.detect_kcomplexes(
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
     json_dir='wonambi/kc_results',
+    subject='sub-001',
 )
 ```
 
 `method` accepts `'AASM/Massimini2004'` (default) or `'Massimini2004'`. No
 other Wonambi slow-wave methods are exposed here, since they target slow
 oscillations rather than the isolated K-complex morphology. The AASM defaults
-(`neg_peak_thresh=-37.0`, `p2p_thresh=70.0`, `trough_duration=(0.25, 1.0)`)
-are the parameters shown above.
+(`neg_peak_thresh=-40.0`, `p2p_thresh=75.0`, `trough_duration=(0.25, 1.0)`)
+are the parameters shown above — Wonambi's own published `'AASM/Massimini2004'`
+values, not `turtlewave_hdEEG`'s pre-4.3 `-37.0`/`70.0` defaults, which
+matched no published criterion.
 
 `min_isolation` is K-complex-specific: it is the minimum gap, in seconds,
-required between successive K-complex trough times. It is what distinguishes
-an isolated K-complex from one cycle of a continuous N3 slow-oscillation
-train — set it to `0` to disable the isolation filter. K-complexes are
-typically scored in N2 only; pass `stage=['NREM2', 'NREM3']` to also include
-N3.
+required between successive K-complex trough times — measured between the
+**negative** peaks. It is what distinguishes an isolated K-complex from one
+cycle of a continuous N3 slow-oscillation train — set it to `0` to disable
+the isolation filter. K-complexes are typically scored in N2 only; pass
+`stage=['NREM2', 'NREM3']` to also include N3.
 
 ## Interpreting Results
 
-Detection writes one JSON file per channel to `json_dir`, using the
-`kcomplex_` filename prefix so results stay distinct from slow waves on disk.
-Aggregate them into CSV, then import into the database. K-complex export
-reuses the `ParalSWA` CSV helpers internally (K-complex parameters are
-structurally identical to slow-wave parameters), so `export_kc_parameters_to_csv`
-/ `export_kc_density_to_csv` pass the K-complex event type through for you:
+K-complexes are in `neural_events.db` (`events` table, `event_type =
+'k_complex'`) as soon as detection returns — this keeps them distinguishable
+from slow waves in the same database without any extra step. Query it with
+pandas or R:
 
 ```python
-from turtlewave_hdEEG.dbwrite import fmt_freq_token
+import sqlite3
+import pandas as pd
 
-method_db = 'AASM/Massimini2004'   # canonical, unescaped — the value used in the DB
-method_str = method_db.replace('/', '_')  # filesystem-safe — filenames/patterns ONLY
-freq_range = fmt_freq_token(0.1, 4.0)     # must match the `frequency` passed to detect_kcomplexes
-stages_str = 'NREM2'
-file_pattern = f'kcomplex_{method_str}_{freq_range}_{stages_str}'
-
-param_csv = f'wonambi/kc_results/kc_parameters_{method_str}_{freq_range}_{stages_str}.csv'
-density_csv = f'wonambi/kc_results/kc_density_{method_str}_{freq_range}_{stages_str}.csv'
-
-event_processor.export_kc_parameters_to_csv(
-    json_input='wonambi/kc_results',
-    csv_file=param_csv,
-    file_pattern=file_pattern,
-    frequency=(0.1, 4.0),
-)
-
-event_processor.export_kc_density_to_csv(
-    json_input='wonambi/kc_results',
-    csv_file=density_csv,
-    stage=['NREM2'],
-    file_pattern=file_pattern,
-)
-
-event_processor.initialize_sqlite_database('wonambi/neural_events.db')
-event_processor.import_parameters_csv_to_database(
-    csv_file=param_csv,
-    db_path='wonambi/neural_events.db',
-    method=method_db,  # the canonical, UNESCAPED method string — never method_str
+conn = sqlite3.connect('wonambi/neural_events.db')
+kcomplexes = pd.read_sql_query(
+    "SELECT channel, start_time, duration, stage, min_amp, peak2peak_amp "
+    "FROM events WHERE event_type = 'k_complex' AND method = 'AASM/Massimini2004'",
+    conn,
 )
 ```
 
-!!! warning
-    Always pass `method=` explicitly to `ParalKC.import_parameters_csv_to_database`
-    with `method_db`, the original unescaped method string (e.g.
-    `'AASM/Massimini2004'`, not the filename-escaped `'AASM_Massimini2004'`).
-    The importer's filename parser breaks on the escaped form and would
-    otherwise record just `'AASM'`. `method_db` (canonical, unescaped, for the
-    database) vs. `method_str` (filesystem-safe, filenames only) is a
-    project-wide convention — see
+and report density from the database directly — its denominator is the
+artefact-free in-stage time this run actually analysed, stored automatically
+in `analysed_time`:
+
+```python
+from turtlewave_hdEEG.density import event_density, format_density_table
+
+density_df = event_density(
+    'wonambi/neural_events.db', event_type='k_complex',
+    method='AASM/Massimini2004', stage=['NREM2'], subject='sub-001',
+    reject_artifacts=True, reject_arousals=True,  # must match the detection call
+)
+print(format_density_table(density_df))
+```
+
+See [Read the database with pandas and R](read-database-with-pandas-and-r.md)
+for more query patterns, including how to pull a flat CSV back out with
+`export_events_to_csv` if a downstream tool needs one.
+
+!!! note "Using the legacy JSON → CSV → import path instead"
+    If you passed `write_db=False` above, detection wrote one JSON file per
+    channel to `json_dir`, using the `kcomplex_` filename prefix so results
+    stay distinct from slow waves on disk. K-complex export reuses the
+    `ParalSWA` CSV helpers internally (K-complex parameters are structurally
+    identical to slow-wave parameters), so `export_kc_parameters_to_csv` /
+    `export_kc_density_to_csv` pass the K-complex event type through for you:
+    ```python
+    from turtlewave_hdEEG.dbwrite import fmt_freq_token
+
+    method_db = 'AASM/Massimini2004'   # canonical, unescaped — the value used in the DB
+    method_str = method_db.replace('/', '_')  # filesystem-safe — filenames/patterns ONLY
+    freq_range = fmt_freq_token(0.1, 4.0)     # must match `frequency` above
+    file_pattern = f'kcomplex_{method_str}_{freq_range}_NREM2'
+
+    param_csv = f'wonambi/kc_results/kc_parameters_{method_str}_{freq_range}_NREM2.csv'
+    density_csv = f'wonambi/kc_results/kc_density_{method_str}_{freq_range}_NREM2.csv'
+
+    event_processor.export_kc_parameters_to_csv(
+        json_input='wonambi/kc_results',
+        csv_file=param_csv,
+        file_pattern=file_pattern,
+        frequency=(0.1, 4.0),
+    )
+    event_processor.export_kc_density_to_csv(  # deprecated; JSON-only
+        json_input='wonambi/kc_results',
+        csv_file=density_csv,
+        stage=['NREM2'],
+        file_pattern=file_pattern,
+    )
+    event_processor.import_parameters_csv_to_database(  # deprecated
+        csv_file=param_csv,
+        db_path='wonambi/neural_events.db',
+        method=method_db,  # the canonical, UNESCAPED method string — never method_str
+    )
+    ```
+    Always pass `method=` explicitly with `method_db`, the original unescaped
+    method string (e.g. `'AASM/Massimini2004'`, not the filename-escaped
+    `'AASM_Massimini2004'`). The importer's filename parser breaks on the
+    escaped form and would otherwise record just `'AASM'`. See
     [About naming, subject identity & provenance conventions](../explanation/naming-and-identity-conventions.md).
-
-    It also now raises rather than returning `{"error": ..., "added": 0}` on
+    It also raises rather than returning `{"error": ..., "added": 0}` on
     failure, and refuses to import over rows already written by the
-    direct-to-database path unless you pass `force=True`.
-
-The parameters CSV includes start/end time, channel, sleep stage, amplitude,
-duration, and frequency for each K-complex, tagged with the `'k_complex'`
-event type — this keeps K-complexes distinguishable from slow waves once both
-are imported into the same `neural_events.db`.
-
-Alternatively, pass `write_db=True` and `db_path=...` to `detect_kcomplexes`
-to skip the JSON→CSV→import round-trip and write events straight into the
-database under the `'k_complex'` event type — see
-[Write Detection Results Directly to the Database](direct-to-database-detection.md).
+    direct-write path unless you pass `force=True`.
 
 ## Optimizing Detection
 
@@ -143,7 +186,7 @@ If you want to detect more K-complexes:
 
 If you want only unambiguous, AASM-conforming K-complexes:
 
-- Use the AASM defaults: `neg_peak_thresh=-37.0`, `p2p_thresh=70.0`,
+- Use the AASM defaults: `neg_peak_thresh=-40.0`, `p2p_thresh=75.0`,
   `trough_duration=(0.25, 1.0)`
 - Keep `min_isolation=1.0` so consecutive slow-oscillation cycles in N3 are
   not double-counted as separate K-complexes
@@ -173,4 +216,5 @@ After detecting K-complexes, you might want to:
 
 - Run slow wave detection for comparison — [Detect Slow Waves](detect-slow-waves.md)
 - Review detected events in the QC dashboard — [Review EEG Events](review-eeg-events.md)
-- Write results directly to the database — [Direct-to-Database Detection](direct-to-database-detection.md)
+- Read the database from pandas or R — [Read the Database with pandas and R](read-database-with-pandas-and-r.md)
+- Resume interrupted runs, verify coverage, or opt out to legacy JSON — [Direct-to-Database Detection](direct-to-database-detection.md)

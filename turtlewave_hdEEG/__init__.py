@@ -2,7 +2,7 @@
 turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 """
 
-__version__ = '4.0.2'
+__version__ = '4.3.0'
 
 # Import important classes to expose at the package level
 from .dataset import LargeDataset
@@ -18,10 +18,17 @@ from .cycleprocessor import (ParalCycles, detect_cycles,
 from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
                          ImprovedDetectKComplex)
 from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
-                      set_journal_mode, VALID_JOURNAL_MODES)
-from .utils import derive_subject, read_channels_from_csv
+                      set_journal_mode, VALID_JOURNAL_MODES,
+                      resolve_db_target, read_analysed_time,
+                      assert_single_subject, subjects_in_database,
+                      join_stage_token, split_stage_token, stage_components,
+                      stage_tokens_covering, resolve_stage_tokens,
+                      pooled_denominator, stage_format,
+                      assert_stage_format_compatible)
+from .density import event_density, format_density_table
+from .utils import derive_subject, normalize_subject, read_channels_from_csv
 from .rerun import (RerunGuardError, verify_rater_match, channel_clean_gate,
-                    resolve_rerun_params)
+                    resolve_rerun_params, resolve_sw_amplitude_thresholds)
 
 # Cycle plotting pulls in matplotlib; keep the import defensive so a missing or
 # broken matplotlib never breaks `import turtlewave_hdEEG` (mirrors the optional

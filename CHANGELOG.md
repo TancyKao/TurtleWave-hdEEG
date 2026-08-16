@@ -5,6 +5,170 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] — 2026-08-16
+
+`events.stage` now records the stage set the run searched, as one joint token:
+a run over N2 and N3 stores `NREM2NREM3` on every event, written identically by
+all three detectors on both the database and the legacy paths. Two spellings
+used to coexist: detection stored each event's own epoch stage, while the 4.0.x
+CSV import route stored the joined request for spindles and the epoch stage for
+slow waves. A database carrying both blocked the PAC tab outright. A detection
+run now also fills sleep cycles and stage durations, which no run had ever done.
+A database written before 4.3 must be migrated before it is re-detected — see
+**Upgrading**.
+
+The Massimini slow-wave and K-complex detectors also now implement the criteria
+they document. The published duration and depth limits were applied to the wrong
+half-wave, and the AASM window rejected every wave longer than a second, so those
+methods returned few events or none. Slow-wave and K-complex counts change
+substantially and must not be pooled across this release. Staresina2015 and
+Ngo2015 are unaffected by those criteria changes, but both lose an amplitude
+floor that compared a microvolt threshold against a sample count, cutting any
+wave whose trough-to-peak interval spanned fewer than `threshold` samples — a
+cut of `threshold / s_freq` seconds, not a fixed duration. `threshold` was not
+one number: it was 140 for a direct `ParalSWA` call or the GUI's Ngo2015 tab,
+75 for the GUI's Staresina2015 tab and the previous example script, and 40 for
+the Gadi CLI driver's default. At 128 Hz that is a 0.31-1.09 s cut depending on
+entry point, shrinking as sampling rate rises — see **Upgrading** for the
+per-entry-point figures at 128/256/500 Hz. On this project's 128 Hz test
+fixture the 140-sample floor rejected essentially every synthetic wave
+(88→0 for Staresina2015, 11→0 for Ngo2015); the smaller floors were not
+independently measured. Runs made with default arguments must not be pooled
+across this release, whichever entry point wrote them. Reference: Massimini
+et al. 2004, J Neurosci 24(31), 6862-70.
+
+### Added
+
+- `events.epoch_stage`, keeping each event's own scored epoch stage beside the run's token.
+- Public API: `join_stage_token`, `split_stage_token`, `stage_components`, `stage_tokens_covering`, `resolve_stage_tokens`, `pooled_denominator`, `stage_format` and `assert_stage_format_compatible`, whose `stage_token` is keyword-only and has no default so the guard cannot be skipped by omission.
+- `db_meta` table, carrying a `stage_format` marker that distinguishes a joint-token database from a pre-4.3 one.
+- `idx_events_run` index on `events(run_id)`, so tagging a run's cycles visits only that run's rows instead of every run's events in the same time span.
+- `db_meta.det_ptp_units`, recording whether `det_ptp` holds microvolts or a pre-4.3 sample count, seeded only on a database with no events because the two ranges overlap numerically.
+- `v_event_density` SQL view, so R and plain SQL read the same densities `event_density` computes.
+- `examples/migrate_stage_to_joint.py`: converts a pre-4.3 database and stamps the marker, dry-run by default, deriving the target token per channel group so channels searched over different stage sets are not collapsed into one.
+- Detection fills `sleep_cycles`, `stage_durations` and `events.cycle` on its own connection, without touching the annotation XML.
+- `run_id` and `tag_events` on `finalize_cycles_and_durations`, `ParalCycles.run` and `tag_events_with_cycles`, and `conn` on `finalize_cycles_and_durations` (the other two gained it in 4.0.2), so a detection shares one connection and tags only its own rows.
+- `strict` on `store_analysed_time`, raising and rolling the write back when the denominator comes out as zero seconds for every stage rather than storing one that turns every density in the scope into an unexplained NaN. Detection keeps the tolerant default; the migration passes it.
+
+### Changed
+
+- `events.stage` holds the run's canonical stage token instead of the per-epoch stage or the requested list, in the database, the JSON and the exported filenames.
+- Only `tag_method` writes `events.cycle`; every method used to tag it, last run winning.
+- `finalize_cycles_and_durations` raises when `tag_method` is not one of `methods`, which previously wrote no XML markers at all and silently let the last method own the numbering.
+- Detection stops when a requested stage has no scored epoch, instead of labelling every event with a stage the recording does not contain.
+- Re-detecting a scope over a different stage set raises instead of writing, because the stage keys the stored rows and the new ones would be appended beside them rather than replacing them. Pass `replace_channels` for the affected channels to delete the old rows in the same transaction.
+- `event_density` reports one row per stage token, and refuses a request for a strict subset of a stored joint token rather than returning a number it cannot attribute.
+- The deprecated per-channel JSON carries the run's stage token plus a new `epoch_stage` field; the deprecated density exporters split the token, so their per-stage numbers are unchanged.
+- The PAC channel lookup intersects two per-side queries instead of self-joining on stage, so a genuine stage mismatch is reported and confirmable rather than fatal.
+- `AASM/Massimini2004` uses Wonambi's published -40 µV and 75 µV thresholds, replacing the -37 / 70 pair, which matches no published criterion.
+- K-complex isolation is measured between successive negative peaks rather than positive ones.
+- K-complex detection is turned off in the GUI for this release. Stored K-complexes stay reviewable and exportable, and `ParalKC.detect_kcomplexes` still runs, but what it returns moves with the two changes above.
+- The Staresina2015 peak-to-peak control is labelled as the percentile it always was and made read-only, since nothing the GUI could send ever reached it. The percentile stays at the published 75, and the GUI now sends no microvolt amplitude thresholds for Staresina2015 or Ngo2015, so both run on their published criteria.
+
+### Fixed
+
+- PAC was unusable on a database built by the 4.0.x CSV import route, where spindles carry the joined stage request and slow waves the per-epoch stage: the channel lookup joined the two on `stage`, which those spellings can never satisfy, so the channel list came back empty and every run failed with "No channels selected".
+- Detection to the database was drastically slower than it needed to be, because each detected event's measurement window was cut from the whole-night segment with a scan whose cost grew with the length of the recording. A five-channel slow-wave run that took over an hour now takes seconds. The events and their measurements are unchanged, so nothing needs re-running for correctness. This affects 4.2.0, which made the database the default path.
+- Ngo2015 slow-wave detection with adaptive thresholds failed on every channel with a `TypeError` and finished the run with zero events, in every released version. The sigma thresholds are read off the detector instance but were passed to its constructor, and the GUI prefills both fields, so the failure did not depend on typing a value.
+- `trough_duration` now bounds the negative half-wave, as Massimini et al. 2004 define it, instead of being passed as the whole-wave duration. The published AASM window rejected every wave running past one second, which is most of them, so those runs returned no events at all.
+- `neg_peak_thresh` and `p2p_thresh` now reach the detector; they were stored under attribute names Wonambi never reads, so neither threshold had any effect.
+- The depth criterion is applied to the negative trough rather than the positive peak, so an accepted wave really is as deep as the threshold says.
+- Candidates are no longer pre-rejected on the duration or amplitude of their positive half-wave, which the paper does not constrain. Against 216 slow waves injected into a synthetic 1/f background, recall rises from 0.025 to 0.525 for Massimini2004 and from 0.046 to 0.764 for AASM/Massimini2004, with precision holding above 0.98; re-run it as `test_permissive_search_recall_against_injected_ground_truth`. That ground truth is synthetic rather than expert-scored, so it shows recovery at high precision and is not a clinical validation.
+- `det_ptp` holds peak-to-peak microvolts for all four methods, replacing a sample count that scaled with sampling rate and ignored amplitude despite the column being named for microvolts.
+- `det_trough` and `det_peak` mean the same thing across methods: the negative extremum and the positive one. They were opposite between the Massimini family and the zero-crossing methods, so comparing them across methods compared opposite quantities.
+- The GUI's duration spin boxes keep 3 decimals, so an Ngo2015 run with nothing typed no longer sends 0.83 s in place of the method's 0.833 s default and detects on a slightly shifted band.
+- `sleep_cycles`, `stage_durations` and `events.cycle` were never populated by a detection run; only the standalone cycle script filled them.
+- The GUI's post-run verification counted events by single stage, so a successful run would have reported "0 events written" once joint tokens landed.
+- The review GUI's QC density and the legacy JSON exporters treated a joint token as a stage of its own, which matches no denominator and reads as zero everywhere.
+- Ngo2015 and Staresina2015 no longer apply an amplitude floor that compared microvolts against a sample count, cutting waves by trough-to-peak duration instead of amplitude — from every event at low sampling rates under the 140-sample floor down to a smaller share under the 40-sample Gadi default (see the per-entry-point figures above). Both now run on their published criteria unless a microvolt threshold is passed explicitly, and an explicit one is applied in microvolts and logged as a deviation from the paper.
+- The annotation tab failed with "Failed to generate annotations" unless all three annotation types were ticked, and now warns when the recording header carries no staging instead of quietly writing stage-less XML.
+- Header staging was dropped without a word on a recording whose header has no start time, because the resulting `AttributeError` was caught and reported as "no staging".
+- `XLAnnotations.save()` wrote a stage CSV over the annotation XML instead of saving it.
+- `XLAnnotations.process_all()` reports whether sleep stages were imported instead of always returning success.
+- Re-running a slow-wave detection recorded before 4.3.0 no longer turns its recorded amplitude thresholds into microvolt floors the original run never applied.
+- The test suite no longer exits 0 after printing `[FAIL]`, so CI can actually fail.
+- `verify_channel_coverage` raised `KeyError` on a missing database (its early-return result omitted the `failed`/`events_only` keys both cluster drivers dereference unconditionally) or a raw `no such table: events` error on an empty one, instead of reporting which channels were unaccounted for.
+- A channel that legitimately detected zero events was reported missing by the coverage check on the JSON/CSV import path: its `processing_status` row was written without the run's method/frequency/stage scope, matched nothing in the scoped query, and the cluster drivers exited 1 after a successful run.
+- Re-detecting into a database written by 4.0.2 or earlier appended a duplicate set of events instead of replacing them, because the slow-wave method was stored under a different spelling (`AASM_Massimini2004`, the filename-escaped form, versus this release's `AASM/Massimini2004`) that the duplicate-write guard did not recognise as the same method. This is now refused, and a scoped re-detection with `replace_channels` deletes rows under every spelling in the same transaction.
+- Opening a file that is not a SQLite database left the connection open and reported the raw error, because `open_write_connection` caught only `sqlite3.OperationalError` — `sqlite3.DatabaseError` ("file is not a database") is a sibling exception, not a subclass.
+- The Gadi batch annotator printed `[done] Annotations saved` regardless of whether staging succeeded, so a recording whose header carried no sleep stages looked identical in the log to a successful run. It now reports the failure and exits non-zero before any `[done]` line.
+
+### Upgrading
+
+- Slow-wave and K-complex counts and densities change substantially, so rows detected before and after 4.3 must never be pooled and any comparison spanning the two is invalid. Re-detect rather than mix.
+- Check a first production run before trusting it: N3 slow-wave density should land at roughly 5-15/min. A result far outside that means the run is misconfigured, not that the detector changed.
+- Staresina2015 and Ngo2015 are unaffected by the Massimini criteria fix: the same events, the same counts and densities, and every morphology column identical except `det_ptp`, which changes from a sample count to microvolts. A Ngo2015 run started from the GUI now filters on a band 0.4% lower, because the duration box can finally hold the method's own 0.833 s default, and no stored data is affected because GUI Ngo2015 runs raised `TypeError` and wrote nothing before 4.3.
+- Staresina2015 and Ngo2015 yields do change wherever the removed amplitude floor was binding, and the cut was not the same everywhere: the filter compared a microvolt threshold against Wonambi's sample-index `ptp`, so it rejected any wave whose trough-to-peak interval was shorter than `threshold / s_freq` seconds, where `threshold` depended on which entry point wrote the run. A direct `ParalSWA.detect_slow_waves()` call with no explicit override, and the GUI's Ngo2015 tab, used 140 — 1.09 s at 128 Hz, 0.55 s at 256 Hz, 0.28 s at 500 Hz. The GUI's Staresina2015 tab, and the pre-4.3 example script's hardcoded default, used 75 — 0.59 s at 128 Hz, 0.29 s at 256 Hz, 0.15 s at 500 Hz. The Gadi CLI driver's default (neither `--neg-peak-thresh` nor `--p2p-thresh` passed) used 40 — 0.31 s at 128 Hz, 0.16 s at 256 Hz, 0.08 s at 500 Hz. All three shrink toward zero effect as sampling rate rises and reject close to everything at low enough rates — measured at 140 samples / 128 Hz on this project's synthetic test fixture, the floor rejected essentially every wave (88→0 for Staresina2015, 11→0 for Ngo2015); the 75- and 40-sample floors were not independently measured but follow the same `threshold / s_freq` relationship. Pre- and post-4.3 rows detected with default arguments must not be pooled either, regardless of entry point; re-detect anything recorded below 500 Hz rather than assume the floor was inert.
+- Re-running a pre-4.3 slow-wave run resolves its recorded Ngo2015/Staresina2015 amplitude thresholds back to the published criteria and logs the resolution. A value that matches no known pre-4.3 default is kept and warned about, because it will now bind in microvolts; pass `None` to run on the published criteria.
+- `det_ptp` written before 4.3 is a sample count rather than microvolts, and `db_meta.det_ptp_units` records which a database holds. `peak2peak_amp` was and remains microvolts and is unaffected.
+- Detection refuses a pre-4.3 database that already holds rows for the scope it is about to write. `event_uuid5` hashes the stage, so the new token changes every event's identity and `INSERT OR REPLACE` appends a duplicate set instead of replacing it, doubling every count and density in that scope with no error. Run `examples/migrate_stage_to_joint.py`, or detect into a fresh database.
+- The same duplicate-write guard also fires on method spelling, independent of the stage-token check above: a pre-4.3 direct-write database can hold slow waves under `AASM_Massimini2004` where this release writes `AASM/Massimini2004`, and re-detecting that scope now refuses rather than silently appending a second set under the other spelling. There is no dedicated migration for this one — re-detect with `replace_channels=<the affected channels>`, which deletes rows under every spelling in the same transaction, or detect into a fresh database.
+- Every row written by detection before 4.3 carries a per-epoch stage, spindles included, so a 4.1 or 4.2 database needs migrating in full. Only a database imported from CSV by 4.0.x already carries joint spindle tokens, and there the migration just stamps the marker.
+- The migration reads `processing_status` to find which channels were searched over which stages, and warns when one scope needs more than one token. Check that warning before applying: relabelling a channel searched over N2 alone with a wider token divides its events by a larger denominator from then on.
+- The migration relabels NULL-stage rows with their run's token, which is not invented data: `events.stage` used to be the event's own epoch and could be unresolved, and is now the run's stage scope, which is known for every row in it. The per-epoch uncertainty stays NULL in `events.epoch_stage`; `--keep-null-stage` restores the old behaviour.
+- The migration exits 3 and leaves the marker unstamped when it could not unblock every scope, rather than reporting success while the surviving rows keep refusing re-detection. Treat any non-zero exit as failure, not only 1.
+- The migration's backup is the only way back. A joint token cannot be un-collapsed without re-reading the hypnogram, so keep that file until you have checked the result.
+- `processing_status` rows written by earlier versions are not in canonical stage order, so a resume re-detects those channels instead of skipping them, and coverage verification warns about channels that are not missing. Both are harmless and clear after one 4.3 run.
+- `event_density` with `stage=['NREM2']` against a run detected over N2 and N3 returns no row instead of a wrong one. Use `events.epoch_stage` when you need the split.
+- Schema changes are additive: `events.epoch_stage`, `db_meta` and the `v_event_density` view. No column is dropped, renamed or retyped.
+
+## [4.2.0] — 2026-08-16
+
+Makes `neural_events.db` the single store of record. Detection writes to the
+database by default and no longer writes per-channel JSON, and the
+export-import-density file round-trip is gone from the drivers, the example
+scripts and the GUI. That round-trip is what lost events silently: detection
+wrote files and a separately built string had to find them again. Density is now
+derived from the database, which also closes a gap where `--write-db` runs
+produced no density at all. `--legacy-json` keeps the old path — see **Upgrading**.
+
+### Added
+
+- `density.event_density`, deriving per-channel density from the database, and `density.format_density_table`.
+- `analysed_time` table holding the artefact-free density denominator, written at detection time.
+- Public API: `resolve_db_target`, `recording_root_from_db`, `ensure_analysed_time_schema`, `record_analysed_time`, `store_analysed_time`, `read_analysed_time`.
+- `--legacy-json` on the detection drivers, and `--subject` on the three example detectors.
+- `normalize_subject`, giving one canonical `sub-` subject form, and `subjects_in_database` / `assert_single_subject`, which refuse a write that would mix subjects in one database.
+- `subject` column on `detection_runs`.
+- `include_zero_channels` on `event_density`, on by default, so a channel that detected nothing appears as a zero rather than vanishing from a montage summary.
+- `write_csv` on `analyze_pac`, gating the per-channel PAC parameter CSVs.
+- An Export CSV button on each GUI detection tab, writing events and density for a chosen scope.
+- Docs: [Read the database with pandas and R](docs/how-to/read-database-with-pandas-and-r.md) and [Upgrade to 4.2](docs/how-to/upgrade-to-4.2.md).
+
+### Changed
+
+- `write_db` defaults to `None`, meaning write to the database; `write_db=False` keeps the JSON and CSV path.
+- Detection no longer writes per-channel JSON unless `write_db=False`. Crash-resume comes from `processing_status`, which records per-channel failures with reasons.
+- `resolve_db_target` raises when a database write was asked for and no path resolves, instead of silently continuing without one.
+- The GUI reports a run by reading the database back, and names the database path and the event and channel counts on completion.
+- `analyze_pac` writes per-channel CSVs only when `write_csv=True` or `write_db=False`. The `*_mean_amps.npy` modulogram is always written; it is not reconstructable from `pac_coupling`.
+- The three `export_*_density_to_csv` methods and the CSV import route are deprecated and warn through both `DeprecationWarning` and the logger.
+
+### Removed
+
+- The `create_empty_json` parameter on `detect_spindles`, `detect_slow_waves` and `detect_kcomplexes`.
+- `--write-db` on the drivers, now the default. The flag is still accepted and does nothing; the two cluster drivers warn when it is passed.
+
+### Fixed
+
+- The review GUI's QC density assumed both artefact and arousal rejection regardless of what the run used, inflating density by 8% on a run detected with arousal rejection off. It now reads the run's own settings from `detection_runs`.
+- A `--write-db` run produced no density at all, because the drivers returned before the density export.
+- Detection continued after failing to read the sleep scoring, stamping every event with no stage; the run then read as an empty night while the database held it in full. It now stops and says so.
+- Density pooled across stages divided by only the stages that produced events, over-estimating whenever a requested stage detected nothing.
+- A joined stage token such as `NREM2NREM3` returned an empty density frame that read as "nothing detected".
+- The drivers and the GUI disagreed on a subject's name, which put two denominators in one database and then failed every density query that did not name a subject.
+
+### Upgrading
+
+- Detection now writes to `neural_events.db` and no JSON. Pass `--legacy-json`, or `write_db=False`, to keep the old output.
+- Scripts passing `create_empty_json` raise `TypeError`. Remove the argument.
+- A database built by `--legacy-json` has no `analysed_time` table, so `event_density` refuses to compute on it rather than substituting raw hypnogram time. Use the legacy density CSV for those runs.
+- Density read from the QC dashboard before this release was too high for any run detected with arousal rejection off, which is the default on the spindle drivers. Re-read affected numbers.
+- Subject identifiers are normalised to the `sub-` form, so `--subject 10sd` and `--subject sub-10sd` now name one subject. The cycle and stage-duration writers stored whatever they were handed before this release, so a database written by an earlier version can hold the other spelling; re-running cycles rewrites those rows rather than adding a second set, and says how many it replaced.
+- Detection refuses to write into a database that already holds another subject. A database written before 4.2 records no subject, so the first run claims it and says so in a warning; from then on a second subject is refused. One database per subject remains the expected layout.
+- Detection now stops when the sleep scoring cannot be read, where it previously carried on and produced events with no stage.
+- Schema changes are additive. An existing database gains an `analysed_time` table and a `subject` column on `detection_runs`; no column is dropped, renamed or retyped. The first 4.2 run fills that column in for rows that have none.
+
 ## [4.0.2] — 2026-08-16
 
 Fixes `disk I/O error` when `neural_events.db` lives on a mapped network drive

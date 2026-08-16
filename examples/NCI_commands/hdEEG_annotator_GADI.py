@@ -5,6 +5,7 @@ hdEEG_annotator_GADI.py
 
 import os
 import glob
+import sys
 import argparse
 from turtlewave_hdEEG import LargeDataset, XLAnnotations
 
@@ -63,9 +64,23 @@ def main():
 
     print(f"[info] Writing annotations to: {annot_file}")
 
-    # Create annotations
+    # Create annotations. process_all() returns the STAGING outcome: False
+    # means the recording header carried no staging, so the XML is written
+    # without sleep stages and every stage-filtered detection downstream will
+    # quietly find nothing. On a batch queue nobody reads the log of a job
+    # that "succeeded", so fail the job loudly instead.
     ann = XLAnnotations(data, annot_file)
-    ann.process_all()
+    staged = ann.process_all()
+
+    # Report the failure BEFORE any "[done]" line: a log whose last words are
+    # "[done] Annotations saved" reads as success even when the exit status
+    # says otherwise, and on a batch queue the log is skimmed, not parsed.
+    if not staged:
+        print(f"[error] {annot_file} was written WITHOUT sleep stages: the "
+              f"recording header carries no staging (see the messages above). "
+              f"Stage-filtered detection on this subject would return zero "
+              f"events.", file=sys.stderr)
+        sys.exit(7)
 
     print(f"[done] Annotations saved: {annot_file}")
 

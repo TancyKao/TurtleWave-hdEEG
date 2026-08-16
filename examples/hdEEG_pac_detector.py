@@ -582,8 +582,9 @@ def main():
             'db_path': db_path,
             'out_dir': args.output_dir,
             'event_opts': event_opts,
-            # analyze_pac still defaults write_db=False (flipping that default
-            # is a later stage); pass it explicitly so results reach the DB.
+            # analyze_pac defaults to writing the database (write_db=None
+            # means auto since 4.2); passed explicitly so --no-write-db works
+            # and the intent is visible here.
             'write_db': write_db,
             'subject': subject,
         }

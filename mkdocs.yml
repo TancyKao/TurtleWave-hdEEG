@@ -100,13 +100,17 @@ nav:
     - Detect K-Complexes: how-to/detect-kcomplexes.md
     - Run PAC Analysis: how-to/run-pac-analysis.md
     - Write Detection Results Directly to the Database: how-to/direct-to-database-detection.md
+    - Read the Database with pandas and R: how-to/read-database-with-pandas-and-r.md
     - Finalize Sleep Cycles & Stage Durations: how-to/detect-sleep-cycles.md
     - Review EEG Events: how-to/review-eeg-events.md
     - Re-run Detection on Reviewer-Selected Channels: how-to/rerun-detection-on-channels.md
     - Maintenance & Migration:
       - Back-fill PAC Results into the Database: how-to/backfill-pac-to-database.md
       - Run With the Database on a Network Drive: how-to/run-with-database-on-a-network-drive.md
+      - Migrate a Database to the Joint Stage Token: how-to/migrate-stage-to-joint.md
       - Upgrade to 4.0: how-to/upgrade-to-4.0.md
+      - Upgrade to 4.2: how-to/upgrade-to-4.2.md
+      - Upgrade to 4.3: how-to/upgrade-to-4.3.md
 
   - Reference:
     - API Reference: reference/api/index.md
@@ -119,6 +123,7 @@ nav:
     - Sleep Cycle Plotting: reference/api/cycleplot.md
     - PAC Processor: reference/api/pacprocessor.md
     - Direct-to-Database Write: reference/api/dbwrite.md
+    - Event Density: reference/api/density.md
     - Journal-Mode CLI (turtlewave_set_journal_mode): reference/api/cli.md
     - Scoped Re-detection: reference/api/rerun.md
     - Utilities: reference/api/utils.md

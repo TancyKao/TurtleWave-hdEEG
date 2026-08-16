@@ -50,12 +50,19 @@ _p.add_argument('--annot', default=None,
                 help='override annotation XML (e.g. QC sidecar)')
 _p.add_argument('--channels', default=None,
                 help='CSV of channels to detect (no header, one per row)')
-_p.add_argument('--write-db', dest='write_db', action='store_true',
-                help='write events straight to neural_events.db and skip the '
-                     'JSON->CSV->import steps (default: legacy JSON+CSV path)')
+_p.add_argument('--legacy-json', dest='legacy_json', action='store_true',
+                help='opt back into the legacy JSON -> CSV -> import pipeline. '
+                     'By default events go straight into neural_events.db and '
+                     'no per-channel JSON or intermediate CSV is written.')
+# Accepted so existing command lines keep working; it now names the default.
+_p.add_argument('--write-db', dest='write_db_flag', action='store_true',
+                help=_ap.SUPPRESS)
+_p.add_argument('--subject', dest='subject', default=None,
+                help='subject id keying the density denominator '
+                     '(default: derived from the annotation/recording path)')
 _p.add_argument('--resume', dest='resume', action='store_true',
-                help='with --write-db, skip channels already completed for this '
-                     'exact method/band/stage scope in the database')
+                help='skip channels already completed for this exact '
+                     'method/band/stage scope in the database')
 _cli, _ = _p.parse_known_args()
 
 
@@ -66,7 +73,7 @@ annotfilename = "sub-001js_ses-1_task-psg_run-1_desc-avg1_eeg.xml"
 
 data_file = os.path.join(root_dir, datafilename)
 annot_file = _cli.annot if _cli.annot else os.path.join(root_dir, "wonambi", annotfilename)
-json_dir = os.path.join(root_dir, "wonambi", "kc_results")
+out_dir = os.path.join(root_dir, "wonambi", "kc_results")
 db_path = os.path.join(root_dir, "wonambi", "neural_events.db")
 
 
@@ -89,9 +96,10 @@ if _cli.channels:
     print(f"Channels from --channels: {len(test_channels)}")
 test_stages = ['NREM2']                   # default; add 'NREM3' if needed
 test_frequency = (0.1, 4.0)
+# Min/max duration of the NEGATIVE HALF-WAVE, not of the whole K-complex.
 test_trough_duration = (0.25, 1.0)
-test_neg_peak_thresh = -37.0              # µV (AASM KC default)
-test_p2p_thresh = 70.0                    # µV (AASM KC default)
+test_neg_peak_thresh = -40.0              # µV trough depth (AASM/Massimini2004)
+test_p2p_thresh = 75.0                    # µV peak-to-peak (AASM/Massimini2004)
 test_min_isolation = 1.0                  # seconds between successive KC troughs
 
 
@@ -111,45 +119,65 @@ kcomplexes = event_processor.detect_kcomplexes(
     reject_arousals=True,
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
-    json_dir=json_dir,
-    create_empty_json=True,
-    # Direct-to-DB path (opt-in). Off by default -> legacy behaviour unchanged.
-    write_db=_cli.write_db,
-    db_path=db_path if _cli.write_db else None,
+    json_dir=out_dir,
+    subject=_cli.subject,
+    # neural_events.db is the store of record. --legacy-json opts back into
+    # the per-channel JSON the export/import steps below consume.
+    write_db=False if _cli.legacy_json else True,
+    db_path=None if _cli.legacy_json else db_path,
     resume=_cli.resume,
 )
 
 
-# 6. Export ------------------------------------------------------------
+# 6. Report / export ---------------------------------------------------
 method_str = str(test_method).replace('/', '_')
 freq_range = fmt_freq_token(*test_frequency)
 stages_str = "".join(test_stages)
-file_pattern = f"kcomplex_{method_str}_{freq_range}_{stages_str}"
 
-param_csv = os.path.join(
-    json_dir, f'kc_parameters_{method_str}_{freq_range}_{stages_str}.csv')
-density_csv = os.path.join(
-    json_dir, f'kc_density_{method_str}_{freq_range}_{stages_str}.csv')
-
-if _cli.write_db:
-    # Direct-to-DB run: K-complexes are already in neural_events.db. Skip the
-    # JSON->CSV->import steps. A flat CSV can be produced on demand from the DB:
+if not _cli.legacy_json:
+    # K-complexes are already in neural_events.db with det_* and spectral
+    # columns and a detection_runs provenance row. Density is derived from the
+    # database on read -- its denominator is the artefact-free in-stage time
+    # this run analysed, stored in analysed_time. A flat CSV can still be
+    # produced on demand:
     #   from turtlewave_hdEEG import export_events_to_csv
     #   export_events_to_csv(db_path, 'k_complex', test_method, test_frequency,
-    #                        test_stages, output_dir=json_dir)
+    #                        test_stages, output_dir=out_dir)
+    from turtlewave_hdEEG.density import event_density, format_density_table
+
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
-    print(f"K-complex events written directly to DB: {db_path}")
-    print(f"ALL DONE (direct-to-DB)")
+    print(f"K-complex events written to: {db_path}")
+    try:
+        # Rejection settings must match the detection call above: they are part
+        # of the analysed_time key, so a mismatch divides by a different amount
+        # of recording time.
+        density_df = event_density(
+            db_path, event_type='k_complex', method=test_method,
+            stage=test_stages, subject=_cli.subject,
+            reject_artifacts=True, reject_arousals=True)
+        print("K-complex density (events per minute of artefact-free in-stage time):")
+        print(format_density_table(density_df))
+    except (ValueError, FileNotFoundError) as e:
+        print(f"K-complex density unavailable: {e}")
+    print("ALL DONE")
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
 else:
+    # Legacy path: aggregate the per-channel JSON written above into CSVs and
+    # import them. file_pattern must use the same band token the detector used.
+    file_pattern = f"kcomplex_{method_str}_{freq_range}_{stages_str}"
+    param_csv = os.path.join(
+        out_dir, f'kc_parameters_{method_str}_{freq_range}_{stages_str}.csv')
+    density_csv = os.path.join(
+        out_dir, f'kc_density_{method_str}_{freq_range}_{stages_str}.csv')
+
     event_processor.export_kc_parameters_to_csv(
-        json_input=json_dir, csv_file=param_csv, file_pattern=file_pattern,
+        json_input=out_dir, csv_file=param_csv, file_pattern=file_pattern,
         frequency=test_frequency,
     )
     # Same rejection settings as the detection call above, so the density
     # denominator matches the recording time actually analysed.
     event_processor.export_kc_density_to_csv(
-        json_input=json_dir, csv_file=density_csv, stage=test_stages,
+        json_input=out_dir, csv_file=density_csv, stage=test_stages,
         file_pattern=file_pattern,
         reject_artifacts=True, reject_arousals=True,
     )

@@ -8,7 +8,6 @@ and spindle detection functionalities in a user-friendly interface.
 
 import os
 import sys
-import csv
 import threading
 import json
 from datetime import datetime
@@ -25,11 +24,26 @@ import logging
 try:
     from turtlewave_hdEEG import LargeDataset, XLAnnotations, ParalEvents, ParalSWA, ParalKC, CustomAnnotations
     from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave, ImprovedDetectSpindle, ImprovedDetectKComplex
-    # Single source of truth for the '{lo}-{hi}Hz' filename token. The
-    # detectors name their per-channel JSON with this same function, so the
-    # file_pattern rebuilt here to find those files again cannot drift from
-    # the names they were written under.
-    from turtlewave_hdEEG.dbwrite import fmt_freq_token
+    # Single source of truth for the '{lo}-{hi}Hz' filename token, shared with
+    # the detectors so any filename this GUI builds matches what the library
+    # writes.
+    #
+    # The rest of these are the database-era result path. Detection no longer
+    # writes per-channel JSON: neural_events.db is the store of record, so the
+    # GUI resolves the target up front (resolve_db_target), checks afterwards
+    # that every requested channel is accounted for (verify_channel_coverage),
+    # derives density from the stored denominator (event_density), and offers
+    # a flat CSV on demand (export_events_to_csv).
+    #
+    # resolve_stage_tokens translates a requested stage set into the tokens
+    # actually stored, so a post-run count reads joint-token rows
+    # ('NREM2NREM3') and legacy per-epoch rows ('NREM2', 'NREM3') alike.
+    from turtlewave_hdEEG.dbwrite import (fmt_freq_token, resolve_db_target,
+                                          verify_channel_coverage,
+                                          export_events_to_csv,
+                                          resolve_stage_tokens,
+                                          join_stage_token)
+    from turtlewave_hdEEG.density import event_density
 
     #from wonambi.dataset import Dataset as WonambiDataset
 except ImportError as e:
@@ -39,6 +53,66 @@ try:
     from frontend.db_connect import connect_events_db
 except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
     from db_connect import connect_events_db
+
+
+#: The single event scan XLAnnotations offers, and what it actually writes.
+#: ``add_artefacts_from_events`` walks the EEGLAB event list once and adds
+#: Artefact, Arousal, Resp, Move and Snore annotations in the same pass, so
+#: artefacts and arousals cannot be imported independently of each other.
+ANNOTATION_EVENT_STEP = (
+    'add_artefacts_from_events',
+    "artefact and arousal events (plus respiratory, movement and snore)",
+)
+
+#: Staging import. Returns False when the recording header carries no staging.
+ANNOTATION_STAGE_STEP = (
+    'add_stages_from_header',
+    "sleep stages from the recording header",
+)
+
+LINKED_EVENT_TOOLTIP = (
+    "Artefacts and arousals are read from one pass over the recording's "
+    "event list, so ticking either one imports both\n(along with any "
+    "respiratory, movement and snore events found)."
+)
+
+
+def plan_annotation_actions(process_artifacts, process_arousals, process_stages):
+    """Map the annotation tab's checkboxes onto XLAnnotations calls.
+
+    Kept free of Qt so the mapping can be tested without a display.
+
+    Parameters
+    ----------
+    process_artifacts : bool
+        State of the "Process Artifacts" checkbox.
+    process_arousals : bool
+        State of the "Process Arousals" checkbox.
+    process_stages : bool
+        State of the "Process Sleep Stages" checkbox.
+
+    Returns
+    -------
+    list of tuple of (str, str)
+        ``(method_name, description)`` pairs to run in order. Every
+        ``method_name`` is a real public method of
+        ``turtlewave_hdEEG.annotation.XLAnnotations``. The list is empty when
+        nothing is selected.
+
+    Notes
+    -----
+    ``XLAnnotations`` has no per-type entry points, so artefacts and arousals
+    both map to ``add_artefacts_from_events``; ticking either one imports
+    both. Selecting all three is equivalent to ``process_all()``, but the
+    steps are run individually so the caller can see
+    ``add_stages_from_header``'s return value, which ``process_all`` discards.
+    """
+    steps = []
+    if process_artifacts or process_arousals:
+        steps.append(ANNOTATION_EVENT_STEP)
+    if process_stages:
+        steps.append(ANNOTATION_STAGE_STEP)
+    return steps
 
 
 class LoggingOutput(QtCore.QObject):
@@ -351,14 +425,21 @@ class TurtleWaveGUI(QMainWindow):
         # Checkboxes for annotation types
         self.artifact_check = QCheckBox("Process Artifacts")
         self.artifact_check.setChecked(True)
+        self.artifact_check.setToolTip(LINKED_EVENT_TOOLTIP)
         options_layout.addWidget(self.artifact_check)
-        
+
         self.arousal_check = QCheckBox("Process Arousals")
         self.arousal_check.setChecked(True)
+        self.arousal_check.setToolTip(LINKED_EVENT_TOOLTIP)
         options_layout.addWidget(self.arousal_check)
-        
+
         self.stage_check = QCheckBox("Process Sleep Stages")
         self.stage_check.setChecked(True)
+        self.stage_check.setToolTip(
+            "Import the sleep staging carried in the recording header.\n"
+            "If the header has no staging, the XML is still written but "
+            "without stages, and the log says so."
+        )
         options_layout.addWidget(self.stage_check)
         
         options_layout.addStretch(1)
@@ -537,12 +618,34 @@ class TurtleWaveGUI(QMainWindow):
         self.view_sw_results_btn.clicked.connect(self.view_sw_results)
         self.view_sw_results_btn.setEnabled(False)
         action_layout.addWidget(self.view_sw_results_btn)
-        
+
+        # Detection writes to neural_events.db and nothing else, so the flat
+        # file collaborators ask for is produced here, on demand, from the
+        # database as it currently stands.
+        self.export_sw_csv_btn = QPushButton("Export CSV")
+        self.export_sw_csv_btn.setToolTip(
+            "Write the stored slow wave events and their density out as CSV "
+            "files, from the database. Detection itself writes no CSV.")
+        self.export_sw_csv_btn.clicked.connect(self.export_sw_csv)
+        action_layout.addWidget(self.export_sw_csv_btn)
+
         layout.addLayout(action_layout)
         
         # Initialize method-specific parameters for the default method
         self.update_sw_params_for_method(self.sw_method_combo.currentText())    
 
+
+    #: Staresina2015 selects on a percentile of peak-to-peak amplitude, not on
+    #: an absolute voltage. One constant so the box, its note and the run log
+    #: cannot describe it differently.
+    STARESINA_PTP_TOOLTIP = (
+        "Keep candidate waves whose peak-to-peak amplitude is at or above "
+        "this percentile of all candidates on the channel — 75 keeps the top "
+        "25%. This method has no absolute microvolt floor; the cut-off is "
+        "relative to each channel's own amplitude distribution.\n\n"
+        "Read-only: nothing the GUI can send reaches this percentile "
+        "(ParalSWA.detect_slow_waves has no parameter for it), so it is held "
+        "at Staresina's published 75.")
 
     def update_sw_params_for_method(self, method_name):
         """Update slow wave detection parameters based on selected method"""
@@ -630,15 +733,22 @@ class TurtleWaveGUI(QMainWindow):
                 
                 trough_duration = detector.trough_duration
                 
+                # Same millisecond resolution as the duration pair below. No
+                # current default needs it (0.3/0.25/1.0 all fit in 2
+                # decimals), but these are seconds-valued boxes wired to a
+                # detection criterion, and 10 ms granularity is not a property
+                # anyone chose.
                 trough_layout.addWidget(QLabel("Min (s):"))
                 min_trough_spin = QDoubleSpinBox()
+                min_trough_spin.setDecimals(3)
                 min_trough_spin.setRange(0.01, 5.0)
                 min_trough_spin.setSingleStep(0.05)
                 min_trough_spin.setValue(trough_duration[0])
                 trough_layout.addWidget(min_trough_spin)
-                
+
                 trough_layout.addWidget(QLabel("Max (s):"))
                 max_trough_spin = QDoubleSpinBox()
+                max_trough_spin.setDecimals(3)
                 max_trough_spin.setRange(0.1, 10.0)
                 max_trough_spin.setSingleStep(0.1)
                 max_trough_spin.setValue(trough_duration[1])
@@ -720,15 +830,24 @@ class TurtleWaveGUI(QMainWindow):
                 dur_group = QGroupBox("Slow Wave Duration")
                 dur_layout = QHBoxLayout()
                 
+                # Durations are in seconds and need millisecond resolution:
+                # QDoubleSpinBox defaults to 2 decimals, which cannot hold
+                # Ngo2015's published min_dur of 0.833 -- setValue(0.833) then
+                # value() returned 0.83, so the tab sent a duration the method
+                # never specified, and the derived band (1/min_dur) with it,
+                # without the user touching anything. setDecimals must precede
+                # setValue: it rounds the value already stored.
                 dur_layout.addWidget(QLabel("Min (s):"))
                 min_dur_spin = QDoubleSpinBox()
+                min_dur_spin.setDecimals(3)
                 min_dur_spin.setRange(0.01, 5.0)
                 min_dur_spin.setSingleStep(0.05)
                 min_dur_spin.setValue(detector.min_dur)
                 dur_layout.addWidget(min_dur_spin)
-                
+
                 dur_layout.addWidget(QLabel("Max (s):"))
                 max_dur_spin = QDoubleSpinBox()
+                max_dur_spin.setDecimals(3)
                 max_dur_spin.setRange(0.1, 10.0)
                 max_dur_spin.setSingleStep(0.1)
                 max_dur_spin.setValue(detector.max_dur)
@@ -811,17 +930,42 @@ class TurtleWaveGUI(QMainWindow):
                     self.sw_param_widgets["ptp_thresh"] = ptp_spin
                     
                 elif method_name == "Staresina2015":
-                    # MODIFIED: Get p2p threshold from detector
-                    ptp_group = QGroupBox("Amplitude Threshold")
+                    # `detector.ptp_thresh` is a PERCENTILE, not microvolts:
+                    # wonambi/detect/slowwave.py:351 does
+                    # `ptp_thresh = percentile(ptp, opts.ptp_thresh)` and keeps
+                    # `ptp >= ptp_thresh`, so the published 75 keeps the top
+                    # 25% of candidates on each channel. The box used to be
+                    # labelled "(μV)" while holding this number, and its value
+                    # went out as `p2p_thresh` — harmless while that argument
+                    # only reached a unit-confused post-hoc filter, but since
+                    # 4.3 `p2p_thresh` is a real microvolt floor, so sending
+                    # 75 from here would impose a 75 μV peak-to-peak gate this
+                    # method never had. It is now logged and never sent; see
+                    # the amplitude block in start_sw_detection.
+                    #
+                    # It is shown read-only at the published 75 rather than
+                    # made editable: ParalSWA.detect_slow_waves() exposes no
+                    # parameter that reaches `opts.ptp_thresh` (its only
+                    # assignment is guarded by `meth == 'Ngo2015'`), so nothing
+                    # the GUI can send would change the percentile.
+                    ptp_group = QGroupBox("Peak-to-Peak Selection")
                     ptp_layout = QHBoxLayout()
-                    ptp_layout.addWidget(QLabel("Peak-to-Peak Threshold (μV):"))
+                    ptp_layout.addWidget(QLabel("Peak-to-peak percentile:"))
                     ptp_spin = QDoubleSpinBox()
-                    ptp_spin.setRange(0, 1000)
+                    ptp_spin.setRange(0, 100)
                     ptp_spin.setValue(detector.ptp_thresh)
+                    ptp_spin.setEnabled(False)
+                    ptp_spin.setToolTip(self.STARESINA_PTP_TOOLTIP)
                     ptp_layout.addWidget(ptp_spin)
+                    ptp_note = QLabel(
+                        "Fixed at the published 75 — relative cut-off, not µV.")
+                    ptp_note.setWordWrap(True)
+                    ptp_note.setStyleSheet("color: #888888;")
+                    ptp_note.setToolTip(self.STARESINA_PTP_TOOLTIP)
+                    ptp_layout.addWidget(ptp_note)
                     ptp_group.setLayout(ptp_layout)
                     self.method_params_layout.addWidget(ptp_group)
-                    
+
                     # Store ptp threshold widget
                     self.sw_param_widgets["ptp_thresh"] = ptp_spin
             
@@ -934,21 +1078,32 @@ class TurtleWaveGUI(QMainWindow):
                 # These methods don't use trough_duration
                 trough_duration = None
                 
+                # Neither of these methods defines an absolute microvolt
+                # amplitude criterion: Ngo thresholds at a multiple of the
+                # mean, Staresina at a percentile of peak-to-peak amplitude.
+                # None therefore means "run the method as published", which is
+                # what this tab offers. An explicit µV floor is still
+                # available from the scripting API (pass neg_peak_thresh /
+                # p2p_thresh to ParalSWA.detect_slow_waves), where the library
+                # logs it as a deliberate deviation from the paper.
+                neg_peak_thresh = None
+                p2p_thresh = None
+
                 if self.sw_method == "Ngo2015":
                    # Get thresholds - these are in sigma units for adaptive thresholds
                     peak_thresh_sigma = self.sw_param_widgets["peak_thresh"].value()
                     ptp_thresh_sigma = self.sw_param_widgets["ptp_thresh"].value()
+                    ptp_percentile = None
 
-                    
-                    # These will be overridden by sigma thresholds in the detector
-                    neg_peak_thresh = -80.0  # Default value
-                    p2p_thresh = 140.0      # Default value
-                
-                    
                 else:  # Staresina2015
-                    # Get threshold in μV
-                    neg_peak_thresh = -75.0  # Default value 
-                    p2p_thresh = self.sw_param_widgets["ptp_thresh"].value()
+                    # The percentile box is read-only, so this is always
+                    # Staresina's published 75. It is logged for the record
+                    # and deliberately NOT sent as `p2p_thresh`: the detector
+                    # reads the percentile from `opts.ptp_thresh`, which is
+                    # not settable from here, whereas `p2p_thresh` is now a
+                    # real microvolt floor. Sending 75 there would silently
+                    # impose a 75 µV peak-to-peak gate this method never had.
+                    ptp_percentile = self.sw_param_widgets["ptp_thresh"].value()
                     peak_thresh_sigma = None
                     ptp_thresh_sigma = None
             
@@ -975,8 +1130,32 @@ class TurtleWaveGUI(QMainWindow):
             else:
                 self.write_log(f"Duration range: {min_dur:.2f}-{max_dur:.2f} s")
                 
-            self.write_log(f"Negative peak threshold: {neg_peak_thresh} μV")
-            self.write_log(f"Peak-to-peak threshold: {p2p_thresh} μV")
+            # Only the Massimini family takes microvolt amplitude criteria
+            # from this tab. Ngo2015 and Staresina2015 run on their published
+            # criteria with no absolute μV floor, so logging a μV number for
+            # them would put a false record in the log tab.
+            if self.sw_method in ["Massimini2004", "AASM/Massimini2004"]:
+                self.write_log(f"Negative peak threshold: {neg_peak_thresh} μV")
+                self.write_log(f"Peak-to-peak threshold: {p2p_thresh} μV")
+            elif self.sw_method == "Staresina2015":
+                self.write_log(
+                    f"Peak-to-peak percentile: {ptp_percentile:g} "
+                    f"(keeps the top {100 - ptp_percentile:g}% by amplitude)")
+                self.write_log(
+                    "Amplitude criteria: published Staresina2015 criteria "
+                    "only (neg_peak_thresh=None, p2p_thresh=None). An "
+                    "absolute μV floor is available from the scripting API.")
+            elif self.sw_method == "Ngo2015":
+                self.write_log(
+                    "Amplitude criteria: published Ngo2015 adaptive "
+                    "thresholds only (neg_peak_thresh=None, "
+                    "p2p_thresh=None). An absolute μV floor is available "
+                    "from the scripting API.")
+            else:
+                self.write_log(
+                    f"Amplitude arguments sent to the detector: "
+                    f"neg_peak_thresh={neg_peak_thresh}, "
+                    f"p2p_thresh={p2p_thresh}")
 
             if self.sw_method == "Ngo2015":
                 self.write_log(f"Adaptive peak threshold: {peak_thresh_sigma} σ")
@@ -1096,76 +1275,61 @@ class TurtleWaveGUI(QMainWindow):
             detect_kwargs['json_dir'] = json_dir  # Added parameter
             detect_kwargs['save_to_annotations'] = False  # Added parameter
 
+            # Resolve the database BEFORE detecting: an unwritable target must
+            # cost a dialog, not an hour of detection with nowhere to put the
+            # results. write_db is left at its default (None = the database),
+            # so no per-channel JSON is written.
+            db_path = self.run_db_path()
+            subject = self.resolve_subject()
+            detect_kwargs['db_path'] = db_path
+            detect_kwargs['subject'] = subject
+            self.write_log(
+                f"Slow wave rows will be keyed under subject '{subject}'")
+
+            # Snapshot the runs already recorded for this scope, so the rows
+            # this run writes can be told apart from rows an earlier run left.
+            runs_before = self.db_run_ids(db_path, 'slow_wave', params['method'])
+
             slow_waves = event_processor.detect_slow_waves(**detect_kwargs)
             sw_count = self.log_event_count("Slow wave", slow_waves)
 
-            # Export results
-            # Format names for export
-            # detect_slow_waves names its JSON with the method escaped
-            # (swprocessor: str(method).replace('/', '_')), so a shipped option
-            # like 'AASM/Massimini2004' must be escaped the same way here or
-            # the pattern matches nothing on disk.
-            method_str = str(params['method']).replace('/', '_')
-            freq_range_str = fmt_freq_token(params['frequency'][0],
-                                            params['frequency'][1])
-            stages_str = "".join(params['stage'])
-            file_pattern = f"slowwaves_{method_str}_{freq_range_str}_{stages_str}"
-
-            # Export parameters to CSV. Reported after the fact, from the
-            # filesystem, so the log cannot announce a file that was never
-            # written.
-            param_csv = os.path.join(json_dir, f'sw_parameters_{method_str}_{freq_range_str}_{stages_str}.csv')
-            param_written = self.export_csv_step(
-                "Slow wave parameters CSV",
-                event_processor.export_slow_wave_parameters_to_csv,
-                param_csv,
-                json_input=json_dir,
-                frequency=params['frequency'],
-                file_pattern=file_pattern
-            )
-
-            # Initialize and update database
-            # Add database functionality
-            db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
-            # Tri-state: True imported, False genuine failure, None not
-            # attempted because there was nothing to import.
-            sw_import_ok = None
-            if param_written:
-                self.write_log(f"Initializing/updating database at {db_path}")
-                event_processor.initialize_sqlite_database(db_path)
-                # Pass the original (unescaped) method so the importer doesn't
-                # mangle 'AASM/Massimini2004' down to 'AASM' by splitting the
-                # filename (swprocessor's fallback parser).
-                sw_import_ok = self.import_to_database(
-                    "Slow wave database import",
-                    event_processor.import_parameters_csv_to_database,
-                    param_csv, db_path, method=params['method'])
-            else:
+            # The method is kept UNESCAPED for every database query: that is how
+            # the detector stores it, so 'AASM/Massimini2004' must not be
+            # flattened to 'AASM_Massimini2004' here.
+            runs_after = self.db_run_ids(db_path, 'slow_wave', params['method'])
+            new_runs = (None if runs_before is None or runs_after is None
+                        else runs_after - runs_before)
+            if not new_runs:
                 self.write_log(
-                    "Skipping the slow wave database import: this run produced no "
-                    "usable parameters CSV to import from (see the export "
-                    "step above).")
+                    "Could not identify this run's own database run id, so the "
+                    "counts below cover every run stored for this method, band "
+                    "and stage set - not only this one.")
+            sw_rows, sw_channels = self.count_db_events(
+                db_path, 'slow_wave', params['method'], params['frequency'],
+                params['stage'], run_ids=new_runs)
 
-            # Export density to CSV
-            density_csv = os.path.join(json_dir, f'sw_density_{method_str}_{freq_range_str}_{stages_str}.csv')
-            # The density denominator has to be computed over the same epochs
-            # the detector actually analysed. Leaving these out let the
-            # exporter assume both rejections were on, so a run with either
-            # unticked got a denominator larger than the time it searched and
-            # a density biased low.
-            density_written = self.export_csv_step(
-                "Slow wave density CSV",
-                event_processor.export_slow_wave_density_to_csv,
-                density_csv,
-                json_input=json_dir,
-                stage=params['stage'],
-                file_pattern=file_pattern,
+            sw_coverage = self.verify_db_channels(
+                "Slow wave", db_path, 'slow_wave', params['method'],
+                params['chan'], params['frequency'], params['stage'])
+
+            # Density from the database, not from JSON. The denominator is the
+            # artefact-free time this run stored in analysed_time, selected by
+            # the run's own rejection settings.
+            self.report_db_density(
+                "Slow wave", db_path, 'slow_wave', params['method'],
+                params['frequency'], params['stage'], subject,
+                params['reject_artifacts'], params['reject_arousals'])
+
+            self.remember_run_scope(
+                "Slow wave", db_path=db_path, event_type='slow_wave',
+                method=params['method'], frequency=params['frequency'],
+                stage=list(params['stage']), subject=subject,
                 reject_artifacts=params['reject_artifacts'],
-                reject_arousals=params['reject_arousals']
-            )
+                reject_arousals=params['reject_arousals'],
+                out_dir=json_dir)
 
-            self.log_run_outcome("Slow wave", db_path, sw_count,
-                                 param_written, sw_import_ok)
+            self.log_run_outcome("Slow wave", db_path, sw_count, sw_rows,
+                                 sw_channels, sw_coverage)
 
             try:
                 # Prepare parameters summary
@@ -1189,15 +1353,18 @@ class TurtleWaveGUI(QMainWindow):
                         parameters_summary['peak_thresh_sigma'] = params.get('peak_thresh_sigma')
                         parameters_summary['ptp_thresh_sigma'] = params.get('ptp_thresh_sigma')
                 
-                # Prepare results summary
-                # Only name the files that were actually written, so the saved
-                # summary cannot point at a CSV that does not exist.
+                # Report the database, because that is where the results are.
+                # Detection writes no CSV, so naming one here would send a
+                # reader to a file that does not exist.
                 results_summary = {
                     'total_slow_waves_detected': len(slow_waves) if 'slow_waves' in locals() else 0,
-                    'channels_processed': len(params['chan']),
-                    'csv_file': param_csv if param_written else None,
-                    'density_file': density_csv if density_written else None,
-                    'database_file': db_path if sw_import_ok else None
+                    'channels_requested': len(params['chan']),
+                    'channels_in_database': sw_channels,
+                    'events_written_to_database': sw_rows,
+                    'database_file': db_path,
+                    'subject': subject,
+                    'channels_missing_from_database': (
+                        (sw_coverage or {}).get('missing') or []),
                 }
                 
                 # Save detection summary
@@ -1249,6 +1416,42 @@ class TurtleWaveGUI(QMainWindow):
     # The method combo is restricted to Massimini2004 / AASM/Massimini2004;
     # Ngo2015 and Staresina2015 target slow oscillations and are not
     # appropriate for KC scoring.
+    #
+    # Starting a K-complex run is gated off for this release, at the user's
+    # request. The tab, its parameters and everything that reads
+    # already-detected K-complexes out of the database stay available; only
+    # launching a new detection is blocked. The switch is GUI-only: nothing
+    # here gates ParalKC, so scripted and cluster callers keep working.
+    # Setting KC_DETECTION_ENABLED back to True restores every control, so the
+    # decision lives in one place.
+    #
+    # The reason text says nothing about why the release turned it off -- that
+    # is a decision, not a defect, and defect-specific wording goes stale. It
+    # does state what changed for scripted callers, because "not gated" is not
+    # the same as "unchanged": ImprovedDetectKComplex moved the
+    # AASM/Massimini2004 defaults to -40/75 uV and now measures the isolation
+    # gap between negative peaks, so their counts move.
+
+    KC_DETECTION_ENABLED = False
+
+    KC_DISABLED_REASON = (
+        "K-complex detection is turned off in this release.\n\n"
+        "K-complexes already stored in the database are unaffected: you can "
+        "still view them in the event review GUI and write them out with "
+        "Export CSV on this tab.\n\n"
+        "This switch gates the GUI only — scripted and cluster code can still "
+        "call ParalKC.detect_kcomplexes. What that returns does change in "
+        "this release: the AASM/Massimini2004 defaults moved from -37/70 µV "
+        "to Wonambi's published -40/75 µV, and the isolation gap is now "
+        "measured between negative peaks rather than positive ones. Counts "
+        "move on both axes, so do not pool new runs with K-complexes detected "
+        "by an earlier version.")
+
+    KC_DISABLED_SHORT = (
+        "K-complex detection is turned off in this release. Stored "
+        "K-complexes can still be reviewed and exported. Scripted ParalKC "
+        "runs are not gated by this switch, but what they detect changes in "
+        "this release — hover for detail.")
 
     def setup_kcomplex_tab(self):
         """Setup the K-complex detection tab"""
@@ -1282,6 +1485,7 @@ class TurtleWaveGUI(QMainWindow):
         iso_layout = QHBoxLayout()
         iso_layout.addWidget(QLabel("Min isolation (s):"))
         self.kc_min_isolation_spin = QDoubleSpinBox()
+        self.kc_min_isolation_spin.setDecimals(3)  # seconds; see the SW tab
         self.kc_min_isolation_spin.setRange(0.0, 5.0)
         self.kc_min_isolation_spin.setSingleStep(0.1)
         self.kc_min_isolation_spin.setValue(1.0)
@@ -1370,13 +1574,52 @@ class TurtleWaveGUI(QMainWindow):
         self.detect_kc_btn = QPushButton("Detect K-Complexes")
         self.detect_kc_btn.clicked.connect(self.detect_kc_thread)
         self.detect_kc_btn.setStyleSheet("font-weight: bold;")
+        # Greyed out for this release - see KC_DISABLED_REASON. A disabled
+        # button takes no mouse click and no Space/Return from the keyboard,
+        # so detect_kc_thread() cannot be reached through it either way.
+        if not self.KC_DETECTION_ENABLED:
+            self.detect_kc_btn.setEnabled(False)
+            self.detect_kc_btn.setToolTip(self.KC_DISABLED_REASON)
         action_layout.addWidget(self.detect_kc_btn)
 
         self.view_kc_results_btn = QPushButton("View Results")
         self.view_kc_results_btn.clicked.connect(self.view_kc_results)
+        # Stays disabled: it reads wonambi/kc_results/*.csv, the legacy
+        # per-channel directory that 4.2.0 stopped writing, so enabling it
+        # would point at files this version never produces.
         self.view_kc_results_btn.setEnabled(False)
+        self.view_kc_results_btn.setToolTip(
+            "Unavailable: this reads the legacy kc_results/*.csv directory, "
+            "which this version no longer writes. Use Export CSV on this tab "
+            "or the event review GUI — both read the database.")
         action_layout.addWidget(self.view_kc_results_btn)
+
+        # See the slow wave tab: the flat file is produced on demand from the
+        # database, not as a side effect of detection.
+        self.export_kc_csv_btn = QPushButton("Export CSV")
+        self.export_kc_csv_btn.setToolTip(
+            "Write the stored K-complex events and their density out as CSV "
+            "files, from the database. Detection itself writes no CSV.")
+        self.export_kc_csv_btn.clicked.connect(self.export_kc_csv)
+        action_layout.addWidget(self.export_kc_csv_btn)
         layout.addLayout(action_layout)
+
+        if not self.KC_DETECTION_ENABLED:
+            # A disabled button accepts no click, so the reason has to be
+            # readable without one: it sits on the page as well as in the
+            # button's tooltip.
+            self.kc_disabled_notice = QLabel(self.KC_DISABLED_SHORT)
+            self.kc_disabled_notice.setWordWrap(True)
+            self.kc_disabled_notice.setToolTip(self.KC_DISABLED_REASON)
+            self.kc_disabled_notice.setStyleSheet("color: #888888;")
+            layout.addWidget(self.kc_disabled_notice)
+
+            # Grey the tab label to match, and carry the explanation there too.
+            kc_tab_index = self.tabs.indexOf(self.kcomplex_tab)
+            if kc_tab_index != -1:
+                self.tabs.setTabToolTip(kc_tab_index, self.KC_DISABLED_REASON)
+                self.tabs.tabBar().setTabTextColor(
+                    kc_tab_index, QtGui.QColor("#888888"))
 
         self.update_kc_params_for_method(self.kc_method_combo.currentText())
 
@@ -1452,14 +1695,17 @@ class TurtleWaveGUI(QMainWindow):
             trough_group = QGroupBox("Trough Duration (Negative Half-Wave)")
             trough_layout = QHBoxLayout()
             trough_duration = detector.trough_duration
+            # Millisecond resolution, as on the slow wave tab.
             trough_layout.addWidget(QLabel("Min (s):"))
             min_trough_spin = QDoubleSpinBox()
+            min_trough_spin.setDecimals(3)
             min_trough_spin.setRange(0.01, 5.0)
             min_trough_spin.setSingleStep(0.05)
             min_trough_spin.setValue(trough_duration[0])
             trough_layout.addWidget(min_trough_spin)
             trough_layout.addWidget(QLabel("Max (s):"))
             max_trough_spin = QDoubleSpinBox()
+            max_trough_spin.setDecimals(3)
             max_trough_spin.setRange(0.1, 10.0)
             max_trough_spin.setSingleStep(0.1)
             max_trough_spin.setValue(trough_duration[1])
@@ -1516,6 +1762,16 @@ class TurtleWaveGUI(QMainWindow):
 
     def detect_kc_thread(self):
         """Start K-complex detection in a separate thread."""
+        # Second gate behind the disabled button: anything that still reaches
+        # this slot gets the reason, not a downstream error about parameters or
+        # channels that would blame the user for a block the GUI imposed.
+        if not self.KC_DETECTION_ENABLED:
+            QMessageBox.information(
+                self, "K-complex detection unavailable",
+                self.KC_DISABLED_REASON)
+            self.write_log("K-complex detection is disabled in this release.")
+            return
+
         if not self.dataset:
             QMessageBox.critical(self, "Error", "No dataset loaded. Please load a dataset first.")
             return
@@ -1627,60 +1883,53 @@ class TurtleWaveGUI(QMainWindow):
             detect_kwargs['json_dir'] = json_dir
             detect_kwargs['save_to_annotations'] = False
 
+            # See the slow wave path for why the database is resolved before
+            # detection rather than after it.
+            db_path = self.run_db_path()
+            subject = self.resolve_subject()
+            detect_kwargs['db_path'] = db_path
+            detect_kwargs['subject'] = subject
+            self.write_log(
+                f"K-complex rows will be keyed under subject '{subject}'")
+
+            runs_before = self.db_run_ids(db_path, 'k_complex', params['method'])
+
             kcomplexes = event_processor.detect_kcomplexes(**detect_kwargs)
             kc_count = self.log_event_count("K-complex", kcomplexes)
 
-            method_str = str(params['method']).replace('/', '_')
-            freq_range_str = fmt_freq_token(params['frequency'][0],
-                                            params['frequency'][1])
-            stages_str = "".join(params['stage'])
-            file_pattern = f"kcomplex_{method_str}_{freq_range_str}_{stages_str}"
-
-            param_csv = os.path.join(
-                json_dir,
-                f'kc_parameters_{method_str}_{freq_range_str}_{stages_str}.csv')
-            param_written = self.export_csv_step(
-                "K-complex parameters CSV",
-                event_processor.export_kc_parameters_to_csv,
-                param_csv,
-                json_input=json_dir,
-                frequency=params['frequency'], file_pattern=file_pattern)
-
-            db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
-            # Tri-state: True imported, False genuine failure, None not
-            # attempted because there was nothing to import.
-            kc_import_ok = None
-            if param_written:
-                self.write_log(f"Initializing/updating database at {db_path}")
-                event_processor.initialize_sqlite_database(db_path)
-                # Pass the original (unescaped) method so the importer doesn't
-                # mangle 'AASM/Massimini2004' down to 'AASM' via filename parsing.
-                kc_import_ok = self.import_to_database(
-                    "K-complex database import",
-                    event_processor.import_parameters_csv_to_database,
-                    param_csv, db_path, method=params['method'])
-            else:
+            # UNESCAPED method throughout: the shipped default is
+            # 'AASM/Massimini2004' and that is exactly what is stored.
+            runs_after = self.db_run_ids(db_path, 'k_complex', params['method'])
+            new_runs = (None if runs_before is None or runs_after is None
+                        else runs_after - runs_before)
+            if not new_runs:
                 self.write_log(
-                    "Skipping the K-complex database import: this run produced no "
-                    "usable parameters CSV to import from (see the export "
-                    "step above).")
+                    "Could not identify this run's own database run id, so the "
+                    "counts below cover every run stored for this method, band "
+                    "and stage set - not only this one.")
+            kc_rows, kc_channels = self.count_db_events(
+                db_path, 'k_complex', params['method'], params['frequency'],
+                params['stage'], run_ids=new_runs)
 
-            density_csv = os.path.join(
-                json_dir,
-                f'kc_density_{method_str}_{freq_range_str}_{stages_str}.csv')
-            # Same reject settings the detector ran with; see the note in the
-            # slow wave path.
-            density_written = self.export_csv_step(
-                "K-complex density CSV",
-                event_processor.export_kc_density_to_csv,
-                density_csv,
-                json_input=json_dir,
-                stage=params['stage'], file_pattern=file_pattern,
+            kc_coverage = self.verify_db_channels(
+                "K-complex", db_path, 'k_complex', params['method'],
+                params['chan'], params['frequency'], params['stage'])
+
+            self.report_db_density(
+                "K-complex", db_path, 'k_complex', params['method'],
+                params['frequency'], params['stage'], subject,
+                params['reject_artifacts'], params['reject_arousals'])
+
+            self.remember_run_scope(
+                "K-complex", db_path=db_path, event_type='k_complex',
+                method=params['method'], frequency=params['frequency'],
+                stage=list(params['stage']), subject=subject,
                 reject_artifacts=params['reject_artifacts'],
-                reject_arousals=params['reject_arousals'])
+                reject_arousals=params['reject_arousals'],
+                out_dir=json_dir)
 
-            self.log_run_outcome("K-complex", db_path, kc_count,
-                                 param_written, kc_import_ok)
+            self.log_run_outcome("K-complex", db_path, kc_count, kc_rows,
+                                 kc_channels, kc_coverage)
 
             try:
                 parameters_summary = {
@@ -1694,13 +1943,16 @@ class TurtleWaveGUI(QMainWindow):
                     'trough_duration': params.get('trough_duration'),
                     'min_isolation': params.get('min_isolation'),
                 }
-                # Only name the files that were actually written.
+                # The database is where the results are; detection writes no CSV.
                 results_summary = {
                     'total_kcomplexes_detected': len(kcomplexes) if 'kcomplexes' in locals() else 0,
-                    'channels_processed': len(params['chan']),
-                    'csv_file': param_csv if param_written else None,
-                    'density_file': density_csv if density_written else None,
-                    'database_file': db_path if kc_import_ok else None,
+                    'channels_requested': len(params['chan']),
+                    'channels_in_database': kc_channels,
+                    'events_written_to_database': kc_rows,
+                    'database_file': db_path,
+                    'subject': subject,
+                    'channels_missing_from_database': (
+                        (kc_coverage or {}).get('missing') or []),
                 }
                 event_processor.save_detection_summary(
                     output_dir=json_dir, method=params['method'],
@@ -1719,10 +1971,11 @@ class TurtleWaveGUI(QMainWindow):
             QtCore.QMetaObject.invokeMethod(
                 self, "show_error", QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, f"Failed to detect K-complexes: {e}"))
-            QtCore.QMetaObject.invokeMethod(
-                self.detect_kc_btn, "setEnabled",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, True))
+            if self.KC_DETECTION_ENABLED:
+                QtCore.QMetaObject.invokeMethod(
+                    self.detect_kc_btn, "setEnabled",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(bool, True))
             QtCore.QMetaObject.invokeMethod(
                 self.progress, "setVisible",
                 QtCore.Qt.QueuedConnection,
@@ -1731,8 +1984,12 @@ class TurtleWaveGUI(QMainWindow):
     @QtCore.pyqtSlot()
     def finish_kc_detection(self):
         """Finish K-complex detection."""
-        self.detect_kc_btn.setEnabled(True)
-        self.view_kc_results_btn.setEnabled(True)
+        # Do not resurrect the run button while detection is gated off.
+        if self.KC_DETECTION_ENABLED:
+            self.detect_kc_btn.setEnabled(True)
+        # `view_kc_results_btn` is NOT enabled here: nothing writes
+        # wonambi/kc_results/*.csv any more, so a run produces nothing for it
+        # to show. Export CSV and the review GUI read the database instead.
         self.progress.setVisible(False)
         self.statusBar().showMessage("K-complex detection completed")
         self.show_run_finished_dialog("K-complex")
@@ -1748,7 +2005,7 @@ class TurtleWaveGUI(QMainWindow):
 
         csv_files = [f for f in os.listdir(json_dir) if f.endswith('.csv')]
         if not csv_files:
-            QMessageBox.critical(self, "Error", "No CSV result files found.")
+            QMessageBox.information(self, "No CSV files", self._no_csv_message())
             return
 
         viewer = QtWidgets.QDialog(self)
@@ -1991,7 +2248,16 @@ class TurtleWaveGUI(QMainWindow):
         self.view_results_btn.clicked.connect(self.view_spindle_results)
         self.view_results_btn.setEnabled(False)
         action_layout.addWidget(self.view_results_btn)
-        
+
+        # See the slow wave tab: the flat file is produced on demand from the
+        # database, not as a side effect of detection.
+        self.export_spindle_csv_btn = QPushButton("Export CSV")
+        self.export_spindle_csv_btn.setToolTip(
+            "Write the stored spindle events and their density out as CSV "
+            "files, from the database. Detection itself writes no CSV.")
+        self.export_spindle_csv_btn.clicked.connect(self.export_spindle_csv)
+        action_layout.addWidget(self.export_spindle_csv_btn)
+
         layout.addLayout(action_layout)
         
         #Initialize method-specific parameters for the default method
@@ -3257,42 +3523,92 @@ class TurtleWaveGUI(QMainWindow):
                     "Database not found. Cannot update available channels.")
                 return
             
+            # Find channels carrying both slow waves and spindles for the
+            # selected methods, as two independent lookups intersected in
+            # Python rather than one self-join on ``sw.stage = sp.stage``.
+            #
+            # The join demanded that both sides carry the *identical* stage
+            # string. A database where slow waves stored the per-epoch stage
+            # ('NREM2', 'NREM3') and spindles the joined run scope
+            # ('NREM2NREM3') can never satisfy that, so it matched zero rows,
+            # the channel list came back empty, and the only symptom the user
+            # saw was "No channels selected" at run time - with the stage
+            # difference, the actual cause, never mentioned. Joint stage tokens
+            # remove that particular mismatch, but not the general one:
+            # detecting slow waves on N2+N3 and spindles on N2 alone rebuilds
+            # exactly the same dead end.
+            #
+            # Intersecting per-side channel sets keeps a stage difference
+            # visible instead of fatal - it is reported here and confirmed by
+            # the "Continue anyway?" modal in run_pac_analysis, which the join
+            # made unreachable.
             conn = connect_events_db(db_path)
-            cursor = conn.cursor()
+            try:
+                cursor = conn.cursor()
 
-            # Find channels with both SW and spindles for the selected methods and stages
-            query = """
-                SELECT DISTINCT sw.channel 
-                FROM events sw
-                JOIN events sp ON sw.channel = sp.channel AND sw.stage = sp.stage
-                WHERE sw.event_type = 'slow_wave' AND sw.method = ? AND sw.stage = ?
-                AND sp.event_type = 'spindle' AND sp.method = ? AND sp.stage = ?
-                ORDER BY sw.channel
-            """
-            
-            cursor.execute(query, (sw_base_method, sw_stage, spindle_base_method, spindle_stage))
-            
-            # Get matching channels
-            matching_channels = [row[0] for row in cursor.fetchall()]
-            conn.close()
+                def _channels_for(event_type, method, stage):
+                    cursor.execute(
+                        "SELECT DISTINCT channel FROM events "
+                        "WHERE event_type = ? AND method = ? AND stage = ? "
+                        "AND channel IS NOT NULL",
+                        (event_type, method, stage))
+                    return {row[0] for row in cursor.fetchall()}
+
+                sw_channels = _channels_for('slow_wave', sw_base_method,
+                                            sw_stage)
+                spindle_channels = _channels_for('spindle',
+                                                 spindle_base_method,
+                                                 spindle_stage)
+            finally:
+                conn.close()
+
+            matching_channels = sorted(sw_channels & spindle_channels)
 
             # The lookup got through, so forget any earlier failure message:
             # if the same problem recurs it should be reported again.
             self.write_log_once('pac_channel_lookup', None)
 
             if matching_channels:
-                #self.write_log(f"Found {len(matching_channels)} channels with both {sw_base_method} slow waves and {spindle_base_method} spindles in {sw_stage}")
-                
                 # Store and update available channels
                 self.pac_available_channels = matching_channels
-                
+                self.write_log_once('pac_channel_empty', None)
+
                 # Update UI
                 self.update_pac_channel_lists()
             else:
-                #self.write_log(f"No channels found with both {sw_base_method} slow waves and {spindle_base_method} spindles in {sw_stage}")
+                # Say which side was empty, and whether the two scopes even
+                # describe the same stages. Kept under its own log key so the
+                # success-path clear above cannot make it repeat on every combo
+                # change.
+                if not sw_channels and not spindle_channels:
+                    reason = (f"no slow-wave rows for method '{sw_base_method}' "
+                              f"stage '{sw_stage}', and no spindle rows for "
+                              f"method '{spindle_base_method}' stage "
+                              f"'{spindle_stage}'")
+                elif not sw_channels:
+                    reason = (f"no slow-wave rows for method '{sw_base_method}' "
+                              f"stage '{sw_stage}' ({len(spindle_channels)} "
+                              f"spindle channel(s) found)")
+                elif not spindle_channels:
+                    reason = (f"no spindle rows for method "
+                              f"'{spindle_base_method}' stage "
+                              f"'{spindle_stage}' ({len(sw_channels)} "
+                              f"slow-wave channel(s) found)")
+                else:
+                    reason = (f"{len(sw_channels)} slow-wave channel(s) and "
+                              f"{len(spindle_channels)} spindle channel(s), "
+                              f"but none in common")
+                if str(sw_stage) != str(spindle_stage):
+                    reason += (f"; the two stage scopes differ (SW '{sw_stage}' "
+                               f"vs spindle '{spindle_stage}'), so re-detect "
+                               f"both on the same stage set")
+                self.write_log_once(
+                    'pac_channel_empty',
+                    "PAC: no channel has both slow waves and spindles - "
+                    + reason)
                 self.pac_available_channels = []
                 self.update_pac_channel_lists()
-        
+
         except Exception as e:
             self.write_log_once('pac_channel_lookup',
                                 f"Error updating available channels: {str(e)}")
@@ -3972,68 +4288,109 @@ class TurtleWaveGUI(QMainWindow):
     def process_annotations(self):
         """Process annotations (runs in a thread)"""
         try:
+            want_artifacts = self.artifact_check.isChecked()
+            want_arousals = self.arousal_check.isChecked()
+            want_stages = self.stage_check.isChecked()
+
+            steps = plan_annotation_actions(want_artifacts, want_arousals,
+                                            want_stages)
+
+            if not steps:
+                self.write_log("No annotation types selected - nothing to do.")
+                QtCore.QMetaObject.invokeMethod(
+                    self, "show_error",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, "Select at least one annotation type "
+                                      "(artefacts, arousals or sleep stages) "
+                                      "before generating annotations.")
+                )
+                self._reset_annotation_controls()
+                return
+
+            if want_artifacts != want_arousals:
+                self.write_log(
+                    "Note: artefacts and arousals come from the same pass over "
+                    "the recording's event list, so both are imported."
+                )
+
             # Create annotations
             annotations = XLAnnotations(self.dataset, self.annot_file_path)
-            
-            # Process artifacts, arousals, and sleep stages based on user selection
-            process_all = (self.artifact_check.isChecked() and 
-                          self.arousal_check.isChecked() and 
-                          self.stage_check.isChecked())
-            
-            if process_all:
-                annotations.process_all()
-                self.write_log("Processed all annotation types")
-            else:
-                if self.artifact_check.isChecked():
-                    annotations.process_artifact()
-                    self.write_log("Processed artifacts")
-                
-                if self.arousal_check.isChecked():
-                    annotations.process_arousal()
-                    self.write_log("Processed arousals")
-                
-                if self.stage_check.isChecked():
-                    annotations.process_stage()
-                    self.write_log("Processed sleep stages")
-            
+
+            warning = ""
+            for method_name, description in steps:
+                result = getattr(annotations, method_name)()
+
+                # add_stages_from_header returns False - and prints its reason -
+                # when the header carries no staging. process_all() throws that
+                # answer away, which is how stage-less XML used to be written
+                # without anyone being told, so the steps are run directly here.
+                if method_name == ANNOTATION_STAGE_STEP[0] and result is False:
+                    warning = ("XML written without sleep stages - staging is "
+                               "missing from the EEG header. See the log for "
+                               "the reason.")
+                    self.write_log(f"WARNING: {warning}")
+                else:
+                    self.write_log(f"Processed {description}")
+
             self.write_log(f"Annotations saved to {self.annot_file_path}")
-            
+
             # Update UI in main thread
             QtCore.QMetaObject.invokeMethod(
-                self, "finish_annotations", 
-                QtCore.Qt.QueuedConnection
+                self, "finish_annotations",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, warning)
             )
-        
+
         except Exception as e:
             self.write_log(f"Error generating annotations: {str(e)}")
             QtCore.QMetaObject.invokeMethod(
-                self, "show_error", 
+                self, "show_error",
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, f"Failed to generate annotations: {str(e)}")
             )
-            
-            # Re-enable buttons in main thread
-            QtCore.QMetaObject.invokeMethod(
-                self.generate_annot_btn, "setEnabled", 
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, True)
-            )
-            
-            QtCore.QMetaObject.invokeMethod(
-                self.progress, "setVisible", 
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, False)
-            )
-    
+
+            self._reset_annotation_controls()
+
+    def _reset_annotation_controls(self):
+        """Re-enable the annotation tab from a worker thread after a failure."""
+        QtCore.QMetaObject.invokeMethod(
+            self.generate_annot_btn, "setEnabled",
+            QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(bool, True)
+        )
+
+        QtCore.QMetaObject.invokeMethod(
+            self.progress, "setVisible",
+            QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(bool, False)
+        )
+
     @QtCore.pyqtSlot()
-    def finish_annotations(self):
-        """Finish annotation generation"""
+    @QtCore.pyqtSlot(str)
+    def finish_annotations(self, warning=""):
+        """Finish annotation generation.
+
+        Parameters
+        ----------
+        warning : str, optional
+            Non-fatal problem to surface. Empty string means the run was
+            clean. The zero-argument overload is kept so existing callers
+            (and any queued invocation without an argument) still work.
+        """
         self.generate_annot_btn.setEnabled(True)
         self.view_annot_btn.setEnabled(True)
         self.progress.setVisible(False)
-        self.statusBar().showMessage("Annotations generated successfully")
-        QMessageBox.information(self, "Success", "Annotations have been generated successfully.")
-    
+
+        if warning:
+            self.statusBar().showMessage("Annotations generated with warnings")
+            QMessageBox.warning(
+                self, "Annotations generated with warnings",
+                f"Annotations have been generated, but:\n\n{warning}"
+            )
+        else:
+            self.statusBar().showMessage("Annotations generated successfully")
+            QMessageBox.information(self, "Success", "Annotations have been generated successfully.")
+
     def view_annotation_file(self):
         """View the annotation file"""
         if not os.path.isfile(self.annot_file_path):
@@ -4244,7 +4601,18 @@ class TurtleWaveGUI(QMainWindow):
             reject_artifacts = self.spindle_reject_artifacts_check.isChecked()
             reject_arousals = self.spindle_reject_arousals_check.isChecked()
 
-            # Detect spindles
+            # See the slow wave path for why the database is resolved before
+            # detection rather than after it.
+            db_path = self.run_db_path()
+            subject = self.resolve_subject()
+            self.write_log(
+                f"Spindle rows will be keyed under subject '{subject}'")
+
+            runs_before = self.db_run_ids(db_path, 'spindle',
+                                          self.spindle_method)
+
+            # Detect spindles. write_db is left at its default (None = the
+            # database), so no per-channel JSON is written.
             spindles = event_processor.detect_spindles(
                 method=self.spindle_method,
                 chan=self.selected_channels,
@@ -4257,80 +4625,46 @@ class TurtleWaveGUI(QMainWindow):
                 polar=polar,
                 save_to_annotations=False,
                 json_dir=json_dir,
+                db_path=db_path,
+                subject=subject,
                 **custom_params
             )
             spindle_count = self.log_event_count("Spindle", spindles)
 
-            # Format names for export
-            # detect_spindles names its JSON with the method escaped
-            # (eventprocessor: method_db.replace('/', '_')), as the slow-wave
-            # and K-complex detectors do, so escape it the same way here or
-            # the pattern would not match on disk. The unescaped method stays
-            # in use for the database write below, which keeps events.method
-            # canonical.
-            method_str = str(self.spindle_method).replace('/', '_')
-            freq_range_str = fmt_freq_token(freq_range[0], freq_range[1])
-            stages_str = "".join(selected_stages)
-            file_pattern = f"spindles_{method_str}_{freq_range_str}_{stages_str}"
-
-            # Export parameters to CSV
-            param_csv = os.path.join(json_dir, f'spindle_parameters_{method_str}_{freq_range_str}_{stages_str}.csv')
-
-            method_info = {
-                'method': self.spindle_method,
-                'frequency': freq_range,
-                'duration': duration_range,
-                'custom_params': custom_params,  # Add this
-                'polar': polar,
-                'stages': selected_stages
-            }
-
-            param_written = self.export_csv_step(
-                "Spindle parameters CSV",
-                event_processor.export_spindle_parameters_to_csv,
-                param_csv,
-                json_input=json_dir,
-                file_pattern=file_pattern
-            )
-
-            # Initialize and update database
-            # Add database functionality
-            db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
-            # Tri-state: True imported, False genuine failure, None not
-            # attempted because there was nothing to import.
-            spindle_import_ok = None
-            if param_written:
-                self.write_log(f"Initializing/updating database at {db_path}")
-                event_processor.initialize_sqlite_database(db_path)
-                # method= is passed explicitly so a multi-method run cannot stamp
-                # one method on every row (the importer otherwise infers it).
-                spindle_import_ok = self.import_to_database(
-                    "Spindle database import",
-                    event_processor.import_parameters_csv_to_database,
-                    param_csv, db_path, method=self.spindle_method)
-            else:
+            # The method is used UNESCAPED for every database query, which is
+            # how the detector stores it in events.method.
+            runs_after = self.db_run_ids(db_path, 'spindle',
+                                         self.spindle_method)
+            new_runs = (None if runs_before is None or runs_after is None
+                        else runs_after - runs_before)
+            if not new_runs:
                 self.write_log(
-                    "Skipping the spindle database import: this run produced no "
-                    "usable parameters CSV to import from (see the export "
-                    "step above).")
+                    "Could not identify this run's own database run id, so the "
+                    "counts below cover every run stored for this method, band "
+                    "and stage set - not only this one.")
+            spindle_rows, spindle_channels = self.count_db_events(
+                db_path, 'spindle', self.spindle_method, freq_range,
+                selected_stages, run_ids=new_runs)
 
-            # Export density to CSV
-            density_csv = os.path.join(json_dir, f'spindle_density_{method_str}_{freq_range_str}_{stages_str}.csv')
-            # Same reject settings the detector ran with; see the note in the
-            # slow wave path.
-            density_written = self.export_csv_step(
-                "Spindle density CSV",
-                event_processor.export_spindle_density_to_csv,
-                density_csv,
-                json_input=json_dir,
-                stage=selected_stages,
-                file_pattern=file_pattern,
+            spindle_coverage = self.verify_db_channels(
+                "Spindle", db_path, 'spindle', self.spindle_method,
+                self.selected_channels, freq_range, selected_stages)
+
+            self.report_db_density(
+                "Spindle", db_path, 'spindle', self.spindle_method, freq_range,
+                selected_stages, subject, reject_artifacts, reject_arousals)
+
+            self.remember_run_scope(
+                "Spindle", db_path=db_path, event_type='spindle',
+                method=self.spindle_method, frequency=freq_range,
+                stage=list(selected_stages), subject=subject,
                 reject_artifacts=reject_artifacts,
-                reject_arousals=reject_arousals
-            )
+                reject_arousals=reject_arousals,
+                out_dir=json_dir)
 
             self.log_run_outcome("Spindle", db_path, spindle_count,
-                                 param_written, spindle_import_ok)
+                                 spindle_rows, spindle_channels,
+                                 spindle_coverage)
             
             # Save detection summary
             try:
@@ -4347,14 +4681,16 @@ class TurtleWaveGUI(QMainWindow):
                     'method_specific_parameters': method_params if 'method_params' in locals() else {}
                 }
                 
-                # Prepare results summary. Only name the files that were
-                # actually written.
+                # The database is where the results are; detection writes no CSV.
                 results_summary = {
                     'total_spindles_detected': len(spindles) if 'spindles' in locals() else 0,
-                    'channels_processed': len(self.selected_channels),
-                    'csv_file': param_csv if param_written else None,
-                    'density_file': density_csv if density_written else None,
-                    'database_file': db_path if spindle_import_ok else None
+                    'channels_requested': len(self.selected_channels),
+                    'channels_in_database': spindle_channels,
+                    'events_written_to_database': spindle_rows,
+                    'database_file': db_path,
+                    'subject': subject,
+                    'channels_missing_from_database': (
+                        (spindle_coverage or {}).get('missing') or []),
                 }
                 
                 # Save detection summary
@@ -4407,11 +4743,6 @@ class TurtleWaveGUI(QMainWindow):
         # Update PAC detection methods
         self.populate_detection_methods()
 
-    def view_sw_results(self):
-        """View slow wave detection results"""
-        # Similar to view_spindle_results but for slow waves
-        # Change directory path to sw_results and adjust file patterns
-
     @QtCore.pyqtSlot()
     def finish_spindle_detection(self):
         """Finish spindle detection"""
@@ -4430,12 +4761,12 @@ class TurtleWaveGUI(QMainWindow):
         if not os.path.isdir(json_dir):
             QMessageBox.critical(self, "Error", "Spindle results directory doesn't exist.")
             return
-        
+
         # Get list of CSV files
         csv_files = [f for f in os.listdir(json_dir) if f.endswith('.csv')]
-        
+
         if not csv_files:
-            QMessageBox.critical(self, "Error", "No CSV result files found.")
+            QMessageBox.information(self, "No CSV files", self._no_csv_message())
             return
         
         # Create file viewer dialog
@@ -4497,12 +4828,12 @@ class TurtleWaveGUI(QMainWindow):
         if not os.path.isdir(json_dir):
             QMessageBox.critical(self, "Error", "Slow wave results directory doesn't exist.")
             return
-        
+
         # Get list of CSV files
         csv_files = [f for f in os.listdir(json_dir) if f.endswith('.csv')]
-        
+
         if not csv_files:
-            QMessageBox.critical(self, "Error", "No CSV result files found.")
+            QMessageBox.information(self, "No CSV files", self._no_csv_message())
             return
         
         # Create file viewer dialog
@@ -4591,6 +4922,609 @@ class TurtleWaveGUI(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Error launching Event Review: {e}")
                 self.write_log(f"Error launching Event Review: {e}")
 
+
+    # ------------------------------------------------------------------
+    # Database-era run plumbing
+    #
+    # Detection writes straight into neural_events.db and no longer produces
+    # per-channel JSON, so there is no CSV to export, no CSV to import, and
+    # nothing on the filesystem to fingerprint. What replaces that chain is:
+    # resolve the target before detecting, then read the database back
+    # afterwards and report what is actually in it.
+    # ------------------------------------------------------------------
+
+    DB_FILENAME = "neural_events.db"
+
+    def run_db_path(self):
+        """Resolve, and log, the database a detection run will write to.
+
+        ``resolve_db_target`` raises rather than downgrading an unwritable
+        target to a no-op, and it is called here - before any channel is
+        detected - so an unusable output directory costs a dialog rather than
+        an hour of detection whose results have nowhere to go.
+
+        Returns
+        -------
+        str
+            Absolute path of the database file.
+        """
+        db_path = resolve_db_target(
+            db_path=os.path.join(self.output_dir, "wonambi", self.DB_FILENAME))
+        self.write_log(f"Results for this run go to the database: {db_path}")
+        return db_path
+
+    def db_run_ids(self, db_path, event_type, method):
+        """The ``detection_runs`` ids already recorded for one scope.
+
+        Snapshotted before detection and again after, so the difference names
+        exactly the run that just happened. That matters for the closing
+        report: ``events`` rows are upserted on a deterministic uuid5, so a
+        scope-wide count cannot tell "this run wrote 12000 events" from "an
+        earlier run left 12000 events and this one wrote none". Rows carry the
+        run_id of whichever run last wrote them, so counting by the new run_id
+        is the honest question.
+
+        Parameters
+        ----------
+        db_path : str
+            Database the run writes to. Need not exist yet.
+        event_type : str
+            ``'spindle'``, ``'slow_wave'`` or ``'k_complex'``.
+        method : str
+            Detection method as stored, UNESCAPED.
+
+        Returns
+        -------
+        set of str or None
+            The known run ids, and ``None`` when the database could not be read.
+            A database file that does not exist yet returns an empty set, not
+            ``None``: there are demonstrably no earlier runs, so the first run
+            against a fresh output directory is identified exactly rather than
+            warned about. ``None`` is reserved for "cannot tell" - an
+            unreadable file, or one with no ``detection_runs`` table (a
+            database predating the direct-write path) - and the caller then
+            degrades to a scope-wide count and says so.
+        """
+        if not db_path:
+            return None
+        if not os.path.exists(db_path):
+            return set()
+        conn = None
+        try:
+            conn = connect_events_db(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name='detection_runs'")
+            if cur.fetchone() is None:
+                return None
+            cur.execute("SELECT run_id FROM detection_runs "
+                        "WHERE event_type = ? AND method = ?",
+                        (str(event_type), str(method)))
+            return {str(r[0]) for r in cur.fetchall()}
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def count_db_events(self, db_path, event_type, method, frequency,
+                        stage_list, run_ids=None):
+        """Count the rows a detection run left in ``events``.
+
+        Parameters
+        ----------
+        db_path : str
+            Database to read.
+        event_type, method : str
+            Scope of the run; `method` UNESCAPED, as stored.
+        frequency : tuple of float
+            Band ``(lo, hi)`` of the run.
+        stage_list : list of str
+            Stages the run was scoped to, as single stage labels.
+            ``events.stage`` holds the *run's* stage set - a joint token such
+            as ``'NREM2NREM3'`` for a two-stage run - so this list is resolved
+            against the tokens actually stored rather than used as a literal
+            ``IN`` filter. Filtering literally would match zero joint-token
+            rows and report "0 events written" after a run that succeeded.
+            Older databases holding one row per epoch stage still read
+            correctly, because a per-epoch label is a one-component token.
+        run_ids : set of str or None
+            When given, restrict to these ``run_id`` values - the rows this run
+            wrote. ``None`` counts the whole scope regardless of run, which
+            over-reports after a re-run with a narrower channel set; callers
+            pass ``None`` only when the run ids could not be determined, and
+            say so in the log.
+
+        Returns
+        -------
+        tuple of (int, int) or (None, None)
+            ``(n_events, n_channels)``, or ``(None, None)`` when the database
+            could not be read - which is reported as "cannot tell", never as
+            zero.
+        """
+        if not db_path or not os.path.exists(db_path):
+            return (None, None)
+        where = ["event_type = ?", "method = ?"]
+        params = [str(event_type), str(method)]
+        if frequency is not None:
+            where += ["freq_lower = ?", "freq_upper = ?"]
+            params += [float(frequency[0]), float(frequency[1])]
+        conn = None
+        try:
+            conn = connect_events_db(db_path)
+            if stage_list:
+                # Resolve against the tokens the database actually holds. An
+                # empty result means nothing stored is inside the requested
+                # set, which must match no rows - dropping the predicate here
+                # would count the whole method/band scope instead.
+                tokens = resolve_stage_tokens(conn, list(stage_list),
+                                              where=list(where),
+                                              params=list(params))
+                if tokens:
+                    where.append("stage IN (%s)"
+                                 % ",".join("?" * len(tokens)))
+                    params += [str(t) for t in tokens]
+                else:
+                    where.append("1 = 0")
+            if run_ids:
+                run_ids = sorted(run_ids)
+                where.append("run_id IN (%s)" % ",".join("?" * len(run_ids)))
+                params += run_ids
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT channel) FROM events "
+                "WHERE " + " AND ".join(where), params)
+            row = cur.fetchone()
+        except Exception as e:
+            self.write_log(
+                f"Could not count events in {db_path}: {type(e).__name__}: {e}")
+            return (None, None)
+        finally:
+            if conn is not None:
+                conn.close()
+        if row is None:
+            return (0, 0)
+        return (int(row[0] or 0), int(row[1] or 0))
+
+    def verify_db_channels(self, label, db_path, event_type, method, channels,
+                           frequency, stage_list):
+        """Check every requested channel is accounted for in the database.
+
+        Delegates to :func:`turtlewave_hdEEG.dbwrite.verify_channel_coverage`,
+        which counts a channel as covered when it has events for the scope OR a
+        ``processing_status`` row recording ``success = 1`` - so a channel that
+        legitimately found nothing is not mistaken for one that crashed. The
+        failures it reports are the partial-run case that a bare event count
+        cannot see: 200 channels of 257 returning results still yields a large,
+        healthy-looking total.
+
+        Parameters
+        ----------
+        label : str
+            Event name for the log lines, e.g. ``"Spindle"``.
+        db_path : str
+            Database the run wrote to.
+        event_type, method : str
+            Scope of the run; `method` UNESCAPED.
+        channels : list of str
+            Channels the run was asked to process.
+        frequency : tuple of float
+            Band ``(lo, hi)`` of the run.
+        stage_list : list of str
+            Stages of the run. Joined into the scope token the detectors write
+            to ``processing_status`` (``"".join(stage)``), which is how all
+            three processors key it.
+
+        Returns
+        -------
+        dict or None
+            The ``verify_channel_coverage`` result, or ``None`` when the check
+            itself failed (reported, and treated by the caller as "unknown"
+            rather than as success).
+        """
+        stage_key = "".join(str(s) for s in stage_list) if stage_list else "all"
+        try:
+            coverage = verify_channel_coverage(
+                db_path, event_type, method, list(channels or []),
+                frequency[0], frequency[1], stage_key)
+        except Exception as e:
+            self.write_log(
+                f"Could not verify {label} channel coverage in {db_path}: "
+                f"{type(e).__name__}: {e}. Treat the channel counts below as "
+                f"unknown.")
+            return None
+
+        if not coverage.get('scoped_status', True):
+            self.write_log(
+                f"{label} coverage check ran against an unmigrated "
+                f"processing_status table, so a status row from another method "
+                f"or band cannot be told apart from this run's.")
+
+        failed = coverage.get('failed') or []
+        missing = coverage.get('missing') or []
+        events_only = coverage.get('events_only') or []
+
+        if failed:
+            self.write_log(
+                f"{label} channels that FAILED during detection "
+                f"({len(failed)} of {coverage['requested']}): "
+                f"{self._abbrev_channels(failed)}")
+        silent = [c for c in missing if c not in set(failed)]
+        if silent:
+            self.write_log(
+                f"{label} channels with neither events nor a completion record "
+                f"({len(silent)} of {coverage['requested']}): "
+                f"{self._abbrev_channels(silent)}")
+        if events_only:
+            self.write_log(
+                f"{label}: {len(events_only)} channel(s) are counted as done on "
+                f"the strength of stored events alone, with no completion "
+                f"record for this exact stage scope. Those events may predate "
+                f"this run.")
+        return coverage
+
+    @staticmethod
+    def _abbrev_channels(channels, limit=12):
+        """Join channel names for a log line, truncating a long list."""
+        names = [str(c) for c in channels]
+        if len(names) <= limit:
+            return ", ".join(names)
+        return ", ".join(names[:limit]) + f", ... (+{len(names) - limit} more)"
+
+    def report_db_density(self, label, db_path, event_type, method, frequency,
+                          stage_list, subject, reject_artifacts,
+                          reject_arousals):
+        """Log per-stage density read back from the database.
+
+        Replaces the JSON-reading ``export_*_density_to_csv`` exporters, which
+        can no longer work: their input was the per-channel JSON detection no
+        longer writes. :func:`turtlewave_hdEEG.density.event_density` is the
+        single definition of density now - its denominator is the
+        ``analysed_time`` row the run itself stored, i.e. the artefact-free time
+        the detector actually searched, not raw hypnogram time.
+
+        ``missing='nan'`` is deliberate: a denominator that could not be stored
+        is a reporting problem, and taking down the closing report of a
+        detection run that otherwise succeeded would hide the more important
+        news. The library warns, the density reads ``nan``, and the run is still
+        reported.
+
+        Parameters
+        ----------
+        label : str
+            Event name for the log lines.
+        db_path : str
+            Database to read.
+        event_type, method : str
+            Scope of the run; `method` UNESCAPED.
+        frequency : tuple of float
+            Band ``(lo, hi)`` of the run.
+        stage_list : list of str
+            Stages of the run.
+        subject : str
+            Subject the ``analysed_time`` denominator is keyed under.
+        reject_artifacts, reject_arousals : bool
+            The run's rejection settings. They select the denominator row, so
+            passing the run's own values is what keeps numerator and
+            denominator on the same time base.
+
+        Returns
+        -------
+        pandas.DataFrame or None
+            The density table, or ``None`` when it could not be computed.
+        """
+        try:
+            df = event_density(
+                db_path, event_type=event_type, method=method,
+                stage=list(stage_list) if stage_list else None,
+                freq_lower=frequency[0], freq_upper=frequency[1],
+                subject=subject,
+                reject_artifacts=reject_artifacts,
+                reject_arousals=reject_arousals,
+                missing='nan')
+        except Exception as e:
+            self.write_log(
+                f"{label} density could not be computed from {db_path}: "
+                f"{type(e).__name__}: {e}. The detected events are unaffected.")
+            return None
+
+        if df is None or not len(df):
+            self.write_log(
+                f"No {label} density to report: no stored events matched this "
+                f"run's scope.")
+            return df
+
+        self.write_log(
+            f"{label} density (events per artefact-free minute, from "
+            f"{db_path}):")
+        for stage_name, grp in df.groupby('stage', dropna=False):
+            dens = grp['density_per_min'].dropna()
+            minutes = grp['analysed_minutes'].dropna()
+            if not len(dens):
+                self.write_log(
+                    f"    {stage_name}: {len(grp)} channel(s), "
+                    f"{int(grp['n_events'].sum())} events, but no stored "
+                    f"denominator, so density is undefined for this stage.")
+                continue
+            self.write_log(
+                f"    {stage_name}: {len(grp)} channel(s), "
+                f"{int(grp['n_events'].sum())} events over "
+                f"{minutes.iloc[0]:.1f} analysed min, "
+                f"median {dens.median():.2f}/min "
+                f"(range {dens.min():.2f}-{dens.max():.2f})")
+        return df
+
+    def remember_run_scope(self, label, **scope):
+        """Store the scope of the last run so the CSV export can reuse it."""
+        if getattr(self, '_last_run_scope', None) is None:
+            self._last_run_scope = {}
+        self._last_run_scope[label] = dict(scope)
+        return self._last_run_scope[label]
+
+    # ------------------------------------------------------------------
+    # Explicit database -> CSV export
+    #
+    # Deliberately a button, not a side effect of detection. A CSV written
+    # automatically after every run is a second copy of the results that goes
+    # stale the moment anything is re-detected or a channel is dropped in
+    # review, and the whole point of moving to one store of record was to stop
+    # having two. Collaborators who need a flat file still get one, on request,
+    # and it is dated from the database as it stands when they ask.
+    # ------------------------------------------------------------------
+
+    def _no_csv_message(self):
+        """Explain an empty results directory instead of calling it an error.
+
+        A results directory with no CSV in it used to mean detection had gone
+        wrong. Since the database became the store of record it is the normal
+        state, and reporting it as an error sends the reader looking for a
+        failure that did not happen.
+        """
+        db_path = os.path.join(self.output_dir or "", "wonambi",
+                               self.DB_FILENAME)
+        return (
+            "No CSV files here - and that is expected. Detection writes its "
+            "results to the database:\n\n"
+            f"{db_path}\n\n"
+            "Use \"Export CSV\" on this tab to write a flat file from it, or "
+            "open the Event Review GUI to inspect the events.")
+
+    def db_scopes_for(self, db_path, event_type):
+        """List the (method, band, stages) scopes stored for one event type.
+
+        Parameters
+        ----------
+        db_path : str
+            Database to read.
+        event_type : str
+            Event type to list scopes for.
+
+        Returns
+        -------
+        list of dict
+            One dict per scope with keys ``method``, ``frequency``, ``stage``
+            and ``n_events``, ordered by method then band. Empty when there is
+            nothing stored (or nothing readable).
+        """
+        if not db_path or not os.path.exists(db_path):
+            return []
+        conn = None
+        try:
+            conn = connect_events_db(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT method, freq_lower, freq_upper, "
+                "       GROUP_CONCAT(DISTINCT stage), COUNT(*) "
+                "FROM events WHERE event_type = ? "
+                "GROUP BY method, freq_lower, freq_upper "
+                "ORDER BY method, freq_lower, freq_upper", (str(event_type),))
+            rows = cur.fetchall()
+        except Exception as e:
+            self.write_log(
+                f"Could not list stored scopes in {db_path}: "
+                f"{type(e).__name__}: {e}")
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+
+        scopes = []
+        for method, lo, hi, stages, count in rows:
+            stage_list = sorted(s for s in str(stages or '').split(',') if s)
+            scopes.append({
+                'method': str(method),
+                'frequency': (float(lo), float(hi)),
+                'stage': stage_list,
+                'n_events': int(count or 0),
+            })
+        return scopes
+
+    def export_scope_csv(self, label, event_type):
+        """Write the events and density of one stored scope out as CSV.
+
+        Uses this session's last run for `label` when there was one, and
+        otherwise offers whatever scopes the database already holds - so the
+        button works after restarting the GUI, or on a database somebody else
+        produced.
+
+        Two files are written: the events table
+        (:func:`turtlewave_hdEEG.dbwrite.export_events_to_csv`, the same column
+        shape the old parameters CSV had) and the per-channel density
+        (:func:`turtlewave_hdEEG.density.event_density`). Both are named after
+        the scope, and both paths are reported.
+
+        Parameters
+        ----------
+        label : str
+            The run label, e.g. ``"Spindle"``.
+        event_type : str
+            Event type as stored: ``'spindle'``, ``'slow_wave'``,
+            ``'k_complex'``.
+        """
+        if not self.output_dir:
+            QMessageBox.warning(self, "No output directory",
+                                "Set an output directory first.")
+            return
+
+        scope = (getattr(self, '_last_run_scope', None) or {}).get(label)
+        if scope is None:
+            try:
+                db_path = resolve_db_target(
+                    db_path=os.path.join(self.output_dir, "wonambi",
+                                         self.DB_FILENAME))
+            except ValueError as e:
+                QMessageBox.critical(self, "No database", str(e))
+                return
+            scope = self._choose_db_scope(label, db_path, event_type)
+            if scope is None:
+                return
+
+        db_path = scope['db_path']
+        out_dir = scope.get('out_dir') or os.path.dirname(db_path)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            QMessageBox.critical(self, "Export failed",
+                                 f"Could not create {out_dir}: {e}")
+            return
+
+        method_str = str(scope['method']).replace('/', '_')
+        freq_str = fmt_freq_token(scope['frequency'][0], scope['frequency'][1])
+        # join_stage_token, not a raw ''.join: the canonical order is what the
+        # detectors wrote into events.stage, so the exported filename cannot
+        # drift from the token it describes when the stages arrive out of order.
+        stages_str = join_stage_token(scope['stage']) if scope['stage'] else "all"
+        base = f"{event_type}_{method_str}_{freq_str}_{stages_str}"
+        events_csv = os.path.join(out_dir, f"{base}_events.csv")
+        density_csv = os.path.join(out_dir, f"{base}_density.csv")
+
+        written = []
+        QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            self.write_log(
+                f"Exporting {label} scope method={scope['method']!r}, "
+                f"{freq_str}, stages={stages_str} from {db_path} to CSV")
+            path = export_events_to_csv(
+                db_path, event_type, scope['method'], scope['frequency'],
+                scope['stage'] or None, csv_file=events_csv)
+            if path:
+                written.append(path)
+                self.write_log(f"{label} events CSV written: {path}")
+            else:
+                self.write_log(
+                    f"No {label} events matched that scope, so no events CSV "
+                    f"was written.")
+
+            df = event_density(
+                db_path, event_type=event_type, method=scope['method'],
+                stage=scope['stage'] or None,
+                freq_lower=scope['frequency'][0],
+                freq_upper=scope['frequency'][1],
+                subject=scope.get('subject'),
+                reject_artifacts=scope.get('reject_artifacts', True),
+                reject_arousals=scope.get('reject_arousals', True),
+                missing='nan')
+            if df is not None and len(df):
+                df.to_csv(density_csv, index=False)
+                written.append(density_csv)
+                self.write_log(f"{label} density CSV written: {density_csv}")
+            else:
+                self.write_log(
+                    f"No {label} density to export for that scope, so no "
+                    f"density CSV was written.")
+        except Exception as e:
+            import traceback
+            self.write_log("!" * 60)
+            self.write_log(f"!!! {label} CSV export FAILED: "
+                           f"{type(e).__name__}: {e}")
+            for line in traceback.format_exc().rstrip().splitlines():
+                self.write_log(f"!!!   {line}")
+            self.write_log("!" * 60)
+            QMessageBox.critical(
+                self, "Export failed",
+                f"Could not export {label} results to CSV:\n\n"
+                f"{type(e).__name__}: {e}\n\nSee the Log tab.")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if written:
+            QMessageBox.information(
+                self, "Export complete",
+                f"{label} results exported from the database:\n\n"
+                + "\n".join(written)
+                + "\n\nThe database remains the store of record; these files "
+                  "are a snapshot of it.")
+        else:
+            QMessageBox.warning(
+                self, "Nothing exported",
+                f"No {label} events matched that scope in\n{db_path}\n\n"
+                f"Nothing was written. See the Log tab.")
+
+    def _choose_db_scope(self, label, db_path, event_type):
+        """Ask which stored scope to export when this session has no run.
+
+        Returns
+        -------
+        dict or None
+            A scope dict in the shape `remember_run_scope` stores, or ``None``
+            when the user cancelled or there is nothing to export.
+        """
+        scopes = self.db_scopes_for(db_path, event_type)
+        if not scopes:
+            QMessageBox.information(
+                self, "Nothing to export",
+                f"No {label.lower()} events are stored in\n{db_path}\n\n"
+                f"Run detection first.")
+            return None
+
+        entries = [
+            f"{s['method']}  ·  "
+            f"{fmt_freq_token(s['frequency'][0], s['frequency'][1])}  ·  "
+            f"{'+'.join(s['stage']) if s['stage'] else 'all stages'}  ·  "
+            f"{s['n_events']} events"
+            for s in scopes]
+        choice, ok = QtWidgets.QInputDialog.getItem(
+            self, f"Export {label} results",
+            "This session has not run a detection, so choose which stored "
+            "result to export:", entries, 0, False)
+        if not ok:
+            return None
+        selected = scopes[entries.index(choice)]
+        # The rejection settings of the original run are not recoverable from
+        # the events rows, and they select the density denominator. The
+        # detector defaults are assumed and said so, rather than quietly
+        # picking one: a wrong guess makes event_density report a missing
+        # denominator, which is visible, not a silently biased number.
+        self.write_log(
+            f"Exporting a stored {label.lower()} scope from an earlier "
+            f"session. The density denominator is looked up assuming the run "
+            f"used reject_artifacts=True and reject_arousals=True (the "
+            f"detector defaults). If it did not, the density columns will "
+            f"report no stored denominator rather than a wrong number.")
+        return {
+            'db_path': db_path,
+            'event_type': event_type,
+            'method': selected['method'],
+            'frequency': selected['frequency'],
+            'stage': selected['stage'],
+            'subject': None,
+            'reject_artifacts': True,
+            'reject_arousals': True,
+            'out_dir': os.path.dirname(db_path),
+        }
+
+    def export_spindle_csv(self):
+        """Export the spindle results from the database as CSV."""
+        self.export_scope_csv("Spindle", 'spindle')
+
+    def export_sw_csv(self):
+        """Export the slow wave results from the database as CSV."""
+        self.export_scope_csv("Slow wave", 'slow_wave')
+
+    def export_kc_csv(self):
+        """Export the K-complex results from the database as CSV."""
+        self.export_scope_csv("K-complex", 'k_complex')
 
     def verify_pac_rows(self, db_path, subject, expect_scope=None):
         """Report the PAC rows the run left in the database, per scope.
@@ -4833,240 +5767,6 @@ class TurtleWaveGUI(QMainWindow):
                             pass
             self._gui_log_handler = None
 
-    def log_import_result(self, label, stats):
-        """Log an importer's return value verbatim and judge whether it worked.
-
-        A result of zero added, zero updated and zero skipped is reported as a
-        failure to reach the database rather than as a quiet success, because
-        on its own it is indistinguishable from a clean idempotent re-run
-        (which shows non-zero updated or skipped counts).
-
-        The one exception is a run that legitimately detected nothing. The
-        importer says so explicitly with ``"no_events": True`` alongside
-        ``"ok": True``. That case is checked before the all-zero test but after
-        the error test, so a genuine failure still wins even if it somehow
-        carried the flag, and it logs nothing of its own: the importer's INFO
-        message already reaches the pane through the handler on the
-        ``turtlewave_hdEEG`` logger, and the caller states the conclusion in its
-        closing "no events to export, the database is unchanged" line. A third
-        statement of the same fact would be the echo this reporting was cleaned
-        up to remove.
-
-        Parameters
-        ----------
-        label : str
-            Human-readable name of the import step, used in the log lines.
-        stats : dict
-            The dictionary returned by ``import_parameters_csv_to_database``.
-
-        Returns
-        -------
-        bool or None
-            True when rows reached the database, False on failure, and None
-            when the run was fine but had no events to import. The caller's
-            tri-state then reports "completed with no events" rather than
-            either success or failure.
-        """
-        if not isinstance(stats, dict):
-            self.write_log(
-                f"!!! {label}: importer returned {stats!r}, expected a stats "
-                f"dict. Treating this as a FAILURE; assume nothing reached "
-                f"the database.")
-            return False
-
-        # Verbatim, so any extra keys (notably 'error') are visible. Not for the
-        # clean zero-event no-op: there the dict holds nothing the log does not
-        # already say.
-        if not stats.get('no_events') or stats.get('error'):
-            self.write_log(f"{label}: importer returned {stats}")
-
-        if stats.get('error'):
-            self.write_log("!" * 60)
-            self.write_log(f"!!! {label} FAILED: {stats['error']}")
-            self.write_log("!!! Nothing was written to the database.")
-            self.write_log("!" * 60)
-            return False
-
-        if stats.get('no_events'):
-            return None
-
-        added = stats.get('added', 0)
-        updated = stats.get('updated', 0)
-        skipped = stats.get('skipped', 0)
-
-        if (added, updated, skipped) == (0, 0, 0):
-            self.write_log("!" * 60)
-            self.write_log(
-                f"!!! {label}: 0 added, 0 updated, 0 skipped, so NOTHING "
-                f"reached the database.")
-            self.write_log(
-                "!!! This is not a clean re-run (a re-run reports updated or "
-                "skipped rows), and it is not a zero-event run either (that "
-                "reports itself as such). The CSV most likely matched no "
-                "detected events. Check the export step above.")
-            self.write_log("!" * 60)
-            return False
-
-        self.write_log(
-            f"{label} complete: {added} added, {updated} updated, "
-            f"{skipped} skipped")
-        return True
-
-    def import_to_database(self, label, importer, *args, **kwargs):
-        """Run a CSV-to-database importer and report failure loudly.
-
-        The importers raise on failure rather than returning an error
-        sentinel, so an exception here means no rows were written. It is
-        caught, reported in the GUI log with its traceback, and turned into a
-        False return so the surrounding run can finish and say so, instead of
-        dying silently or taking the window down.
-
-        Parameters
-        ----------
-        label : str
-            Human-readable name of the import step.
-        importer : callable
-            The bound ``import_parameters_csv_to_database`` method.
-        *args, **kwargs
-            Passed straight through to `importer`.
-
-        Returns
-        -------
-        bool or None
-            True when rows reached the database, False on failure, None when
-            the run was clean but had no events to import (see
-            `log_import_result`).
-        """
-        import traceback
-        try:
-            stats = importer(*args, **kwargs)
-        except Exception as e:
-            self.write_log("!" * 60)
-            self.write_log(f"!!! {label} FAILED: {type(e).__name__}: {e}")
-            self.write_log("!!! Nothing was written to the database.")
-            for line in traceback.format_exc().rstrip().splitlines():
-                self.write_log(f"!!!   {line}")
-            self.write_log("!" * 60)
-            return False
-        return self.log_import_result(label, stats)
-
-    @staticmethod
-    def _file_state(path):
-        """Return a change-detecting fingerprint of `path`, or None if absent.
-
-        Used to tell "this run wrote the file" apart from "a file of that name
-        was already lying there from an earlier run".
-        """
-        try:
-            st = os.stat(path)
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size)
-
-    @staticmethod
-    def _csv_is_header_only(path):
-        """True when `path` is a parameters CSV with a header and no data rows.
-
-        This is exactly what a run that detected no events writes, and it has
-        to be told apart from the other one-line CSV the exporter can produce -
-        the "No JSON files found matching pattern:" placeholder, which reports a
-        real problem (usually a file pattern matching nothing on disk) and must
-        not be described as a clean zero-event result. The two are distinguished
-        by the first cell, which for the real header is the exporter's own first
-        column name.
-        """
-        try:
-            from turtlewave_hdEEG.utils import PARAMS_CSV_COLUMNS
-            header_first_cells = {str(PARAMS_CSV_COLUMNS[0]).strip().lower()}
-        except Exception:
-            header_first_cells = set()
-        # Independent of the library constant, so this still works if the
-        # import is unavailable or the column list is renamed.
-        header_first_cells |= {'start time', 'channel', 'stage'}
-
-        try:
-            with open(path, newline='', encoding='utf-8') as handle:
-                rows = [row for row in csv.reader(handle)
-                        if any(cell.strip() for cell in row)]
-        except (OSError, UnicodeDecodeError, csv.Error):
-            return False
-
-        if len(rows) != 1 or not rows[0]:
-            return False
-        return rows[0][0].strip().lower() in header_first_cells
-
-    def export_csv_step(self, label, exporter, csv_path, **kwargs):
-        """Run a CSV exporter and report only what actually reached the disk.
-
-        A "saved to ..." line printed unconditionally around the call is a claim
-        the filesystem does not support, so this checks instead of claiming: it
-        fingerprints the path before and after, and reports what changed.
-
-        A run that detected no events now writes a header-only CSV rather than
-        no file at all, and repeating such a run rewrites byte-identical
-        content. Where the fingerprint is unchanged, the file is classified
-        before it is described, so "unchanged because there was nothing to
-        write" does not get reported in the alarming words reserved for
-        "unchanged because the export did not run". The header-only case counts
-        as written: importing it is safe by construction (there are no rows to
-        import, stale or otherwise) and it makes a repeat zero-event run read
-        exactly like the first one.
-
-        Parameters
-        ----------
-        label : str
-            Human-readable name of the file, e.g. ``"Slow wave parameters CSV"``.
-        exporter : callable
-            Bound exporter, called as ``exporter(csv_file=csv_path, **kwargs)``.
-        csv_path : str
-            Where the exporter has been asked to write.
-        **kwargs
-            Passed straight through to `exporter`.
-
-        Returns
-        -------
-        bool
-            True when the file exists and either this call put it there (or
-            changed it), or it is a header-only CSV holding no events. False
-            when no file was written, or when an existing file with event rows
-            was left untouched by this run. Exceptions are not swallowed: a
-            genuine export error still propagates to the caller's error
-            handling.
-        """
-        before = self._file_state(csv_path)
-        exporter(csv_file=csv_path, **kwargs)
-        after = self._file_state(csv_path)
-
-        if after is None:
-            # No claim about why. An exporter writes no file both when there
-            # was nothing to write and when it failed part way (an unreadable
-            # sampling frequency, no valid segments, a caught exception), and
-            # from here those are indistinguishable. The closing outcome line
-            # has the event count and can tell them apart; this line reports
-            # only what the filesystem shows.
-            self.write_log(
-                f"No {label} was written. Expected path was {csv_path}")
-            return False
-
-        header_only = self._csv_is_header_only(csv_path)
-
-        if before is not None and after == before:
-            if header_only:
-                self.write_log(
-                    f"{label} left as it was, there being no events to write: "
-                    f"{csv_path}")
-                return True
-            self.write_log(
-                f"{label} was NOT updated by this run; the file already on "
-                f"disk is left unchanged: {csv_path}")
-            return False
-
-        if header_only:
-            self.write_log(f"{label} written, header row only: {csv_path}")
-            return True
-        self.write_log(f"{label} written ({after[1]} bytes): {csv_path}")
-        return True
-
     def log_event_count(self, label, events):
         """Log how many events a detector returned, when that is knowable.
 
@@ -5116,23 +5816,44 @@ class TurtleWaveGUI(QMainWindow):
             The label the run reported under, e.g. ``"Spindle"``.
         """
         outcome = (getattr(self, '_last_run_outcome', None) or {}).get(label)
-        if outcome == 'imported':
+        scope = (getattr(self, '_last_run_scope', None) or {}).get(label) or {}
+        db_path = scope.get('db_path')
+        # The one thing this dialog must not leave unsaid. Detection no longer
+        # writes a CSV anywhere, so a researcher who is only told "finished"
+        # goes looking in the results folder and finds nothing.
+        where = (f"\n\nResults are in the database:\n{db_path}\n\nNo CSV is "
+                 f"written by detection. Use \"Export CSV\" on this tab if you "
+                 f"need a flat file." if db_path else "")
+        if outcome == 'written':
             QMessageBox.information(
                 self, "Detection finished",
-                f"{label} detection finished. Its results were written to the "
-                f"database.\n\nSee the Log tab for the counts, and for any "
-                f"channels that reported errors.")
+                f"{label} detection finished. Its events were written to the "
+                f"database.{where}\n\nSee the Log tab for the per-stage counts "
+                f"and density.")
+        elif outcome == 'partial':
+            QMessageBox.warning(
+                self, "Detection finished with missing channels",
+                f"{label} detection finished, but some channels produced no "
+                f"result and are missing from the database.{where}\n\nSee the "
+                f"Log tab for which channels, and re-run them before using "
+                f"per-channel or topographic results.")
         elif outcome == 'no_events':
             QMessageBox.information(
                 self, "Detection finished",
-                f"{label} detection finished. No events were detected, so "
-                f"nothing was written to the database.")
-        elif outcome in ('export_failed', 'import_failed'):
+                f"{label} detection finished. Every channel ran and no events "
+                f"were detected, so nothing was written to the database.")
+        elif outcome == 'write_failed':
             QMessageBox.warning(
                 self, "Detection finished with errors",
                 f"{label} detection finished, but nothing reached the "
-                f"database.\n\nSee the Log tab: the errors are recorded "
+                f"database.{where}\n\nSee the Log tab: the errors are recorded "
                 f"there.")
+        elif outcome == 'unknown':
+            QMessageBox.warning(
+                self, "Detection finished, result unverified",
+                f"{label} detection finished, but the database could not be "
+                f"read back, so what reached it is unknown.{where}\n\nSee the "
+                f"Log tab, and check the database before using these results.")
         else:
             # No outcome recorded: the run ended before the reporting step.
             QMessageBox.information(
@@ -5140,122 +5861,124 @@ class TurtleWaveGUI(QMainWindow):
                 f"{label} detection finished. See the Log tab for what was "
                 f"written.")
 
-    def log_run_outcome(self, label, db_path, event_count, param_written,
-                        import_ok):
-        """Say how the run ended, in terms of what actually happened.
+    def log_run_outcome(self, label, db_path, event_count, rows_written,
+                        channels_written, coverage):
+        """Say how the run ended, in terms of what is actually in the database.
 
-        The closing line of a detection run is the one a researcher reads, so
-        it must not conflate two opposite outcomes. "No events were detected"
-        and "events were detected but could not be written" both leave the
-        database empty and both skip the import, yet only the first is a
-        result; the second is a failure that would otherwise be announced as a
-        clean, quiet finish.
+        The closing lines of a detection run are the ones a researcher reads,
+        so they must not conflate outcomes that look alike from the inside.
+        "No events were detected" and "every channel raised" both come back
+        from the detector as an empty list; "12000 events written" and "12000
+        events written but 57 channels never ran" both come back as a large,
+        healthy-looking number. Only the database can tell those apart, so this
+        reports from the database rather than from the return value.
 
-        The exporters return ``None`` without writing a file for several real
-        failures - an unreadable sampling frequency, no valid segments to
-        measure, a caught exception during the export - and none of those touch
-        the detected event count. Neither does a run in which every channel
-        raised: the detectors return only the events they collected, so a
-        montage that failed outright comes back as an empty list and counts as
-        zero, indistinguishable from a quiet night on the count alone.
-
-        So the count alone does not decide it. The calm no-events wording needs
-        both a count of zero *and* a parameters CSV on disk, because a run that
-        genuinely detected nothing still writes a header-only CSV, while a run
-        that failed writes nothing at all - the library refuses to write a file
-        it cannot stand behind. Zero events with no CSV is therefore a failed
-        run, not an empty one, and is reported as such.
-
-        The outcome is also recorded under `label`, so the dialog that closes
-        the run can say the same thing as the log instead of announcing success
-        regardless.
+        Now that detection writes straight to ``neural_events.db``, the closing
+        report also has one job it did not have before: saying plainly where
+        the results are. No CSV appears in the results directory any more, and a
+        researcher who is not told will go looking for one.
 
         Parameters
         ----------
         label : str
             Event name for the log lines, e.g. ``"Spindle"``.
         db_path : str
-            The database the run was writing to, named in every branch so the
-            log always says which file is or is not affected.
+            The database the run wrote to, named in every branch so the log
+            always says which file is or is not affected.
         event_count : int or None
-            What `log_event_count` returned: the number of events detected, or
-            None when the detector's return value could not be counted. None is
-            treated as "not known to be zero", so it never licenses the calm
-            no-events wording.
-        param_written : bool
-            Whether the parameters CSV export produced a usable file.
-        import_ok : bool or None
-            The tri-state from `import_to_database`: True imported, False
-            failed, None not attempted or a clean zero-event no-op.
+            What `log_event_count` returned: the number of events the detector
+            collected, or None when its return value could not be counted.
+        rows_written : int or None
+            Rows this run left in ``events`` (`count_db_events`). ``None`` means
+            the database could not be read, which is reported as unknown - never
+            as zero.
+        channels_written : int or None
+            Distinct channels those rows cover.
+        coverage : dict or None
+            The `verify_db_channels` result, or ``None`` when that check could
+            not run.
 
         Returns
         -------
         str
-            One of ``'imported'``, ``'no_events'``, ``'export_failed'`` or
-            ``'import_failed'`` - the outcome that was reported.
+            One of ``'written'``, ``'partial'``, ``'no_events'``,
+            ``'write_failed'`` or ``'unknown'`` - the outcome that was reported.
         """
-        if import_ok:
-            # A statement of what happened, not a verdict on the run. The
-            # detectors export the channels that succeeded when others fail, so
-            # this same branch is reached by a clean run and by one that lost
-            # 60 channels of 257 - and the GUI cannot yet tell which, because
-            # the exporters do not report a failed-channel count. Claiming
-            # success here would contradict the channel errors logged above it;
-            # naming what the count covers does not.
-            counted = ("Its events were" if event_count is None
-                       else f"{event_count} events, from the channels that "
-                            f"returned a result, were")
-            self.write_log(
-                f"{label} detection finished. {counted} written to {db_path}.")
-            return self._record_run_outcome(label, 'imported')
+        requested = (coverage or {}).get('requested')
+        incomplete = bool(coverage) and not coverage.get('complete', True)
 
-        if import_ok is False:
+        if rows_written is None:
+            self.write_log("!" * 60)
             self.write_log(
-                f"{label} detection finished, but NOTHING was written to "
-                f"{db_path}. Any CSV files reported above are intact; see "
-                f"the database import errors earlier in this log.")
-            return self._record_run_outcome(label, 'import_failed')
+                f"!!! {label} detection finished, but the database at {db_path} "
+                f"could not be read back, so what reached it is UNKNOWN. The "
+                f"detector reported "
+                f"{'an unknown number of' if event_count is None else event_count} "
+                f"events. Open the database and check before using these "
+                f"results.")
+            self.write_log("!" * 60)
+            return self._record_run_outcome(label, 'unknown')
 
-        # import_ok is None: either the import was skipped because the export
-        # produced nothing usable, or it ran and found no event rows.
-        if event_count == 0 and param_written:
+        if rows_written > 0:
+            where = (f"{rows_written} events across {channels_written} channel(s) "
+                     f"written to {db_path}")
+            if incomplete:
+                n_missing = len(coverage.get('missing') or [])
+                self.write_log("!" * 60)
+                self.write_log(f"!!! {label} detection finished PARTIALLY: {where}.")
+                self.write_log(
+                    f"!!! {n_missing} of {requested} requested channels produced "
+                    f"no result and are NOT in the database. The events that are "
+                    f"there are valid, but this run does not cover the montage "
+                    f"you asked for - see the channel errors earlier in this log, "
+                    f"and re-run the missing channels before using per-channel or "
+                    f"topographic results.")
+                self.write_log("!" * 60)
+                return self._record_run_outcome(label, 'partial')
+            covered = (f" covering all {requested} requested channels"
+                       if requested else "")
             self.write_log(
-                f"{label} detection completed: 0 events detected, so there was "
-                f"nothing to export. The database at {db_path} is unchanged.")
+                f"{label} detection finished. {where}{covered}.")
+            self.write_log(
+                f"There is no results CSV: the database is the store of record. "
+                f"Use \"Export CSV\" on this tab to write a flat file for "
+                f"collaborators, or open the Event Review GUI to inspect the "
+                f"events.")
+            return self._record_run_outcome(label, 'written')
+
+        # No rows. Distinguish an empty night from a run that fell over.
+        if event_count == 0 and coverage is not None and coverage.get('complete'):
+            self.write_log(
+                f"{label} detection completed: 0 events detected. All "
+                f"{requested} channels ran and reported nothing, so the "
+                f"database at {db_path} holds no events for this scope. That is "
+                f"a result, not a failure.")
             return self._record_run_outcome(label, 'no_events')
 
         self.write_log("!" * 60)
-        if event_count == 0:
-            # Zero events *and* no CSV. A night with no events still gets its
-            # header-only CSV, so this combination means the run did not
-            # complete: channels that raised contribute no events and no file.
-            self.write_log(
-                f"!!! {label} detection reported 0 events and wrote no "
-                f"parameters CSV. Those two together mean the run did not "
-                f"finish, not that the night was empty - a night with no "
-                f"events still writes a CSV holding its header row.")
-            self.write_log(
-                f"!!! Treat this as a failed run: some or all channels did not "
-                f"produce a result. The database at {db_path} is unchanged; see "
-                f"the channel and export errors earlier in this log.")
-            self.write_log("!" * 60)
-            return self._record_run_outcome(label, 'export_failed')
-
         counted = ("an unknown number of" if event_count is None
-                   else f"{event_count}")
-        reason = ("the export produced no usable parameters CSV"
-                  if not param_written else
-                  "the parameters CSV that reached the import step held no "
-                  "event rows")
+                   else str(event_count))
         self.write_log(
-            f"!!! {label} detection found {counted} events, but {reason}, so "
-            f"nothing could be imported.")
-        self.write_log(
-            f"!!! This is an export failure, not an empty result. The database "
-            f"at {db_path} is unchanged; see the export errors earlier in this "
-            f"log.")
+            f"!!! {label} detection wrote NO rows to {db_path}. The detector "
+            f"reported {counted} events.")
+        if coverage is None:
+            self.write_log(
+                "!!! The channel coverage check could not run either, so why "
+                "is unknown. Check the errors earlier in this log.")
+        elif incomplete:
+            self.write_log(
+                f"!!! {len(coverage.get('missing') or [])} of {requested} "
+                f"channels produced no result. Treat this as a failed run, not "
+                f"an empty night: a night with no events still records every "
+                f"channel as completed.")
+        else:
+            self.write_log(
+                "!!! Every channel is recorded as completed, yet no rows are "
+                "stored for this scope. That combination points at the scope "
+                "itself - method, band or stage set - not matching what was "
+                "written. Check the detection parameters against the database.")
         self.write_log("!" * 60)
-        return self._record_run_outcome(label, 'export_failed')
+        return self._record_run_outcome(label, 'write_failed')
 
     def write_log_once(self, key, message):
         """Log `message` only when it differs from the last one under `key`.

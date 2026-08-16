@@ -189,17 +189,11 @@ Take a moment to review these numbers. They tell the story of your data.
 
 Navigate to your output directory. You'll find:
 
-**`spindle_results/*.json`** - One JSON file per channel with the raw detected events
+**`neural_events.db`** - SQLite database holding every detected spindle
 
-**`spindle_results/spindle_parameters_*.csv`** - All channels aggregated into a single CSV
-
-- Contains timing, amplitude, frequency for each spindle
-- Organized by channel and sleep stage
-- Ready for statistical analysis
-
-**`neural_events.db`** - SQLite database the CSV was imported into
-
-- Queryable with SQL or pandas (`pd.read_sql`)
+- One row per event, in the `events` table (`event_type = 'spindle'`)
+- Queryable with SQL, pandas (`pd.read_sql_query`), or R (`DBI`/`RSQLite`) —
+  no CSV or per-channel file to open first
 - The store the EEG Review GUI reads from
 
 **`*_annotations.xml`** - Sleep stage annotations
@@ -213,9 +207,10 @@ Navigate to your output directory. You'll find:
 - Documents parameters used
 
 !!! tip "Next steps with your data"
-    The CSV can be loaded directly with pandas. For SQL access to
-    `neural_events.db`, use `sqlite3` or `pd.read_sql_query`. We'll cover that
-    in the how-to guides.
+    Query `neural_events.db` straight from Python or R — see
+    [Read the database with pandas and R](../how-to/read-database-with-pandas-and-r.md)
+    for query patterns, or how to pull a flat CSV back out if a downstream
+    tool needs one.
 
 ## What You've Learned
 
@@ -233,9 +228,9 @@ The pattern you just learned applies to all TurtleWave analyses:
 
 1. **Load data** - Select your recording
 2. **Annotate** - Map sleep stages and artifacts
-3. **Detect** - Run event detection
-4. **Import** - Get results into `neural_events.db`
-5. **Review** - Triage detected events in the QC dashboard
+3. **Detect** - Run event detection; results land in `neural_events.db`
+   directly, with no separate import step
+4. **Review** - Triage detected events in the QC dashboard
 
 This same workflow works for slow waves, phase-amplitude coupling, and other analyses.
 
@@ -250,9 +245,9 @@ Now that you understand the basics, you're ready to explore more:
 - [Review EEG events in the QC dashboard](eeg-review-gui-tutorial.md) — now
   review those events: triage flagged channels and drill into epochs before
   you trust the counts
-- [Write detection results directly to the database](../how-to/direct-to-database-detection.md)
-  — get results into `neural_events.db` for analysis, skipping the
-  JSON→CSV→import round-trip
+- [Read the database with pandas and R](../how-to/read-database-with-pandas-and-r.md)
+  — query `neural_events.db` directly for statistics, or pull a CSV back out
+  if a downstream tool needs one
 
 **Try different event types:**
 

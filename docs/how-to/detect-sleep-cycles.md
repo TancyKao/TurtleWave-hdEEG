@@ -10,6 +10,22 @@ event detection has already populated `neural_events.db` (or as a standalone
 backfill against a database you detected into previously); it reads only the
 scored hypnogram and the events already in the database.
 
+!!! info "Since 4.3, a detection run does this automatically"
+    `detect_spindles`, `detect_slow_waves` and `detect_kcomplexes` now call
+    `finalize_cycles_and_durations` themselves after a run (via
+    `dbwrite.ensure_cycles_populated` / `dbwrite.tag_run_cycles`), so
+    `sleep_cycles`, `stage_durations` and `events.cycle` are normally already
+    populated without you calling this page's steps yourself. It's a no-op on
+    the second and later detector run against a subject that already has
+    cycles stored. You still need this page directly for: a database detected
+    into before 4.3, a subject whose cycle back-fill failed and was logged
+    (a completed detection is never lost to a cycle-detection failure), or
+    finer control over `methods`/`wake_thresh`/`nrem_min`/`rem_min` than the
+    automatic call uses (`('2022', '1979')`, `tag_method='2022'`, detector
+    defaults — not currently overridable from `detect_*`). Either way, the
+    annotation XML is never written by a detection run itself — see
+    [What lands in the database](direct-to-database-detection.md#cycles-and-stage-durations-populate-automatically).
+
 ## When to use this
 
 **Problem:** You have detected events (spindles, slow waves, K-complexes)
@@ -124,6 +140,23 @@ for name in sorted(os.listdir(ROOT)):
     print(f"[{name}] {summary}")
 ```
 
+Passing the bare folder name (`name`, e.g. `'10sd'`) as `subject` above is
+fine as written: `subject` is normalised to the canonical `sub-` form on
+write (and on every read, e.g. by `density.event_density`), so `'10sd'` and
+`'sub-10sd'` name the same recording throughout `sleep_cycles`,
+`stage_durations`, `analysed_time` and `pac_coupling`.
+
+If an earlier run already wrote `sleep_cycles`/`stage_durations` rows under a
+different, non-canonical spelling of this recording's subject (e.g. `'10sd'`
+from a script that predates normalisation, alongside a later run's
+`'sub-10sd'`), re-running `store_cycles_to_database` / `store_stage_durations`
+replaces those older-spelling rows rather than leaving them alongside the new
+ones — `stage_durations` in particular has one row per subject as its whole
+contract, and a stale second spelling would double any total computed from
+it. A `logger.warning` names every older spelling found and how many rows it
+replaced, so check the log after a re-run on a recording you've run under
+more than one subject spelling.
+
 `examples/backfill_cycles.py` is a hardened, ready-to-run version of this loop
 (subject-id derivation, per-subject try/except so one bad folder doesn't abort
 the batch, and a PASS/FAIL summary):
@@ -208,11 +241,19 @@ If `cycles_by_method[method]` comes back empty:
   `'2022'` usually means the NREM/REM structure itself doesn't meet the
   stricter 1979 rule — inspect the hypnogram directly.
 
-### `events.cycle` Doesn't Match the XML Markers
+### `ValueError: tag_method` is not one of `methods`
 
-This happens only if `tag_method` is not included in `methods` — the XML gate
-never fires but `events.cycle` is still overwritten by the last method run.
-Keep `tag_method` within `methods` (the default already satisfies this).
+```text
+ValueError: tag_method='2022' is not one of methods=('1979',) ...
+```
+
+Since 4.3, `finalize_cycles_and_durations` **raises** instead of silently
+mistagging: passing a `tag_method` that isn't in `methods` used to write no
+XML cycle markers at all while still letting the last-run method own
+`events.cycle`, so the database and the XML disagreed about the cycle
+numbering with nothing recording which was which. Keep `tag_method` within
+`methods` (the default already satisfies this), or pass `tag_method=None` if
+you genuinely want cycles stored but nothing tagged.
 
 ### `FileNotFoundError: No database at ...`
 

@@ -10,16 +10,21 @@ from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
 from turtlewave_hdEEG import dbwrite
+from turtlewave_hdEEG.utils import derive_subject
+from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
+                                             assert_scoring_covers_stages)
 
 
 class ParalKC:
     """
     K-complex detection across many channels.
 
-    Mirrors the ParalSWA pattern: per-channel detection writes one JSON per
-    channel into ``json_dir``; CSV / SQLite export reuses the slow-wave
-    helpers on ParalSWA (KC parameters are structurally identical to SW
-    parameters, so duplicating the export code would just be drift bait).
+    Mirrors the ParalSWA pattern: detection writes each channel's events
+    straight into ``neural_events.db`` (the store of record). The legacy
+    ``write_db=False`` path still writes one JSON per channel into
+    ``json_dir``, and its CSV / SQLite export reuses the slow-wave helpers on
+    ParalSWA (KC parameters are structurally identical to SW parameters, so
+    duplicating the export code would just be drift bait).
 
     Detected events are stored under the ``'k_complex'`` event type (in
     Wonambi XML annotations and the SQLite events table) and JSON files use
@@ -57,14 +62,14 @@ class ParalKC:
                           ref_chan=None, grp_name='eeg',
                           frequency=(0.1, 4.0),
                           trough_duration=(0.25, 1.0),
-                          neg_peak_thresh=-37.0, p2p_thresh=70.0,
+                          neg_peak_thresh=-40.0, p2p_thresh=75.0,
                           min_isolation=1.0,
                           detrend=False, polar='normal',
                           reject_artifacts=True, reject_arousals=True,
                           stage=None, cat=None,
                           save_to_annotations=False, json_dir=None,
-                          create_empty_json=True,
-                          *, write_db=False, db_path=None, resume=False,
+                          *, write_db=None, db_path=None, subject=None,
+                          resume=False,
                           run_params=None, replace_channels=None, n_fft_sec=4):
         """
         Detect K-complexes in the dataset.
@@ -80,13 +85,19 @@ class ParalKC:
         frequency : tuple
             Bandpass for KC detection. AASM KC default is (0.1, 4.0) Hz —
             wider than the SO band so the full KC waveform is captured.
-        trough_duration : tuple
-            Min/max negative half-wave duration (s). AASM KC default
-            (0.25, 1.0).
-        neg_peak_thresh : float
-            Minimum trough amplitude in µV (negative). AASM KC default −37 µV.
-        p2p_thresh : float
-            Minimum peak-to-peak amplitude in µV. AASM KC default 70 µV.
+        trough_duration : tuple or None
+            Min/max duration of the NEGATIVE HALF-WAVE (s), AASM KC default
+            (0.25, 1.0). It bounds the half-wave, not the whole K-complex --
+            a KC with a 0.5 s negative half-wave typically runs ~1 s in
+            total. ``None`` uses the method's published window.
+        neg_peak_thresh : float or None
+            Depth the trough must reach in µV; the sign is ignored. ``None``
+            uses the method's published value. Default −40 µV, matching
+            Wonambi's own ``AASM/Massimini2004`` configuration.
+        p2p_thresh : float or None
+            Minimum peak-to-peak amplitude in µV. ``None`` uses the method's
+            published value. Default 75 µV -- the AASM slow-wave-activity
+            figure, and Wonambi's ``AASM/Massimini2004`` value.
         min_isolation : float
             Minimum gap in seconds between successive KC trough times. KCs
             closer than this are dropped — this is what distinguishes a KC
@@ -99,18 +110,29 @@ class ParalKC:
         stage : list or str
             Sleep stages to analyze. KCs are typically scored in N2;
             override to include other stages if needed.
-        cat, reject_artifacts, reject_arousals, save_to_annotations,
-        json_dir, create_empty_json
+        cat, reject_artifacts, reject_arousals, save_to_annotations, json_dir
             Same semantics as ParalSWA.detect_slow_waves.
-        write_db : bool, keyword-only, default False
-            When True, write detected K-complexes straight into a SQLite
-            database (``db_path``) under the ``'k_complex'`` event type via the
-            direct-write path (deterministic uuid5 rows, detector-own
-            morphology in ``det_*``, batched re-measured columns, per-scope
-            ``processing_status`` tracking, ``detection_runs`` provenance). When
-            False the behaviour is byte-identical to the legacy JSON-only path.
+        write_db : bool or None, keyword-only, default None
+            Database write mode.
+
+            * ``None`` (default) -- AUTO: write K-complexes straight into the
+              database under the ``'k_complex'`` event type, resolving its
+              path with :func:`turtlewave_hdEEG.dbwrite.resolve_db_target`.
+              No per-channel JSON is written.
+            * ``True`` -- the same, and equally an error if no database can be
+              resolved.
+            * ``False`` -- legacy JSON-only path, unchanged.
+
+            A failure to resolve or open the database **raises**; it is never
+            downgraded to a silent no-op.
         db_path : str or None, keyword-only
             Target SQLite database (or directory -> ``neural_events.db``).
+            ``None`` resolves the target from ``json_dir``.
+        subject : str or None, keyword-only
+            Subject identifier keying the ``analysed_time`` density
+            denominator. ``None`` derives one with
+            :func:`turtlewave_hdEEG.utils.derive_subject`. Any value is
+            normalised to the canonical ``sub-`` form.
         resume : bool, keyword-only, default False
             When True (and ``write_db``), channels already recorded as
             ``success = 1`` for the same scope are skipped.
@@ -129,6 +151,20 @@ class ParalKC:
         -------
         list
             List of detected K-complex event dicts across all channels.
+
+        Raises
+        ------
+        ValueError
+            If a database write is in effect and no database file can be
+            resolved (see
+            :func:`turtlewave_hdEEG.dbwrite.resolve_db_target`).
+
+        Notes
+        -----
+        The run also stores its density denominator -- the artefact-free
+        in-stage seconds it actually analysed -- in ``analysed_time``, so
+        :func:`turtlewave_hdEEG.density.event_density` can derive K-complex
+        density from the database without re-reading any file.
         """
         if ref_chan is None:
             ref_chan = []
@@ -152,6 +188,15 @@ class ParalKC:
         if isinstance(stage, str):
             stage = [stage]
 
+        # write_db=None means AUTO: the database is the store of record.
+        # write_db=False is the legacy escape hatch and is the ONLY mode that
+        # still writes per-channel JSON.
+        auto_db = write_db is None
+        write_db = True if auto_db else bool(write_db)
+        write_json = (not write_db) and bool(json_dir)
+
+        # json_dir still holds the optional annotation XML and locates the
+        # database, so it is created either way.
         if json_dir:
             os.makedirs(json_dir, exist_ok=True)
 
@@ -183,7 +228,10 @@ class ParalKC:
         # written here and any file_pattern a caller rebuilds later cannot
         # drift (see dbwrite.fmt_freq_token).
         freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
-        stages_str = "".join(stage) if stage else "all"
+        # ONE canonical token for the run's stage set, used for events.stage,
+        # the event_uuid5 stage argument, processing_status, the JSON dict and
+        # the filename -- so all three detectors agree on what a stage means.
+        stages_str = dbwrite.join_stage_token(stage) if stage else "all"
 
         self.logger.info(
             f"Detecting K-complexes (method={method_db}, "
@@ -234,6 +282,35 @@ class ParalKC:
                 save_to_annotations = False
                 new_annotations = None
 
+        # Epoch -> stage lookup so each KC is attributed to the single scored
+        # epoch it falls in (matches the SW convention).
+        _det_epochs = _build_epoch_lookup(
+            self.annotations, self.logger, required=write_db)
+        _det_epoch_starts = [e[0] for e in _det_epochs]
+        _n_null_stage = 0
+        _n_out_of_scope = 0
+
+        def _stage_at(t):
+            """Return the scored stage of the epoch containing time t, or None."""
+            if t is None or not _det_epochs:
+                return None
+            idx = bisect.bisect_right(_det_epoch_starts, t) - 1
+            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
+                return _det_epochs[idx][2]
+            return None
+
+        # A requested stage with no scored epoch would otherwise be invisible:
+        # the joint token labels every row with the requested set whether or
+        # not the recording contains it. Fatal on the database path.
+        assert_scoring_covers_stages(
+            _det_epochs, stage, self.logger, required=write_db,
+            event_label='K-complex')
+        _requested_stages = set(str(s) for s in stage) if stage else set()
+
+        # (Built BEFORE the database connection is opened: on the database
+        # path an unusable scoring aborts the run, and doing it first means
+        # that abort cannot leave a connection open.)
+
         # ------------------------------------------------------------------
         # Direct-to-DB write path setup (opt-in; JSON behaviour unchanged).
         # ------------------------------------------------------------------
@@ -244,84 +321,110 @@ class ParalKC:
         rec_start = None
         s_freq = None
         if write_db:
-            if db_path is None:
-                self.logger.error("write_db=True but db_path is None; skipping DB writes")
-                write_db = False
-            else:
+            # Resolve first: an unresolvable target raises here, BEFORE any
+            # channel is detected, instead of silently downgrading to a run
+            # whose results go nowhere.
+            db_path = dbwrite.resolve_db_target(
+                db_path=db_path, output_dir=json_dir, logger=self.logger)
+            # Deliberately NOT wrapped in try/except: a database that cannot be
+            # opened or migrated must abort the run, not turn it into a no-op.
+            self.initialize_sqlite_database(db_path)
+            db_conn = dbwrite.open_write_connection(db_path)
+            try:
+                dbwrite.ensure_direct_write_schema(db_conn, self.logger)
                 try:
-                    if os.path.isdir(db_path):
-                        db_path = os.path.join(db_path, 'neural_events.db')
-                    self.initialize_sqlite_database(db_path)
-                    db_conn = dbwrite.open_write_connection(db_path)
-                    dbwrite.ensure_direct_write_schema(db_conn, self.logger)
-                    try:
-                        s_freq = self.dataset.header['s_freq']
-                    except Exception:
-                        s_freq = None
-                    try:
-                        rec_start = self.dataset.header.get('start_time')
-                    except Exception:
-                        rec_start = None
-                    run_id = str(uuid.uuid4())
-                    params_dict = {
-                        'frequency': list(frequency),
-                        'trough_duration': list(trough_duration),
-                        'neg_peak_thresh': neg_peak_thresh,
-                        'p2p_thresh': p2p_thresh,
-                        'min_isolation': min_isolation,
-                        'detrend': detrend, 'polar': polar,
-                        'method': method_db,
-                        'ref_chan': ref_chan, 'cat': cat,
-                        'reject_artifacts': reject_artifacts,
-                        'reject_arousals': reject_arousals,
-                        'n_fft_sec': n_fft_sec,
-                    }
-                    if run_params:
-                        params_dict.update(run_params)
-                    dbwrite.record_run(
-                        db_conn, run_id, self.EVENT_TYPE, method_db,
-                        dbwrite.method_citation(method_db),
-                        json.dumps(params_dict, default=str),
-                        ref_chan, polar, stage, reject_artifacts, reject_arousals)
-                    if resume:
-                        db_skip = dbwrite.resume_skip_channels(
-                            db_conn, self.EVENT_TYPE, method_db,
-                            frequency[0], frequency[1], stages_key)
-                        if db_skip:
-                            self.logger.info(
-                                f"Resume: skipping {len(db_skip)} already-completed "
-                                f"channels for this scope")
-                except Exception as e:
-                    self.logger.error(f"Could not set up direct-DB write: {e}", exc_info=True)
-                    write_db = False
-                    if db_conn is not None:
-                        try:
-                            db_conn.close()
-                        except Exception:
-                            pass
-                        db_conn = None
+                    s_freq = self.dataset.header['s_freq']
+                except Exception:
+                    s_freq = None
+                try:
+                    rec_start = self.dataset.header.get('start_time')
+                except Exception:
+                    rec_start = None
+                run_id = str(uuid.uuid4())
+                params_dict = {
+                    'frequency': list(frequency),
+                    'trough_duration': (list(trough_duration)
+                                        if trough_duration is not None
+                                        else None),
+                    'neg_peak_thresh': neg_peak_thresh,
+                    'p2p_thresh': p2p_thresh,
+                    'min_isolation': min_isolation,
+                    'detrend': detrend, 'polar': polar,
+                    'method': method_db,
+                    'ref_chan': ref_chan, 'cat': cat,
+                    'reject_artifacts': reject_artifacts,
+                    'reject_arousals': reject_arousals,
+                    'n_fft_sec': n_fft_sec,
+                }
+                if run_params:
+                    params_dict.update(run_params)
+                # Resolve the subject BEFORE the first write, and refuse if this
+                # database already belongs to a different recording: events has no
+                # subject column, so a second subject's rows would overwrite the
+                # first's under the same uuid5 keys.
+                annot_file = getattr(self.annotations, 'xml_file', None)
+                db_subject = derive_subject(
+                    annotation_path=annot_file,
+                    root_dir=dbwrite.recording_root_from_db(db_path),
+                    explicit=subject)
+                dbwrite.assert_single_subject(
+                    db_conn, db_subject, db_path=db_path, logger=self.logger)
 
-        # Epoch -> stage lookup so each KC is attributed to the single scored
-        # epoch it falls in (matches the SW convention).
-        try:
-            _det_epochs = sorted(
-                ((float(e['start']), float(e['end']), str(e['stage']))
-                 for e in self.annotations.get_epochs()),
-                key=lambda x: x[0]
-            ) if self.annotations is not None else []
-        except Exception as e:
-            self.logger.warning(f"Could not build epoch stage lookup: {e}")
-            _det_epochs = []
-        _det_epoch_starts = [e[0] for e in _det_epochs]
+                # Refuse any write that would append a duplicate set rather
+                # than replace: the stage is part of both the uuid5 and the
+                # event_chan_time UNIQUE key, so rows stored under a DIFFERENT
+                # stage token (a pre-4.3 per-epoch stage, or an earlier run
+                # over a different stage set) would survive alongside this
+                # run's. stages_str is what makes the second case visible.
+                dbwrite.assert_stage_format_compatible(
+                    db_conn, self.EVENT_TYPE, methods, frequency[0],
+                    frequency[1], stage_token=stages_str, channels=chan,
+                    replace_channels=replace_channels, db_path=db_path,
+                    logger=self.logger)
 
-        def _stage_at(t):
-            """Return the scored stage of the epoch containing time t, or None."""
-            if t is None or not _det_epochs:
-                return None
-            idx = bisect.bisect_right(_det_epoch_starts, t) - 1
-            if 0 <= idx < len(_det_epochs) and _det_epochs[idx][0] <= t < _det_epochs[idx][1]:
-                return _det_epochs[idx][2]
-            return None
+                dbwrite.record_run(
+                    db_conn, run_id, self.EVENT_TYPE, method_db,
+                    dbwrite.method_citation(method_db),
+                    json.dumps(params_dict, default=str),
+                    ref_chan, polar, stage, reject_artifacts, reject_arousals,
+                    subject=db_subject)
+
+                # Density denominator: the artefact-free in-stage time this run
+                # actually analysed, so density can be derived from the database
+                # alone (turtlewave_hdEEG.density.event_density).
+                dbwrite.store_analysed_time(
+                    db_conn, db_subject, self.annotations, self.dataset, stage,
+                    reject_artifacts, reject_arousals,
+                    annotation_file=annot_file, logger=self.logger)
+
+                # Sleep cycles + stage durations, on this run's connection and
+                # WITHOUT touching the annotation XML. A no-op when they are
+                # already stored. events.cycle is tagged after the channel
+                # loop, scoped to this run.
+                dbwrite.ensure_cycles_populated(
+                    db_conn, self.annotations, db_subject, db_path=db_path,
+                    logger=self.logger)
+
+                if resume:
+                    db_skip = dbwrite.resume_skip_channels(
+                        db_conn, self.EVENT_TYPE, method_db,
+                        frequency[0], frequency[1], stages_key)
+                    if db_skip:
+                        self.logger.info(
+                            f"Resume: skipping {len(db_skip)} already-completed "
+                            f"channels for this scope")
+            except Exception:
+                # Never leave the connection held on an aborted setup, and
+                # never let a failing close() replace the real exception --
+                # close() itself raises 'disk I/O error' on the mapped network
+                # drives 4.0.2 was cut for, which would swallow the setup
+                # failure and never reach the raise below.
+                try:
+                    db_conn.close()
+                except Exception:
+                    pass
+                db_conn = None
+                raise
 
         all_kcs = []
 
@@ -372,10 +475,17 @@ class ParalKC:
                                 self.logger.error(
                                     f"Error detrending segment {i + 1}: {e}")
 
+                        # `trough_duration` is the NEGATIVE HALF-WAVE window,
+                        # not the whole-wave duration. It used to be forwarded
+                        # as Wonambi's `duration`, which bounds the whole wave
+                        # while the real half-wave limit stayed hardcoded --
+                        # so the AASM window (0.25, 1.0) rejected every
+                        # K-complex whose full waveform ran past 1 s, which is
+                        # most of them.
                         detector = ImprovedDetectKComplex(
                             method=meth,
                             frequency=frequency,
-                            duration=trough_duration,
+                            trough_duration=trough_duration,
                             neg_peak_thresh=neg_peak_thresh,
                             p2p_thresh=p2p_thresh,
                             polar=polar,
@@ -396,16 +506,26 @@ class ParalKC:
                                 kc_start = float(kc.get('start', 0))
                                 kc_end = float(kc.get('end', 0))
                                 kc_dur = float(kc.get('dur', kc_end - kc_start))
-                                single_stage = _stage_at(kc_start)
-                                if single_stage is None and isinstance(stage, (list, tuple)) and len(stage) == 1:
-                                    single_stage = stage[0]
+                                # events.stage is the RUN's stage token. The
+                                # epoch stage is kept beside it in the additive
+                                # epoch_stage column and used as the assertion
+                                # below.
+                                epoch_stage = _stage_at(kc_start)
+                                if epoch_stage is None:
+                                    # No scored epoch contains this event.
+                                    # Counted and reported after the loop.
+                                    _n_null_stage += 1
+                                elif (_requested_stages
+                                        and epoch_stage not in _requested_stages):
+                                    _n_out_of_scope += 1
                                 morph = dbwrite.event_det_morphology(kc)
                                 ev = {
                                     'uuid': dbwrite.event_uuid5(
                                         self.EVENT_TYPE, ch, kc_start, meth,
-                                        frequency[0], frequency[1], single_stage),
+                                        frequency[0], frequency[1], stages_str),
                                     'start_time': kc_start, 'end_time': kc_end,
-                                    'duration': kc_dur, 'stage': single_stage,
+                                    'duration': kc_dur, 'stage': stages_str,
+                                    'epoch_stage': epoch_stage,
                                     'method': meth,
                                 }
                                 ev.update(morph)
@@ -413,9 +533,10 @@ class ParalKC:
                                 channel_param_segments.append(
                                     dbwrite.make_param_segment(
                                         processed_seg['data'], kc_start, kc_end,
-                                        self.EVENT_TYPE, single_stage, ch))
+                                        self.EVENT_TYPE, stages_str, ch))
 
-                            if json_dir:
+                            # Legacy write_db=False path only
+                            if write_json:
                                 channel_json_kcs.append({
                                     'uuid': kc['uuid'],
                                     'chan': ch,
@@ -429,7 +550,14 @@ class ParalKC:
                                     'ptp': float(kc.get('ptp', 0)),
                                     'method': meth,
                                     'min_isolation': min_isolation,
-                                    'stage': stage,
+                                    # The run's canonical stage token, the same
+                                    # string the database stores, so the JSON
+                                    # and the database cannot disagree about
+                                    # what an event's stage means. Was the raw
+                                    # requested LIST.
+                                    'stage': stages_str,
+                                    'epoch_stage': _stage_at(
+                                        float(kc.get('start', 0))),
                                     'freq_range': frequency,
                                 })
 
@@ -453,15 +581,16 @@ class ParalKC:
                         f"Wrote {len(channel_db_events)} K-complex rows for "
                         f"channel {ch} to the database")
 
-                if json_dir:
+                if write_json:
                     ch_json = os.path.join(
                         json_dir,
                         f"{self.FILE_PREFIX}_{method_str}_{freq_str}_"
                         f"{stages_str}_{ch}.json")
-                    if not channel_json_kcs and create_empty_json:
+                    # Empty JSON marks a channel that ran and found nothing
+                    if not channel_json_kcs:
                         with open(ch_json, 'w', encoding='utf-8') as f:
                             json.dump([], f)
-                    elif channel_json_kcs:
+                    else:
                         with open(ch_json, 'w', encoding='utf-8') as f:
                             json.dump(channel_json_kcs, f, indent=2)
                         self.logger.info(
@@ -480,10 +609,10 @@ class ParalKC:
                     dbwrite.record_channel_failure(
                         db_conn, self.EVENT_TYPE, ch, method_db,
                         frequency[0], frequency[1], stages_key, e)
-                # Write an error sentinel (not an empty list) so downstream import
-                # can tell a failed channel apart from one that legitimately had no
-                # K-complexes and re-run it.
-                elif json_dir and create_empty_json:
+                # Legacy path only: write an error sentinel (not an empty list) so
+                # downstream import can tell a failed channel apart from one that
+                # legitimately had no K-complexes.
+                elif write_json:
                     try:
                         ch_json = os.path.join(
                             json_dir,
@@ -495,7 +624,31 @@ class ParalKC:
                         self.logger.error(
                             f"Could not write sentinel JSON for {ch}: {je}")
 
+        if write_db and _n_null_stage:
+            self.logger.error(
+                "%d of %d detected K-complex(es) fall outside every scored "
+                "epoch (events.epoch_stage is NULL). They still carry this "
+                "run's stage token '%s' and so still count towards its "
+                "density, but no scored epoch vouches for them. Check that the "
+                "scoring covers the whole recording.",
+                _n_null_stage, len(all_kcs), stages_str)
+        if write_db and _n_out_of_scope:
+            # The retained assertion: detection ran on segments fetched for the
+            # requested stages, so an event whose own epoch stage is outside
+            # that set means the stage token on its row is not the whole truth.
+            self.logger.warning(
+                "%d of %d detected K-complex(es) fall in a scored epoch "
+                "OUTSIDE the requested stage set %s (see events.epoch_stage). "
+                "They are labelled with this run's stage token '%s' like every "
+                "other row. A handful at segment boundaries is expected; a "
+                "large share means the fetch and the scoring disagree.",
+                _n_out_of_scope, len(all_kcs), sorted(_requested_stages),
+                stages_str)
+
         if write_db and db_conn is not None:
+            # events.cycle for THIS run's rows only, from the stored cycles.
+            dbwrite.tag_run_cycles(db_conn, db_subject, run_id=run_id,
+                                   logger=self.logger)
             try:
                 db_conn.close()
             except Exception:
@@ -576,6 +729,15 @@ class ParalKC:
                                  file_pattern=None, reject_artifacts=None,
                                  reject_arousals=None):
         """Export K-complex statistics to CSV with whole-night and per-stage densities.
+
+        .. deprecated:: 4.2.0
+            Use ``turtlewave_hdEEG.density.event_density(db_path,
+            event_type='k_complex', ...)`` instead, which derives density from
+            ``neural_events.db`` and its stored ``analysed_time`` denominator.
+            This method reads the per-channel JSON that detection stopped
+            writing in 4.2 (it still works against a legacy directory produced
+            with ``write_db=False``). Scheduled for removal in 5.0. The
+            deprecation notice is emitted by the delegated slow-wave exporter.
 
         Delegates to :meth:`ParalSWA.export_slow_wave_density_to_csv`, since
         K-complex and slow-wave density are computed identically; pass

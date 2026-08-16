@@ -37,6 +37,68 @@ import numpy as np
 # up the journal-mode override and the busy timeout (it used to call
 # sqlite3.connect directly, with neither).
 from . import dbwrite
+from .utils import normalize_subject
+
+#: Fallback for module-level helpers called without a processor logger.
+LOGGER = logging.getLogger('turtlewave_hdEEG.cycleprocessor')
+
+
+def _subject_spellings(conn, table, subject, logger=None):
+    """Every stored spelling of one recording's id in ``table``.
+
+    The idempotency delete in the cycle writers is keyed on ``subject``. Now
+    that the writers normalise before inserting, a row written earlier under
+    the bare folder name (which the cycle how-to tells users to pass) is not
+    matched by a delete on the canonical id, so the insert adds a *second* row
+    instead of replacing the first. ``stage_durations`` has
+    ``PRIMARY KEY (subject)`` -- one row per recording is its whole contract --
+    and the duplicate doubles any total computed from it.
+
+    Matching every spelling that normalises to the same canonical id makes the
+    delete do what it always claimed to.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    table : str
+        Table holding a ``subject`` column.
+    subject : str
+        Canonical (already normalised) subject id.
+    logger : logging.Logger or None, optional
+        Logger for the stale-spelling notice. Default ``None``.
+
+    Returns
+    -------
+    list of str
+        Stored spellings equivalent to ``subject``, canonical first. On a
+        failed lookup this degrades to ``[subject]`` -- the pre-fix
+        single-spelling delete -- and says so at WARNING, because that
+        degradation silently re-introduces the duplicate row this function
+        exists to prevent.
+    """
+    try:
+        stored = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT subject FROM {table} "
+            f"WHERE subject IS NOT NULL AND subject != ''")]
+    except Exception as e:
+        (logger or LOGGER).warning(
+            "Could not read the stored subject spellings from %s (%s), so the "
+            "idempotency delete falls back to the canonical id '%s' alone. If "
+            "this recording has rows under an older spelling of its id they "
+            "will NOT be replaced, and the insert that follows adds a "
+            "duplicate instead. Check the table and re-run.", table, e, subject)
+        return [subject]
+    equivalent = [s for s in stored
+                  if str(s) != subject and normalize_subject(str(s)) == subject]
+    if equivalent and logger is not None:
+        logger.warning(
+            "%s holds this recording under %d older spelling(s) of its "
+            "subject id (%s); they are being replaced by '%s' so the "
+            "recording keeps one row per key instead of gaining a duplicate.",
+            table, len(equivalent), ", ".join(repr(s) for s in equivalent),
+            subject)
+    return [subject] + equivalent
 
 
 # Numeric hypnogram codes as produced by ``XLAnnotations.get_hypnogram()``:
@@ -538,17 +600,29 @@ class ParalCycles:
         int
             Number of cycles written.
         """
-        subject = subject if subject is not None else (self.subject or '')
+        # One canonical spelling, matching analysed_time / pac_coupling and the
+        # detectors. The cycle how-to tells users to pass the bare folder name,
+        # so without this a recording carries '10sd' here and 'sub-10sd' there
+        # -- two subjects to SQL, and the detectors' single-subject guard then
+        # refuses the recording's own next run.
+        subject = normalize_subject(
+            subject if subject is not None else (self.subject or ''))
         own = conn is None
         if own:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
             method_vals = {c['method'] for c in cycles} or {method}
+            # Delete every stored spelling of this recording's id, not just the
+            # canonical one, or a row written under the bare folder name
+            # survives and the insert adds a duplicate cycle.
+            spellings = _subject_spellings(conn, 'sleep_cycles', subject,
+                                           self.logger)
+            placeholders = ",".join("?" * len(spellings))
             for m in method_vals:
                 conn.execute(
-                    'DELETE FROM sleep_cycles WHERE subject=? AND method=?',
-                    (subject, m))
+                    f'DELETE FROM sleep_cycles WHERE subject IN ({placeholders}) '
+                    f'AND method=?', (*spellings, m))
             conn.executemany('''
                 INSERT INTO sleep_cycles
                     (subject, method, cycle_number, nrem_start, nrem_end,
@@ -621,14 +695,23 @@ class ParalCycles:
         int
             Number of rows written (always 1).
         """
-        subject = subject if subject is not None else (self.subject or '')
+        # Same canonical spelling as write_cycles_to_database; see there.
+        subject = normalize_subject(
+            subject if subject is not None else (self.subject or ''))
         own = conn is None
         if own:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_stage_durations_table(conn)
+            # Same as write_cycles_to_database: match every stored spelling of
+            # this recording's id. stage_durations is PRIMARY KEY (subject), so
+            # a missed old-spelling row is a second row for one recording and
+            # doubles any SUM over the table.
+            spellings = _subject_spellings(conn, 'stage_durations', subject,
+                                           self.logger)
             conn.execute(
-                'DELETE FROM stage_durations WHERE subject=?', (subject,))
+                'DELETE FROM stage_durations WHERE subject IN (%s)'
+                % ",".join("?" * len(spellings)), spellings)
             conn.execute('''
                 INSERT INTO stage_durations
                     (subject, epoch_length, wake_min, n1_min, n2_min, n3_min,
@@ -653,7 +736,8 @@ class ParalCycles:
                 conn.close()
         return 1
 
-    def tag_events_with_cycles(self, cycles, db_path, conn=None):
+    def tag_events_with_cycles(self, cycles, db_path=None, conn=None,
+                               run_id=None):
         """Assign a cycle number to each event in the ``events`` table.
 
         Each event is tagged by testing its ``start_time`` against the cycle
@@ -664,15 +748,29 @@ class ParalCycles:
         Parameters
         ----------
         cycles : list of dict
-            Detected cycles, as returned by :meth:`detect`.
-        db_path : str
-            Path to the ``neural_events.db`` SQLite database.
+            Detected cycles, as returned by :meth:`detect`. Only
+            ``cycle_number``, ``nrem_start_sec`` and ``rem_end_sec`` are read,
+            so a caller can rebuild them from stored ``sleep_cycles`` rows
+            instead of re-detecting (see
+            :func:`turtlewave_hdEEG.dbwrite.tag_run_cycles`).
+        db_path : str, optional
+            Path to the ``neural_events.db`` SQLite database. Only used when
+            ``conn`` is ``None``; ignored otherwise.
         conn : sqlite3.Connection, optional
             An already-open connection **on ``db_path``** (not checked at
             runtime; it is a caller contract). When supplied, the caller owns
             closing it. When ``None`` a connection is opened via
             :func:`~turtlewave_hdEEG.dbwrite.open_write_connection` and closed
             here.
+        run_id : str, optional
+            When given, only rows carrying this ``events.run_id`` are tagged.
+            A detection run passes its own id so it annotates the rows it just
+            wrote and leaves every other run's ``cycle`` value alone --
+            without it, tagging is a table-wide ``UPDATE`` and one detector's
+            finalize step silently renumbers every other detector's events
+            (harmlessly when the cycles agree, wrongly when they were computed
+            from different scoring). ``None`` (the backfill case) tags the
+            whole table, which is what a backfill is for.
 
         Returns
         -------
@@ -686,6 +784,7 @@ class ParalCycles:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
+            scoped = run_id is not None
             total = 0
             for idx, cyc in enumerate(cycles):
                 lo = cyc['nrem_start_sec']
@@ -695,12 +794,17 @@ class ParalCycles:
                 else:
                     hi = cyc['rem_end_sec']
                     where = 'start_time >= ? AND start_time <= ?'
+                params = [str(cyc['cycle_number']), lo, hi]
+                if scoped:
+                    where += ' AND run_id = ?'
+                    params.append(str(run_id))
                 cur = conn.execute(
-                    f'UPDATE events SET cycle=? WHERE {where}',
-                    (str(cyc['cycle_number']), lo, hi))
+                    f'UPDATE events SET cycle=? WHERE {where}', params)
                 total += cur.rowcount
             conn.commit()
-            self.logger.info(f"Tagged {total} event(s) with a cycle number.")
+            self.logger.info(
+                "Tagged %d event(s) with a cycle number%s.", total,
+                f" (run_id={run_id})" if scoped else " (whole table)")
         finally:
             if own:
                 conn.close()
@@ -708,7 +812,7 @@ class ParalCycles:
 
     def run(self, db_path, method='2022', write_xml=True, subject=None,
             epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
-            conn=None):
+            conn=None, run_id=None, tag_events=True):
         """Detect cycles, then persist to XML and the database.
 
         This single entry point serves both backfilling an existing
@@ -725,6 +829,16 @@ class ParalCycles:
             three storage methods so one whole run shares one connection. When
             supplied the caller owns closing it; when ``None`` this method
             opens one connection for the three writes and closes it on exit.
+        run_id : str, optional
+            Passed to :meth:`tag_events_with_cycles` so a detection run tags
+            only the rows it wrote. Default ``None`` (tag every row).
+        tag_events : bool, optional
+            When False, cycles and stage durations are stored but
+            ``events.cycle`` is left alone. Used by
+            :func:`turtlewave_hdEEG.dbwrite.ensure_cycles_populated`, which
+            runs BEFORE a detection's channel loop -- there are no rows to tag
+            yet, and tagging then would rewrite an earlier run's. Default
+            ``True``.
 
         Returns
         -------
@@ -766,7 +880,9 @@ class ParalCycles:
                             f"Cycle-marker writing skipped: {e}")
                 self.store_cycles_to_database(cycles, db_path, subject=subject,
                                               method=method, conn=conn)
-                self.tag_events_with_cycles(cycles, db_path, conn=conn)
+                if tag_events:
+                    self.tag_events_with_cycles(cycles, db_path, conn=conn,
+                                                run_id=run_id)
             else:
                 self.logger.info(
                     "No cycles detected; writing stage durations only.")
@@ -793,7 +909,7 @@ def finalize_cycles_and_durations(
         methods=('2022', '1979'), tag_method='2022',
         write_xml=True, plot=False, plot_path=None,
         epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
-        log_level=logging.INFO):
+        log_level=logging.INFO, conn=None, run_id=None, tag_events=True):
     """Populate ``neural_events.db`` with sleep cycles + stage durations.
 
     The explicit post-detection finalize step. Run it once after event
@@ -820,11 +936,12 @@ def finalize_cycles_and_durations(
         Subject identifier stored in ``sleep_cycles`` / ``stage_durations``.
     methods : sequence of str, optional
         Cycle definitions to detect and store (default ``('2022', '1979')``).
-    tag_method : str, optional
+    tag_method : str or None, optional
         The method whose cycle numbering owns ``events.cycle`` and the XML
-        markers. Forced to run last among ``methods`` (default ``'2022'``). If
-        it is not present in ``methods`` it is not run for tagging, and the
-        last method in ``methods`` wins instead.
+        markers. Forced to run last among ``methods`` (default ``'2022'``).
+        **Must be one of ``methods``**, or ``None`` to tag nothing and write
+        no markers -- a ``tag_method`` outside ``methods`` raises (see
+        ``Raises``).
     write_xml : bool, optional
         Write cycle markers to the annotation XML for ``tag_method`` only
         (default True).
@@ -846,6 +963,20 @@ def finalize_cycles_and_durations(
     log_level : int, optional
         Logging level for the internal ``ParalCycles`` (default
         ``logging.INFO``).
+    conn : sqlite3.Connection, optional
+        An already-open write connection **on ``db_path``**. Pass it when a
+        detector is holding one: opening a second write connection while the
+        first is open is a writer-vs-writer collision under DELETE journal
+        mode, which is exactly the network-drive failure 4.0.2 was cut for.
+        When supplied the caller owns closing it, and the
+        database-exists check is skipped (the caller has it open, so it
+        exists). Default ``None`` (open and close one here).
+    run_id : str, optional
+        Passed through to the event tagging so a detection run tags only its
+        own rows. Default ``None`` (tag every row -- the backfill case).
+    tag_events : bool, optional
+        When False, cycles and stage durations are stored but ``events.cycle``
+        is not touched. Default ``True``.
 
     Returns
     -------
@@ -856,29 +987,42 @@ def finalize_cycles_and_durations(
     Raises
     ------
     FileNotFoundError
-        If ``db_path`` does not exist. This is the post-detection finalize
-        step: it annotates an existing ``neural_events.db`` and never creates
-        one, so a missing file is a wrong path rather than a database to
-        create. Checked before connecting, since connecting would create it.
+        If ``db_path`` does not exist and no ``conn`` was supplied. This is
+        the post-detection finalize step: it annotates an existing
+        ``neural_events.db`` and never creates one, so a missing file is a
+        wrong path rather than a database to create. Checked before
+        connecting, since connecting would create it.
+    ValueError
+        If ``tag_method`` is neither ``None`` nor one of ``methods``. That
+        combination used to be silently self-contradictory: the
+        ``m == tag_method`` gate never fires, so NO XML markers are written at
+        all, while ``events.cycle`` is still overwritten by whichever method
+        happens to run last. The database and the XML then disagree about the
+        cycle numbering with nothing recording which is which, and the mistake
+        is a single misspelled argument. Pass ``tag_method=None`` if tagging
+        nothing is what you meant.
 
     Notes
     -----
     Only ``tag_method`` writes XML markers, so the XML never ends up with two
     conflicting cycle numberings. All methods are stored in ``sleep_cycles``.
-
-    If ``tag_method`` is NOT one of ``methods``, the ``write_xml and
-    m == tag_method`` gate never fires, so NO XML cycle markers are written at
-    all — yet ``events.cycle`` is still overwritten by the last method in the
-    run order ("last run wins"). The XML markers (unchanged from a prior run, or
-    absent) can then disagree with ``events.cycle``. This is a misconfiguration
-    path; keep ``tag_method`` within ``methods`` (the default already does) so
-    the XML markers and ``events.cycle`` stay consistent.
     """
     pc = ParalCycles(annotations=annotations, subject=subject,
                      log_level=log_level)
 
     methods = list(methods)
-    # Reorder so tag_method runs LAST (tagging is "last run wins").
+    if tag_method is not None and tag_method not in methods:
+        raise ValueError(
+            f"tag_method={tag_method!r} is not one of methods={methods}. It "
+            f"names the cycle definition that owns events.cycle and the XML "
+            f"markers, so a value outside the list writes NO markers at all "
+            f"while events.cycle silently takes whichever method ran last -- "
+            f"a database and an annotation file that disagree, from one "
+            f"misspelled argument. Use one of {methods}, or tag_method=None "
+            f"to store both definitions and tag nothing.")
+
+    # Reorder so tag_method runs LAST (tagging is "last run wins" whenever
+    # more than one method tags). With tag_method=None nothing tags.
     if tag_method in methods:
         run_order = [m for m in methods if m != tag_method] + [tag_method]
     else:
@@ -891,21 +1035,26 @@ def finalize_cycles_and_durations(
     # database each close deletes and each connect recreates the -wal/-shm
     # sidecars -- the operation that fails on a network share.
     cycles_by_method = {}
-    # Fail fast before connecting: connecting would create the file. This is a
-    # backfill onto an existing neural_events.db, so a missing one is a wrong
-    # path, not a database to create.
-    _require_existing_db(db_path)
-    conn = dbwrite.open_write_connection(db_path, logger=pc.logger)
+    own_conn = conn is None
+    if own_conn:
+        # Fail fast before connecting: connecting would create the file. This
+        # is a backfill onto an existing neural_events.db, so a missing one is
+        # a wrong path, not a database to create. Skipped when the caller
+        # supplied a connection -- they have the database open already.
+        _require_existing_db(db_path)
+        conn = dbwrite.open_write_connection(db_path, logger=pc.logger)
     try:
         for m in run_order:
             cycles = pc.run(
                 db_path, method=m, write_xml=(write_xml and m == tag_method),
                 subject=subject, epoch_length=epoch_length,
                 wake_thresh=wake_thresh, nrem_min=nrem_min, rem_min=rem_min,
-                conn=conn)
+                conn=conn, run_id=run_id,
+                tag_events=(tag_events and m == tag_method))
             cycles_by_method[m] = cycles
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
     # Return in the caller's requested method order for stable plotting.
     cycles_by_method = {m: cycles_by_method[m] for m in methods}

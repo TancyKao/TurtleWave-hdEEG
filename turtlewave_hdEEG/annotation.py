@@ -167,8 +167,13 @@ class XLAnnotations:
             if 'start_time' in self.dataset.header:
                 rec_start = self.dataset.header['start_time']
             else:
-                # Default to current date/time if not available
-                rec_start = datetime.now()
+                # Default to current date/time if not available.
+                # `datetime` here is the MODULE (see the import at the top), so
+                # this needs the class as well; `datetime.now()` raised
+                # AttributeError, which the broad except below turned into a
+                # silent "return False" -- i.e. a recording that HAS staging
+                # but no header start_time lost its stages without a word.
+                rec_start = datetime.datetime.now()
             
             # Create a temporary file with Compumedics format staging
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as temp_file:
@@ -275,30 +280,74 @@ class XLAnnotations:
 
 
     def process_all(self):
+        """Import artefact/arousal events and header staging in one pass.
+
+        Both steps always run. Only the staging step has a pass/fail answer:
+        :meth:`add_artefacts_from_events` returns ``(count, seconds)`` and a
+        count of zero is a legitimate outcome (the recording simply carries no
+        reject flags), so it cannot be folded into a success flag without
+        reporting a clean recording as a failure.
+
+        Returns
+        -------
+        bool
+            The result of :meth:`add_stages_from_header`: ``True`` when header
+            staging was imported, ``False`` when the recording header carries
+            no staging (or the import failed) -- in which case the annotation
+            XML is written WITHOUT sleep stages and every stage-filtered
+            detection downstream will find nothing. This used to be hardcoded
+            ``True``, so a non-GUI caller had no way to see that outcome;
+            ``frontend/turtlewave_gui.py`` works around it by calling the two
+            steps directly.
         """
-        Process all annotations - add artefacts and stages.
-        """
-        # Add artefacts
+        # Artefacts/arousals first: it reports its own counts and timing.
         self.add_artefacts_from_events()
-        
-        stages_from_header = self.add_stages_from_header()
-        return True
-    
+
+        return self.add_stages_from_header()
+
     def save(self, filename=None):
-        """
-        Save annotations to the XML file in Wonambi format.
-        
+        """Save the annotations as Wonambi XML.
+
+        Uses ``Annotations.save()``, which serialises the whole annotation
+        tree (raters, epochs, events) back to XML.
+
+        **This used to call** ``Annotations.export(filename)``. Wonambi
+        7.15's ``export`` defaults to ``xformat='csv'`` and writes a four-column
+        epoch/stage CSV to the path it is given, so calling ``save()`` with the
+        default ``annot_file`` OVERWROTE the annotation XML with a stage CSV --
+        losing every event and rater, and leaving a file that
+        ``Annotations(annot_file)`` can no longer parse. Nothing in this
+        repository called it, which is why the trap survived.
+
         Parameters
         ----------
         filename : str or None
-            Path to save the file. If None, uses the annot_file from initialization.
+            Path to write to. ``None`` (default) uses the ``annot_file`` given
+            at construction. A different path is written as a copy: the object
+            keeps pointing at its original file afterwards, so a "save as" does
+            not silently redirect every later write.
+
+        Returns
+        -------
+        bool
+            True on success, False if the write raised.
         """
-        if filename is None:
-            filename = self.annot_file
-            
-        try:    
-            self.annotations.export(filename)
-            print(f"Annotations saved to {filename}")
+        target = self.annot_file if filename is None else filename
+
+        # Annotations.save() has no target argument -- it writes to
+        # self.xml_file -- so a copy is made by retargeting it for the one
+        # call and restoring it afterwards, even on failure.
+        original = getattr(self.annotations, 'xml_file', None)
+        try:
+            if original is not None and str(target) != str(original):
+                try:
+                    self.annotations.xml_file = target
+                    self.annotations.save()
+                finally:
+                    self.annotations.xml_file = original
+            else:
+                self.annotations.save()
+            print(f"Annotations saved to {target}")
             return True
         except Exception as e:
             print(f"Error saving annotations: {e}")
@@ -412,24 +461,43 @@ class CustomAnnotations:
         return [stage_map.get(stage, -1) for stage in stages]
     
     def save(self, filename=None):
-        """
-        Save annotations to the XML file in Wonambi format.
-        
+        """Save the annotations as Wonambi XML.
+
+        ``Annotations.save()`` takes no target and always writes to its own
+        ``xml_file``, so this used to accept a ``filename``, ignore it, and
+        then print "Annotations saved to <filename>" for a file it had not
+        touched. The path is now honoured, and written as a copy: the object
+        keeps pointing at its original file afterwards.
+
         Parameters
         ----------
         filename : str or None
-            Path to save the file. If None, uses the annot_file from initialization.
+            Path to write to. ``None`` (default) uses the ``annot_file`` given
+            at construction.
+
+        Returns
+        -------
+        bool
+            True on success, False if the write raised.
         """
-        if filename is None:
-            filename = self.annot_file
-            
-        try:    
-            self.wonb_annot.save()
-            print(f"Annotations saved to {filename}")
+        target = self.annot_file if filename is None else filename
+
+        original = getattr(self.wonb_annot, 'xml_file', None)
+        try:
+            if original is not None and str(target) != str(original):
+                try:
+                    self.wonb_annot.xml_file = target
+                    self.wonb_annot.save()
+                finally:
+                    self.wonb_annot.xml_file = original
+            else:
+                self.wonb_annot.save()
+            print(f"Annotations saved to {target}")
             return True
         except Exception as e:
             print(f"Error saving annotations: {e}")
             return False
+
     # Special method for fetch compatibility
     def create_epochs(self, times, epoch_length=30):
         """

@@ -2,12 +2,17 @@
 Custom extensions to Wonambi spindle detection
 """
 
+from copy import copy
+import logging
+
 import numpy as np
 import scipy
 from wonambi.detect import DetectSpindle as OriginalDetectSpindle
 from wonambi.detect import DetectSlowWave as OriginalDetectSlowWave
 from wonambi.detect.spindle import transform_signal
 from wonambi.graphoelement import Spindles
+
+lg = logging.getLogger('turtlewave_hdEEG.extensions')
 
 
 def _get_cirus_envelope_func(sfreq, filter_mode, filter_window, filter_order, transition_bw, frequency, det_remez=None):
@@ -666,12 +671,52 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
 
 
 class ImprovedDetectSlowWave(OriginalDetectSlowWave):
-    def __init__(self, method='Massimini2004', frequency=None, 
-                 duration=None, neg_peak_thresh=40, p2p_thresh=75,
+    """Slow-wave detector that honours the criteria it is given.
+
+    Wonambi's ``DetectSlowWave`` keeps the Massimini criteria in three
+    attributes that its constructor hardcodes per method:
+
+    ``trough_duration``
+        min/max duration of the FIRST half-wave, in seconds — Massimini's
+        *"a negative zero crossing and a subsequent positive zero crossing
+        separated by 0.3–1.0 sec"*.
+    ``max_trough_amp``
+        depth the first half-wave's extremum must reach, in µV (negative) —
+        *"a negative peak between the two zero crossings with voltage less
+        than −80 µV"*.
+    ``min_ptp``
+        minimum negative-to-positive peak-to-peak amplitude, in µV — *"≥140
+        µV"*.
+
+    ``duration`` is a fourth, separate bound on the WHOLE wave (both
+    half-waves), applied by ``detect_Massimini2004`` after the half-waves are
+    joined. It is not one of the published criteria and defaults to
+    ``(min_dur, max_dur)`` = ``(0, None)`` for the Massimini family.
+
+    This subclass lets a caller override the three criteria, which is what
+    Wonambi's own documentation describes and what its constructor does not
+    allow. Passing a trough window as ``duration`` — which is what this class
+    used to do — silently applies a half-wave limit to the whole wave and
+    rejects everything below 1 Hz, i.e. most slow waves.
+
+    References
+    ----------
+    Massimini, M., Huber, R., Ferrarelli, F., Hill, S. & Tononi, G.
+    The sleep slow oscillation as a traveling wave.
+    J Neurosci 24(31), 6862-70 (2004).
+    """
+
+    #: Methods that go through ``detect_Massimini2004`` and therefore use
+    #: ``trough_duration`` / ``max_trough_amp`` / ``min_ptp``.
+    MASSIMINI_METHODS = ('Massimini2004', 'AASM/Massimini2004')
+
+    def __init__(self, method='Massimini2004', frequency=None,
+                 duration=None, trough_duration=None,
+                 neg_peak_thresh=None, p2p_thresh=None,
                  min_dur=None, max_dur=None, polar='normal'):
         """
         Initialize improved slow wave detection.
-        
+
         Parameters
         ----------
         method : str
@@ -681,34 +726,102 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
             - 'Ngo2015': Detection based on Ngo et al. 2015
             - 'Staresina2015': Detection based on Staresina et al. 2015
         frequency : tuple of float
-            Frequency range for slow wave detection
-        duration : tuple of float
-            Duration range for slow waves in seconds (used for trough_duration in Massimini methods)
-        neg_peak_thresh : float
-            Minimum negative peak amplitude in μV
-        p2p_thresh : float
-            Minimum peak-to-peak amplitude in μV
+            Frequency range for slow wave detection.
+        duration : tuple of float or None
+            Min/max duration of the WHOLE slow wave in seconds. For the
+            Massimini family this is Wonambi's ``duration``, an extra bound
+            on top of the published criteria; ``None`` leaves it at
+            ``(min_dur, max_dur)``. For Ngo2015/Staresina2015 it is the
+            zero-crossing interval and is derived from ``min_dur``/``max_dur``.
+            **This is not the trough window** — pass that as
+            ``trough_duration``.
+        trough_duration : tuple of float or None
+            Min/max duration of the first half-wave in seconds — Massimini's
+            0.3–1.0 s criterion. ``None`` keeps the method's published window
+            (0.3–1.0 s for Massimini2004, 0.25–1.0 s for AASM/Massimini2004).
+            Ignored by Ngo2015 and Staresina2015, which are zero-crossing
+            methods.
+        neg_peak_thresh : float or None
+            Depth the trough must reach, in µV. The sign is ignored (−80 and
+            80 both mean "at least 80 µV deep"). ``None`` keeps the method's
+            published criteria.
+
+            For the Massimini family it is stored as Wonambi's negative
+            ``max_trough_amp`` and enforced inside the detector. For
+            Ngo2015/Staresina2015 — which publish no absolute µV criterion —
+            ``None`` means **no amplitude floor at all**, and any explicit
+            value is applied as a post-hoc µV floor on ``trough_val``, a
+            deliberate deviation from the paper that is logged as a warning.
+        p2p_thresh : float or None
+            Minimum negative-to-positive peak-to-peak amplitude in µV.
+            ``None`` keeps the method's published criteria.
+
+            For the Massimini family it is stored as Wonambi's ``min_ptp``
+            and enforced inside ``_add_halfwave``. For Ngo2015/Staresina2015
+            it behaves exactly like ``neg_peak_thresh`` above: ``None`` means
+            no floor, an explicit value is a post-hoc µV floor on the
+            reported ``ptp``. It is **not** Staresina's percentile, which is
+            ``self.ptp_thresh`` and is not settable here.
         min_dur : float or None
-            Minimum duration of a slow wave in seconds (used for Ngo2015 and Staresina2015)
+            Minimum duration of the whole slow wave in seconds. For the
+            Massimini family this bounds the two joined half-waves and
+            defaults to 0 (no lower bound), as in Wonambi.
+
+            For Ngo2015/Staresina2015 it sets ``self.min_dur`` and through it
+            ``det_filt['freq']``, but it does **not** reach
+            ``find_intervals``, which gates on ``self.duration`` — the value
+            Wonambi's constructor fixed from the published defaults. That is
+            a real defect, left in place deliberately so those two methods
+            keep producing exactly what they always have; see
+            :meth:`_set_method_params`.
         max_dur : float or None
-            Maximum duration of a slow wave in seconds (used for Ngo2015 and Staresina2015)
+            Maximum duration of the whole slow wave in seconds, with the same
+            Massimini-only caveat. ``None`` leaves the Massimini family
+            unbounded (Wonambi then caps the search at its
+            ``MAXIMUM_DURATION`` of 5 s).
         polar : str
-            Signal polarity - 'normal' or 'opposite'
+            Signal polarity - 'normal' or 'opposite'.
         """
+        # Keep the caller's requests aside: Wonambi's constructor overwrites
+        # every criterion with its own per-method defaults, so they can only
+        # be applied AFTER super().__init__ (in _set_method_params).
+        self._duration_param = duration
+        self._trough_duration_param = trough_duration
+        self._neg_peak_thresh_param = neg_peak_thresh
+        self._p2p_thresh_param = p2p_thresh
+
         super().__init__(method, duration)
-        
-        # Store additional parameters
-        self.min_neg_amp = neg_peak_thresh
-        self.min_ptp_amp = p2p_thresh
+
+        # Optional post-hoc amplitude floors in MICROVOLTS, applied only to
+        # Ngo2015 and Staresina2015 — see __call__. `None` means "no floor",
+        # which for those two methods is what their papers specify: neither
+        # defines any absolute uV criterion. Both are normalised to a
+        # magnitude so a caller's sign cannot change the meaning, matching the
+        # `neg_peak_thresh` contract in the docstring above.
+        self.min_neg_amp = (None if neg_peak_thresh is None
+                            else abs(float(neg_peak_thresh)))
+        self.min_ptp_amp = (None if p2p_thresh is None
+                            else abs(float(p2p_thresh)))
+        if (method not in self.MASSIMINI_METHODS
+                and (self.min_neg_amp or self.min_ptp_amp)):
+            lg.warning(
+                "%s: neg_peak_thresh=%s / p2p_thresh=%s applied as absolute "
+                "microvolt floors AFTER detection. Neither Ngo et al. 2015 "
+                "nor Staresina et al. 2015 defines a fixed uV amplitude "
+                "criterion (Ngo thresholds at 1.25x the mean, Staresina at "
+                "the 75th percentile), so this is a deliberate deviation from "
+                "the published method. Pass None to run the method as "
+                "published.",
+                method, neg_peak_thresh, p2p_thresh)
         if polar == 'normal':
             self.invert = False
         elif polar == 'opposite':
             self.invert = True
-        
+
         # Store duration parameters
         self.min_dur_param = min_dur
         self.max_dur_param = max_dur
-                
+
         # Override frequency if provided
         if frequency is not None:
             if method in ['Massimini2004', 'AASM/Massimini2004']:
@@ -716,19 +829,25 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
             elif method in ['Ngo2015', 'Staresina2015']:
                 self.lowpass['freq'] = frequency[1]  # Use upper bound
                 self.det_filt['freq'] = frequency
-        
+
         # Set method-specific parameters
         self._set_method_params()
 
     def _set_method_params(self):
-        """Set parameters specific to each detection method."""
+        """Set parameters specific to each detection method.
+
+        Runs after ``super().__init__`` and is therefore the only place where
+        a caller's criteria survive: it writes the published defaults first,
+        then applies the overrides recorded by :meth:`__init__`, then
+        recomputes ``self.duration`` from the final ``min_dur``/``max_dur``.
+        """
         if self.method == 'Massimini2004':
             if not hasattr(self, 'det_filt'):
                 self.det_filt = {
                     'order': 2,
                     'freq': (0.1, 4.0)
                 }
-            # Use default values unless overridden
+            # Massimini et al. 2004, J Neurosci 24(31):6862-70, Methods.
             self.trough_duration = (0.3, 1.0)
             self.max_trough_amp = -80
             self.min_ptp = 140
@@ -742,10 +861,13 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
                     'order': 2,
                     'freq': (0.1, 1.0)
                 }
-            # Use default values unless overridden
+            # AASM slow-wave activity criteria as configured by Wonambi's own
+            # DetectSlowWave ('AASM/Massimini2004': -40 uV / 75 uV, 0.25-1.0 s).
+            # The 75 uV peak-to-peak floor is the AASM number; turtlewave used
+            # to use -37/70, which matches no published criterion.
             self.trough_duration = (0.25, 1.0)
-            self.max_trough_amp = -37
-            self.min_ptp = 70
+            self.max_trough_amp = -40
+            self.min_ptp = 75
             self.min_dur = 0
             self.max_dur = None
 
@@ -787,11 +909,331 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
 
         else:
             raise ValueError('Method must be one of: Massimini2004, AASM/Massimini2004, Ngo2015, or Staresina2015')
-        
+
         # Always update filter frequency based on min_dur and max_dur for these methods
         if self.method in ['Ngo2015', 'Staresina2015'] and self.min_dur > 0 and self.max_dur > 0:
             self.det_filt['freq'] = (1 / self.max_dur, 1 / self.min_dur)
-    
+
+        # --- the caller's criteria, applied last so they survive -------------
+        # Massimini's three published criteria live in three attributes that
+        # Wonambi's constructor hardcodes; they are only settable here.
+        if self.method in self.MASSIMINI_METHODS:
+            if self._trough_duration_param is not None:
+                self.trough_duration = tuple(self._trough_duration_param)
+            if self._neg_peak_thresh_param is not None:
+                # Wonambi's contract is a NEGATIVE max_trough_amp ("the trough
+                # amplitude has a negative value, so this parameter sets the
+                # minimum depth of the trough"). Callers in this codebase pass
+                # -80/-37, the GUI spin box is clamped to [-200, 0], but the
+                # old default here was +40. Normalise to a depth so neither
+                # sign can silently mean something different.
+                self.max_trough_amp = -abs(float(self._neg_peak_thresh_param))
+            if self._p2p_thresh_param is not None:
+                self.min_ptp = abs(float(self._p2p_thresh_param))
+            # Massimini's branches hardcode min_dur=0 / max_dur=None, so
+            # without this a caller has no way to bound the WHOLE wave under
+            # its own name -- which is what made passing the trough window as
+            # `duration` look like the only option.
+            if self.min_dur_param is not None:
+                self.min_dur = self.min_dur_param
+            if self.max_dur_param is not None:
+                self.max_dur = self.max_dur_param
+
+            # self.duration is Wonambi's WHOLE-wave bound. The parent set it
+            # from its own min_dur/max_dur BEFORE the overrides above ran, so
+            # it has to be recomputed here or a Massimini caller's
+            # min_dur/max_dur never reaches within_duration.
+            #
+            # MASSIMINI FAMILY ONLY, deliberately. Ngo2015 and Staresina2015
+            # have the same latent defect -- the parent fixes self.duration
+            # from its published defaults and _set_method_params then
+            # overwrites min_dur/max_dur without it, so the GUI's "Slow Wave
+            # Duration" control reaches det_filt['freq'] (cosmetic) but never
+            # find_intervals, which is the actual gate. Repairing that would
+            # be arguably more correct and is NOT done here: it moves the
+            # detected set of two published methods that already have
+            # hundreds of thousands of rows in the user's databases, and it
+            # does not need exotic input to bite. frontend/turtlewave_gui.py
+            # prefills the control with `setValue(detector.min_dur)` on a
+            # 2-decimal spin box, so Ngo2015's 0.833 s default reads back as
+            # 0.83 and every zero-crossing interval in [0.830, 0.833) would
+            # flip from rejected to accepted on a GUI run with nothing typed.
+            # Pinned by test_staresina_and_ngo_are_untouched.
+            if self._duration_param is not None:
+                self.duration = tuple(self._duration_param)
+            else:
+                self.duration = (self.min_dur, self.max_dur)
+
+    @staticmethod
+    def _as_negative_first(evt):
+        """Report one event with a negative trough, positive peak and µV ptp.
+
+        Applied to EVERY method, so ``neural_events.db`` carries one meaning
+        per column no matter which detector wrote the row.
+
+        **Signs.** ``detect_Massimini2004`` finds an ABOVE-zero run first
+        (``detect_events(dat_det, 'above_thresh', value=0.)``) and stores that
+        run's maximum as ``trough_val`` and the following minimum as
+        ``peak_val``. The signs therefore come out opposite to Ngo2015 and
+        Staresina2015, which are zero-crossing based, and opposite to
+        Wonambi's own ``SlowWaves`` docstring ("trough_val: the lowest value,
+        peak_val: the highest value"). Left alone, ``det_trough`` means
+        +positive for one method family and -negative for the other, and any
+        cross-method comparison of it is comparing opposite quantities. The
+        swap is conditional, so this is idempotent, is a no-op on the
+        zero-crossing methods, and stays correct if a future Wonambi anchors
+        Massimini on the negative half-wave instead.
+
+        **Units.** ``make_slow_waves`` computes ``'ptp': abs(ev[3] - ev[1])``
+        on sample INDICES for all four methods — a sample count that scales
+        with sampling rate and is independent of amplitude, stored in a
+        column named ``det_ptp (uV)``. It is replaced with the real
+        peak-to-peak amplitude, the quantity ``_add_halfwave`` already gates
+        on with ``min_ptp``.
+
+        This is a reporting change only: it runs after every criterion, so it
+        cannot alter which events were detected.
+
+        Parameters
+        ----------
+        evt : dict
+            One event from ``wonambi.graphoelement.SlowWaves.events``.
+
+        Returns
+        -------
+        dict
+            The same dict, mutated in place.
+        """
+        trough_val = float(evt['trough_val'])
+        peak_val = float(evt['peak_val'])
+
+        if trough_val > peak_val:
+            evt['trough_val'], evt['peak_val'] = peak_val, trough_val
+            # Keep each time with its own value; for the Massimini family the
+            # negative peak is the SECOND half-wave, so after the swap
+            # trough_time > peak_time. That is what the detector actually
+            # found, not a bookkeeping error.
+            evt['trough_time'], evt['peak_time'] = (evt['peak_time'],
+                                                    evt['trough_time'])
+
+        evt['ptp'] = float(evt['peak_val']) - float(evt['trough_val'])
+        return evt
+
+    def _meets_amplitude_floor(self, evt):
+        """Whether the event clears the optional µV floors. Non-Massimini only.
+
+        Applies ``min_neg_amp`` to the negative peak and ``min_ptp_amp`` to
+        the peak-to-peak amplitude, both in MICROVOLTS. It must therefore run
+        AFTER :meth:`_as_negative_first`, which is what makes ``trough_val``
+        the negative extremum and replaces Wonambi's ``ptp`` — a sample-index
+        distance, ``abs(ev[3] - ev[1])`` (wonambi/detect/slowwave.py:418) —
+        with the real amplitude.
+
+        Until 4.3 this comparison ran BEFORE that conversion, so a µV
+        threshold was tested against a sample count and the floor scaled with
+        sampling rate instead of amplitude. ``ParalSWA`` passed 140.0 for
+        these methods, which at 500 Hz rejected almost nothing but at 128 Hz
+        rejected every event on the same signal (88 -> 0 for Staresina2015,
+        11 -> 0 for Ngo2015 on the test oscillation). Both floors now default
+        to ``None``, so Ngo2015 and Staresina2015 run on their published
+        criteria alone.
+
+        A threshold of ``0`` is accepted and can never reject anything, so the
+        old workaround of passing ``p2p_thresh=0`` to neutralise the filter
+        stays valid and is now identical to passing nothing.
+
+        Parameters
+        ----------
+        evt : dict
+            One event, AFTER :meth:`_as_negative_first`.
+
+        Returns
+        -------
+        bool
+            True if the event clears both floors (or neither is set).
+        """
+        if (self.min_neg_amp is not None
+                and float(evt['trough_val']) > -self.min_neg_amp):
+            return False
+        if (self.min_ptp_amp is not None
+                and float(evt['ptp']) < self.min_ptp_amp):
+            return False
+        return True
+
+    def _meets_trough_depth(self, evt):
+        """Whether the event's NEGATIVE trough reaches ``max_trough_amp``.
+
+        Massimini et al. 2004 require *"a negative peak between the two zero
+        crossings with voltage less than -80 µV"*. Wonambi enforces that with
+        ``select_peaks``, which tests ``abs(data[events[:, 1]]) >=
+        abs(limit)`` on column 1 — the extremum of the FIRST half-wave. Since
+        ``detect_Massimini2004`` searches for the above-zero run first, that
+        column is the POSITIVE peak, so the depth criterion lands on the
+        wrong half-wave. On a symmetric wave the two are the same number and
+        nothing shows; on a physiological slow wave (sharp deep negative,
+        broad shallow positive) they are not, and 11 % of accepted events had
+        a negative trough shallower than the stated threshold, the shallowest
+        being 1.1 µV against a -80 µV criterion.
+
+        This re-gates after detection rather than inverting the signal, so
+        Wonambi's search order and candidate set are untouched and only the
+        published criterion is added on top. ``max_trough_amp`` is normalised
+        to a depth because callers pass either sign.
+
+        The comparison is inclusive (``<=``), matching the ``>=`` that
+        ``select_peaks`` already uses for the other half-wave.
+
+        Parameters
+        ----------
+        evt : dict
+            One event, AFTER :meth:`_as_negative_first`, so ``trough_val`` is
+            the negative extremum.
+
+        Returns
+        -------
+        bool
+            True if the trough is at least ``abs(max_trough_amp)`` µV deep.
+        """
+        return float(evt['trough_val']) <= -abs(float(self.max_trough_amp))
+
+    @staticmethod
+    def negative_halfwave_duration(evt):
+        """Duration of the negative half-wave, in seconds. Massimini only.
+
+        ``_add_halfwave`` (wonambi/detect/slowwave.py:459-463) sets ``ev[4]``
+        to the first zero crossing after ``ev[2]`` and ``ev[3]`` to the
+        ``argmin`` between them, so ``[ev[2], ev[4])`` is exactly the negative
+        half-wave. ``make_slow_waves`` exposes those two as ``zero_time`` and
+        ``end``, which is why the span can be read straight off the event
+        dict without re-deriving any crossings.
+
+        Verified on every event of a synthetic run: the data over
+        ``[ev[2], ev[4])`` is entirely negative, the reported trough lies
+        inside it, and it is the ``argmin`` of that span.
+
+        ``_as_negative_first`` swaps ``trough_*``/``peak_*`` but never touches
+        ``zero_time`` or ``end``, so this is the same number before and after
+        the relabel.
+
+        **One-sample convention.** ``make_slow_waves`` stores
+        ``'end': time[ev[4] - 1]`` while ``zero_time`` is ``time[ev[2]]``, so
+        this span is one sample shorter than ``(ev[4] - ev[2]) / s_freq``.
+        That is kept deliberately, NOT corrected: Wonambi's own
+        ``within_duration`` — the function that applies this very same
+        ``trough_duration`` tuple to the positive half-wave — measures
+        ``time[ev[-1] - 1] - time[ev[0]]``, short by exactly the same one
+        sample. Correcting one and not the other would make the same tuple
+        mean two different things depending on which half-wave it lands on.
+        The bias is conservative (it can only reject a borderline event) and
+        is one sample: 3.9 ms at 256 Hz, 10 ms at 100 Hz, against a 300 ms
+        lower bound.
+
+        Not meaningful for Ngo2015/Staresina2015: those are zero-crossing
+        methods whose events START at a positive-to-negative crossing, so for
+        them ``zero_time`` is the crossing INSIDE the wave and
+        ``end - zero_time`` is the POSITIVE half-wave — the opposite reading.
+
+        Parameters
+        ----------
+        evt : dict
+            One event from a Massimini-family detection.
+
+        Returns
+        -------
+        float
+            Negative half-wave duration in seconds.
+        """
+        return float(evt['end']) - float(evt['zero_time'])
+
+    def _meets_trough_duration(self, evt):
+        """Whether the NEGATIVE half-wave falls inside ``trough_duration``.
+
+        Massimini: *"a negative zero crossing and a subsequent positive zero
+        crossing separated by 0.3-1.0 sec"* — the negative half-wave.
+        Wonambi applies ``trough_duration`` with ``within_duration`` to the
+        ABOVE-zero run, because that is what its search finds first, so the
+        published window lands on the positive half-wave instead. This
+        re-gates on the negative one after detection, in the same style as
+        :meth:`_meets_trough_depth`, leaving Wonambi's search and candidate
+        set untouched.
+
+        Bounds are inclusive on both sides, matching the ``>=`` / ``<=`` in
+        ``within_duration``, and a ``None`` bound is ignored, matching its
+        handling of ``None`` limits.
+
+        Parameters
+        ----------
+        evt : dict
+            One event from a Massimini-family detection.
+
+        Returns
+        -------
+        bool
+            True if the negative half-wave is within the window.
+        """
+        lo, hi = self.trough_duration
+        dur = self.negative_halfwave_duration(evt)
+        if lo is not None and dur < lo:
+            return False
+        if hi is not None and dur > hi:
+            return False
+        return True
+
+    def _permissive_search(self):
+        """A copy of this detector that pre-rejects nothing on the up-state.
+
+        ``detect_Massimini2004`` applies two of the paper's criteria to the
+        ABOVE-zero run, before any of our re-gates can see the candidate:
+
+        * ``within_duration(above_zero, time, opts.trough_duration)`` requires
+          the POSITIVE half-wave to fall inside the window. A wave with a
+          0.45 s negative half-wave — paper-valid under any window — and a
+          1.15 s positive one is discarded outright.
+        * ``select_peaks(..., opts.max_trough_amp)`` requires the POSITIVE
+          peak to reach the depth, so a wave with a deep trough and a shallow
+          up-state is discarded outright.
+
+        Post-detection re-gates can only remove, never recover, so leaving
+        those in place biases which slow waves survive by their UP-state
+        duration and amplitude — quantities Massimini does not constrain at
+        all. This hands Wonambi a search that pre-rejects on neither, and
+        lets :meth:`_meets_trough_duration` and :meth:`_meets_trough_depth`
+        enforce the published criteria on the negative half-wave, where they
+        belong.
+
+        Only those two are relaxed. ``min_ptp`` is left at its real value:
+        ``_add_halfwave`` already applies it in genuine microvolts to the
+        true negative-to-positive excursion, so it is correct as it stands
+        and still keeps the candidate set bounded. The whole-wave
+        ``duration`` bound is likewise untouched.
+
+        Returns a shallow COPY rather than mutating and restoring ``self``,
+        so the user-facing ``trough_duration`` / ``max_trough_amp`` — which
+        the GUI reads to prefill its spin boxes, and which the re-gates read
+        back — are never briefly wrong, and a re-entrant or threaded caller
+        cannot observe a half-configured detector.
+
+        Returns
+        -------
+        instance of ImprovedDetectSlowWave
+            A shallow copy with ``trough_duration = (None, None)`` (both
+            limits ignored by ``within_duration``) and ``max_trough_amp = 0``
+            (``abs(x) >= 0`` is always true in ``select_peaks``).
+        """
+        search = copy(self)
+        search.trough_duration = (None, None)
+        search.max_trough_amp = 0
+        # copy() is shallow, so det_filt (and lowpass, where present) would
+        # still be the SAME dict object as the detector's. Wonambi 7.15 only
+        # reads them, so nothing aliases today, but a future in-place edit
+        # anywhere in the detection path would silently reconfigure the live
+        # detector. One line closes that permanently.
+        for attr in ('det_filt', 'lowpass'):
+            shared = getattr(search, attr, None)
+            if isinstance(shared, dict):
+                setattr(search, attr, dict(shared))
+        return search
+
     def __call__(self, data):
         """
         Detect slow waves in the data.
@@ -820,18 +1262,46 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
         # (hstack(data(chan=chan)) then a demean that allocates a new array),
         # so it never mutates the caller's segment in place.
 
-        # Run detection using parent class
-        events = super().__call__(data)
+        if self.method in self.MASSIMINI_METHODS:
+            events = OriginalDetectSlowWave.__call__(
+                self._permissive_search(), data)
+        else:
+            # Run detection using parent class
+            events = super().__call__(data)
 
-        # Apply additional amplitude criteria if needed
-        filtered_events = []
-        for evt in events:
-            if (abs(evt['trough_val']) >= self.min_neg_amp and
-                abs(evt['ptp']) >= self.min_ptp_amp):
-                filtered_events.append(evt)
+        # Reporting, every method: negative trough, positive peak, ptp in uV.
+        # Every remaining criterion below is expressed in those normalised
+        # fields, so nothing downstream can compare a microvolt threshold
+        # against a sample index.
+        events.events = [self._as_negative_first(evt)
+                         for evt in events.events]
 
-        # Update events
-        events.events = filtered_events
+        if self.method not in self.MASSIMINI_METHODS:
+            # Optional absolute amplitude floors for Ngo2015/Staresina2015.
+            # Off by default (both thresholds None), because neither paper
+            # defines one; when a caller sets them they are microvolts
+            # compared against microvolts. See _meets_amplitude_floor for the
+            # unit bug this replaces.
+            if self.min_neg_amp is not None or self.min_ptp_amp is not None:
+                events.events = [evt for evt in events.events
+                                 if self._meets_amplitude_floor(evt)]
+
+        if self.method in self.MASSIMINI_METHODS:
+            # Two of the paper's three criteria, applied to the NEGATIVE
+            # half-wave -- the only place they are enforced at all, since
+            # _permissive_search stopped Wonambi applying them to the
+            # above-zero run. The third, min_ptp, is already correct in uV
+            # inside _add_halfwave and was left at its real value there.
+            #
+            # So the criteria the caller asked for are enforced here, on the
+            # quantities Massimini names, and nowhere else:
+            #   duration        _meets_trough_duration  (end - zero_time)
+            #   trough depth    _meets_trough_depth     (trough_val)
+            #   peak-to-peak    Wonambi's _add_halfwave (uV, unmodified)
+            events.events = [evt for evt in events.events
+                             if self._meets_trough_depth(evt)
+                             and self._meets_trough_duration(evt)]
+
         return events
 
 
@@ -844,12 +1314,17 @@ class ImprovedDetectKComplex(ImprovedDetectSlowWave):
     oscillation is **isolation**: a KC stands alone rather than being one
     cycle of a continuous train. This class adds a `min_isolation` filter
     on top of `ImprovedDetectSlowWave` to enforce that.
+
+    The isolation criterion is this project's modelling choice, not a
+    settled standard: AASM defines a KC by morphology and duration, not by a
+    minimum gap to its neighbour.
     """
 
     SUPPORTED_METHODS = ('Massimini2004', 'AASM/Massimini2004')
 
     def __init__(self, method='AASM/Massimini2004', frequency=None,
-                 duration=None, neg_peak_thresh=40, p2p_thresh=75,
+                 duration=None, trough_duration=None,
+                 neg_peak_thresh=None, p2p_thresh=None,
                  min_dur=None, max_dur=None, polar='normal',
                  min_isolation=1.0):
         """
@@ -859,12 +1334,31 @@ class ImprovedDetectKComplex(ImprovedDetectSlowWave):
             Detection method. Only 'Massimini2004' and 'AASM/Massimini2004'
             are supported for K-complexes (Ngo2015 / Staresina2015 are
             slow-oscillation algorithms that do not match AASM KC criteria).
+        trough_duration : tuple of float or None
+            Min/max duration of the negative half-wave in seconds. ``None``
+            keeps the method's published window (0.25-1.0 s for AASM). This
+            is NOT the whole-wave duration -- see
+            :class:`ImprovedDetectSlowWave`.
         min_isolation : float
             Minimum gap in seconds between consecutive KCs, measured between
-            successive trough times. KCs closer than this are dropped from
-            the result.
+            successive ``trough_time`` values. KCs closer than this are
+            dropped from the result.
 
-        Other parameters are forwarded to ImprovedDetectSlowWave.
+            **The landmark it measures between changed in 4.3.** Wonambi's
+            Massimini output labelled the POSITIVE peak ``trough_time``, so
+            this gap used to be measured up-state to up-state;
+            :meth:`ImprovedDetectSlowWave._as_negative_first` now puts
+            ``trough_time`` on the negative peak, which is the correct
+            landmark for a K-complex and the one the AASM description
+            implies. The gap therefore shifts by roughly one half-wave per
+            event, so K-complex counts move even at an unchanged
+            ``min_isolation``. Together with the default threshold change
+            below, a scripted ``ParalKC`` run changes on two axes: do not
+            pool pre- and post-4.3 K-complexes.
+
+        Other parameters are forwarded to ImprovedDetectSlowWave. Note the
+        ``AASM/Massimini2004`` defaults also moved in 4.3, from -37 uV / 70 uV
+        (which match no published criterion) to Wonambi's own -40 uV / 75 uV.
         """
         if method not in self.SUPPORTED_METHODS:
             raise ValueError(
@@ -872,6 +1366,7 @@ class ImprovedDetectKComplex(ImprovedDetectSlowWave):
                 f"Use one of: {self.SUPPORTED_METHODS}"
             )
         super().__init__(method=method, frequency=frequency, duration=duration,
+                         trough_duration=trough_duration,
                          neg_peak_thresh=neg_peak_thresh,
                          p2p_thresh=p2p_thresh,
                          min_dur=min_dur, max_dur=max_dur, polar=polar)
@@ -879,6 +1374,11 @@ class ImprovedDetectKComplex(ImprovedDetectSlowWave):
 
     def __call__(self, data):
         """Detect K-complexes, then drop any that are not isolated.
+
+        The isolation gap is measured between successive ``trough_time``
+        values, which since 4.3 is the NEGATIVE peak rather than the positive
+        one -- see ``min_isolation`` in :meth:`__init__` for what that means
+        for counts.
 
         Returns
         -------
