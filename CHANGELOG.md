@@ -5,7 +5,7 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.3.0] — Unreleased
+## [4.3.0] — 2026-08-16
 
 `events.stage` now records the stage set the run searched, as one joint token:
 a run over N2 and N3 stores `NREM2NREM3` on every event, written identically by
@@ -112,7 +112,7 @@ et al. 2004, J Neurosci 24(31), 6862-70.
 - `event_density` with `stage=['NREM2']` against a run detected over N2 and N3 returns no row instead of a wrong one. Use `events.epoch_stage` when you need the split.
 - Schema changes are additive: `events.epoch_stage`, `db_meta` and the `v_event_density` view. No column is dropped, renamed or retyped.
 
-## [4.2.0] — Unreleased
+## [4.2.0] — 2026-08-16
 
 Makes `neural_events.db` the single store of record. Detection writes to the
 database by default and no longer writes per-channel JSON, and the
