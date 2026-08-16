@@ -30,20 +30,40 @@ If you haven't done these steps, refer to the [Getting Started tutorial](../tuto
     figure as evidence the fix works as intended, not as validated
     performance on human sleep, until that check is done.
 
-    `Ngo2015` and `Staresina2015` detection is unchanged: the detected set,
+    `Ngo2015` and `Staresina2015` detection also changes with this release,
+    though not from any change to their published criteria: a legacy
+    post-detection amplitude filter that used to run unconditionally on these
+    two methods is now off by default. That filter compared a microvolt
+    threshold against Wonambi's raw peak-to-peak value, which before this
+    release was a **sample count**, not microvolts — so it rejected any wave
+    whose trough-to-peak interval spanned fewer than `threshold` samples, a
+    cut of `threshold / s_freq` seconds rather than a fixed duration.
+    `threshold` was not one number across the codebase: 140 for a direct
+    `ParalSWA` call or the GUI's Ngo2015 tab, 75 for the GUI's Staresina2015
+    tab and the previous example script, 40 for the Gadi CLI driver's
+    default — a 0.31-1.09 s cut at 128 Hz depending on which entry point
+    wrote the run, shrinking as sampling rate rises (see the CHANGELOG's
+    4.3.0 entry for the per-rate figures). It is now gone by default:
+    with `neg_peak_thresh=None, p2p_thresh=None` (the default), `Ngo2015` and
+    `Staresina2015` run on their published criteria alone, with no amplitude
+    floor. Passing an explicit `neg_peak_thresh` / `p2p_thresh` for these two
+    methods now applies it as a real, correctly-unitted µV floor on top of
+    the published criteria — a deliberate deviation from the paper that logs
+    a warning when used. **Counts and densities for `Ngo2015` /
+    `Staresina2015` detected with default arguments are therefore not
+    guaranteed to match a pre-4.3 run and should not be pooled with one.**
     `det_trough`, `det_peak`, `det_trough_time`, `det_peak_time`, `min_amp`,
     `max_amp`, `peak2peak_amp`, `start_time`, `end_time` and `duration` are
-    all identical to before. The one exception is `det_ptp`, which — like
-    every other method — now reports real microvolts instead of Wonambi's
-    sample count; see [Interpreting Results](#interpreting-results) below.
-    Counts and densities for these two methods are safe to pool across the
-    upgrade.
+    otherwise computed the same way. The other change common to every method,
+    `det_ptp`, now reports real microvolts instead of Wonambi's sample count;
+    see [Interpreting Results](#interpreting-results) below.
 
-    **Do not pool Massimini-family or K-complex counts/densities detected
-    before this release with ones detected after it.** Before trusting any
-    between-group comparison, sanity-check a first production run against the
-    expected N3 slow-wave density (roughly 5-15 events/min) — a run that
-    lands far outside that range is worth investigating before you use it.
+    **Do not pool Massimini-family, K-complex, `Ngo2015` or `Staresina2015`
+    counts/densities detected before this release with ones detected after
+    it.** Before trusting any between-group comparison, sanity-check a first
+    production run against the expected N3 slow-wave density (roughly 5-15
+    events/min) — a run that lands far outside that range is worth
+    investigating before you use it.
 
 ## Using the GUI
 
@@ -103,9 +123,13 @@ limitations to know about on those two methods:
 - **`Staresina2015`'s "Peak-to-peak Selection" control is a percentile, not a
   µV floor.** It sets `opts.ptp_thresh` to a percentile of all candidate
   amplitudes on the channel (published default 75, keeping the top 25% by
-  amplitude) — there is no absolute microvolt threshold for this method. The
+  amplitude) — the GUI sends no absolute microvolt threshold for either
+  `Staresina2015` or `Ngo2015`, matching their published criteria. The
   control is read-only in the GUI because nothing else it sends reaches this
-  percentile.
+  percentile. An optional absolute µV floor (`neg_peak_thresh` / `p2p_thresh`)
+  is available for both methods from the Python API — see the warning at the
+  top of this page — but it is a deliberate deviation from the published
+  method, not something either GUI tab exposes.
 - **The "Slow Wave Duration" control does not reach `Ngo2015` /
   `Staresina2015`'s actual detection gate.** It moves the displayed frequency
   band (`det_filt['freq']`, cosmetic) but not `find_intervals`, the criterion
@@ -149,8 +173,11 @@ slow_waves = event_processor.detect_slow_waves(
     chan=['E110', 'E111', 'E112'],
     frequency=(0.5, 1.25),
     trough_duration=(0.3, 1.0),  # negative half-wave, in seconds — Massimini's published window
-    neg_peak_thresh=-75.0,
-    p2p_thresh=75.0,
+    # neg_peak_thresh / p2p_thresh: leave unset (None, the default) to run
+    # Massimini2004's PUBLISHED criteria, -80 uV / 140 uV. Passing an
+    # explicit value here overrides them -- e.g. neg_peak_thresh=-75.0,
+    # p2p_thresh=75.0 is a deliberately LOOSER floor than the paper (roughly
+    # half its peak-to-peak criterion), not the published method.
     stage=['NREM2', 'NREM3'],
     reject_artifacts=True,
     reject_arousals=True,

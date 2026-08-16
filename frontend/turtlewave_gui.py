@@ -55,6 +55,66 @@ except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
     from db_connect import connect_events_db
 
 
+#: The single event scan XLAnnotations offers, and what it actually writes.
+#: ``add_artefacts_from_events`` walks the EEGLAB event list once and adds
+#: Artefact, Arousal, Resp, Move and Snore annotations in the same pass, so
+#: artefacts and arousals cannot be imported independently of each other.
+ANNOTATION_EVENT_STEP = (
+    'add_artefacts_from_events',
+    "artefact and arousal events (plus respiratory, movement and snore)",
+)
+
+#: Staging import. Returns False when the recording header carries no staging.
+ANNOTATION_STAGE_STEP = (
+    'add_stages_from_header',
+    "sleep stages from the recording header",
+)
+
+LINKED_EVENT_TOOLTIP = (
+    "Artefacts and arousals are read from one pass over the recording's "
+    "event list, so ticking either one imports both\n(along with any "
+    "respiratory, movement and snore events found)."
+)
+
+
+def plan_annotation_actions(process_artifacts, process_arousals, process_stages):
+    """Map the annotation tab's checkboxes onto XLAnnotations calls.
+
+    Kept free of Qt so the mapping can be tested without a display.
+
+    Parameters
+    ----------
+    process_artifacts : bool
+        State of the "Process Artifacts" checkbox.
+    process_arousals : bool
+        State of the "Process Arousals" checkbox.
+    process_stages : bool
+        State of the "Process Sleep Stages" checkbox.
+
+    Returns
+    -------
+    list of tuple of (str, str)
+        ``(method_name, description)`` pairs to run in order. Every
+        ``method_name`` is a real public method of
+        ``turtlewave_hdEEG.annotation.XLAnnotations``. The list is empty when
+        nothing is selected.
+
+    Notes
+    -----
+    ``XLAnnotations`` has no per-type entry points, so artefacts and arousals
+    both map to ``add_artefacts_from_events``; ticking either one imports
+    both. Selecting all three is equivalent to ``process_all()``, but the
+    steps are run individually so the caller can see
+    ``add_stages_from_header``'s return value, which ``process_all`` discards.
+    """
+    steps = []
+    if process_artifacts or process_arousals:
+        steps.append(ANNOTATION_EVENT_STEP)
+    if process_stages:
+        steps.append(ANNOTATION_STAGE_STEP)
+    return steps
+
+
 class LoggingOutput(QtCore.QObject):
     """Class to capture and redirect logging to the GUI"""
     text_written = QtCore.pyqtSignal(str)
@@ -365,14 +425,21 @@ class TurtleWaveGUI(QMainWindow):
         # Checkboxes for annotation types
         self.artifact_check = QCheckBox("Process Artifacts")
         self.artifact_check.setChecked(True)
+        self.artifact_check.setToolTip(LINKED_EVENT_TOOLTIP)
         options_layout.addWidget(self.artifact_check)
-        
+
         self.arousal_check = QCheckBox("Process Arousals")
         self.arousal_check.setChecked(True)
+        self.arousal_check.setToolTip(LINKED_EVENT_TOOLTIP)
         options_layout.addWidget(self.arousal_check)
-        
+
         self.stage_check = QCheckBox("Process Sleep Stages")
         self.stage_check.setChecked(True)
+        self.stage_check.setToolTip(
+            "Import the sleep staging carried in the recording header.\n"
+            "If the header has no staging, the XML is still written but "
+            "without stages, and the log says so."
+        )
         options_layout.addWidget(self.stage_check)
         
         options_layout.addStretch(1)
@@ -869,19 +936,18 @@ class TurtleWaveGUI(QMainWindow):
                     # `ptp >= ptp_thresh`, so the published 75 keeps the top
                     # 25% of candidates on each channel. The box used to be
                     # labelled "(μV)" while holding this number, and its value
-                    # went out as `p2p_thresh`, which for this method reaches
-                    # neither `opts.ptp_thresh` nor any microvolt gate — it
-                    # lands in the legacy post-hoc filter in
-                    # ImprovedDetectSlowWave.__call__, compared against
-                    # Wonambi's sample-count `ptp`.
+                    # went out as `p2p_thresh` — harmless while that argument
+                    # only reached a unit-confused post-hoc filter, but since
+                    # 4.3 `p2p_thresh` is a real microvolt floor, so sending
+                    # 75 from here would impose a 75 μV peak-to-peak gate this
+                    # method never had. It is now logged and never sent; see
+                    # the amplitude block in start_sw_detection.
                     #
                     # It is shown read-only at the published 75 rather than
                     # made editable: ParalSWA.detect_slow_waves() exposes no
                     # parameter that reaches `opts.ptp_thresh` (its only
                     # assignment is guarded by `meth == 'Ngo2015'`), so nothing
-                    # the GUI can send would change the percentile. Fixing it
-                    # at 75 sends exactly the value the box sent before, so
-                    # existing Staresina yields are untouched.
+                    # the GUI can send would change the percentile.
                     ptp_group = QGroupBox("Peak-to-Peak Selection")
                     ptp_layout = QHBoxLayout()
                     ptp_layout.addWidget(QLabel("Peak-to-peak percentile:"))
@@ -1012,35 +1078,32 @@ class TurtleWaveGUI(QMainWindow):
                 # These methods don't use trough_duration
                 trough_duration = None
                 
+                # Neither of these methods defines an absolute microvolt
+                # amplitude criterion: Ngo thresholds at a multiple of the
+                # mean, Staresina at a percentile of peak-to-peak amplitude.
+                # None therefore means "run the method as published", which is
+                # what this tab offers. An explicit µV floor is still
+                # available from the scripting API (pass neg_peak_thresh /
+                # p2p_thresh to ParalSWA.detect_slow_waves), where the library
+                # logs it as a deliberate deviation from the paper.
+                neg_peak_thresh = None
+                p2p_thresh = None
+
                 if self.sw_method == "Ngo2015":
                    # Get thresholds - these are in sigma units for adaptive thresholds
                     peak_thresh_sigma = self.sw_param_widgets["peak_thresh"].value()
                     ptp_thresh_sigma = self.sw_param_widgets["ptp_thresh"].value()
+                    ptp_percentile = None
 
-                    
-                    # These will be overridden by sigma thresholds in the detector
-                    neg_peak_thresh = -80.0  # Default value
-                    p2p_thresh = 140.0      # Default value
-                
-                    
                 else:  # Staresina2015
-                    # Neither of these is a microvolt criterion for this
-                    # method. Staresina selects on a percentile
-                    # (opts.ptp_thresh, not settable from here); both values
-                    # below only reach the legacy post-hoc filter in
-                    # ImprovedDetectSlowWave.__call__.
-                    #
-                    # -75.0 is inert there: the filter tests
-                    # `abs(trough_val) >= min_neg_amp`, and an absolute value
-                    # is always >= a negative number. It is kept at exactly
-                    # this value rather than dropped because passing None
-                    # would make the processor substitute its own -80.0
-                    # default, and a changed argument is a changed run record.
-                    neg_peak_thresh = -75.0  # inert; see above
                     # The percentile box is read-only, so this is always
-                    # Staresina's published 75 — the same value this tab has
-                    # always sent.
-                    p2p_thresh = self.sw_param_widgets["ptp_thresh"].value()
+                    # Staresina's published 75. It is logged for the record
+                    # and deliberately NOT sent as `p2p_thresh`: the detector
+                    # reads the percentile from `opts.ptp_thresh`, which is
+                    # not settable from here, whereas `p2p_thresh` is now a
+                    # real microvolt floor. Sending 75 there would silently
+                    # impose a 75 µV peak-to-peak gate this method never had.
+                    ptp_percentile = self.sw_param_widgets["ptp_thresh"].value()
                     peak_thresh_sigma = None
                     ptp_thresh_sigma = None
             
@@ -1067,26 +1130,32 @@ class TurtleWaveGUI(QMainWindow):
             else:
                 self.write_log(f"Duration range: {min_dur:.2f}-{max_dur:.2f} s")
                 
-            # Only the Massimini family reads these as microvolt criteria; for
-            # Ngo2015/Staresina2015 they reach the legacy post-hoc filter, so
-            # logging them as "μV" would put a false record in the log tab.
+            # Only the Massimini family takes microvolt amplitude criteria
+            # from this tab. Ngo2015 and Staresina2015 run on their published
+            # criteria with no absolute μV floor, so logging a μV number for
+            # them would put a false record in the log tab.
             if self.sw_method in ["Massimini2004", "AASM/Massimini2004"]:
                 self.write_log(f"Negative peak threshold: {neg_peak_thresh} μV")
                 self.write_log(f"Peak-to-peak threshold: {p2p_thresh} μV")
             elif self.sw_method == "Staresina2015":
                 self.write_log(
-                    f"Peak-to-peak percentile: {p2p_thresh:g} "
-                    f"(keeps the top {100 - p2p_thresh:g}% by amplitude; "
-                    f"no absolute μV floor)")
+                    f"Peak-to-peak percentile: {ptp_percentile:g} "
+                    f"(keeps the top {100 - ptp_percentile:g}% by amplitude)")
                 self.write_log(
-                    f"Amplitude arguments sent to the detector: "
-                    f"neg_peak_thresh={neg_peak_thresh}, "
-                    f"p2p_thresh={p2p_thresh} (legacy filter only)")
+                    "Amplitude criteria: published Staresina2015 criteria "
+                    "only (neg_peak_thresh=None, p2p_thresh=None). An "
+                    "absolute μV floor is available from the scripting API.")
+            elif self.sw_method == "Ngo2015":
+                self.write_log(
+                    "Amplitude criteria: published Ngo2015 adaptive "
+                    "thresholds only (neg_peak_thresh=None, "
+                    "p2p_thresh=None). An absolute μV floor is available "
+                    "from the scripting API.")
             else:
                 self.write_log(
                     f"Amplitude arguments sent to the detector: "
                     f"neg_peak_thresh={neg_peak_thresh}, "
-                    f"p2p_thresh={p2p_thresh} (legacy filter only)")
+                    f"p2p_thresh={p2p_thresh}")
 
             if self.sw_method == "Ngo2015":
                 self.write_log(f"Adaptive peak threshold: {peak_thresh_sigma} σ")
@@ -4219,68 +4288,109 @@ class TurtleWaveGUI(QMainWindow):
     def process_annotations(self):
         """Process annotations (runs in a thread)"""
         try:
+            want_artifacts = self.artifact_check.isChecked()
+            want_arousals = self.arousal_check.isChecked()
+            want_stages = self.stage_check.isChecked()
+
+            steps = plan_annotation_actions(want_artifacts, want_arousals,
+                                            want_stages)
+
+            if not steps:
+                self.write_log("No annotation types selected - nothing to do.")
+                QtCore.QMetaObject.invokeMethod(
+                    self, "show_error",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, "Select at least one annotation type "
+                                      "(artefacts, arousals or sleep stages) "
+                                      "before generating annotations.")
+                )
+                self._reset_annotation_controls()
+                return
+
+            if want_artifacts != want_arousals:
+                self.write_log(
+                    "Note: artefacts and arousals come from the same pass over "
+                    "the recording's event list, so both are imported."
+                )
+
             # Create annotations
             annotations = XLAnnotations(self.dataset, self.annot_file_path)
-            
-            # Process artifacts, arousals, and sleep stages based on user selection
-            process_all = (self.artifact_check.isChecked() and 
-                          self.arousal_check.isChecked() and 
-                          self.stage_check.isChecked())
-            
-            if process_all:
-                annotations.process_all()
-                self.write_log("Processed all annotation types")
-            else:
-                if self.artifact_check.isChecked():
-                    annotations.process_artifact()
-                    self.write_log("Processed artifacts")
-                
-                if self.arousal_check.isChecked():
-                    annotations.process_arousal()
-                    self.write_log("Processed arousals")
-                
-                if self.stage_check.isChecked():
-                    annotations.process_stage()
-                    self.write_log("Processed sleep stages")
-            
+
+            warning = ""
+            for method_name, description in steps:
+                result = getattr(annotations, method_name)()
+
+                # add_stages_from_header returns False - and prints its reason -
+                # when the header carries no staging. process_all() throws that
+                # answer away, which is how stage-less XML used to be written
+                # without anyone being told, so the steps are run directly here.
+                if method_name == ANNOTATION_STAGE_STEP[0] and result is False:
+                    warning = ("XML written without sleep stages - staging is "
+                               "missing from the EEG header. See the log for "
+                               "the reason.")
+                    self.write_log(f"WARNING: {warning}")
+                else:
+                    self.write_log(f"Processed {description}")
+
             self.write_log(f"Annotations saved to {self.annot_file_path}")
-            
+
             # Update UI in main thread
             QtCore.QMetaObject.invokeMethod(
-                self, "finish_annotations", 
-                QtCore.Qt.QueuedConnection
+                self, "finish_annotations",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, warning)
             )
-        
+
         except Exception as e:
             self.write_log(f"Error generating annotations: {str(e)}")
             QtCore.QMetaObject.invokeMethod(
-                self, "show_error", 
+                self, "show_error",
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, f"Failed to generate annotations: {str(e)}")
             )
-            
-            # Re-enable buttons in main thread
-            QtCore.QMetaObject.invokeMethod(
-                self.generate_annot_btn, "setEnabled", 
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, True)
-            )
-            
-            QtCore.QMetaObject.invokeMethod(
-                self.progress, "setVisible", 
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(bool, False)
-            )
-    
+
+            self._reset_annotation_controls()
+
+    def _reset_annotation_controls(self):
+        """Re-enable the annotation tab from a worker thread after a failure."""
+        QtCore.QMetaObject.invokeMethod(
+            self.generate_annot_btn, "setEnabled",
+            QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(bool, True)
+        )
+
+        QtCore.QMetaObject.invokeMethod(
+            self.progress, "setVisible",
+            QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(bool, False)
+        )
+
     @QtCore.pyqtSlot()
-    def finish_annotations(self):
-        """Finish annotation generation"""
+    @QtCore.pyqtSlot(str)
+    def finish_annotations(self, warning=""):
+        """Finish annotation generation.
+
+        Parameters
+        ----------
+        warning : str, optional
+            Non-fatal problem to surface. Empty string means the run was
+            clean. The zero-argument overload is kept so existing callers
+            (and any queued invocation without an argument) still work.
+        """
         self.generate_annot_btn.setEnabled(True)
         self.view_annot_btn.setEnabled(True)
         self.progress.setVisible(False)
-        self.statusBar().showMessage("Annotations generated successfully")
-        QMessageBox.information(self, "Success", "Annotations have been generated successfully.")
-    
+
+        if warning:
+            self.statusBar().showMessage("Annotations generated with warnings")
+            QMessageBox.warning(
+                self, "Annotations generated with warnings",
+                f"Annotations have been generated, but:\n\n{warning}"
+            )
+        else:
+            self.statusBar().showMessage("Annotations generated successfully")
+            QMessageBox.information(self, "Success", "Annotations have been generated successfully.")
+
     def view_annotation_file(self):
         """View the annotation file"""
         if not os.path.isfile(self.annot_file_path):

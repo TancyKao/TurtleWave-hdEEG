@@ -132,26 +132,23 @@ def main():
     test_stages = [s.strip() for s in args.stages.split(",") if s.strip()]
     f_lo, f_hi = [float(x) for x in args.freq.split(",")]
 
-    # Massimini2004 / AASM/Massimini2004 read these as the published
-    # criteria, so leaving them unset must mean "the published values", not
-    # some arbitrary CLI number. Ngo2015 and Staresina2015 ignore
-    # trough_duration entirely and use the amplitudes only in ParalSWA's
-    # legacy post-hoc filter, so their historical defaults are preserved
-    # verbatim there and those two methods' yields are unchanged.
-    is_massimini = test_method in ("Massimini2004", "AASM/Massimini2004")
+    # Leaving these unset means "the method's published criteria" for all
+    # four methods: -80/140 uV for Massimini2004, -40/75 uV for
+    # AASM/Massimini2004, and NO absolute uV floor for Ngo2015 and
+    # Staresina2015, which threshold relatively (1.25x the mean and the 75th
+    # percentile respectively). The old -20.0/40.0 fallbacks for the two
+    # zero-crossing methods fed a post-hoc filter that compared them against
+    # a sample-index distance, not microvolts; passing them now would apply a
+    # real 20/40 uV floor that neither paper asks for.
     if args.trough_duration:
         td_lo, td_hi = [float(x) for x in args.trough_duration.split(",")]
         trough_duration = (td_lo, td_hi)
     else:
         trough_duration = None
-    if args.neg_peak_thresh is not None:
-        neg_peak_thresh = float(args.neg_peak_thresh)
-    else:
-        neg_peak_thresh = None if is_massimini else -20.0
-    if args.p2p_thresh is not None:
-        p2p_thresh = float(args.p2p_thresh)
-    else:
-        p2p_thresh = None if is_massimini else 40.0
+    neg_peak_thresh = (float(args.neg_peak_thresh)
+                       if args.neg_peak_thresh is not None else None)
+    p2p_thresh = (float(args.p2p_thresh)
+                  if args.p2p_thresh is not None else None)
     logger.info(
         f"Criteria: trough_duration={trough_duration}, "
         f"neg_peak_thresh={neg_peak_thresh}, p2p_thresh={p2p_thresh} "

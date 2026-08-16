@@ -118,15 +118,15 @@ test_frequency = (0.5, 1.25)  # Frequency range for slow waves
 # only setting that is right for all four methods. Ignored by Ngo2015 and
 # Staresina2015, which use min_dur/max_dur instead.
 test_trough_duration = None
-# For Massimini2004 / AASM/Massimini2004 these ARE the paper's amplitude
-# criteria and they override it: set both to None to run the published values
-# (-80/140 uV and -40/75 uV respectively). The values below are kept because
-# this example's method is Staresina2015, which does not read them as
-# amplitude criteria at all -- they only feed ParalSWA's legacy post-hoc
-# filter. Change the method above and you should change these too.
+# None = the chosen method's published amplitude criteria, which is right for
+# all four methods: -80/140 uV for Massimini2004, -40/75 uV for
+# AASM/Massimini2004, and NO absolute uV floor for Ngo2015/Staresina2015,
+# which threshold relatively (1.25x the mean and the 75th percentile). Setting
+# a number here on either of those two methods adds a microvolt floor their
+# papers do not define; the detector logs a warning when you do.
 test_amplitude = {
-     'neg_peak_threshold': -75.0,  # trough depth (μV); sign ignored
-     'peak_to_peak_threshold': 75.0  # min peak-to-peak amplitude (μV)
+     'neg_peak_threshold': None,  # trough depth (μV); sign ignored
+     'peak_to_peak_threshold': None  # min peak-to-peak amplitude (μV)
 }
 
 

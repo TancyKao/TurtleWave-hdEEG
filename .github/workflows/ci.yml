@@ -59,3 +59,23 @@ jobs:
       - name: Run frontend stage-token tests (offscreen)
         run: |
           python tests/test_frontend_stage_tokens.py
+
+      - name: Run slow-wave amplitude-floor tests
+        run: |
+          python tests/test_sw_amplitude_floor.py
+
+      - name: Run annotation I/O tests
+        run: |
+          python tests/test_annotation_io.py
+
+      - name: Run SQLite journal-mode tests
+        run: |
+          python tests/test_db_journal.py
+
+      - name: Run cycle connection-reuse tests
+        run: |
+          python tests/test_cycle_connection_reuse.py
+
+      - name: Run database scope-guard tests
+        run: |
+          python tests/test_db_scope_guards.py

@@ -250,6 +250,177 @@ def channel_clean_gate(annotations, stages, s_freq=None, n_min_sec=300.0,
     }
 
 
+#: Slow-wave methods whose published criteria contain no absolute microvolt
+#: amplitude floor (Ngo thresholds at 1.25x the mean, Staresina at the 75th
+#: percentile). Before 4.3.0 a recorded ``neg_peak_thresh``/``p2p_thresh`` for
+#: these was compared against a SAMPLE-INDEX distance, never microvolts.
+RELATIVE_SW_METHODS = ('Ngo2015', 'Staresina2015')
+
+#: ``(neg_peak_thresh, p2p_thresh)`` pairs that the shipped entry points
+#: injected for :data:`RELATIVE_SW_METHODS` before 4.3.0, none of which the
+#: caller chose as a microvolt criterion:
+#:
+#: * ``(-80.0, 140.0)`` -- ``ParalSWA.detect_slow_waves``'s substitution for
+#:   ``None``, and the value ``turtlewave_gui`` sent for Ngo2015;
+#: * ``(-20.0, 40.0)`` -- ``hdEEG_sw_detector_GADI.py``'s non-Massimini default;
+#: * ``(-75.0, 75.0)`` -- ``turtlewave_gui``'s Staresina2015 tab, where the 75
+#:   is the PERCENTILE widget's value forwarded into a microvolt argument.
+LEGACY_INERT_SW_THRESHOLDS = frozenset({
+    (-80.0, 140.0),
+    (-20.0, 40.0),
+    (-75.0, 75.0),
+})
+
+#: First release in which a recorded slow-wave amplitude threshold genuinely
+#: means microvolts for :data:`RELATIVE_SW_METHODS`.
+FLOOR_FIX_VERSION = (4, 3, 0)
+
+
+def _version_tuple(version):
+    """Parse ``'4.3.0'`` into ``(4, 3, 0)`` for ordering, or ``None``.
+
+    Parameters
+    ----------
+    version : str or None
+        A recorded ``turtlewave_version``.
+
+    Returns
+    -------
+    tuple of int or None
+        The leading dotted integer components, or ``None`` when the string is
+        absent or not parseable (a pre-provenance run, or a dev tag).
+    """
+    if not version:
+        return None
+    parts = []
+    for chunk in str(version).split('.'):
+        digits = ''
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def resolve_sw_amplitude_thresholds(method, neg_peak_thresh, p2p_thresh,
+                                    recorded_version=None, logger=None):
+    """Read recorded slow-wave amplitude thresholds in their original meaning.
+
+    Before 4.3.0, ``ImprovedDetectSlowWave`` applied these two thresholds to
+    Ngo2015/Staresina2015 through a filter that ran BEFORE the event fields
+    were converted to microvolts, so ``p2p_thresh`` was compared against
+    Wonambi's ``ptp`` -- a sample-index distance -- and ``neg_peak_thresh`` was
+    tested as ``abs(trough_val) >= thresh``, which a negative value can never
+    fail. Replaying such a recorded value as the microvolt floor it now means
+    would impose a criterion the original run never applied.
+
+    The policy, applied only to :data:`RELATIVE_SW_METHODS` and only to runs
+    recorded before :data:`FLOOR_FIX_VERSION`:
+
+    * a pair matching a known legacy default
+      (:data:`LEGACY_INERT_SW_THRESHOLDS`) resolves to ``(None, None)`` -- the
+      published criteria -- and says so;
+    * a lone negative ``neg_peak_thresh`` resolves to ``None`` whatever its
+      value, because ``abs(x) >= a negative number`` is unconditionally true:
+      that arm was provably a no-op, independent of signal and sampling rate;
+    * anything else is AMBIGUOUS and is kept, with a loud warning that it will
+      now bind in microvolts when it previously did not.
+
+    The Massimini family is returned untouched: its thresholds were always
+    enforced inside the detector, in microvolts.
+
+    .. note::
+
+       Dropping the floor does not reproduce the original run bit-for-bit
+       where it was binding. The sample-count comparison rejected nothing at
+       ~500 Hz but everything below ~200 Hz, so a low-rate recording's
+       original event set was smaller than the published criteria give. That
+       run was wrong; this returns the criteria the method actually defines.
+
+    Parameters
+    ----------
+    method : str
+        Slow-wave method the re-run will use.
+    neg_peak_thresh, p2p_thresh : float or None
+        The values recovered from the original run's ``params_json``.
+    recorded_version : str or None, optional
+        ``turtlewave_version`` of the original run, from
+        :func:`turtlewave_hdEEG.dbwrite.recover_run_scope`. ``None`` is treated
+        as pre-fix, which is the safe reading: every database that predates the
+        column also predates the fix.
+    logger : logging.Logger or None, optional
+        Logger for the resolution message.
+
+    Returns
+    -------
+    tuple
+        ``(neg_peak_thresh, p2p_thresh)`` to pass to the re-run.
+    """
+    log = logger or logging.getLogger('turtlewave_hdEEG.rerun')
+
+    if method not in RELATIVE_SW_METHODS:
+        return neg_peak_thresh, p2p_thresh
+    if neg_peak_thresh is None and p2p_thresh is None:
+        return None, None
+
+    version = _version_tuple(recorded_version)
+    if version is not None and version >= FLOOR_FIX_VERSION:
+        log.info(
+            "Re-run %s: recorded neg_peak_thresh=%r / p2p_thresh=%r come from "
+            "a %s run, i.e. after the microvolt-floor fix, so they are a "
+            "deliberate uV criterion and are replayed unchanged.",
+            method, neg_peak_thresh, p2p_thresh, recorded_version)
+        return neg_peak_thresh, p2p_thresh
+
+    try:
+        pair = (None if neg_peak_thresh is None else float(neg_peak_thresh),
+                None if p2p_thresh is None else float(p2p_thresh))
+    except (TypeError, ValueError):
+        # A params_json that does not hold numbers here is not something to
+        # guess at: keep the recorded values and let the detector reject them,
+        # rather than crash the re-run inside a provenance helper.
+        log.warning(
+            "Re-run %s: recorded neg_peak_thresh=%r / p2p_thresh=%r are not "
+            "numeric, so they cannot be checked against the pre-4.3.0 "
+            "defaults; passing them through unchanged.",
+            method, neg_peak_thresh, p2p_thresh)
+        return neg_peak_thresh, p2p_thresh
+
+    if pair in LEGACY_INERT_SW_THRESHOLDS:
+        log.info(
+            "Re-run %s: recorded neg_peak_thresh=%r / p2p_thresh=%r predate "
+            "4.3.0's amplitude-floor fix and were never a microvolt criterion "
+            "(they were compared against a sample count); replaying with the "
+            "published criteria instead, i.e. no absolute uV floor.",
+            method, neg_peak_thresh, p2p_thresh)
+        return None, None
+
+    neg_out, p2p_out = neg_peak_thresh, p2p_thresh
+    if neg_out is not None and float(neg_out) < 0:
+        log.info(
+            "Re-run %s: recorded neg_peak_thresh=%r was provably inert before "
+            "4.3.0 (abs(trough_val) >= a negative number is always true), so "
+            "it is dropped rather than replayed as a %.1f uV depth floor.",
+            method, neg_out, abs(float(neg_out)))
+        neg_out = None
+
+    if neg_out is not None or p2p_out is not None:
+        log.warning(
+            "Re-run %s: recorded neg_peak_thresh=%r / p2p_thresh=%r is not a "
+            "known pre-4.3.0 default, so neg_peak_thresh=%r / p2p_thresh=%r "
+            "are KEPT -- but they will now bind as ABSOLUTE MICROVOLT floors, "
+            "which they did not in the original run (p2p was compared against "
+            "a sample-index distance). Neither Ngo et al. 2015 nor Staresina "
+            "et al. 2015 defines a uV amplitude criterion. Pass them "
+            "explicitly as None to re-run on the published criteria.",
+            method, neg_peak_thresh, p2p_thresh, neg_out, p2p_out)
+
+    return neg_out, p2p_out
+
+
 def resolve_rerun_params(db_path, event_type, method, freq_lower=None,
                          freq_upper=None, ref_chan=None, polar=None, cat=None,
                          logger=None):

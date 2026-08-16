@@ -3,6 +3,7 @@ Custom extensions to Wonambi spindle detection
 """
 
 from copy import copy
+import logging
 
 import numpy as np
 import scipy
@@ -10,6 +11,8 @@ from wonambi.detect import DetectSpindle as OriginalDetectSpindle
 from wonambi.detect import DetectSlowWave as OriginalDetectSlowWave
 from wonambi.detect.spindle import transform_signal
 from wonambi.graphoelement import Spindles
+
+lg = logging.getLogger('turtlewave_hdEEG.extensions')
 
 
 def _get_cirus_envelope_func(sfreq, filter_mode, filter_window, filter_order, transition_bw, frequency, det_remez=None):
@@ -740,14 +743,25 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
             methods.
         neg_peak_thresh : float or None
             Depth the trough must reach, in µV. The sign is ignored (−80 and
-            80 both mean "at least 80 µV deep") and the value is stored as
-            Wonambi's negative ``max_trough_amp``. ``None`` keeps the
-            method's published value. Massimini family only.
+            80 both mean "at least 80 µV deep"). ``None`` keeps the method's
+            published criteria.
+
+            For the Massimini family it is stored as Wonambi's negative
+            ``max_trough_amp`` and enforced inside the detector. For
+            Ngo2015/Staresina2015 — which publish no absolute µV criterion —
+            ``None`` means **no amplitude floor at all**, and any explicit
+            value is applied as a post-hoc µV floor on ``trough_val``, a
+            deliberate deviation from the paper that is logged as a warning.
         p2p_thresh : float or None
-            Minimum peak-to-peak amplitude in µV, stored as Wonambi's
-            ``min_ptp``. ``None`` keeps the method's published value.
-            Massimini family only — see the note on the legacy filter in
-            :meth:`__call__` for what it does on the other methods.
+            Minimum negative-to-positive peak-to-peak amplitude in µV.
+            ``None`` keeps the method's published criteria.
+
+            For the Massimini family it is stored as Wonambi's ``min_ptp``
+            and enforced inside ``_add_halfwave``. For Ngo2015/Staresina2015
+            it behaves exactly like ``neg_peak_thresh`` above: ``None`` means
+            no floor, an explicit value is a post-hoc µV floor on the
+            reported ``ptp``. It is **not** Staresina's percentile, which is
+            ``self.ptp_thresh`` and is not settable here.
         min_dur : float or None
             Minimum duration of the whole slow wave in seconds. For the
             Massimini family this bounds the two joined half-waves and
@@ -778,11 +792,27 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
 
         super().__init__(method, duration)
 
-        # Legacy post-hoc amplitude filter, kept ONLY for Ngo2015 and
-        # Staresina2015 — see __call__. The 40/75 fallbacks reproduce the old
-        # constructor defaults exactly so those two methods are unchanged.
-        self.min_neg_amp = 40 if neg_peak_thresh is None else neg_peak_thresh
-        self.min_ptp_amp = 75 if p2p_thresh is None else p2p_thresh
+        # Optional post-hoc amplitude floors in MICROVOLTS, applied only to
+        # Ngo2015 and Staresina2015 — see __call__. `None` means "no floor",
+        # which for those two methods is what their papers specify: neither
+        # defines any absolute uV criterion. Both are normalised to a
+        # magnitude so a caller's sign cannot change the meaning, matching the
+        # `neg_peak_thresh` contract in the docstring above.
+        self.min_neg_amp = (None if neg_peak_thresh is None
+                            else abs(float(neg_peak_thresh)))
+        self.min_ptp_amp = (None if p2p_thresh is None
+                            else abs(float(p2p_thresh)))
+        if (method not in self.MASSIMINI_METHODS
+                and (self.min_neg_amp or self.min_ptp_amp)):
+            lg.warning(
+                "%s: neg_peak_thresh=%s / p2p_thresh=%s applied as absolute "
+                "microvolt floors AFTER detection. Neither Ngo et al. 2015 "
+                "nor Staresina et al. 2015 defines a fixed uV amplitude "
+                "criterion (Ngo thresholds at 1.25x the mean, Staresina at "
+                "the 75th percentile), so this is a deliberate deviation from "
+                "the published method. Pass None to run the method as "
+                "published.",
+                method, neg_peak_thresh, p2p_thresh)
         if polar == 'normal':
             self.invert = False
         elif polar == 'opposite':
@@ -988,6 +1018,47 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
 
         evt['ptp'] = float(evt['peak_val']) - float(evt['trough_val'])
         return evt
+
+    def _meets_amplitude_floor(self, evt):
+        """Whether the event clears the optional µV floors. Non-Massimini only.
+
+        Applies ``min_neg_amp`` to the negative peak and ``min_ptp_amp`` to
+        the peak-to-peak amplitude, both in MICROVOLTS. It must therefore run
+        AFTER :meth:`_as_negative_first`, which is what makes ``trough_val``
+        the negative extremum and replaces Wonambi's ``ptp`` — a sample-index
+        distance, ``abs(ev[3] - ev[1])`` (wonambi/detect/slowwave.py:418) —
+        with the real amplitude.
+
+        Until 4.3 this comparison ran BEFORE that conversion, so a µV
+        threshold was tested against a sample count and the floor scaled with
+        sampling rate instead of amplitude. ``ParalSWA`` passed 140.0 for
+        these methods, which at 500 Hz rejected almost nothing but at 128 Hz
+        rejected every event on the same signal (88 -> 0 for Staresina2015,
+        11 -> 0 for Ngo2015 on the test oscillation). Both floors now default
+        to ``None``, so Ngo2015 and Staresina2015 run on their published
+        criteria alone.
+
+        A threshold of ``0`` is accepted and can never reject anything, so the
+        old workaround of passing ``p2p_thresh=0`` to neutralise the filter
+        stays valid and is now identical to passing nothing.
+
+        Parameters
+        ----------
+        evt : dict
+            One event, AFTER :meth:`_as_negative_first`.
+
+        Returns
+        -------
+        bool
+            True if the event clears both floors (or neither is set).
+        """
+        if (self.min_neg_amp is not None
+                and float(evt['trough_val']) > -self.min_neg_amp):
+            return False
+        if (self.min_ptp_amp is not None
+                and float(evt['ptp']) < self.min_ptp_amp):
+            return False
+        return True
 
     def _meets_trough_depth(self, evt):
         """Whether the event's NEGATIVE trough reaches ``max_trough_amp``.
@@ -1198,33 +1269,22 @@ class ImprovedDetectSlowWave(OriginalDetectSlowWave):
             # Run detection using parent class
             events = super().__call__(data)
 
-        if self.method not in self.MASSIMINI_METHODS:
-            # Legacy post-hoc amplitude filter, Ngo2015/Staresina2015 only.
-            #
-            # It is unit-confused and kept deliberately: `min_ptp_amp` is
-            # compared against Wonambi's raw `ptp`, a SAMPLE COUNT
-            # (abs(ev[3] - ev[1]) on indices), so this acts as a
-            # sampling-rate-dependent floor rather than a uV one -- at 100 Hz
-            # it rejects every Staresina event, at >=200 Hz on the same signal
-            # it rejects none. The `min_neg_amp` arm is a no-op whenever the
-            # threshold is negative, which is how every caller passes it
-            # (abs(x) >= a negative number is always true).
-            #
-            # Removing it would change Staresina2015 and Ngo2015 counts, and
-            # those are published methods with hundreds of thousands of rows
-            # already in the user's databases, so it is left byte-for-byte as
-            # it was pending an explicit decision. It MUST run before the
-            # normalisation below, while `ptp` is still the sample count it
-            # was written against -- otherwise the detected set moves.
-            events.events = [
-                evt for evt in events.events
-                if (abs(evt['trough_val']) >= self.min_neg_amp
-                    and abs(evt['ptp']) >= self.min_ptp_amp)]
-
         # Reporting, every method: negative trough, positive peak, ptp in uV.
-        # Runs after every criterion, so it cannot change what was detected.
+        # Every remaining criterion below is expressed in those normalised
+        # fields, so nothing downstream can compare a microvolt threshold
+        # against a sample index.
         events.events = [self._as_negative_first(evt)
                          for evt in events.events]
+
+        if self.method not in self.MASSIMINI_METHODS:
+            # Optional absolute amplitude floors for Ngo2015/Staresina2015.
+            # Off by default (both thresholds None), because neither paper
+            # defines one; when a caller sets them they are microvolts
+            # compared against microvolts. See _meets_amplitude_floor for the
+            # unit bug this replaces.
+            if self.min_neg_amp is not None or self.min_ptp_amp is not None:
+                events.events = [evt for evt in events.events
+                                 if self._meets_amplitude_floor(evt)]
 
         if self.method in self.MASSIMINI_METHODS:
             # Two of the paper's three criteria, applied to the NEGATIVE

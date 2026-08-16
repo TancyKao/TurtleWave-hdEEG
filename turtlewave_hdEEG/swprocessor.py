@@ -172,15 +172,17 @@ class ParalSWA:
         neg_peak_thresh : float or None
             Depth the negative peak must reach, in µV (Massimini: −80 µV;
             AASM: −40 µV). The sign is ignored. ``None`` (default) uses the
-            method's published value. For Ngo2015/Staresina2015 this feeds
-            only the legacy post-hoc filter and ``None`` keeps that filter's
-            historical −80.0.
+            method's published criteria.
+
+            For Ngo2015/Staresina2015 the published criteria include **no**
+            absolute µV floor, so ``None`` applies none. An explicit value is
+            honoured as a post-hoc µV floor on the trough, and logged as a
+            deviation from the paper.
         p2p_thresh : float or None
             Minimum negative-to-positive peak-to-peak amplitude in µV
             (Massimini: 140 µV; AASM: 75 µV). ``None`` (default) uses the
-            method's published value. For Ngo2015/Staresina2015 this feeds
-            only the legacy post-hoc filter and ``None`` keeps that filter's
-            historical 140.0 -- it is NOT Staresina's percentile, which is
+            method's published criteria, and for Ngo2015/Staresina2015 that
+            again means no floor. It is NOT Staresina's percentile, which is
             not settable from here.
         min_dur : float or None
             Minimum duration of the WHOLE wave in seconds, for the Massimini
@@ -654,28 +656,29 @@ class ParalSWA:
                             # separate meanings.
                             is_massimini = meth in ['Massimini2004',
                                                     'AASM/Massimini2004']
-                            # For the Massimini family None means "use the
-                            # method's published thresholds", so AASM gets
-                            # -40/75 and Massimini2004 gets -80/140 without
-                            # the caller having to know which is which.
-                            # Ngo2015/Staresina2015 do not read these at all;
-                            # they only reach the legacy post-hoc filter, so
-                            # None resolves to the values this processor used
-                            # to hardcode and their yield is unchanged.
-                            meth_neg = neg_peak_thresh
-                            meth_p2p = p2p_thresh
-                            if not is_massimini:
-                                if meth_neg is None:
-                                    meth_neg = -80.0
-                                if meth_p2p is None:
-                                    meth_p2p = 140.0
+                            # None means "the method's published criteria" for
+                            # all four methods, so the caller never has to
+                            # know which threshold belongs to which method:
+                            # AASM/Massimini2004 gets -40/75, Massimini2004
+                            # gets -80/140, and Ngo2015/Staresina2015 get no
+                            # absolute amplitude floor at all, which is what
+                            # their papers specify (Ngo thresholds at 1.25x
+                            # the mean, Staresina at the 75th percentile).
+                            #
+                            # This processor used to substitute -80.0/140.0
+                            # for the two zero-crossing methods. Those reached
+                            # a post-hoc filter that compared them against
+                            # Wonambi's `ptp`, a SAMPLE-INDEX distance, so the
+                            # 140 acted as a sampling-rate-dependent floor: at
+                            # 500 Hz it rejected almost nothing, at 128 Hz it
+                            # rejected every event. Nothing is substituted now.
                             detection = DetectSlowWave(
                                 meth,
                                 frequency=frequency,
                                 trough_duration=(trough_duration
                                                  if is_massimini else None),
-                                neg_peak_thresh=meth_neg,
-                                p2p_thresh=meth_p2p,
+                                neg_peak_thresh=neg_peak_thresh,
+                                p2p_thresh=p2p_thresh,
                                 # min_dur/max_dur bound the WHOLE wave for
                                 # every method, including the Massimini
                                 # family, where they used to be dropped --
@@ -2437,15 +2440,30 @@ class ParalSWA:
                 # Update processing status with handling for both channels with events and empty channels
                 if 'Channel' in df.columns:
                     processed_channels = set(df['Channel'].unique())
-                    
+
+                    # The SCOPE these status rows belong to. Without it the
+                    # row lands on the schema defaults (method='',
+                    # freq_lower=0, stage=''), which matches nothing in
+                    # dbwrite.verify_channel_coverage's scoped query -- so a
+                    # channel that legitimately detected ZERO events was
+                    # reported 'missing' and the cluster drivers exited 1 on a
+                    # successful run, every run, with no way to self-heal.
+                    ps_stage = dbwrite.resolve_status_stage_token(
+                        csv_file,
+                        df['Stage'] if 'Stage' in df.columns else None,
+                        self.logger)
+                    ps_scope = (method, float(freq_lower or 0),
+                                float(freq_upper or 0), ps_stage)
+
                     # Add channels that have events in the CSV
                     for channel in processed_channels:
                         cursor.execute('''
                         INSERT OR REPLACE INTO processing_status
-                        (channel, event_type, processed, success, attempts, last_attempt_time)
-                        VALUES (?, ?, 1, 1, 1, datetime('now'))
-                        ''', (channel,event_type))
-                    
+                        (channel, event_type, method, freq_lower, freq_upper,
+                         stage, processed, success, attempts, last_attempt_time)
+                        VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, datetime('now'))
+                        ''', (channel, event_type) + ps_scope)
+
                     # Try to identify empty channels from JSON filenames
                     # Note: This assumes the CSV file name contains information to identify related JSON files
                     csv_basename = os.path.basename(csv_file)
@@ -2510,21 +2528,29 @@ class ParalSWA:
                                 self.logger.warning(f"Error checking JSON file {file}: {e}")
 
 
-                        # Add empty channels to processing_status
+                        # Add empty channels to processing_status. success = 1:
+                        # the channel RAN and found nothing, which is a real
+                        # result. This row is the only evidence of that, so it
+                        # carries the full scope like the others.
                         for channel in empty_channels:
                             cursor.execute('''
                             INSERT OR REPLACE INTO processing_status
-                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
-                            VALUES (?, ?, 1, 1, 1, datetime('now'), 'No events detected')
-                            ''', (channel,event_type))
+                            (channel, event_type, method, freq_lower, freq_upper,
+                             stage, processed, success, attempts,
+                             last_attempt_time, error_message)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, datetime('now'),
+                                    'No events detected')
+                            ''', (channel, event_type) + ps_scope)
 
                         # Record failed channels as unsuccessful so a resume re-runs them
                         for channel, err in failed_channels.items():
                             cursor.execute('''
                             INSERT OR REPLACE INTO processing_status
-                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
-                            VALUES (?, ?, 1, 0, 1, datetime('now'), ?)
-                            ''', (channel, event_type, err[:500]))
+                            (channel, event_type, method, freq_lower, freq_upper,
+                             stage, processed, success, attempts,
+                             last_attempt_time, error_message)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, 0, 1, datetime('now'), ?)
+                            ''', (channel, event_type) + ps_scope + (err[:500],))
 
                         if empty_channels:
                             self.logger.info(f"Recorded {len(empty_channels)} channels with no events: {', '.join(empty_channels)}")

@@ -2562,15 +2562,30 @@ class ParalEvents:
                 # Update processing status with handling for both channels with events and empty channels
                 if 'Channel' in df.columns:
                     processed_channels = set(df['Channel'].unique())
-                    
+
+                    # The SCOPE these status rows belong to. Without it the
+                    # row lands on the schema defaults (method='',
+                    # freq_lower=0, stage=''), which matches nothing in
+                    # dbwrite.verify_channel_coverage's scoped query -- so a
+                    # channel that legitimately detected ZERO events was
+                    # reported 'missing' and the cluster drivers exited 1 on a
+                    # successful run, every run, with no way to self-heal.
+                    ps_stage = dbwrite.resolve_status_stage_token(
+                        csv_file,
+                        df['Stage'] if 'Stage' in df.columns else None,
+                        self.logger)
+                    ps_scope = (method, float(freq_lower or 0),
+                                float(freq_upper or 0), ps_stage)
+
                     # Add channels that have events in the CSV
                     for channel in processed_channels:
                         cursor.execute('''
                         INSERT OR REPLACE INTO processing_status
-                        (channel, event_type, processed, success, attempts, last_attempt_time)
-                        VALUES (?, ?, 1, 1, 1, datetime('now'))
-                        ''', (channel,event_type))
-                    
+                        (channel, event_type, method, freq_lower, freq_upper,
+                         stage, processed, success, attempts, last_attempt_time)
+                        VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, datetime('now'))
+                        ''', (channel, event_type) + ps_scope)
+
                     # Try to identify empty channels from JSON filenames
                     # Note: This assumes the CSV file name contains information to identify related JSON files
                     csv_basename = os.path.basename(csv_file)
@@ -2578,15 +2593,29 @@ class ParalEvents:
                     if len(parts) >= 3:
                         # For CSVs like: spindle_parameters_Ferrarelli2007_9-12Hz_NREM2NREM3.csv
                         # Matching JSONs like: spindles_Ferrarelli2007_9-12Hz_NREM2NREM3_E101.json
-                        
-                        # Extract the method and frequency-stage parts
-                        method = parts[2]  # Ferrarelli2007
+
+                        # Extract the method and frequency-stage parts from the
+                        # CSV name. Use a local (not the resolved `method`) so
+                        # the caller's override survives for the INSERTs above.
+                        file_method = parts[2]  # Ferrarelli2007
                         freq_stage = parts[3:]  # ['9-12Hz', 'NREM2NREM3']
                         freq_stage_str = '_'.join(freq_stage).replace('.csv', '')
-                        
+
+                        # Map event_type -> the JSON prefix the detector
+                        # actually wrote. `{event_type}s` is wrong for slow
+                        # waves (slowwaves, not slow_waves) and k-complexes
+                        # (kcomplex), so importing one of those CSVs through
+                        # ParalEvents found no JSON and left every empty or
+                        # failed channel untracked. Same map as swprocessor.
+                        json_prefix = {
+                            'spindle': 'spindles',
+                            'slow_wave': 'slowwaves',
+                            'k_complex': 'kcomplex',
+                        }.get(event_type, f"{event_type}s")
+
                         # Construct pattern to find related JSON files
-                        json_pattern = f"{event_type}s_{method}_{freq_stage_str}_*"
-                        
+                        json_pattern = f"{json_prefix}_{file_method}_{freq_stage_str}_*"
+
                         # Find JSON files matching the pattern
                         json_dir = os.path.dirname(csv_file)
                         all_json_files = glob.glob(os.path.join(json_dir, f"{json_pattern}.json"))
@@ -2623,21 +2652,29 @@ class ParalEvents:
                                 self.logger.warning(f"Error checking JSON file {file}: {e}")
 
 
-                        # Add empty channels to processing_status
+                        # Add empty channels to processing_status. success = 1:
+                        # the channel RAN and found nothing, which is a real
+                        # result. This row is the only evidence of that, so it
+                        # carries the full scope like the others.
                         for channel in empty_channels:
                             cursor.execute('''
                             INSERT OR REPLACE INTO processing_status
-                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
-                            VALUES (?, ?, 1, 1, 1, datetime('now'), 'No events detected')
-                            ''', (channel,event_type))
+                            (channel, event_type, method, freq_lower, freq_upper,
+                             stage, processed, success, attempts,
+                             last_attempt_time, error_message)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, datetime('now'),
+                                    'No events detected')
+                            ''', (channel, event_type) + ps_scope)
 
                         # Record failed channels as unsuccessful so a resume re-runs them
                         for channel, err in failed_channels.items():
                             cursor.execute('''
                             INSERT OR REPLACE INTO processing_status
-                            (channel, event_type, processed, success, attempts, last_attempt_time, error_message)
-                            VALUES (?, ?, 1, 0, 1, datetime('now'), ?)
-                            ''', (channel, event_type, err[:500]))
+                            (channel, event_type, method, freq_lower, freq_upper,
+                             stage, processed, success, attempts,
+                             last_attempt_time, error_message)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, 0, 1, datetime('now'), ?)
+                            ''', (channel, event_type) + ps_scope + (err[:500],))
 
                         if empty_channels:
                             self.logger.info(f"Recorded {len(empty_channels)} channels with no events: {', '.join(empty_channels)}")

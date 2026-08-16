@@ -14,15 +14,32 @@ from turtlewave_hdEEG.utils import read_channels_from_csv
 import turtlewave_hdEEG
 importlib.reload(turtlewave_hdEEG)
 
+# Failure counter for the try/except-wrapped tests below, which print
+# "[FAIL] ..." instead of letting the AssertionError/Exception propagate.
+# Without this the suite always exits 0 -- a printed [FAIL] was invisible to
+# CI. Tests written without a try/except (the majority) already fail loudly:
+# an uncaught AssertionError aborts the process with a non-zero exit code.
+_FAILURES = 0
+
+
+def _fail(msg):
+    """Print a [FAIL] line and record it so __main__ can exit non-zero."""
+    global _FAILURES
+    _FAILURES += 1
+    print(f"[FAIL] {msg}")
+
+
 def test_utils_functions():
     """Test the utilities like read_channels_from_csv"""
     print("\n1. Testing utility functions:")
     
-    # Create a temporary CSV file with test channels
+    # read_channels_from_csv's established convention (frontend/eeg_review_gui.py's
+    # channels.csv writer, every example/_GADI driver) is a HEADERLESS CSV, one
+    # channel name per row -- no 'channel'/'name' header token is skipped.
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as temp_file:
-        temp_file.write("channel\nE101\nE102\nE103\n")
+        temp_file.write("E101\nE102\nE103\n")
         temp_csv_path = temp_file.name
-    
+
     try:
         # Test read_channels_from_csv function
         channels = read_channels_from_csv(temp_csv_path)
@@ -30,48 +47,65 @@ def test_utils_functions():
         assert len(channels) == 3, "Should read 3 channels"
         assert "E101" in channels, "Should include E101"
     except Exception as e:
-        print(f"[FAIL] Error in read_channels_from_csv: {e}")
+        _fail(f"Error in read_channels_from_csv: {e}")
     finally:
         # Clean up
         os.remove(temp_csv_path)
 
 def test_custom_annotations():
-    """Test the CustomAnnotations class functionality"""
+    """Test the CustomAnnotations class functionality.
+
+    ``CustomAnnotations.__init__`` requires an ``annot_file`` (it wraps
+    ``wonambi.attr.Annotations``, which has no argument-less constructor), so
+    this builds a real scored annotation XML via ``_synthetic_recording``
+    rather than calling the class with no arguments.
+    """
     print("\n2. Testing CustomAnnotations class:")
-    
-    # Test initialization (without an actual file)
+
+    tmp = tempfile.mkdtemp(prefix='tw_customannot_')
     try:
-        # We'll just test if the class can be instantiated without error
-        annot = turtlewave_hdEEG.CustomAnnotations()
-        print("[ok] CustomAnnotations class can be instantiated")
-        
+        _, wonb_annot = _synthetic_recording(tmp, ('NREM2', 'NREM2'))
+        annot = turtlewave_hdEEG.CustomAnnotations(wonb_annot.xml_file)
+        print("[ok] CustomAnnotations class can be instantiated with an "
+              "annot_file")
+
         # List available methods to show what can be tested
         methods = [m for m in dir(annot) if not m.startswith('_') and callable(getattr(annot, m))]
         print(f"Available methods: {methods}")
     except Exception as e:
-        print(f"[FAIL] Error initializing CustomAnnotations: {e}")
+        _fail(f"Error initializing CustomAnnotations: {e}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 def test_paralevents_class():
-    """Test the ParalEvents class functionality"""
+    """Test the ParalEvents class functionality.
+
+    ``ParalEvents.__init__`` requires a ``dataset`` (only ``annotations`` is
+    optional), so this builds a real synthetic dataset via
+    ``_synthetic_recording`` rather than calling the class with no arguments.
+    """
     print("\n3. Testing ParalEvents class:")
-    
+
+    tmp = tempfile.mkdtemp(prefix='tw_paralevents_')
     try:
-        # We'll just test if the class can be instantiated without error
-        # Note: In real testing, you'd provide actual dataset and annotations
-        event_processor = turtlewave_hdEEG.ParalEvents()
-        print("[ok] ParalEvents class can be instantiated")
-        
+        dataset, annot = _synthetic_recording(tmp, ('NREM2', 'NREM2'))
+        event_processor = turtlewave_hdEEG.ParalEvents(dataset, annot)
+        print("[ok] ParalEvents class can be instantiated with dataset + "
+              "annotations")
+
         # List the methods available in ParalEvents
         methods = [m for m in dir(event_processor) if not m.startswith('_') and callable(getattr(event_processor, m))]
         print(f"Available methods: {', '.join(methods)}")
-        
+
         # Verify the presence of specific methods
         assert 'detect_spindles' in methods, "detect_spindles method should be available"
         assert 'export_spindle_parameters_to_csv' in methods, "export_spindle_parameters_to_csv should be available"
         assert 'export_spindle_density_to_csv' in methods, "export_spindle_density_to_csv should be available"
         print("[ok] All expected methods are available")
     except Exception as e:
-        print(f"[FAIL] Error testing ParalEvents: {e}")
+        _fail(f"Error testing ParalEvents: {e}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 def test_largedataset_class():
     """Test the LargeDataset class functionality"""
@@ -89,7 +123,7 @@ def test_largedataset_class():
         assert 'create_memmap' in params, "create_memmap parameter should exist"
         print("[ok] create_memmap parameter exists")
     except Exception as e:
-        print(f"[FAIL] Error testing LargeDataset: {e}")
+        _fail(f"Error testing LargeDataset: {e}")
 
 def test_xlannotations_class():
     """Test the XLAnnotations class functionality"""
@@ -104,7 +138,7 @@ def test_xlannotations_class():
         assert hasattr(annotations_class, 'process_all'), "process_all method should exist"
         print("[ok] process_all method exists")
     except Exception as e:
-        print(f"[FAIL] Error testing XLAnnotations: {e}")
+        _fail(f"Error testing XLAnnotations: {e}")
 
 
 def test_improved_detect_spindle():
@@ -120,7 +154,7 @@ def test_improved_detect_spindle():
         methods = [m for m in dir(spindle_detector) if not m.startswith('_') and callable(getattr(spindle_detector, m))]
         print(f"Available methods: {methods}")
     except Exception as e:
-        print(f"[FAIL] Error testing ImprovedDetectSpindle: {e}")
+        _fail(f"Error testing ImprovedDetectSpindle: {e}")
         
 
 def _make_chantime(sig, s_freq):
@@ -1134,9 +1168,9 @@ def test_slow_wave_ptp_is_microvolts_not_samples():
     # change its detected set; the thresholds below sit far enough under a
     # 100 uV wave that both 1.0x and 1.5x are fully accepted.
     # Ngo2015/Staresina2015 are relative, so their detected set is already
-    # scale-invariant -- but the legacy post-hoc filter's `min_neg_amp`
-    # default of +40 is NOT, so it is given a negative value (its historical
-    # no-op form) to keep the comparison about ptp alone.
+    # scale-invariant on their published criteria -- which since 4.3 is what
+    # they run with no amplitude arguments at all. They are therefore left at
+    # their defaults, so the ratio test is about the reported ptp alone.
     cases = {
         'Massimini2004': (lambda sf, amp: _biphasic_wave(s_freq=sf, amp=amp),
                           dict(neg_peak_thresh=-50.0, p2p_thresh=100.0),
@@ -1146,12 +1180,10 @@ def test_slow_wave_ptp_is_microvolts_not_samples():
             dict(neg_peak_thresh=-50.0, p2p_thresh=100.0), True),
         'Ngo2015': (
             lambda sf, amp: _synthetic_slow_oscillation(s_freq=sf)
-            * (amp / 100.0),
-            dict(neg_peak_thresh=-75.0, p2p_thresh=75.0), False),
+            * (amp / 100.0), {}, False),
         'Staresina2015': (
             lambda sf, amp: _synthetic_slow_oscillation(s_freq=sf)
-            * (amp / 100.0),
-            dict(neg_peak_thresh=-75.0, p2p_thresh=75.0), False),
+            * (amp / 100.0), {}, False),
     }
 
     for method, (gen, kw, known_amp) in cases.items():
@@ -1275,17 +1307,22 @@ def test_det_trough_is_negative_for_every_method():
 
 
 def test_staresina_and_ngo_are_untouched():
-    """Staresina2015 and Ngo2015 must not move by a single event.
+    """Staresina2015 and Ngo2015 keep their published configuration.
 
-    They are published methods with hundreds of thousands of rows already in
-    the user's databases, and the criteria changes here are aimed only at the
-    Massimini family. Staresina's peak-to-peak gate is
+    Their timing criteria and relative thresholds are aimed at by nothing in
+    the Massimini work: Staresina's peak-to-peak gate is
     ``percentile(ptp, opts.ptp_thresh)`` — a relative criterion that always
     keeps ~25 % of candidates and has no absolute amplitude floor — and it
-    stays exactly that. The legacy post-hoc amplitude filter also stays on
-    these two methods, unit confusion and all, and it runs BEFORE the
-    reported ``ptp`` is converted to microvolts, so that conversion cannot
-    move their detected set.
+    stays exactly that, as do the zero-crossing intervals.
+
+    What DID move in 4.3 is the post-hoc amplitude filter that used to sit on
+    top of them. It compared a microvolt threshold against Wonambi's ``ptp``,
+    a sample-index distance, so ``ParalSWA``'s 140.0 default rejected nothing
+    at 500 Hz and everything at 128 Hz. It is now off unless the caller asks
+    for it, which is what these two papers specify — see
+    ``test_sw_amplitude_floor.py`` for that half of the contract. This test
+    therefore builds the detectors with no amplitude arguments, i.e. on their
+    published criteria.
 
     Pins the published constants and the relative-threshold behaviour that
     depends on them.
@@ -1318,13 +1355,9 @@ def test_staresina_and_ngo_are_untouched():
     # being "fixed" here.
     s_freq = 256.0
     sig = _synthetic_slow_oscillation(s_freq=s_freq)
-    n_1x = len(ImprovedDetectSlowWave(method='Staresina2015',
-                                      neg_peak_thresh=-75.0,
-                                      p2p_thresh=75.0)(
+    n_1x = len(ImprovedDetectSlowWave(method='Staresina2015')(
         _make_chantime(sig, s_freq)))
-    n_3x = len(ImprovedDetectSlowWave(method='Staresina2015',
-                                      neg_peak_thresh=-75.0,
-                                      p2p_thresh=75.0)(
+    n_3x = len(ImprovedDetectSlowWave(method='Staresina2015')(
         _make_chantime(sig * 3.0, s_freq)))
     assert n_1x == n_3x and n_1x > 0, (
         f"Staresina2015 became amplitude-sensitive: {n_1x} events at 1x, "
@@ -1358,9 +1391,12 @@ def test_staresina_and_ngo_are_untouched():
     # interval in [0.830, 0.833) would flip from rejected to accepted on a
     # GUI run with nothing typed.
     published = {'Staresina2015': (0.8, 2.0), 'Ngo2015': (0.833, 2.0)}
-    # p2p_thresh=0 and a negative neg_peak_thresh make both arms of the
-    # legacy post-hoc filter no-ops, so what is compared is the gate itself.
-    isolate = dict(neg_peak_thresh=-75.0, p2p_thresh=0.0)
+    # No amplitude arguments: since 4.3 that IS the no-floor configuration,
+    # so what is compared is the duration gate itself. This used to need
+    # `neg_peak_thresh=-75.0, p2p_thresh=0.0` to neutralise the post-hoc
+    # filter; that workaround is now the default and is pinned as such in
+    # tests/test_sw_amplitude_floor.py.
+    isolate = {}
 
     for method, (pub_lo, pub_hi) in published.items():
         for s_freq, lo, hi in ((200.0, 0.83, 2.0), (256.0, 0.85, 2.0),
@@ -4419,6 +4455,7 @@ if __name__ == "__main__":
     test_det_trough_is_negative_for_every_method()
     test_staresina_and_ngo_are_untouched()
     test_kcomplex_trough_duration_bounds_the_half_wave()
+    test_fast_time_slice_boundary_is_half_open()
     test_package_structure()
     test_density_with_bare_subject_id()
     test_density_identity_axis()
@@ -4448,3 +4485,13 @@ if __name__ == "__main__":
     test_guard_refuses_an_empty_method_list()
 
     print("\nAll tests completed!")
+
+    # Tests above that wrap their body in try/except print "[FAIL]" instead of
+    # raising, so a failure there would otherwise be invisible to the process
+    # exit code. Everything else uses bare asserts, which already abort the
+    # script with a non-zero exit code on failure.
+    if _FAILURES:
+        print(f"\n{_FAILURES} test(s) reported [FAIL]. See output above.")
+        sys.exit(1)
+    else:
+        print("\nNo [FAIL]s reported.")

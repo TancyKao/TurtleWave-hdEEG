@@ -1178,7 +1178,19 @@ class ParalPAC:
         use_detected_events : bool
             False for the continuous (non-event-locked) path.
         stored_event_type, stored_method : str or None
-            Caller overrides. Each wins over derivation independently.
+            Caller overrides.
+
+            **On the event-locked path** (``use_detected_events=True``) each
+            one wins over derivation independently: supplying only
+            ``stored_method`` keeps the derived event type, and vice versa.
+
+            **On the continuous path** (``use_detected_events=False``) BOTH
+            are required, because neither is derivable -- there are no
+            detected events and therefore no detector method, and falling
+            back to the ``event_type`` argument would file a theta-gamma
+            result as ``'slow_wave'``, which is the mislabelling this method
+            exists to prevent. Supplying just one of the two raises, rather
+            than inventing the other.
 
         Returns
         -------
@@ -1188,7 +1200,10 @@ class ParalPAC:
         Raises
         ------
         ValueError
-            If either component is neither supplied nor derivable.
+            If either component is neither supplied nor derivable: on the
+            continuous path whenever fewer than both are given, and on the
+            event-locked path when ``event_opts`` lacks the method the
+            derivation needs.
         """
         resolved_type = (str(stored_event_type)
                          if stored_event_type is not None else None)
@@ -1199,15 +1214,25 @@ class ParalPAC:
             return resolved_type, resolved_method
 
         if not use_detected_events:
+            # BOTH are required here, deliberately: one supplied and one
+            # missing is not half-resolvable, because nothing on this path can
+            # supply the other. Name which one is absent so the message is
+            # actionable rather than a restatement of the rule.
+            given = [n for n, v in (('stored_event_type', resolved_type),
+                                    ('stored_method', resolved_method))
+                     if v is not None]
+            absent = [n for n in ('stored_event_type', 'stored_method')
+                      if n not in given]
             raise ValueError(
-                "analyze_pac(write_db=True, use_detected_events=False) cannot "
-                "name the scope of the row it would store: there is no "
-                "detected-event method to derive it from, and the derived "
-                "defaults would file this continuous result as "
-                "event_type='slow_wave', method='unknown'. Pass "
-                "stored_event_type= and stored_method= explicitly "
-                "(e.g. stored_event_type='continuous', "
-                "stored_method='theta_gamma'), or set write_db=False.")
+                f"analyze_pac(write_db=True, use_detected_events=False) cannot "
+                f"name the scope of the row it would store: there is no "
+                f"detected-event method to derive it from, and the derived "
+                f"defaults would file this continuous result as "
+                f"event_type='slow_wave', method='unknown'. "
+                f"{'Missing ' + ' and '.join(absent) + '. ' if absent else ''}"
+                f"The continuous path needs BOTH stored_event_type= and "
+                f"stored_method= (e.g. stored_event_type='continuous', "
+                f"stored_method='theta_gamma'), or set write_db=False.")
 
         sw_method = (event_opts or {}).get('sw_method') or 'unknown'
         spindle_method = (event_opts or {}).get('spindle_method') or 'unknown'

@@ -28,7 +28,7 @@ from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
 from .density import event_density, format_density_table
 from .utils import derive_subject, normalize_subject, read_channels_from_csv
 from .rerun import (RerunGuardError, verify_rater_match, channel_clean_gate,
-                    resolve_rerun_params)
+                    resolve_rerun_params, resolve_sw_amplitude_thresholds)
 
 # Cycle plotting pulls in matplotlib; keep the import defensive so a missing or
 # broken matplotlib never breaks `import turtlewave_hdEEG` (mirrors the optional

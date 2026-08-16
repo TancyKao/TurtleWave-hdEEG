@@ -35,6 +35,7 @@ JSON + CSV pipeline is unaffected.
 """
 
 import os
+import ast
 import csv
 import uuid
 import logging
@@ -179,6 +180,67 @@ _CITATIONS = {
     'Ngo2015': 'Ngo et al. 2015, J Neurosci 35(17):6630-6638',
     'Staresina2015': 'Staresina et al. 2015, Nat Neurosci 18(11):1679-1686',
 }
+
+
+def method_spellings(method):
+    """Every spelling a method may be stored under in ``events.method``.
+
+    One method has two spellings in the wild. ``AASM/Massimini2004`` contains
+    a ``/``, which is illegal in a filename, so the pipeline also carries an
+    ESCAPED form, ``AASM_Massimini2004``. Up to and including 4.0.2 the
+    slow-wave processor passed that escaped form to the direct-write path, so
+    a 4.0.x database stores ``'AASM_Massimini2004'`` in ``events.method``;
+    from 4.3 the unescaped ``'AASM/Massimini2004'`` is stored and the escaped
+    form is used for filenames only.
+
+    :func:`event_uuid5` hashes the method, and the method is part of the
+    ``event_chan_time`` UNIQUE constraint, so the two spellings are two
+    different rows for the same event. Any lookup that asks "does this scope
+    already hold rows?" must therefore ask under both spellings, or it finds
+    nothing and lets ``INSERT OR REPLACE`` append a complete duplicate set.
+
+    The expansion is deliberately asymmetric and vocabulary-checked:
+
+    * forward (``/`` -> ``_``) is always safe, because no method name
+      contains a ``/`` other than as the separator being escaped;
+    * backward (``_`` -> ``/``) is ambiguous in general -- a joined
+      multi-method label like ``'Moelle2011_Wamsley2012'`` would become
+      nonsense -- so it is applied only when the result is a method this
+      package actually knows (:data:`_CITATIONS`).
+
+    Parameters
+    ----------
+    method : str
+        A method as passed to a detector or stored in a row.
+
+    Returns
+    -------
+    list of str
+        The given spelling first, then any alternate spelling. Order matters:
+        callers that write use element 0.
+
+    Examples
+    --------
+    >>> method_spellings('AASM/Massimini2004')
+    ['AASM/Massimini2004', 'AASM_Massimini2004']
+    >>> method_spellings('AASM_Massimini2004')
+    ['AASM_Massimini2004', 'AASM/Massimini2004']
+    >>> method_spellings('Moelle2011')
+    ['Moelle2011']
+    >>> method_spellings('Moelle2011_Wamsley2012')
+    ['Moelle2011_Wamsley2012']
+    """
+    given = str(method)
+    out = [given]
+    escaped = given.replace('/', '_')
+    if escaped != given:
+        out.append(escaped)
+    else:
+        for known in _CITATIONS:
+            if ('/' in known and known.replace('/', '_') == given
+                    and known not in out):
+                out.append(known)
+    return out
 
 
 def method_citation(method):
@@ -367,8 +429,11 @@ def _explain_io_error(exc, db_path):
 
     Parameters
     ----------
-    exc : sqlite3.OperationalError
-        The original exception.
+    exc : sqlite3.Error
+        The original exception. Any SQLite error is accepted, not only
+        ``OperationalError``: ``open_write_connection`` also routes
+        ``DatabaseError`` ("file is not a database") through here, and the
+        fail-open rule below returns it untouched.
     db_path : str
         Database the operation was against, named in the new message.
 
@@ -522,7 +587,13 @@ def open_write_connection(db_path, journal=None, logger=None):
                 f"probably holding it. Set {_JOURNAL_ENV} and/or run "
                 f"set_journal_mode() with every other process closed.")
         return conn
-    except sqlite3.OperationalError as e:
+    except sqlite3.Error as e:
+        # sqlite3.Error, not OperationalError: 'file is not a database' -- the
+        # single most likely failure when a path points at an EDF, an XML or a
+        # half-copied file -- is a DatabaseError, i.e. a SIBLING of
+        # OperationalError, not a subclass. Catching only OperationalError
+        # leaked it with the open connection still held and without the
+        # network-filesystem diagnosis attached.
         if conn is not None:
             conn.close()
         raise _explain_io_error(e, db_path)
@@ -1046,11 +1117,23 @@ def verify_channel_coverage(db_path, event_type, method, requested_channels,
         ``events_only`` too.
     """
     requested = [str(c) for c in (requested_channels or [])]
+    # EVERY key is initialised here, in one place. The early returns below are
+    # the "nothing was written" cases -- a missing database, a database with no
+    # events table -- and they are exactly the cases a driver is trying to
+    # diagnose, so a partial dict turned the intended error message into a
+    # KeyError on 'failed'/'events_only' (both cluster drivers dereference them
+    # unconditionally). Adding a key to the update at the end of this function
+    # means adding it here too.
     result = {'requested': len(requested), 'with_events': 0, 'covered': 0,
-              'missing': list(requested), 'complete': False,
-              'scoped_status': True}
+              'missing': list(requested), 'complete': not requested,
+              'scoped_status': True, 'failed': [], 'events_only': []}
 
     if not os.path.exists(db_path):
+        if logger is not None:
+            logger.error(
+                "Coverage check: %s does not exist, so none of the %d "
+                "requested channel(s) can be accounted for. Check the path "
+                "the run was given.", db_path, len(requested))
         return result
 
     # Read-only, but with the writers' 60 s busy timeout: under DELETE journal
@@ -1058,6 +1141,18 @@ def verify_channel_coverage(db_path, event_type, method, requested_channels,
     # coverage check whenever a detection run is mid-write.
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
+        # A file that exists but holds no events table is the other shape of
+        # "nothing was written" -- a database created by an aborted run, or a
+        # path that is not this pipeline's database. Reported like the missing
+        # file rather than raised as a bare 'no such table: events'.
+        if not _table_columns(conn, 'events'):
+            if logger is not None:
+                logger.error(
+                    "Coverage check: %s has no 'events' table, so none of the "
+                    "%d requested channel(s) can be accounted for. The run "
+                    "wrote nothing, or this is not the pipeline's database.",
+                    db_path, len(requested))
+            return result
         # NOTE: the events half is not scoped by stage. events.stage holds the
         # run's joined token ('NREM2NREM3') from 4.3 on, but rows written by
         # an earlier release hold the per-epoch stage ('NREM2') and filtering
@@ -1071,6 +1166,21 @@ def verify_channel_coverage(db_path, event_type, method, requested_channels,
               AND freq_lower = ? AND freq_upper = ?
             ''', (event_type, method, float(freq_lower),
                   float(freq_upper))).fetchall()}
+
+        if not _table_columns(conn, 'processing_status'):
+            # Events but no status table at all (a database built purely by an
+            # old CSV import). Nothing to add to the event evidence; the
+            # fallback query below would raise 'no such table' from inside the
+            # except handler and escape this function.
+            succeeded, failed = set(), set()
+            if logger is not None:
+                logger.warning(
+                    "processing_status table absent from %s; coverage rests "
+                    "on event rows alone, so a channel that legitimately "
+                    "detected nothing cannot be distinguished from a lost "
+                    "one.", db_path)
+            return _finish_coverage(result, requested, with_events,
+                                    succeeded, failed)
 
         try:
             succeeded = {str(r[0]) for r in conn.execute('''
@@ -1111,6 +1221,33 @@ def verify_channel_coverage(db_path, event_type, method, requested_channels,
     finally:
         conn.close()
 
+    return _finish_coverage(result, requested, with_events, succeeded, failed)
+
+
+def _finish_coverage(result, requested, with_events, succeeded, failed):
+    """Fold the three channel sets into the coverage dict.
+
+    Shared by :func:`verify_channel_coverage`'s normal path and its
+    "status table absent" path so both produce a dict with the same keys.
+
+    Parameters
+    ----------
+    result : dict
+        The pre-initialised coverage dict, updated in place.
+    requested : list of str
+        Channels the run asked for, in order.
+    with_events : set of str
+        Channels holding event rows for the scope.
+    succeeded : set of str
+        Channels with an in-scope ``success = 1`` status row.
+    failed : set of str
+        Channels with an in-scope ``success = 0`` status row.
+
+    Returns
+    -------
+    dict
+        ``result``, updated.
+    """
     covered = (with_events | succeeded) - failed
     missing = [c for c in requested if c not in covered]
     # Channels vouched for by events alone, with no status row for this exact
@@ -2318,8 +2455,9 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
     -------
     dict or None
         ``{'ref_chan', 'polar', 'cat', 'cat_recorded', 'reject_artifacts',
-        'reject_arousals', 'stages', 'run_id', 'params'}`` from the most recent
-        matching ``detection_runs`` row, or ``None`` if no such row exists.
+        'reject_arousals', 'stages', 'run_id', 'params',
+        'turtlewave_version'}`` from the most recent matching
+        ``detection_runs`` row, or ``None`` if no such row exists.
         ``params`` is the full recorded parameter dict (thresholds/band/
         durations) so a re-run can reuse the original detector thresholds, not
         just the invariants.
@@ -2368,7 +2506,7 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
         try:
             cur = conn.execute('''
             SELECT run_id, params_json, ref_chan, polar, stages,
-                   reject_artifacts, reject_arousals
+                   reject_artifacts, reject_arousals, turtlewave_version
             FROM detection_runs
             WHERE event_type = ? AND method = ?
             ORDER BY timestamp DESC
@@ -2376,7 +2514,8 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
         except sqlite3.OperationalError:
             return None
         for row in cur.fetchall():
-            run_id, params_json, ref_chan, polar, stages, rj_a, rj_r = row
+            (run_id, params_json, ref_chan, polar, stages, rj_a, rj_r,
+             tw_version) = row
             params = {}
             if params_json:
                 try:
@@ -2403,6 +2542,14 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
                 'reject_arousals': bool(rj_r),
                 'stages': stages,
                 'params': params,
+                # The library version that WROTE the run. Needed to read a
+                # recorded parameter in the semantics it had at the time:
+                # before 4.3.0 the slow-wave amplitude thresholds were
+                # compared against a sample count for Ngo2015/Staresina2015,
+                # so replaying one as a microvolt floor would impose a
+                # criterion the original run never applied. ``None`` for a run
+                # whose provenance predates the column.
+                'turtlewave_version': tw_version,
             }
         return None
     finally:
@@ -2987,7 +3134,17 @@ def write_channel_events(conn, run_id, event_type, channel, method,
             # constituent per-event methods so a multi-method run clears every
             # method's rows (the joined method_str never matches a stored
             # per-event method). NOT stage-scoped; freq matched NULL-safe.
-            del_methods = [str(m) for m in (replace_methods or [method])]
+            # Every spelling, not just the one this run writes: a <= 4.0.2
+            # database stores 'AASM_Massimini2004' where this release stores
+            # 'AASM/Massimini2004', and a replace that missed the old spelling
+            # would leave the stale rows in place -- turning the "use
+            # replace_channels" advice from assert_stage_format_compatible
+            # into the very duplication it refuses.
+            del_methods = []
+            for m in (replace_methods or [method]):
+                for spelling in method_spellings(m):
+                    if spelling not in del_methods:
+                        del_methods.append(spelling)
             m_placeholders = ', '.join(['?'] * len(del_methods))
             del_sql = (
                 f"DELETE FROM events WHERE event_type = ? AND channel = ? "
@@ -3758,10 +3915,22 @@ def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
         if not at_risk:
             return 0
 
+    # Match every spelling the stored rows may carry, not just the one this
+    # run will write. A 4.0.x database holds 'AASM_Massimini2004' where this
+    # release writes 'AASM/Massimini2004'; querying only the latter matched
+    # nothing, the guard returned "all clear", and the run appended a complete
+    # duplicate set keyed on a different uuid5. See method_spellings.
+    written_spellings = [m for m in method_list]
+    lookup_methods = []
+    for m in method_list:
+        for spelling in method_spellings(m):
+            if spelling not in lookup_methods:
+                lookup_methods.append(spelling)
+
     where = ["event_type = ?",
-             "method IN (%s)" % ",".join("?" * len(method_list)),
+             "method IN (%s)" % ",".join("?" * len(lookup_methods)),
              "freq_lower IS ?", "freq_upper IS ?"]
-    params = [str(event_type)] + method_list + [
+    params = [str(event_type)] + lookup_methods + [
         None if freq_lower is None else float(freq_lower),
         None if freq_upper is None else float(freq_upper)]
     if at_risk:
@@ -3782,6 +3951,47 @@ def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
         "scope's rows first; or write this run to a different database. "
         "Keeping both is not an option -- they overlap, so every count and "
         "density over this scope would be inflated.")
+
+    # --- check 3: the same method under a DIFFERENT SPELLING --------------
+    # Runs first because it is the one case the other two can miss entirely: a
+    # database whose stage marker is already 'joint' and whose stage token
+    # matches this run's passes both of them, and still duplicates, because
+    # events.method holds the escaped spelling a <= 4.0.2 slow-wave run wrote
+    # ('AASM_Massimini2004') while this run writes 'AASM/Massimini2004'. The
+    # method is hashed into event_uuid5 AND is part of event_chan_time, so
+    # those rows are not replaced -- they are joined by a second, identical
+    # set. Reported separately from the stage cases because the remedy is
+    # different: there is no stage to migrate.
+    if len(lookup_methods) > len(written_spellings):
+        spelling_where = clause + " AND method NOT IN (%s)" % ",".join(
+            "?" * len(written_spellings))
+        spelling_params = params + written_spellings
+        n_rows, n_chans = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT channel) FROM events WHERE "
+            + spelling_where, spelling_params).fetchone()
+        n_rows = int(n_rows or 0)
+        if n_rows:
+            stored_spellings = sorted({str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT method FROM events WHERE " + spelling_where,
+                spelling_params)})
+            chans_hit = [str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT channel FROM events WHERE " + spelling_where
+                + " ORDER BY channel LIMIT 10", spelling_params)]
+            raise ValueError(
+                f"{db_path or 'This database'} already holds {n_rows} "
+                f"{event_type} row(s) across {int(n_chans or 0)} channel(s) "
+                f"under method spelling(s) {stored_spellings}, and this run "
+                f"would write {written_spellings}. These are the SAME method: "
+                f"releases up to 4.0.2 stored the filename-escaped form. The "
+                f"method is part of both the event uuid5 and the "
+                f"event_chan_time UNIQUE constraint, so those rows would NOT "
+                f"be replaced: INSERT OR REPLACE would APPEND A COMPLETE "
+                f"DUPLICATE SET beside them. Channels affected (first 10): "
+                f"{chans_hit}. To proceed: re-detect with "
+                f"replace_channels=<those channels>, which deletes every "
+                f"spelling of the method in the same transaction; or delete "
+                f"that scope's rows first; or write this run to a different "
+                f"database.")
 
     # --- check 2: a different stage token in the same scope ---------------
     # Unconditional, and independent of the marker: both sides can be 'joint',
@@ -3931,6 +4141,120 @@ def fmt_freq_token(lo, hi):
     '9.0-12.0Hz'
     """
     return f"{lo}-{hi}Hz"
+
+
+def stage_token_from_filename(path):
+    """Recover the ``{stages_joined}`` component of a pipeline filename.
+
+    The project naming convention is
+    ``{event_type}_{method}_{freq_lo}-{freq_hi}Hz_{stages_joined}``, and the
+    parameter CSVs follow it
+    (``sw_parameters_AASM_Massimini2004_0.5-4Hz_NREM2NREM3.csv``). The band
+    token is the only component with a fixed marker (``Hz``), so the stage set
+    is everything after it.
+
+    This exists because the CSV import path has to write a
+    ``processing_status`` row for a channel that detected NOTHING -- there is
+    no data row to read a stage from, and without the run's stage the row does
+    not match :func:`verify_channel_coverage`'s scoped query, so a legitimately
+    empty channel is reported as a lost one.
+
+    Parameters
+    ----------
+    path : str
+        File path or basename to parse.
+
+    Returns
+    -------
+    str or None
+        The stage token, or ``None`` when the name does not follow the
+        convention (no ``Hz`` component, or nothing after it).
+
+    Examples
+    --------
+    >>> stage_token_from_filename('sw_parameters_Ngo2015_0.5-1.25Hz_NREM3.csv')
+    'NREM3'
+    >>> stage_token_from_filename('spindle_parameters_Moelle2011_11-16Hz_NREM2NREM3.csv')
+    'NREM2NREM3'
+    >>> stage_token_from_filename('whatever.csv') is None
+    True
+    """
+    stem = os.path.splitext(os.path.basename(str(path)))[0]
+    parts = stem.split('_')
+    for i, part in enumerate(parts):
+        if part.endswith('Hz') and '-' in part:
+            tail = [p for p in parts[i + 1:] if p]
+            return '_'.join(tail) if tail else None
+    return None
+
+
+def resolve_status_stage_token(csv_file, stage_values=None, logger=None):
+    """The stage token a CSV import should stamp on ``processing_status``.
+
+    ``processing_status`` records "this channel ran, in THIS scope", and the
+    scope includes the stage set. A CSV import has two possible sources for
+    it and they are tried in this order:
+
+    1. the filename's ``{stages_joined}`` component
+       (:func:`stage_token_from_filename`), which is the run's own scope and
+       is available even when the CSV holds no rows at all;
+    2. a single distinct ``Stage`` value across the imported rows, for a CSV
+       whose name does not follow the convention.
+
+    A CSV whose rows carry SEVERAL different stage values and whose name is
+    unparseable has no single run token; that returns ``''`` (the schema
+    default) with a warning, which is the pre-existing behaviour.
+
+    Parameters
+    ----------
+    csv_file : str
+        Path of the CSV being imported.
+    stage_values : iterable or None, optional
+        The raw ``Stage`` cells of the imported rows. A cell may be a list or
+        its string repr (``"['NREM2', 'NREM3']"``); both are joined the same
+        way the event rows are.
+    logger : logging.Logger or None, optional
+        Logger for the "no single token" warning.
+
+    Returns
+    -------
+    str
+        The stage token, or ``''`` when none can be determined.
+    """
+    token = stage_token_from_filename(csv_file)
+    if token:
+        return token
+
+    normalised = set()
+    for raw in (stage_values if stage_values is not None else []):
+        if raw is None:
+            continue
+        if isinstance(raw, (list, tuple)):
+            normalised.add("".join(str(s) for s in raw))
+            continue
+        text = str(raw)
+        if '[' in text:
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, (list, tuple)):
+                    normalised.add("".join(str(s) for s in parsed))
+                    continue
+            except (ValueError, SyntaxError):
+                pass
+        normalised.add(text)
+
+    if len(normalised) == 1:
+        return normalised.pop()
+
+    if logger is not None:
+        logger.warning(
+            "Cannot determine the stage set of %s: its name does not follow "
+            "{event_type}_{method}_{lo}-{hi}Hz_{stages} and its rows carry "
+            "%d distinct stage value(s). processing_status rows will be "
+            "written without a stage, so a coverage check scoped by stage "
+            "will not count them.",
+            os.path.basename(str(csv_file)), len(normalised))
+    return ''
 
 
 def default_csv_path(output_dir, event_type, method, frequency, stage):
