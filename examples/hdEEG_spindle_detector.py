@@ -113,7 +113,7 @@ spindles = event_processor.detect_spindles(
     stage                = test_stages,
     reject_artifacts     = True,
     reject_arousals      = False,
-    cat                  = (1, 1, 1, 0),# concatenate within and between stages, cycles separate
+    cat                  = (1, 1, 1, 0),# concatenate across cycles, stages, and discontinuities (event types separate)
     save_to_annotations  = False, # save to annotations
     json_dir             = json_dir,
     # Direct-to-DB path (opt-in). When --write-db is not passed these are

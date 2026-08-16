@@ -320,7 +320,7 @@ Installation complete! Here's what to do next:
 !!! question "Still having issues?"
     If you encounter problems not covered here:
     
-    - Check [GitHub Issues](https://github.com/your-repo/turtlewave-hdEEG/issues) for similar problems
+    - Check [GitHub Issues](https://github.com/TancyKao/TurtleWave-hdEEG/issues) for similar problems
     - Open a new issue with your error message and system details
     - Include Python version, OS, and full error traceback
 

@@ -152,12 +152,14 @@ class ParalSWA:
             Minimum negative peak threshold in μV
         p2p_thresh : float
             Minimum peak-to-peak amplitude threshold in μV
-        peak_thresh_sigma : float or None
-            Peak threshold in standard deviations (for Ngo2015 method)
-        ptp_thresh_sigma : float or None
-            Peak-to-peak threshold in standard deviations (for Ngo2015 method)
-        invert : bool
-            Whether to invert the signal polarity
+        min_dur : float or None
+            Minimum event duration in seconds (method-dependent override)
+        max_dur : float or None
+            Maximum event duration in seconds (method-dependent override)
+        detrend : bool
+            Whether to detrend the signal before detection
+        polar : str
+            'normal' or 'opposite' for handling signal polarity
         reject_artifacts : bool
             Whether to exclude segments marked with artifact annotations
         reject_arousals : bool
@@ -166,10 +168,16 @@ class ParalSWA:
             Sleep stage(s) to analyze
         cat : tuple
             Category specification for data selection
+        peak_thresh_sigma : float or None
+            Peak threshold in standard deviations (for Ngo2015 method)
+        ptp_thresh_sigma : float or None
+            Peak-to-peak threshold in standard deviations (for Ngo2015 method)
         save_to_annotations : bool
             Whether to save detected slow waves to annotations
         json_dir : str or None
             Directory to save individual channel JSON files
+        create_empty_json : bool
+            Whether to create empty JSON files when no slow waves are found
         write_db : bool, keyword-only, default False
             When True, write detected events straight into a SQLite database
             (``db_path``) in addition to the JSON output, via the direct-write

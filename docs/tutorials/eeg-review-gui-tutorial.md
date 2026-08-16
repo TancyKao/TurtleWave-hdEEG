@@ -1,237 +1,121 @@
 # Tutorial: Your First EEG Event Review Session
 
-Welcome! In this tutorial, we'll walk through your first complete event review session using the TurtleWave EEG Review GUI. By the end, you'll have reviewed real EEG events and understand the basic workflow.
+Welcome! In this tutorial, we'll walk through your first QC pass with the TurtleWave EEG Review GUI. By the end, you'll have triaged real channels and know how to flag one for re-detection.
 
 !!! note "What you'll learn"
     - How to launch the EEG Review GUI
     - How to load your data files
-    - How to navigate through detected events
-    - How to accept or reject events
-    - How to export your review results
+    - How to read the Channels (QC) dashboard
+    - How to drill into a channel's epochs
+    - How to flag a channel for re-detection and export a QC report
 
 !!! tip "Before you start"
     Make sure you have:
-    
+
     - TurtleWave installed (`pip install turtlewave-hdEEG`)
-    - An event database file (`.db` file from event detection)
+    - An event database file (`neural_events.db` from event detection)
     - The corresponding EEG data file (`.set` or `.fdt` format)
     - Optional: Sleep stage annotation file (`.xml` format)
 
 ## Step 1: Launch the GUI
 
-First, let's start the EEG Review GUI. Open your terminal and run:
+Open your terminal and run:
 
 ```bash
-python -m frontend.eeg_review_gui
+eeg_review_gui
 ```
 
-The application window will open. You should see a three-panel interface with a channel selector on the left, a timeline and event list in the middle, and navigation controls on the right.
+The application window opens with two tabs — **1 · Channels (QC)** and
+**2 · Epochs** — plus a left filter dock and a right dock carrying
+topography, the global worst-events list, and channel detail.
 
 !!! success "What you should see"
-    A window titled "TurtleWave Event Review" with three main panels. The interface is empty because we haven't loaded any data yet.
+    A window titled "TurtleWave hdEEG · Event Review". The interface is
+    empty because we haven't loaded any data yet.
 
-## Step 2: Load Your Event Database
+## Step 2: Load Your Data
 
-Now let's load the events you want to review.
+1. **File → Open Database…** and select your `neural_events.db`
+2. **File → Open EEG File…** and select the matching `.set`/`.fdt` file
+3. **File → Open Annotation File…** (optional) to load sleep stages
 
-1. Click **File** → **Open Database...** in the menu bar
-2. Navigate to your event database file (e.g., `subject001_events.db`)
-3. Click **Open**
-
-The event list in the middle panel will populate with detected events. You'll see columns showing event type, start time, duration, channel, and other properties.
-
-!!! success "What you should see"
-    The middle panel now shows a table filled with events. Each row represents one detected event (spindle, slow wave, etc.).
-
-## Step 3: Load Your EEG Data
-
-To visualize the actual waveforms, we need to load the EEG data file.
-
-1. Click **File** → **Open EEG File...** in the menu bar
-2. Navigate to your EEG file (e.g., `subject001.set`)
-3. Click **Open**
-
-The GUI will load the data. This may take a moment for large files.
+The toolbar LEDs (DB / XML / EEG) light up as each source loads, and the
+Channels (QC) tab populates with one row per channel.
 
 !!! success "What you should see"
-    The waveform plot in the middle panel now displays EEG traces for the first event. You'll see multiple channels plotted with the detected event highlighted.
+    The Channels (QC) table fills with rows, each showing an outlier flag,
+    event count, density, and amplitude for the current event type.
 
-## Step 4: Load Sleep Stage Annotations (Optional)
+## Step 3: Read the QC Dashboard
 
-If you have sleep stage annotations, let's load them to see the hypnogram.
+The **Channels (QC)** tab is the landing surface. Each row is a channel, not
+an individual event — this is a QC triage view, not a per-event review list.
 
-1. Click **File** → **Open Annotation File...** in the menu bar
-2. Navigate to your annotation file (e.g., `subject001_annotations.xml`)
-3. Click **Open**
-
-The timeline at the top of the middle panel will now show colored bars representing sleep stages (Wake, N1, N2, N3, REM).
-
-!!! success "What you should see"
-    A colorful hypnogram appears above the event list, showing the sleep architecture throughout the recording.
-
-## Step 5: Navigate Through Events
-
-Let's explore the detected events.
-
-**Using the toolbar:**
-
-- Click **Next ▶** to move to the next event
-- Click **◀ Prev** to go back to the previous event
-
-**Using keyboard shortcuts:**
-
-- Press **→** (right arrow) for next event
-- Press **←** (left arrow) for previous event
-
-Notice how the waveform plot updates to show each event as you navigate.
+Use the left filter dock to switch event type (spindle / slow wave /
+K-complex / PAC) and to narrow by method or frequency band. Channels flagged
+as outliers (hard or soft, based on a robust z-score against the rest of the
+montage) sort to the top.
 
 !!! tip "What to observe"
-    As you navigate, watch how:
-    
-    - The selected row in the event table highlights
-    - The waveform plot updates to show the new event
-    - The event details appear in the right panel
+    Click a row to populate the right-hand detail dock with that channel's
+    topography position and worst events. Click a row in the global
+    worst-events list to jump straight to a channel.
 
-## Step 6: Review Your First Event
+## Step 4: Drill into a Channel's Epochs
 
-Now let's review an event. Look at the waveform plot and decide if the detected event is valid.
+1. Select a channel in the QC table
+2. Click **Drill into epochs ▸** (this switches you to the **2 · Epochs** tab)
 
-**To accept an event:**
-
-- Click **✓ Accept** in the toolbar, OR
-- Press **A** on your keyboard
-
-**To reject an event:**
-
-- Click **✗ Reject** in the toolbar, OR
-- Press **R** on your keyboard
-
-After you make a decision, the GUI automatically advances to the next event.
+The Epochs panel steps through 30-second windows for that channel, with a
+hypnogram strip and outlier markers. Use **P**/**N** to jump between outlier
+epochs, or the prev/next buttons to step one epoch at a time.
 
 !!! success "What you should see"
-    The event table updates to show your review decision (a checkmark or X appears in the review column), and the display moves to the next event.
+    The epoch strip highlights outlier windows. Stepping through lets you
+    confirm whether a flagged channel's events look like real detections or
+    artefact.
 
-## Step 7: Filter Events by Type
+## Step 5: Flag a Channel for Re-detection
 
-Let's focus on reviewing only one type of event.
+Once you've decided a channel needs re-running with different parameters
+(or dropped from analysis):
 
-1. Look at the **Event Type Filter** section in the right panel
-2. Uncheck event types you don't want to see (e.g., uncheck "slow_wave" to see only spindles)
-3. Click **Apply Filters**
+1. Select the channel in the Channels (QC) table
+2. Press **F** (or use **Edit → Flag selected channel for re-detect**)
 
-The event list will update to show only the selected event types.
+The channel is added to the re-detect queue shown in the status bar. Repeat
+for as many channels as needed, then use **Analysis → Build re-detect
+request…** to hand them off to a re-run.
 
-!!! tip "Efficient reviewing"
-    Filtering by event type helps you focus on one category at a time, making your review more consistent.
+## Step 6: Export a QC Report
 
-## Step 8: Adjust the Waveform Display
+When you're done triaging:
 
-Let's customize how the waveforms are displayed.
+1. **Export → Export QC report…**
+2. Choose a location and filename
 
-**Change the time window:**
-
-1. Find the **Window Duration** slider in the right panel
-2. Drag it to adjust how many seconds of data to display (10-60 seconds)
-3. The waveform plot updates immediately
-
-**Toggle filtering:**
-
-1. Find the **Filter Settings** section
-2. Check or uncheck **Enable Filter** to toggle bandpass filtering
-3. Adjust the **Low** and **High** frequency sliders if needed
-
-!!! note "Why adjust the display?"
-    - Longer windows show more context around the event
-    - Filtering can help visualize specific frequency components
-    - Different event types may benefit from different display settings
-
-## Step 9: Select Channels to Display
-
-Let's choose which EEG channels to visualize.
-
-1. Look at the **Channel Selector** panel on the left
-2. Check or uncheck channels to show/hide them
-3. The waveform plot updates to show only selected channels
-
-**Quick selection buttons:**
-
-- Click **All** to select all channels
-- Click **None** to deselect all channels
-- Click **Default** to select common channels (E112, E118, Cz)
-
-!!! tip "Channel selection strategy"
-    Start with a few key channels (like Cz, frontal, and occipital) to keep the display clean. Add more channels if you need to verify an event across the scalp.
-
-## Step 10: Review Multiple Events
-
-Now let's review several events in sequence. We'll practice the efficient workflow:
-
-1. Look at the waveform
-2. Make a decision (Accept with **A** or Reject with **R**)
-3. The GUI automatically moves to the next event
-4. Repeat
-
-Try to review at least 10 events to get comfortable with the rhythm.
-
-!!! success "Building momentum"
-    You should start to feel a natural flow: observe → decide → advance. This rhythm makes reviewing large datasets manageable.
-
-## Step 11: Jump to Unreviewed Events
-
-If you want to skip events you've already reviewed:
-
-1. Click **Next Unreviewed** in the right panel
-2. The GUI jumps to the next event that hasn't been reviewed yet
-
-This is helpful when you're resuming a review session or want to focus only on new events.
-
-## Step 12: Check Your Progress
-
-Let's see how much you've reviewed.
-
-Look at the **Review Statistics** section in the right panel. You'll see:
-
-- Total events in the current view
-- Number of events reviewed
-- Number accepted
-- Number rejected
-- Percentage complete
-
-!!! tip "Track your progress"
-    These statistics help you estimate how much time remains and maintain consistency in your review decisions.
-
-## Step 13: Export Your Results
-
-Finally, let's save your review decisions.
-
-1. Click **Export** → **Export Reviewed Events...** in the menu bar
-2. Choose a location and filename (e.g., `subject001_reviewed.csv`)
-3. Click **Save**
-
-The GUI exports a CSV file containing all events with your review decisions.
+This writes a Markdown summary of the per-channel QC table, flagged
+channels, and marked artefact ranges for the current event type.
 
 !!! success "What you've created"
-    A CSV file with columns for each event property plus your review decision and timestamp. You can open this in Excel, Python, or R for further analysis.
+    A Markdown report you can attach to a study log or share with a
+    collaborator, plus a re-detect queue ready to build into a scoped rerun.
 
 ## What You've Accomplished
 
-Congratulations! You've completed your first EEG event review session. You now know how to:
+Congratulations! You now know how to:
 
-✅ Launch the GUI and load your data files  
-✅ Navigate through detected events efficiently  
-✅ Accept or reject events using keyboard shortcuts  
-✅ Filter events by type and customize the display  
-✅ Select channels to visualize  
-✅ Track your progress and export results  
+✅ Launch the GUI and load your data files
+✅ Read the Channels (QC) dashboard and spot outlier channels
+✅ Drill into a channel's epochs to inspect individual windows
+✅ Flag a channel for re-detection with `F`
+✅ Export a QC report
 
 ## Next Steps
 
-Now that you're comfortable with the basics, you can:
-
-- **Review larger datasets** - Apply what you've learned to your full study data
-- **Customize your workflow** - Explore advanced filtering and display options
-- **Learn advanced techniques** - Check out the [How-to Guides](../how-to/review-eeg-events.md) for specific tasks
-- **Understand the architecture** - Read the [Explanation](../explanation/eeg-review-gui-architecture.md) to learn how the GUI works
-
-!!! tip "Practice makes perfect"
-    The more events you review, the faster and more consistent you'll become. Most reviewers develop a comfortable rhythm after reviewing 50-100 events.
+- **Solve specific QC tasks** — see the [How-to Guide](../how-to/review-eeg-events.md)
+- **Understand the design** — see the [Explanation](../explanation/eeg-review-gui-architecture.md)
+- **Upgrading from a pre-4.0 project** — the workflow above replaced the old
+  per-event review GUI; see
+  [How to Upgrade to turtlewave-hdEEG 4.0](../how-to/upgrade-to-4.0.md#step-5-adjust-to-the-review-gui-workflow-change)
+  for what changed and why.
