@@ -8,33 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [4.3.1] — 2026-08-31
 
 Re-running cycle detection at a different threshold used to leave events carrying
-the previous run's cycle numbers, because tagging only ever wrote rows that fell
-inside a new cycle span. Tagging now clears its scope first, so a re-run replaces
-the numbering instead of merging into it. An annotation file that cannot be scored
-is refused outright rather than quietly wiping the tags it was meant to rewrite.
-`examples/backfill_cycles.py` exposes the cycle thresholds and writes a hypnogram
-plot per run.
+the previous run's cycle numbers, and a re-run that found no cycles at all cleared
+the event tags while leaving the previous run's `sleep_cycles` rows and XML markers
+standing. All three stores are now replaced on every run, whether or not any cycles
+were found, so they always describe the same run. An annotation file that cannot be
+scored is refused outright rather than quietly wiping the tags it was meant to
+rewrite. `examples/backfill_cycles.py` exposes the cycle thresholds and writes a
+hypnogram plot per run.
 
 ### Added
 
 - `EPOCH_LENGTH`, `WAKE_THRESH_MIN`, `NREM_MIN_MIN` and `PLOT` CONFIG lines in `examples/backfill_cycles.py`, passed through to `finalize_cycles_and_durations`.
-- `backfill_cycles.py` checks `EPOCH_LENGTH` against the annotation's own epoch grid and skips the subject on a mismatch, since a wrong value rescales every minute column without raising.
+- `backfill_cycles.py` checks `EPOCH_LENGTH` against the annotation's own epoch grid and skips the subject on a mismatch.
 - `backfill_cycles.py` writes `{subject}_hypnogram_cycles_wake{W}_nrem{N}min.png` beside each database, named for the thresholds so a re-run at a new threshold does not overwrite the old plot.
 
 ### Changed
 
-- `ParalCycles.run` and `finalize_cycles_and_durations` raise `ValueError` on an empty or entirely unscored hypnogram instead of storing zero cycles and a full-artefact `stage_durations` row. A scored night that genuinely contains no cycles is still accepted.
+- `ParalCycles.run` and `finalize_cycles_and_durations` raise `ValueError` on an empty or entirely unscored hypnogram instead of storing zero cycles and a full-artefact `stage_durations` row.
+- `tag_events_with_cycles([])` clears every `events.cycle` tag in its scope instead of returning without touching anything, and still returns 0.
 - `ensure_cycles_populated` reports an unusable annotation file as bad input instead of advising a back-fill that would fail the same way.
 - `examples/export_cycle_events.py` and the sleep-cycle how-to record that a database holds only the most recently computed cycle definition and never says which threshold produced it.
 
 ### Fixed
 
-- `tag_events_with_cycles` clears `events.cycle` across its scope before re-tagging, in the same transaction, so a re-run at a new threshold no longer leaves events tagged with the old cycle numbers.
-- `tag_run_cycles` rolls back a failed tagging, so a partial clear cannot be committed by a later write on the same connection.
+- `tag_events_with_cycles` clears `events.cycle` across its scope before re-tagging, so a re-run at a new threshold no longer leaves events tagged with the old cycle numbers.
+- A re-run that detects no cycles now clears the `sleep_cycles` rows and the XML cycle markers as well, instead of emptying `events.cycle` and leaving those two describing the previous run.
+- `tag_run_cycles` clears its scope when the subject has no stored cycles, so a tag left by an earlier run no longer contradicts an empty `sleep_cycles`.
+- `tag_run_cycles` rolls back a failed tagging.
 
 ### Upgrading
 
-- Any database whose cycles were re-run at a changed threshold on 4.3.0 or earlier can hold `events.cycle` values from two different runs. Re-run `finalize_cycles_and_durations` for those subjects to rewrite the column.
+- Any database whose cycles were re-run on 4.3.0 or earlier can hold `sleep_cycles` rows, `events.cycle` tags and XML markers left by different runs. Re-run `finalize_cycles_and_durations` for those subjects to rewrite all three.
 
 ## [4.3.0] — 2026-08-16
 
