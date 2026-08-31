@@ -740,10 +740,20 @@ class ParalCycles:
                                run_id=None):
         """Assign a cycle number to each event in the ``events`` table.
 
-        Each event is tagged by testing its ``start_time`` against the cycle
-        spans. Events outside every cycle keep ``cycle=NULL``. The full cycle
-        span (NREM start .. next cycle start, or recording end) is used so
-        events in the inter-NREM segment are tagged too.
+        The ``cycle`` column is first cleared across the whole scope, then each
+        event is tagged by testing its ``start_time`` against the cycle spans;
+        both happen in one transaction. Clearing first is what makes a re-run
+        *replace* rather than merge: the per-cycle ``UPDATE``s only touch rows
+        that fall inside a new span, so without the clear an event tagged by a
+        previous run whose spans have since moved (a different ``wake_thresh``,
+        rescored epochs) would keep its old, now-wrong cycle number. Events
+        outside every cycle end up ``cycle=NULL``. The full cycle span (NREM
+        start .. next cycle start, or recording end) is used so events in the
+        inter-NREM segment are tagged too.
+
+        Passing an empty ``cycles`` list is therefore *not* a no-op: it clears
+        the scope, which is the right result when a re-run detects no cycles at
+        all and the previous run's tags would otherwise survive.
 
         Parameters
         ----------
@@ -775,16 +785,26 @@ class ParalCycles:
         Returns
         -------
         int
-            Number of event rows tagged.
+            Number of event rows tagged. Zero when ``cycles`` is empty, even
+            though rows may have been cleared in that call.
         """
-        if not cycles:
-            return 0
         own = conn is None
         if own:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
             scoped = run_id is not None
+            # Clear the scope before re-tagging, in the same transaction as the
+            # per-cycle updates below, so the column is never left holding a
+            # mix of this run's numbering and a previous run's. Restricted to
+            # rows that actually carry a tag, which costs nothing extra and
+            # makes rowcount an honest count of previously tagged rows.
+            clear_sql = 'UPDATE events SET cycle=NULL WHERE cycle IS NOT NULL'
+            clear_params = []
+            if scoped:
+                clear_sql += ' AND run_id = ?'
+                clear_params.append(str(run_id))
+            cleared = conn.execute(clear_sql, clear_params).rowcount
             total = 0
             for idx, cyc in enumerate(cycles):
                 lo = cyc['nrem_start_sec']
@@ -803,7 +823,8 @@ class ParalCycles:
                 total += cur.rowcount
             conn.commit()
             self.logger.info(
-                "Tagged %d event(s) with a cycle number%s.", total,
+                "Cleared %d previous cycle tag(s), then tagged %d event(s) "
+                "with a cycle number%s.", cleared, total,
                 f" (run_id={run_id})" if scoped else " (whole table)")
         finally:
             if own:
@@ -834,7 +855,9 @@ class ParalCycles:
             only the rows it wrote. Default ``None`` (tag every row).
         tag_events : bool, optional
             When False, cycles and stage durations are stored but
-            ``events.cycle`` is left alone. Used by
+            ``events.cycle`` is left alone. When True the column is rewritten
+            for the scope even if no cycles were detected -- tagging clears
+            before it writes, so a previous run's tags never survive. Used by
             :func:`turtlewave_hdEEG.dbwrite.ensure_cycles_populated`, which
             runs BEFORE a detection's channel loop -- there are no rows to tag
             yet, and tagging then would rewrite an earlier run's. Default
@@ -851,6 +874,16 @@ class ParalCycles:
             If ``db_path`` does not exist and no ``conn`` was supplied. This is
             a post-detection step; it annotates an existing database and never
             creates one.
+        ValueError
+            If ``self.annotations`` is None, or if its hypnogram is
+            unscorable: empty, or every epoch ``-1`` (an epoch grid with no
+            scoring saved -- ``get_hypnogram`` maps Undefined/Unknown/
+            Artefact/Movement to ``-1``). Either shape is a wrong or unscored
+            annotation file rather than a night without cycles, so it fails
+            loudly and writes nothing -- silently continuing would clear every
+            existing ``events.cycle`` tag, store a 100%-artefact
+            ``stage_durations`` row, and report success with zero cycles. A
+            scored night with no cycles (all Wake) is not refused.
         """
         if self.annotations is None:
             raise ValueError("annotations are required for cycle detection")
@@ -858,6 +891,34 @@ class ParalCycles:
         # Read the hypnogram once and reuse it for both cycle detection and
         # stage-duration accounting.
         hypnogram = self.annotations.get_hypnogram()
+        # Refuse an unscorable hypnogram rather than proceed. Two shapes mean
+        # "the wrong or an unscored annotation file", not "a night without
+        # cycles": no epochs at all, and epochs that are all -1. The second is
+        # the epoched-but-unscored case -- get_hypnogram maps Undefined,
+        # Unknown, Artefact and Movement (and anything unrecognised) to -1, so
+        # a file with an epoch grid and no scoring returns [-1] * n_epochs.
+        # Proceeding on either would clear every existing events.cycle tag
+        # (tagging clears before it writes) and, for the all -1 case, also
+        # store a stage_durations row reading 100% artefact, while reporting
+        # success with zero cycles. Raising leaves the database untouched and
+        # makes the caller's per-subject handler count it as a failure.
+        # A genuinely scored night that happens to contain no cycles -- all
+        # Wake, say -- contains 0s, passes this guard, and goes on to clear
+        # its stale tags, which is the correct outcome there.
+        if not hypnogram:
+            raise ValueError(
+                "the annotation file has an empty hypnogram, so no cycles or "
+                "stage durations can be computed; nothing was written and "
+                "any existing events.cycle tags were left alone. Check that "
+                "this is the right XML and that it has been scored.")
+        if all(stage == -1 for stage in hypnogram):
+            raise ValueError(
+                f"none of the {len(hypnogram)} epochs in the annotation file "
+                f"carries a sleep stage (every epoch reads as "
+                f"Undefined/Unknown/Artefact/Movement), so no cycles or stage "
+                f"durations can be computed; nothing was written and any "
+                f"existing events.cycle tags were left alone. Check that this "
+                f"is the right XML and that its scoring has been saved.")
 
         cycles = self.detect(
             method=method, epoch_length=epoch_length, wake_thresh=wake_thresh,
@@ -880,23 +941,23 @@ class ParalCycles:
                             f"Cycle-marker writing skipped: {e}")
                 self.store_cycles_to_database(cycles, db_path, subject=subject,
                                               method=method, conn=conn)
-                if tag_events:
-                    self.tag_events_with_cycles(cycles, db_path, conn=conn,
-                                                run_id=run_id)
             else:
                 self.logger.info(
                     "No cycles detected; writing stage durations only.")
 
-            # Stage durations are written regardless of the cycle count, so
-            # long as the hypnogram itself is non-empty.
-            if hypnogram:
-                stage_durations = compute_stage_durations(
-                    hypnogram, epoch_length=epoch_length)
-                self.store_stage_durations(
-                    stage_durations, db_path, subject=subject, conn=conn)
-            else:
-                self.logger.warning(
-                    "Empty hypnogram; no stage durations stored.")
+            if tag_events:
+                # Called even with no cycles: tagging clears the scope first,
+                # so this is also what removes tags left behind by a previous
+                # run whose thresholds did find cycles.
+                self.tag_events_with_cycles(cycles, db_path, conn=conn,
+                                            run_id=run_id)
+
+            # Stage durations are written regardless of the cycle count; an
+            # empty hypnogram was already refused above.
+            stage_durations = compute_stage_durations(
+                hypnogram, epoch_length=epoch_length)
+            self.store_stage_durations(
+                stage_durations, db_path, subject=subject, conn=conn)
         finally:
             if own:
                 conn.close()
@@ -1001,6 +1062,14 @@ def finalize_cycles_and_durations(
         cycle numbering with nothing recording which is which, and the mistake
         is a single misspelled argument. Pass ``tag_method=None`` if tagging
         nothing is what you meant.
+
+        Also propagated from :meth:`ParalCycles.run` when ``annotations``
+        yields an unscorable hypnogram -- empty, or every epoch ``-1`` (an
+        epoch grid whose scoring was never saved). Nothing is written and no
+        existing ``events.cycle`` tag is cleared, so a batch caller can count
+        the subject as failed and move on. A scored night with no cycles (all
+        Wake) is not refused: it stores its stage durations and clears its
+        stale tags.
 
     Notes
     -----

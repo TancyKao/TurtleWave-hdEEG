@@ -1833,6 +1833,21 @@ def ensure_cycles_populated(conn, annotations, subject, db_path=None,
             ", ".join(f"{m}={len(c)}" for m, c in cycles.items()) or 'none',
             tag_method)
         return cycles
+    except ValueError as e:
+        # A ValueError here is bad input rather than a transient failure --
+        # almost always an unusable annotation file (an empty or entirely
+        # unscored hypnogram). Back-filling re-runs the same call on the same
+        # inputs, so it would fail identically; telling the user to back-fill
+        # (as the generic handler below does) would just waste their time.
+        log.error(
+            "Could not store sleep cycles / stage durations for subject "
+            "'%s': %s. Detection results are unaffected, but back-filling "
+            "would fail the same way: fix the cause first -- usually the "
+            "annotation file, so check that this is the right XML for the "
+            "recording and that its sleep scoring has been saved -- and only "
+            "then re-run turtlewave_hdEEG.finalize_cycles_and_durations.",
+            subject, e, exc_info=True)
+        return None
     except Exception as e:
         log.error(
             "Could not store sleep cycles / stage durations for subject "
@@ -1905,6 +1920,16 @@ def tag_run_cycles(conn, subject, run_id=None, method='2022', logger=None):
         pc = ParalCycles(log_level=log.level or logging.INFO)
         return pc.tag_events_with_cycles(cycles, conn=conn, run_id=run_id)
     except Exception as e:
+        # Roll back first: tagging clears events.cycle across the scope before
+        # it re-tags, so a failure part-way leaves an uncommitted clear (and
+        # any partial re-tag) open on this connection. Without the rollback
+        # the next commit on this connection would persist it, and the message
+        # below -- "results are unaffected" -- would be false.
+        try:
+            conn.rollback()
+        except Exception as rb:
+            log.error("Rollback after the failed cycle tagging also failed: "
+                      "%s. events.cycle may be partially written.", rb)
         log.error(
             "Could not tag events with cycle numbers for subject '%s': %s. "
             "Detection results are unaffected; events.cycle stays NULL and "
