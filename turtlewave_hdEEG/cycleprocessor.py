@@ -493,26 +493,52 @@ class ParalCycles:
         return cycles
 
     def write_cycle_markers(self, cycles):
-        """Write cycle boundaries into the Wonambi annotation XML.
+        """Replace the cycle markers in the Wonambi annotation XML.
 
         Uses the underlying Wonambi ``clear_cycles`` / ``set_cycle_mrkr`` (via
         ``CustomAnnotations`` delegation). Markers must land exactly on existing
         epoch starts, so boundaries are taken from the epoch grid. Failures are
         logged and swallowed so DB persistence is never blocked by XML issues.
-        """
-        if not cycles:
-            return False
-        epoch_starts = self._epoch_starts()
-        if epoch_starts is None:
-            self.logger.warning(
-                "No epoch grid available; skipping XML cycle markers.")
-            return False
-        n = len(epoch_starts)
 
+        The clear always runs, including when ``cycles`` is empty: this is a
+        *replacement*, not an append. A re-run that finds no cycles (a raised
+        ``nrem_min``, an all-Wake night, rescored epochs) must leave the XML
+        agreeing with ``sleep_cycles`` and ``events.cycle``, and keeping the
+        previous run's markers would leave the annotation file describing
+        cycles that no longer exist anywhere else.
+
+        Parameters
+        ----------
+        cycles : list of dict
+            Detected cycles, as returned by :meth:`detect`. An empty list
+            clears the markers and writes none.
+
+        Returns
+        -------
+        bool
+            True when at least one cycle's markers were written. False when
+            ``cycles`` was empty (the markers were still cleared) or the epoch
+            grid needed to place them was unavailable.
+        """
+        # Clear before anything can bail out, so an empty cycle list -- or a
+        # missing epoch grid -- still leaves the XML free of the previous run's
+        # markers rather than silently keeping them.
         try:
             self.annotations.clear_cycles()
         except Exception as e:
             self.logger.warning(f"clear_cycles failed: {e}")
+
+        if not cycles:
+            self.logger.info(
+                "No cycles to mark; cleared any existing XML cycle markers.")
+            return False
+        epoch_starts = self._epoch_starts()
+        if epoch_starts is None:
+            self.logger.warning(
+                "No epoch grid available; XML cycle markers were cleared but "
+                "none were written.")
+            return False
+        n = len(epoch_starts)
 
         written = 0
         for cyc in cycles:
@@ -571,21 +597,32 @@ class ParalCycles:
 
     def store_cycles_to_database(self, cycles, db_path, subject=None,
                                  method=None, conn=None):
-        """Insert detected cycles into the ``sleep_cycles`` table.
+        """Replace this subject's rows in the ``sleep_cycles`` table.
 
-        Existing rows for the same ``(subject, method)`` are replaced so reruns
-        stay idempotent.
+        Existing rows for the same ``(subject, method)`` are deleted, then the
+        new cycles are inserted, so reruns stay idempotent.
+
+        The delete runs even when ``cycles`` is empty. That is what makes a
+        re-run finding no cycles (a raised ``nrem_min``, an all-Wake night,
+        rescored epochs) *replace* the previous run rather than leave its rows
+        behind: :meth:`tag_events_with_cycles` clears ``events.cycle`` for the
+        same case, so skipping the delete here would leave the table claiming
+        cycles that no event is tagged with and no XML marker records.
 
         Parameters
         ----------
         cycles : list of dict
-            Detected cycles, as returned by :meth:`detect`.
+            Detected cycles, as returned by :meth:`detect`. An empty list
+            deletes the subject's rows for ``method`` and inserts nothing.
         db_path : str
             Path to the ``neural_events.db`` SQLite database.
         subject : str, optional
             Subject identifier. Falls back to ``self.subject`` (then ``''``).
         method : str, optional
-            Cycle definition, used only when ``cycles`` is empty.
+            Cycle definition. Read from the cycles themselves when there are
+            any; when ``cycles`` is empty it is the only thing naming the rows
+            to delete, so passing ``None`` there deletes nothing and is warned
+            about.
         conn : sqlite3.Connection, optional
             An already-open connection **on ``db_path``** (not checked at
             runtime; it is a caller contract). When supplied, the caller owns
@@ -613,16 +650,28 @@ class ParalCycles:
         try:
             self._ensure_sleep_cycles_table(conn)
             method_vals = {c['method'] for c in cycles} or {method}
+            if None in method_vals:
+                # Only reachable with an empty cycles list and method=None:
+                # nothing names the rows to replace, so DELETE ... method=NULL
+                # matches nothing and the previous run's rows would survive.
+                self.logger.warning(
+                    "store_cycles_to_database was called with no cycles and "
+                    "no method for subject '%s', so no existing sleep_cycles "
+                    "rows could be identified for replacement and any "
+                    "previous run's rows were left in place. Pass method= to "
+                    "make the replacement complete.", subject)
+                method_vals = {m for m in method_vals if m is not None}
             # Delete every stored spelling of this recording's id, not just the
             # canonical one, or a row written under the bare folder name
             # survives and the insert adds a duplicate cycle.
             spellings = _subject_spellings(conn, 'sleep_cycles', subject,
                                            self.logger)
             placeholders = ",".join("?" * len(spellings))
+            deleted = 0
             for m in method_vals:
-                conn.execute(
+                deleted += conn.execute(
                     f'DELETE FROM sleep_cycles WHERE subject IN ({placeholders}) '
-                    f'AND method=?', (*spellings, m))
+                    f'AND method=?', (*spellings, m)).rowcount
             conn.executemany('''
                 INSERT INTO sleep_cycles
                     (subject, method, cycle_number, nrem_start, nrem_end,
@@ -637,9 +686,17 @@ class ParalCycles:
                  c['rem_dur_min'], c['cycle_dur_min'])
                 for c in cycles])
             conn.commit()
-            self.logger.info(
-                f"Stored {len(cycles)} cycle(s) for subject "
-                f"'{subject}' in {db_path}.")
+            if cycles:
+                self.logger.info(
+                    f"Stored {len(cycles)} cycle(s) for subject "
+                    f"'{subject}' in {db_path} (replacing {deleted} "
+                    f"previously stored row(s)).")
+            else:
+                self.logger.info(
+                    "No cycles to store for subject '%s' in %s; removed %d "
+                    "previously stored row(s) for method(s) %s so the table "
+                    "describes this run.", subject, db_path, deleted,
+                    sorted(str(m) for m in method_vals) or 'none')
         finally:
             if own:
                 conn.close()
@@ -738,7 +795,7 @@ class ParalCycles:
 
     def tag_events_with_cycles(self, cycles, db_path=None, conn=None,
                                run_id=None):
-        """Assign a cycle number to each event in the ``events`` table.
+        """Replace the ``cycle`` column of the ``events`` table in one scope.
 
         The ``cycle`` column is first cleared across the whole scope, then each
         event is tagged by testing its ``start_time`` against the cycle spans;
@@ -752,8 +809,12 @@ class ParalCycles:
         inter-NREM segment are tagged too.
 
         Passing an empty ``cycles`` list is therefore *not* a no-op: it clears
-        the scope, which is the right result when a re-run detects no cycles at
-        all and the previous run's tags would otherwise survive.
+        the scope (every ``cycle`` value in it becomes NULL) and tags nothing,
+        which is the right result when a re-run detects no cycles at all and
+        the previous run's tags would otherwise survive. The return value is
+        still an ``int`` -- 0, the number of rows *tagged* -- so a caller
+        cannot tell a clear from a no-op by the return; the cleared count is
+        logged at INFO.
 
         Parameters
         ----------
@@ -841,6 +902,14 @@ class ParalCycles:
         durations are always written (via :meth:`store_stage_durations`), even
         when no cycles are detected, since an all-wake or unscorable night still
         has stage durations.
+
+        Every store is a *replacement* and all of them run whether or not this
+        run detected any cycles: the ``sleep_cycles`` rows for
+        ``(subject, method)``, the XML cycle markers (when ``write_xml``) and
+        ``events.cycle`` (when ``tag_events``) are cleared before the new
+        values, if any, go in. A re-run that finds no cycles therefore leaves
+        all three empty and agreeing, instead of an emptied ``events.cycle``
+        beside a stale ``sleep_cycles`` table and stale XML markers.
 
         Parameters
         ----------
@@ -932,18 +1001,27 @@ class ParalCycles:
             _require_existing_db(db_path)
             conn = dbwrite.open_write_connection(db_path)
         try:
-            if cycles:
-                if write_xml:
-                    try:
-                        self.write_cycle_markers(cycles)
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Cycle-marker writing skipped: {e}")
-                self.store_cycles_to_database(cycles, db_path, subject=subject,
-                                              method=method, conn=conn)
-            else:
+            # Both writes are REPLACEMENTS and both run unconditionally, so
+            # sleep_cycles, events.cycle and the XML markers always describe
+            # the same run. Gating them on `cycles` was the defect fixed here:
+            # a re-run detecting none (nrem_min raised, an all-Wake night,
+            # rescored epochs) cleared every events.cycle tag while leaving the
+            # previous run's sleep_cycles rows and XML markers in place --
+            # three stores disagreeing, with nothing recording which was
+            # current.
+            if write_xml:
+                try:
+                    self.write_cycle_markers(cycles)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Cycle-marker writing skipped: {e}")
+            self.store_cycles_to_database(cycles, db_path, subject=subject,
+                                          method=method, conn=conn)
+            if not cycles:
                 self.logger.info(
-                    "No cycles detected; writing stage durations only.")
+                    "No cycles detected for method '%s'; any previously "
+                    "stored cycles were removed and stage durations were "
+                    "written.", method)
 
             if tag_events:
                 # Called even with no cycles: tagging clears the scope first,
@@ -978,8 +1056,11 @@ def finalize_cycles_and_durations(
     them in ``sleep_cycles`` (both definitions coexist, keyed by
     ``(subject, method)``), writes per-stage durations to ``stage_durations``,
     tags ``events.cycle`` and (optionally) writes cycle markers into the
-    annotation XML, and can emit the hypnogram/cycle PNG. Every write is
-    idempotent, so re-running is safe.
+    annotation XML, and can emit the hypnogram/cycle PNG. Every write is a
+    replacement of this subject's previous values rather than an addition to
+    them -- including when a run detects no cycles, which empties all three
+    stores instead of leaving the earlier run's rows and markers behind -- so
+    re-running is safe and always leaves the three agreeing.
 
     Because :meth:`ParalCycles.tag_events_with_cycles` rewrites *all* event rows
     by time window regardless of method ("last run wins"), ``methods`` is
