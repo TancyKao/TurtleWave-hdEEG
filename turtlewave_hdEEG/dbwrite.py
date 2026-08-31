@@ -1833,6 +1833,21 @@ def ensure_cycles_populated(conn, annotations, subject, db_path=None,
             ", ".join(f"{m}={len(c)}" for m, c in cycles.items()) or 'none',
             tag_method)
         return cycles
+    except ValueError as e:
+        # A ValueError here is bad input rather than a transient failure --
+        # almost always an unusable annotation file (an empty or entirely
+        # unscored hypnogram). Back-filling re-runs the same call on the same
+        # inputs, so it would fail identically; telling the user to back-fill
+        # (as the generic handler below does) would just waste their time.
+        log.error(
+            "Could not store sleep cycles / stage durations for subject "
+            "'%s': %s. Detection results are unaffected, but back-filling "
+            "would fail the same way: fix the cause first -- usually the "
+            "annotation file, so check that this is the right XML for the "
+            "recording and that its sleep scoring has been saved -- and only "
+            "then re-run turtlewave_hdEEG.finalize_cycles_and_durations.",
+            subject, e, exc_info=True)
+        return None
     except Exception as e:
         log.error(
             "Could not store sleep cycles / stage durations for subject "
@@ -1852,6 +1867,13 @@ def tag_run_cycles(conn, subject, run_id=None, method='2022', logger=None):
     Scoped to ``run_id`` by default so a detection annotates the rows it just
     wrote and leaves every other run's ``cycle`` alone.
 
+    When ``sleep_cycles`` holds nothing for this subject and method, the scope
+    is *cleared* rather than left alone: an empty table is the stored answer
+    "this recording has no cycles", and a surviving tag from an earlier run
+    would contradict it. This mirrors
+    :meth:`~turtlewave_hdEEG.cycleprocessor.ParalCycles.tag_events_with_cycles`
+    being a replacement, not an append.
+
     Parameters
     ----------
     conn : sqlite3.Connection
@@ -1870,41 +1892,57 @@ def tag_run_cycles(conn, subject, run_id=None, method='2022', logger=None):
     Returns
     -------
     int
-        Number of event rows tagged (0 when no cycles are stored, or on
-        failure -- which is logged, never raised, so a completed detection is
-        never lost to a tagging problem).
+        Number of event rows tagged. 0 when no cycles are stored -- in which
+        case the scope was cleared, not skipped -- and 0 on failure, which is
+        logged, never raised, so a completed detection is never lost to a
+        tagging problem.
     """
     log = logger if logger is not None else logging.getLogger(__name__)
     try:
         from .utils import normalize_subject
         from .cycleprocessor import ParalCycles
 
+        pc = ParalCycles(log_level=log.level or logging.INFO)
         canonical = normalize_subject(str(subject))
         spellings = [str(r[0]) for r in conn.execute(
             "SELECT DISTINCT subject FROM sleep_cycles "
             "WHERE subject IS NOT NULL AND subject != ''")
             if normalize_subject(str(r[0])) == canonical]
-        if not spellings:
-            log.warning(
-                "No stored sleep cycles for subject '%s', so events.cycle was "
-                "left NULL for this run.", subject)
-            return 0
-        placeholders = ",".join("?" * len(spellings))
-        rows = conn.execute(
-            f"SELECT cycle_number, nrem_start, rem_end FROM sleep_cycles "
-            f"WHERE subject IN ({placeholders}) AND method = ? "
-            f"ORDER BY cycle_number", (*spellings, str(method))).fetchall()
+        rows = []
+        if spellings:
+            placeholders = ",".join("?" * len(spellings))
+            rows = conn.execute(
+                f"SELECT cycle_number, nrem_start, rem_end FROM sleep_cycles "
+                f"WHERE subject IN ({placeholders}) AND method = ? "
+                f"ORDER BY cycle_number", (*spellings, str(method))).fetchall()
         if not rows:
+            # Clear rather than skip: with no stored cycles the stored answer
+            # is "no cycles", and a tag surviving from an earlier run would
+            # contradict sleep_cycles. Clearing is a no-op on a fresh run's
+            # own rows (they are inserted with cycle NULL); it matters on a
+            # re-run and on a whole-table backfill.
             log.warning(
                 "No '%s' sleep cycles stored for subject '%s', so "
-                "events.cycle was left NULL for this run.", method, subject)
+                "events.cycle was cleared to NULL for this scope (%s) instead "
+                "of being tagged.", method, subject,
+                f"run_id={run_id}" if run_id is not None else "whole table")
+            pc.tag_events_with_cycles([], conn=conn, run_id=run_id)
             return 0
         # Only the three fields tag_events_with_cycles reads.
         cycles = [{'cycle_number': r[0], 'nrem_start_sec': r[1],
                    'rem_end_sec': r[2]} for r in rows]
-        pc = ParalCycles(log_level=log.level or logging.INFO)
         return pc.tag_events_with_cycles(cycles, conn=conn, run_id=run_id)
     except Exception as e:
+        # Roll back first: tagging clears events.cycle across the scope before
+        # it re-tags, so a failure part-way leaves an uncommitted clear (and
+        # any partial re-tag) open on this connection. Without the rollback
+        # the next commit on this connection would persist it, and the message
+        # below -- "results are unaffected" -- would be false.
+        try:
+            conn.rollback()
+        except Exception as rb:
+            log.error("Rollback after the failed cycle tagging also failed: "
+                      "%s. events.cycle may be partially written.", rb)
         log.error(
             "Could not tag events with cycle numbers for subject '%s': %s. "
             "Detection results are unaffected; events.cycle stays NULL and "

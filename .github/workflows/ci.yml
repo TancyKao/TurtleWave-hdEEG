@@ -76,6 +76,10 @@ jobs:
         run: |
           python tests/test_cycle_connection_reuse.py
 
+      - name: Run cycle re-run regression tests
+        run: |
+          python tests/test_cycle_rerun.py
+
       - name: Run database scope-guard tests
         run: |
           python tests/test_db_scope_guards.py

@@ -46,6 +46,13 @@ Point either ``DB_PATH`` at a single ``neural_events.db`` **or** ``ROOT`` at a
 directory of subject folders (``ROOT/<subj>/wonambi/neural_events.db``); when
 ``ROOT`` is used, subjects are concatenated into the same CSVs with a ``subject``
 column. If both are set, ``DB_PATH`` wins.
+
+A database stores only the most recently computed cycle definition -- re-running
+``backfill_cycles.py`` with a different wake threshold overwrites the previous
+``sleep_cycles`` rows and ``events.cycle`` tags, and nothing in the database
+records which threshold was used. So when you are exporting more than one
+wake-threshold variant, point ``OUTPUT_DIR`` at a folder named for that variant
+(e.g. ``cycle_event_exports_wake15``) and export before re-running the backfill.
 """
 
 import csv

@@ -168,6 +168,40 @@ python examples/backfill_cycles.py
 Edit its `ROOT` (and optional `SUBJECTS` allowlist) constants at the top of
 the file before running.
 
+Its CONFIG block also exposes two thresholds, in minutes, plus the epoch
+length used to convert them for `detect_cycles`: `WAKE_THRESH_MIN` (minutes
+of Wake absorbed into a surrounding NREM period; library default 5 min, i.e.
+`wake_thresh=10` epochs at 30 s — a Wake bout **up to and including** this
+many minutes is absorbed), `NREM_MIN_MIN` (minimum length of an NREM period
+to count at all; library default 15 min, i.e. `nrem_min=30` epochs — an
+NREM run must be **longer than** this many minutes to survive; a run of
+exactly `NREM_MIN_MIN` is dropped), and `EPOCH_LENGTH` (the scoring's epoch
+length in seconds, used to convert both of the above from minutes to epochs
+before calling `finalize_cycles_and_durations`).
+
+!!! warning
+    `EPOCH_LENGTH` is a property of the sleep scoring, not a tunable
+    parameter — it must match the epoch length the hypnogram was actually
+    scored at (30 s for standard AASM scoring). Setting it to the wrong
+    value silently rescales every minute-based threshold and duration in
+    the run, with no error to flag the mismatch.
+
+!!! note
+    Re-running with different `WAKE_THRESH_MIN` / `NREM_MIN_MIN` values
+    replaces the subject's existing `sleep_cycles` rows, `events.cycle`
+    tags, and XML cycle markers outright — the database does not record
+    which threshold produced them, so name `export_cycle_events.py` output
+    folders after the threshold you used if you need to keep runs
+    distinguishable. A re-run whose hypnogram now yields no cycles at all
+    still clears every event's `events.cycle` tag, since none of them fall
+    inside any cycle; an empty or unscored hypnogram fails loudly instead
+    of writing that silently.
+
+`rem_min` (the minimum REM run, in epochs, that closes a `'1979'` cycle;
+library default 10 epochs) is not exposed by `backfill_cycles.py`'s CONFIG
+block and always runs at the library default — the script has no equivalent
+`REM_MIN_MIN` constant.
+
 !!! note
     `finalize_cycles_and_durations` (and `ParalCycles.run`) are strictly
     post-detection: they annotate an existing `neural_events.db` and never
@@ -210,6 +244,12 @@ out_png = os.path.join(root_dir, "wonambi",
                        f"{subject}_hypnogram_cycles_2022_vs_1979.png")
 plot_from_annotations(annot, cycles_by_method, out_png, subject=subject)
 ```
+
+`examples/backfill_cycles.py` produces the same plot for every subject it
+processes; `PLOT = True` in its CONFIG block is the default, and `PLOT = False`
+turns it off. It passes its own `plot_path`, named for the wake and NREM
+thresholds rather than for the methods, so each threshold pair keeps its own
+PNG.
 
 ## Lower-level building blocks
 
