@@ -60,6 +60,10 @@ jobs:
         run: |
           python tests/test_frontend_stage_tokens.py
 
+      - name: Run reject-types GUI acceptance tests (offscreen)
+        run: |
+          python tests/test_reject_types_gui.py
+
       - name: Run slow-wave amplitude-floor tests
         run: |
           python tests/test_sw_amplitude_floor.py
@@ -67,6 +71,10 @@ jobs:
       - name: Run annotation I/O tests
         run: |
           python tests/test_annotation_io.py
+
+      - name: Run annotation event-import tests
+        run: |
+          python tests/test_annotation_events.py
 
       - name: Run SQLite journal-mode tests
         run: |
