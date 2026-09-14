@@ -2256,6 +2256,174 @@ def test_pac_twin_delete_is_scoped():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _pac_coupled_recording(tmp, n_events=50, s_freq=128.0, seed=0):
+    """Write an EDF carrying phase-amplitude-coupled slow waves, plus its events.
+
+    Each event is one slow oscillation of jittered period (0.85-1.6 s, i.e.
+    0.6-1.2 Hz) with a 13.5 Hz burst whose envelope follows the cosine of the
+    slow-wave phase, so sigma amplitude peaks at the slow wave's positive
+    peak. The jitter matters: with every event the same length the
+    concatenated signal is strictly periodic and the time-lag surrogates
+    (``idpac[1] = 3``) reproduce the coupling, driving the z-score to zero.
+
+    Parameters
+    ----------
+    tmp : str
+        Directory to write the EDF and the events database into.
+    n_events : int, optional
+        Number of coupled slow waves. Default ``50`` -- exactly one surrogate
+        block, so no incomplete block is padded by resampling (that padding
+        draws from an unseeded RNG). Default ``50``.
+    s_freq : float, optional
+        Sampling frequency in Hz. Default ``128.0``.
+    seed : int, optional
+        Seed for the noise, the event periods and the inter-event gaps.
+        Default ``0``.
+
+    Returns
+    -------
+    tuple
+        ``(dataset, db_path)`` -- a ``wonambi.Dataset`` over the written EDF
+        and the path to a SQLite database whose ``events`` table holds one
+        ``slow_wave`` row per event on channel ``Cz``.
+    """
+    import uuid as _uuid
+    from wonambi import Dataset
+    from wonambi.ioeeg import write_edf
+    from wonambi.utils.simulate import create_data
+
+    rng = np.random.RandomState(seed)
+    events = []
+    onset = 5.0
+    for _ in range(n_events):
+        period = rng.uniform(0.85, 1.6)
+        events.append((onset, period))
+        onset += period + 2.0 + rng.uniform(0, 3.0)
+
+    duration = onset + 10.0
+    n_samples = int(duration * s_freq)
+    t = np.arange(n_samples) / s_freq
+    sig = rng.randn(n_samples) * 4.0
+    for start, period in events:
+        window = (t >= start - 0.5) & (t < start + period + 0.5)
+        tt = t[window] - start
+        sw_phase = 2 * np.pi * tt / period - np.pi / 2
+        slow = 60.0 * np.sin(sw_phase)
+        envelope = 12.0 * (1 + np.cos(sw_phase)) / 2
+        sigma = envelope * np.sin(2 * np.pi * 13.5 * tt)
+        sig[window] += (slow + sigma) * np.hanning(window.sum())
+
+    data = create_data(datatype='ChanTime', n_trial=1, s_freq=s_freq,
+                       chan_name=['Cz'], time=(0, duration))
+    n_time = len(data.axis['time'][0])
+    data.data[0] = np.asarray(sig[:n_time], dtype='f')[None, :]
+    edf = os.path.join(tmp, 'sub-PAC.edf')
+    write_edf(data, edf)
+
+    db_path = os.path.join(tmp, 'neural_events.db')
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+        CREATE TABLE events (
+            uuid TEXT PRIMARY KEY, event_type TEXT, channel TEXT,
+            start_time REAL, end_time REAL, duration REAL, stage TEXT,
+            method TEXT, freq_lower REAL, freq_upper REAL)""")
+        for start, period in events:
+            conn.execute(
+                "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (str(_uuid.uuid4()), 'slow_wave', 'Cz', start, start + period,
+                 period, 'NREM2', 'Massimini2004', 0.1, 4.0))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return Dataset(edf), db_path
+
+
+def test_pac_mi_raw_is_the_unnormalised_modulation_index():
+    """``mi_raw`` must hold the raw Tort MI, not a second copy of ``mi_norm``.
+
+    ``pac.fit`` RETURNS the surrogate-normalised estimate (a z-score under the
+    default ``idpac=(2, 3, 4)``) and keeps the unnormalised one in
+    ``pac.pac``. Both stored columns used to be the returned value, so every
+    ``pac_coupling.mi_raw`` written before 4.4 was a z-score filed under a
+    raw-MI name -- silently, since a z-score is a plausible-looking number.
+    The two scales are pinned here: the raw MI is a Kullback-Leibler
+    divergence over ``log(nbins)``, bounded by 1; the z-score is unbounded and
+    well above 2 on strongly coupled data.
+    """
+    print("\n13b. Testing that PAC mi_raw is the unnormalised modulation "
+          "index:")
+
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_pacmi_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dataset, db_path = _pac_coupled_recording(tmp)
+
+            pac = ParalPAC(dataset=dataset, rootpath=tmp,
+                           log_level=logging.CRITICAL)
+
+            def run(idpac):
+                pac.analyze_pac(
+                    chan=['Cz'], stage=['NREM2'], idpac=idpac,
+                    phase_freq=(0.5, 1.25), amp_freq=(11, 16),
+                    use_detected_events=True, event_type='slow_wave',
+                    event_opts={'buffer': 1.0, 'sw_method': 'Massimini2004'},
+                    db_path=db_path, out_dir=os.path.join(tmp, 'pac_out'),
+                    write_db=False, write_csv=True)
+                entry = pac.tracking['event_pac']['Cz']['0.5-1.25Hz_11-16Hz']
+                csv = pd.read_csv(entry['outputfile'])
+                return entry, csv
+
+            z_entry, z_csv = run((2, 3, 4))
+            raw, norm = z_entry['mi_raw'], z_entry['mi_norm']
+            print(f"[info] idpac=(2,3,4): mi_raw={raw:.6f}, mi_norm={norm:.4f} "
+                  f"over {z_entry['n_segments']} coupled slow waves")
+
+            assert raw > 0, f"mi_raw={raw} is not a positive modulation index"
+            assert raw < 1, (f"mi_raw={raw} exceeds the Tort MI bound of 1; it "
+                             f"is not on the raw scale")
+            assert norm > 2, (f"mi_norm={norm} is not a z-score above 2 on "
+                              f"strongly coupled data; the fixture is too weak "
+                              f"to tell the two columns apart")
+            assert raw != norm, ("mi_raw is still a copy of mi_norm")
+            print(f"[ok] mi_raw is on the Tort scale (0 < {raw:.6f} < 1) and "
+                  f"mi_norm is a z-score ({norm:.4f} > 2)")
+
+            assert np.isclose(z_csv['mi_raw'][0], raw), (
+                f"CSV mi_raw={z_csv['mi_raw'][0]} != tracking mi_raw={raw}")
+            assert np.isclose(z_csv['mi_norm'][0], norm), (
+                f"CSV mi_norm={z_csv['mi_norm'][0]} != tracking mi_norm={norm}")
+            print("[ok] the per-channel CSV carries the same two values as the "
+                  "in-memory result")
+
+            # idpac[2] = 0: no normalisation, so the two are legitimately
+            # equal -- and equal to the raw value of the z-scored run above,
+            # which is what pins mi_raw as the UNNORMALISED estimate rather
+            # than merely a different number.
+            plain_entry, plain_csv = run((2, 3, 0))
+            p_raw, p_norm = plain_entry['mi_raw'], plain_entry['mi_norm']
+            print(f"[info] idpac=(2,3,0): mi_raw={p_raw:.6f}, "
+                  f"mi_norm={p_norm:.6f}")
+            assert p_raw == p_norm, (
+                f"with idpac[2]=0 nothing is normalised, so mi_raw={p_raw} and "
+                f"mi_norm={p_norm} must be identical")
+            assert np.isclose(p_raw, raw, rtol=1e-9), (
+                f"the unnormalised run gives {p_raw} but the z-scored run "
+                f"reports mi_raw={raw}; mi_raw is not the unnormalised "
+                f"estimate of the same data")
+            assert np.isclose(plain_csv['mi_raw'][0], p_raw)
+            print(f"[ok] idpac=(2,3,0): mi_raw == mi_norm == {p_raw:.6f}, "
+                  f"the same value the z-scored run reports as mi_raw")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _synthetic_recording(tmp, stages, s_freq=128.0, seed=0):
     """Write a scored synthetic EDF and open it as a (Dataset, Annotations).
 
@@ -5090,6 +5258,7 @@ if __name__ == "__main__":
     test_density_multi_method_run()
     test_cycle_subject_spelling_delete()
     test_pac_twin_delete_is_scoped()
+    test_pac_mi_raw_is_the_unnormalised_modulation_index()
     test_stage_token_vocabulary()
     test_detectors_write_joint_stage_token()
     test_mixed_stage_format_database_reads_back()

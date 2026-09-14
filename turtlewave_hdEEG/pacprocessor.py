@@ -306,7 +306,33 @@ class ParalPAC:
         Returns
         -------
         dict
-            Dictionary containing PAC results
+            Dictionary containing PAC results, keyed by channel and then by
+            the ``'<pha_lo>-<pha_hi>Hz_<amp_lo>-<amp_hi>Hz'`` band pair. The
+            same values are written to ``pac_coupling`` and to the
+            per-channel ``*_pac_parameters.csv``. The two coupling-strength
+            columns are different quantities on different scales:
+
+            ``mi_raw``
+                The UNNORMALISED coupling estimate, averaged over the
+                surrogate blocks. With the default ``idpac[0] = 2`` this is
+                the Tort (2010) modulation index: the Kullback-Leibler
+                divergence of the phase-binned mean amplitude from a uniform
+                distribution, divided by ``log(nbins)``. It is dimensionless,
+                non-negative, and in practice far below its theoretical
+                maximum of 1 (order 1e-3 to 1e-1 on real sleep data), so it
+                is comparable across channels and subjects only when the
+                number and length of the segments are comparable.
+            ``mi_norm``
+                The SAME estimate normalised against the surrogate
+                distribution, as selected by ``idpac[2]`` -- a z-score under
+                the default ``idpac[2] = 4``. It is in units of surrogate
+                standard deviations, is signed (a value at or below the
+                surrogate mean is zero or negative), and is the column to use
+                for comparisons across channels or subjects. When
+                ``idpac[2] == 0`` no normalisation is applied and ``mi_norm``
+                is legitimately equal to ``mi_raw``.
+
+            Before 4.4 both columns held ``mi_norm``.
 
         Raises
         ------
@@ -955,7 +981,13 @@ class ParalPAC:
                         longamp[-1, rem+pad] = longamp[-1, ran]
                 
                 # 9. Calculate Coupling Strength
+                # `mi` holds what pac.fit RETURNS -- the surrogate-normalised
+                # estimate when idpac[2] != 0 -- and `mi_raw_blocks` the
+                # unnormalised estimate of the same block. They are two
+                # different quantities on two different scales; see the
+                # comment at the fit call below.
                 mi = np.zeros((longamp.shape[0], 1))
+                mi_raw_blocks = np.zeros((longamp.shape[0], 1))
                 mi_pv = np.zeros((longamp.shape[0], 1))
                 
                 for row in range(longamp.shape[0]):
@@ -970,6 +1002,18 @@ class ParalPAC:
                     amp_data = np.reshape(amp_data, (1, 1, len(amp_data)))
                     
                     mi[row] = pac.fit(pha_data, amp_data, n_perm=400, random_state=5, verbose=False)[0][0]
+
+                    # tensorpac's `fit` stores the UNNORMALISED estimate in
+                    # `pac.pac` (a copy, taken before the surrogates are
+                    # computed) and then normalises the array it returns in
+                    # place. So `pac.pac` read here, right after the call, is
+                    # this block's raw modulation index; read after the loop
+                    # it would hold only the last block. Shape is
+                    # (n_amp, n_pha, n_epochs) -- 1 x 1 x 1 in this
+                    # configuration -- so flatten and take the single value.
+                    raw_block = np.ravel(np.asarray(pac.pac, dtype=float))
+                    mi_raw_blocks[row] = (float(raw_block[0]) if raw_block.size
+                                          else np.nan)
                     mi_pv[row] = pac.infer_pvalues(p=0.95, mcp='fdr')[0][0]
                 
                 # 10. Calculate preferred phase
@@ -1032,12 +1076,13 @@ class ParalPAC:
                 np.save(amp_file, ab)
                 
                 # Save CFC metrics to dataframe.
-                # NOTE: `pac.pac` only holds the LAST block from the loop above,
-                # so average the per-block values in `mi` instead (mi_raw used to
-                # report just the final block). With idpac normalization enabled,
-                # mi_raw and mi_norm are now the same quantity.
+                # Both columns are the mean over the surrogate blocks:
+                # `mi_raw` averages the unnormalised per-block estimates
+                # (Tort MI when idpac[0] == 2), `mi_norm` the normalised ones
+                # that pac.fit returned. With idpac[2] == 0 no normalisation
+                # is applied and the two are legitimately identical.
                 d = pd.DataFrame([
-                    np.mean(mi),
+                    np.mean(mi_raw_blocks),
                     np.mean(mi),
                     np.median(mi_pv), 
                     theta, 
@@ -1073,7 +1118,7 @@ class ParalPAC:
                 # below uses if the database write fails, and `csv_written`
                 # says whether it exists yet.
                 chan_results = {
-                    'mi_raw': float(np.mean(mi)),
+                    'mi_raw': float(np.mean(mi_raw_blocks)),
                     'mi_norm': float(np.mean(mi)),
                     'pval': float(np.median(mi_pv)),
                     'preferred_phase_rad': float(theta),

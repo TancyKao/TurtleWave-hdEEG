@@ -55,10 +55,11 @@ Annotation import also changes independently of that default: on an annotation f
 - Opening a 4.3 database under this release aborted at connection time with a `v_event_density` view error.
 - `examples/rerun_detection.py` used the CLI default reject set instead of the original run's recorded set, so re-detected channels could be searched over different time than the untouched channels.
 - A mixed-method spindle run with `duration` unset recorded only the first method's duration bound; the scalar is now recorded only when every method agrees, and the per-method map is always recorded.
+- `pac_coupling.mi_raw` and the per-channel CSV reported the surrogate-normalised modulation index under both names; `mi_raw` now holds the unnormalised Tort MI.
 
 ### Upgrading
 
-- PAC rows written before this release were computed without artefact or arousal rejection; re-run PAC rather than pooling them with new rows.
+- PAC rows written before this release were computed without artefact or arousal rejection, and their `mi_raw` values are z-scores rather than raw modulation indices; re-run PAC rather than pooling them with new rows.
 - Spindle, slow-wave and K-complex densities written before this release used `Artefact,Arousal` only. Existing `analysed_time` rows are migrated to that key on first open, and a re-run under the new default adds a row instead of replacing them.
 - Densities computed from annotation files re-imported under this release will not match archived densities computed under 4.3, even at the same `reject_types` — the duration-flooring fix changes how much time each `Artefact`/`Arousal`/`Resp`/`Move`/`Snore` annotation actually masks. Re-import and re-run rather than comparing old and new numbers directly.
 - Re-detecting an existing scope after upgrading applies the new default reject set (`Artefact,Arousal,Move`) unless you pass `reject_types=` yourself; pass `replace_channels=<the channels you're re-detecting>` to clear the stale event rows first. That leaves the old reject set's `analysed_time` denominator row in place, so pass `reject_types=` when reading density back.

@@ -284,6 +284,16 @@ pac <- dbGetQuery(con, "
 ", params = list("sub-001", "Staresina2015_paired_Moelle2011"))
 ```
 
+`pac_coupling` holds two coupling-strength columns and they are not
+interchangeable. `mi_raw` is the unnormalised modulation index (Tort 2010 under
+the default `idpac=(2, 3, 4)`): a Kullback–Leibler divergence of the
+phase-binned amplitude from uniform, so it is non-negative and bounded by 1.
+`mi_norm` is that same estimate scored against the surrogate distribution — a
+z-score under the default settings, so it is signed and can be negative when
+coupling sits at or below chance. Use `mi_norm` to compare channels or
+subjects, and note that rows written before 4.4 carry a z-score in `mi_raw`
+too.
+
 `pac_coupling` does not store the per-event modulogram matrix — that's in the
 sibling `*_mean_amps.npy` file next to wherever PAC's `out_dir` pointed
 (always written, regardless of `write_csv`); read it with `numpy.load` in

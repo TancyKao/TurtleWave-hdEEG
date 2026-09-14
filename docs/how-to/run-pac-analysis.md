@@ -186,6 +186,13 @@ result = pac_processor.analyze_pac(
 )
 ```
 
+Both the `pac_coupling` row and the per-channel CSV carry two
+coupling-strength columns: `mi_raw`, the unnormalised modulation index (Tort
+2010 under the default `idpac=(2, 3, 4)`, non-negative and bounded by 1), and
+`mi_norm`, the same estimate normalised against the surrogates — a z-score
+under the default settings, signed, and the one to compare across channels or
+subjects. Before 4.4 both columns held the z-score.
+
 `export_pac_parameters_to_csv` then builds **one summary CSV** across
 channels — it globs for those per-channel `*_pac_parameters.csv` files under
 `out_dir/<method_dir>/<stage_str>/` and aggregates them (falling back to the
