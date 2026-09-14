@@ -49,10 +49,36 @@ Two NREM-REM cycle definitions are supported via `method`:
   NREM period plus the inter-NREM (REM) segment that follows it. Short
   awakenings are absorbed into NREM and too-short NREM runs are dropped.
   Always yields cycles even when REM scoring is sparse.
-- **`'1979'`** — Feinberg/Floyd-Feinberg. As above, but a cycle only closes
-  when a qualifying REM period follows the NREM block (the first cycle needs
-  REM of at least one epoch, later cycles at least `rem_min` epochs). NREM
-  periods not followed by qualifying REM are merged into the next cycle.
+- **`'1979'`** — REM-closed. Same NREM periods and segments as `'2022'`, but
+  a cycle only closes when the segment after an NREM period contains a
+  contiguous REM run of at least `rem_min` epochs (the first cycle needs one
+  epoch). The REM run may sit anywhere in the segment; it need not be adjacent
+  to the NREM period. NREM periods that are not followed by a qualifying REM
+  run are merged forward into the next cycle, so that cycle's NREM span
+  includes the intervening wake and REM; a trailing unpaired NREM period
+  becomes the final cycle. The name is historical: this is **not** the
+  Feinberg & Floyd (1979) definition — see the comparison below.
+
+### How `'1979'` differs from Feinberg & Floyd
+
+The Feinberg-style column is the rule set used by the MATLAB
+`cal_SleepCycle_Feinberg_method3.m` in the PRJ-10 sleep-cycle project
+(wake runs of up to 5 min absorbed, NREM period longer than 15 min, REM
+period of at least 5 min).
+
+| Rule | `'1979'` | Feinberg-style (PRJ-10 Trad Method 3) |
+|---|---|---|
+| Unscored / artefact epochs | recoded as Wake, absorbable | neither wake nor sleep, always break NREM |
+| REM must start right after the NREM period | not required | required |
+| REM period | whole inter-NREM segment | the contiguous REM run only |
+| Absorbed wake trimmed from NREM period edges | yes | no |
+| NREM period with no qualifying REM | merged forward into the next cycle | dropped |
+| Trailing NREM period with no REM | becomes the final cycle | dropped |
+
+Only the `rem_min` threshold and the first-cycle exemption come from Feinberg.
+`'2022'` is the same as the PRJ-10 "Mod method" apart from the unscored-epoch
+handling, and apart from an NREM period that ends on the last epoch of the
+recording, which `'2022'` keeps as a cycle with zero REM duration.
 
 By default `finalize_cycles_and_durations` detects and stores **both**
 definitions side by side in `sleep_cycles` (keyed by `(subject, method)`), but
@@ -276,10 +302,10 @@ If `cycles_by_method[method]` comes back empty:
 - **Check `nrem_min`**: NREM runs shorter than `nrem_min` epochs (default 30,
   i.e. 15 minutes at 30 s epochs) are dropped as too short to count as an
   NREM period.
-- **Under `'1979'` only**: A trailing NREM period with no qualifying REM after
-  it still becomes a final cycle, so an empty result under `'1979'` but not
-  `'2022'` usually means the NREM/REM structure itself doesn't meet the
-  stricter 1979 rule — inspect the hypnogram directly.
+- **Under `'1979'`**: an empty result here always coincides with an empty
+  `'2022'` result, because a trailing NREM period with no qualifying REM still
+  becomes the final cycle. `'1979'` can only return *fewer* cycles than
+  `'2022'` (by merging), never zero when `'2022'` found some.
 
 ### `ValueError: tag_method` is not one of `methods`
 

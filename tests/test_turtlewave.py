@@ -4031,6 +4031,253 @@ def test_migration_refuses_a_stage_token_outside_the_vocabulary():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _synthetic_spindle_train(s_freq=256.0, minutes=3.0, ptp_uv=30.0,
+                             bg_uv=25.0, every_s=10.0, seed=1):
+    """Build a 1/f background with Hann-windowed 13 Hz spindles injected.
+
+    Parameters
+    ----------
+    s_freq : float
+        Sampling frequency in Hz.
+    minutes : float
+        Length of the signal in minutes.
+    ptp_uv : float
+        Peak-to-peak amplitude of each injected burst, in microvolts.
+    bg_uv : float
+        Standard deviation of the 1/f background, in microvolts.
+    every_s : float
+        Mean interval between injected bursts, in seconds.
+    seed : int
+        Seed for the background noise, burst durations and jitter.
+
+    Returns
+    -------
+    sig : ndarray
+        Signal in microvolts, shape (n_samples,).
+    truth : list of tuple of float
+        ``(start_s, end_s)`` of every injected burst.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(minutes * 60 * s_freq)
+    white = rng.standard_normal(n)
+    spec = np.fft.rfft(white)
+    f = np.fft.rfftfreq(n, 1.0 / s_freq)
+    f[0] = f[1]
+    sig = np.fft.irfft(spec / f, n)
+    sig = sig / sig.std() * bg_uv
+
+    truth = []
+    t0 = 5.0
+    while t0 + 3.0 < n / s_freq:
+        dur = rng.uniform(0.5, 1.5)
+        ns = int(dur * s_freq)
+        t = np.arange(ns) / s_freq
+        beg = int(t0 * s_freq)
+        sig[beg:beg + ns] += (np.hanning(ns)
+                              * np.sin(2 * np.pi * 13.0 * t)
+                              * (ptp_uv / 2.0))
+        truth.append((t0, t0 + dur))
+        t0 += every_s + rng.uniform(-1.0, 1.0)
+    return sig, truth
+
+
+def _event_recall(detected, truth, min_overlap=0.2):
+    """Fraction of injected events overlapped by at least one detection.
+
+    Parameters
+    ----------
+    detected : list of tuple of float
+        ``(start_s, end_s)`` per detected event.
+    truth : list of tuple of float
+        ``(start_s, end_s)`` per injected event.
+    min_overlap : float
+        Overlap counting as a hit, as a fraction of the injected event's
+        duration.
+
+    Returns
+    -------
+    float
+        Event-wise recall in [0, 1].
+    """
+    hits = sum(any(min(te, de) - max(ts, ds) >= min_overlap * (te - ts)
+                   for ds, de in detected)
+               for ts, te in truth)
+    return hits / len(truth) if truth else float('nan')
+
+
+def test_lacourse_config_matches_the_published_a7():
+    """Lacourse2018 must reach the detector as A7 published it.
+
+    ``_ensure_step_parameters`` used to force ``zscore['pcl_range'] = None``
+    on every method, which for Lacourse2018 discarded Wonambi's ``(10, 90)``
+    -- A7's z-scores are taken against a *clean* 30 s baseline and the
+    percentile trim is what stands in for that cleaning. Untrimmed, the SD in
+    the denominator is inflated by any spindle or transient inside the
+    baseline window, so ``rel_sig_pow`` and ``sigma_covar`` stop clearing 1.6
+    and 1.3. Measured on a 10 min 256 Hz synthetic, the window-wise pass rate
+    fell from 0.0933 to 0.0643 for relative power and 0.1107 to 0.0818 for
+    covariance.
+
+    Also locks the two other silent config losses on this path: a partial dict
+    from a caller must MERGE (the GUI sends ``{'dur': 0.3}``, and losing
+    ``'step': 0.1`` turns off Wonambi's 10 Hz downsampling, evaluating every
+    moving window at every sample), and an explicitly-passed ``None``
+    threshold must not wipe a published default.
+    """
+    print("\n33. Testing Lacourse2018 (A7) parameter forwarding:")
+
+    from wonambi.detect import DetectSpindle as WonambiDetectSpindle
+    from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+
+    ours = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                 duration=(0.3, 2.5), polar='normal')
+    ours._ensure_step_parameters()          # what __call__ does before detecting
+    theirs = WonambiDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                  duration=(0.3, 2.5))
+
+    for key in ('frequency', 'duration', 'tolerance', 'min_interval',
+                'abs_pow_thresh', 'rel_pow_thresh', 'covar_thresh',
+                'corr_thresh'):
+        assert getattr(ours, key) == getattr(theirs, key), (
+            f"Lacourse2018 {key}: ours {getattr(ours, key)!r} != A7/wonambi "
+            f"{getattr(theirs, key)!r}")
+
+    for key in ('zscore', 'windowing', 'moving_ms', 'moving_power_ratio',
+                'moving_covar', 'moving_sd', 'smooth'):
+        want, got = getattr(theirs, key), getattr(ours, key)
+        for sub, value in want.items():
+            assert got.get(sub) == value, (
+                f"Lacourse2018 {key}['{sub}']: ours {got.get(sub)!r} != "
+                f"A7/wonambi {value!r}")
+    print(f"   zscore  ours={ours.zscore['pcl_range']}  "
+          f"a7/wonambi={theirs.zscore['pcl_range']}")
+
+    merged = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                   duration=(0.3, 2.5),
+                                   windowing={'dur': 0.3},
+                                   moving_power_ratio={'dur': 0.3})
+    assert merged.windowing['step'] == 0.1, (
+        f"a partial windowing dict replaced instead of merged: "
+        f"{merged.windowing!r} — step is gone, so downsampling is off")
+    assert merged.moving_power_ratio['freq_narrow'] == (11, 16), (
+        f"a partial moving_power_ratio dict lost freq_narrow: "
+        f"{merged.moving_power_ratio!r}")
+    print(f"   partial dict merge  windowing={merged.windowing['dur']}s "
+          f"step={merged.windowing['step']}s")
+
+    nones = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                  duration=(0.3, 2.5), abs_pow_thresh=None,
+                                  rel_pow_thresh=None, covar_thresh=None,
+                                  corr_thresh=None)
+    assert (nones.abs_pow_thresh, nones.rel_pow_thresh, nones.covar_thresh,
+            nones.corr_thresh) == (1.25, 1.6, 1.3, 0.69), (
+        "an explicitly-passed None threshold wiped an A7 default")
+
+    # The per-run advisory in ParalEvents is advisory: a malformed duration
+    # must be ignored, not raised on. `tuple(0.5)` is a TypeError, which would
+    # let a warning helper abort the whole detection run.
+    import logging
+
+    from turtlewave_hdEEG.eventprocessor import ParalEvents
+
+    advisor = ParalEvents.__new__(ParalEvents)
+    advisor.logger = logging.getLogger('turtlewave_hdEEG.eventprocessor.test')
+    for bad in (0.5, None, (0.3,), 'wrong'):
+        advisor._warn_lacourse_config(bad, {})          # must not raise
+    print("   advisory survives malformed duration: 0.5, None, (0.3,), 'wrong'")
+
+    # abs_pow_thresh=0.0 is the awkward one: it is NOT negative, so Wonambi
+    # keeps it as a fixed floor at log10(uV^2)=0 rather than switching to A7's
+    # adaptive mode, and the GUI spinbox reaches it. It must be advised on,
+    # and it must not raise.
+    for thresh in (0.0, -0.5, 1.25):
+        advisor._warn_lacourse_config((0.3, 2.5),
+                                      {'abs_pow_thresh': thresh})
+    print("   advisory survives abs_pow_thresh: 0.0, -0.5, 1.25")
+
+    print("[ok] Lacourse2018 is constructed exactly as A7/wonambi define it")
+
+
+def test_lacourse_state_survives_repeat_calls():
+    """Wonambi mutates the Lacourse options object; the subclass must undo it.
+
+    ``detect_Lacourse2018`` writes back into the detector it is handed:
+    ``opts.tolerance *= step`` and, in adaptive mode, replaces a negative
+    ``opts.abs_pow_thresh`` with the absolute value it resolved to. ParalEvents
+    reuses one detector for every segment of a channel, so unrestored state
+    means tolerance decays by 10x per segment (0.3 -> 0.03 -> 0.003) and
+    segments 2..N are thresholded against segment 1's amplitude. Detection has
+    no RNG, so identical input must give byte-identical events every time.
+    """
+    print("\n34. Testing Lacourse2018 state across repeated calls:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+
+    s_freq = 256.0
+    sig, _ = _synthetic_spindle_train(s_freq=s_freq, minutes=2.0)
+    data = _make_chantime(sig, s_freq)
+
+    det = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                duration=(0.3, 2.5), polar='normal',
+                                tolerance=0.3, abs_pow_thresh=-0.5)
+    runs = []
+    for call in range(3):
+        events = [round(float(e['start']), 6) for e in det(data)]
+        runs.append(events)
+        print(f"   call {call + 1}: tolerance={det.tolerance!r} "
+              f"abs_pow_thresh={det.abs_pow_thresh!r} n={len(events)}")
+        assert det.tolerance == 0.3, (
+            f"tolerance drifted to {det.tolerance!r} after call {call + 1}")
+        assert det.abs_pow_thresh == -0.5, (
+            f"abs_pow_thresh was frozen at {det.abs_pow_thresh!r} after call "
+            f"{call + 1}; segments 2..N would reuse segment 1's amplitude")
+
+    assert runs[0] == runs[1] == runs[2], (
+        "repeated detection on identical data returned different events")
+    assert runs[0], "no events detected, so the invariance check is vacuous"
+
+    print("[ok] tolerance and abs_pow_thresh are restored after every call")
+
+
+def test_lacourse_duration_bound_drives_yield():
+    """A7's (0.3, 2.5) s duration is not interchangeable with a global (0.5, 3).
+
+    The four A7 criteria are combined on a 0.1 s grid, so the minimum duration
+    is really "how many consecutive 0.1 s windows must pass": three at A7's
+    0.3 s, five at a typical global 0.5 s. Wonambi lets the caller's duration
+    override the method's own (``DetectSpindle.__init__`` applies
+    ``if duration is not None`` AFTER the per-method block), so a processor
+    default silently reconfigures A7. This pins the direction and rough size
+    of that effect so the trade-off cannot be changed unnoticed.
+    """
+    print("\n35. Testing the Lacourse2018 duration bound:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+
+    s_freq = 256.0
+    sig, truth = _synthetic_spindle_train(s_freq=s_freq, minutes=5.0)
+    data = _make_chantime(sig, s_freq)
+
+    yields = {}
+    for duration in ((0.3, 2.5), (0.5, 3.0)):
+        det = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                    duration=duration, polar='normal')
+        events = [(float(e['start']), float(e['end'])) for e in det(data)]
+        yields[duration] = _event_recall(events, truth)
+        print(f"   duration={duration}  injected={len(truth)}  "
+              f"detected={len(events)}  recall={yields[duration]:.3f}")
+
+    assert yields[(0.3, 2.5)] >= 0.8, (
+        f"A7 as published recovered only {yields[(0.3, 2.5)]:.3f} of injected "
+        f"30 uV peak-to-peak spindles; the detector is broken, not tuned")
+    assert yields[(0.3, 2.5)] > yields[(0.5, 3.0)], (
+        "raising the minimum duration to 0.5 s did not reduce recall, so this "
+        "synthetic no longer exercises the 0.1 s grid it is meant to")
+
+    print("[ok] A7's own duration bound recovers "
+          f"{yields[(0.3, 2.5)]:.0%} vs {yields[(0.5, 3.0)]:.0%} at (0.5, 3.0)")
+
+
 def test_guard_refuses_an_empty_method_list():
     """``method IN ()`` is always-false, so an empty list must not be accepted.
 
@@ -4483,6 +4730,9 @@ if __name__ == "__main__":
     test_migration_sees_a_collision_with_an_already_target_row()
     test_migration_refuses_a_stage_token_outside_the_vocabulary()
     test_guard_refuses_an_empty_method_list()
+    test_lacourse_config_matches_the_published_a7()
+    test_lacourse_state_survives_repeat_calls()
+    test_lacourse_duration_bound_drives_yield()
 
     print("\nAll tests completed!")
 

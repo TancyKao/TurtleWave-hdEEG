@@ -300,6 +300,100 @@ class ParalEvents:
         self.logger.debug("Memory cleanup performed")
 
 
+    #: A7's published duration criterion (Lacourse et al. 2018,
+    #: ``minDurSpindleSec`` / ``maxDurSpindleSec``).
+    LACOURSE_DURATION = (0.3, 2.5)
+
+    def _warn_lacourse_config(self, duration, detector_params):
+        """Warn once per run about Lacourse2018 parameters that fail silently.
+
+        A7 is the only supported method whose threshold is not a single
+        number, and the three ways a caller most often mis-configures it all
+        produce a plausible-looking, near-empty result rather than an error.
+
+        Parameters
+        ----------
+        duration : tuple of float
+            The ``(min, max)`` duration bound this run will apply, in seconds.
+            Wonambi lets it override each method's own default, so a caller's
+            global default silently replaces A7's published 0.3-2.5 s.
+            Anything that is not a 2-element sequence is ignored rather than
+            raised on; this helper is advisory and must not end a run.
+        detector_params : dict
+            Extra keyword arguments forwarded to
+            :class:`~turtlewave_hdEEG.extensions.ImprovedDetectSpindle`.
+
+        Notes
+        -----
+        Three checks, in order of measured impact on yield:
+
+        1. ``duration``. Raising the minimum from A7's 0.3 s to a typical
+           global 0.5 s costs about a third of the detections, because the
+           four criteria are combined on a 0.1 s grid and 0.5 s demands five
+           consecutive passing windows instead of three. Measured on a 10 min
+           synthetic (59 injected 13 Hz bursts, 30 uV peak-to-peak): recall
+           0.627 at (0.5, 3.0) vs 0.949 at (0.3, 2.5) at 256 Hz, and 0.617 vs
+           1.000 at 512 Hz.
+        2. ``det_thresh``. A7 has four thresholds and no ``det_thresh``;
+           passing one changes nothing at all.
+        3. ``tolerance``. A7 specifies 0. Wonambi's implementation makes any
+           other value sampling-rate dependent.
+
+        The absolute-scale ``abs_pow_thresh`` and its adaptive (negative)
+        form are documented on
+        :class:`~turtlewave_hdEEG.extensions.ImprovedDetectSpindle`.
+        """
+        lo, hi = self.LACOURSE_DURATION
+        # This helper is advisory: it must never be the thing that ends a run.
+        # `tuple(duration)` raises TypeError on a scalar, so anything that is
+        # not a 2-element sequence is skipped silently and left for the
+        # detector to reject on its own terms.
+        well_formed = isinstance(duration, (tuple, list)) and len(duration) == 2
+        if well_formed and tuple(duration) != (lo, hi):
+            self.logger.warning(
+                "Lacourse2018: duration=%s overrides A7's published (%.1f, "
+                "%.1f) s. A minimum above %.1f s cuts yield substantially "
+                "(recall 0.95 -> 0.63 on a 256 Hz synthetic when raised to "
+                "0.5 s). Pass duration=(%.1f, %.1f) to run A7 as published.",
+                tuple(duration), lo, hi, lo, lo, hi)
+
+        if detector_params.get('det_thresh') is not None:
+            self.logger.warning(
+                "Lacourse2018: det_thresh=%s is IGNORED. A7 uses four "
+                "thresholds: abs_pow_thresh (default 1.25), rel_pow_thresh "
+                "(1.6), covar_thresh (1.3), corr_thresh (0.69). Pass those "
+                "by name instead.", detector_params['det_thresh'])
+
+        if detector_params.get('tolerance'):
+            self.logger.warning(
+                "Lacourse2018: tolerance=%s is non-zero. A7 specifies 0, and "
+                "Wonambi's implementation makes it sampling-rate dependent "
+                "(inert at 256 Hz, destroys yield at 1000 Hz).",
+                detector_params['tolerance'])
+
+        # >= 0, not > 0: Wonambi selects A7's adaptive mode on a strictly
+        # NEGATIVE value (`if opts.abs_pow_thresh < 0`), so exactly 0 stays a
+        # fixed floor -- and the GUI spinbox reaches it.
+        abs_thresh = detector_params.get('abs_pow_thresh')
+        if abs_thresh is None or abs_thresh >= 0:
+            effective = 1.25 if abs_thresh is None else abs_thresh
+            floor_off = "" if effective > 0 else (
+                " NOTE: %s is NOT adaptive mode -- it is a fixed floor at "
+                "log10(uV^2) <= 0, i.e. about 1 uV RMS of sigma or less, "
+                "which almost no window fails. The absolute criterion is "
+                "effectively off and A7 is running on three criteria, not "
+                "four. Use a NEGATIVE value for the adaptive threshold."
+                % (effective,))
+            self.logger.info(
+                "Lacourse2018: abs_pow_thresh=%s is an ABSOLUTE floor on "
+                "log10(uV^2) sigma power (1.25 ~ 4.2 uV RMS sustained over "
+                "0.3 s), calibrated on MASS-SS2 C3 in young adults. On "
+                "low-amplitude recordings it is the binding criterion and "
+                "yields zero events. A negative value switches to A7's "
+                "adaptive threshold (mean + |value| SD); validate any such "
+                "value against scored data before reporting from it.%s",
+                effective, floor_off)
+
     def detect_spindles(self, method='Ferrarelli2007', chan=None, ref_chan=[], grp_name='eeg',
                        frequency=(11, 16), duration=(0.5, 3), polar='normal',
                        reject_artifacts=True, reject_arousals=True,stage=None, cat=None,
@@ -444,7 +538,13 @@ class ParalEvents:
         # Make sure method is a list
         if isinstance(method, str):
             method = [method]
-        
+
+        # Lacourse2018 (A7) does not take its parameters the way the other six
+        # methods do, and every mismatch here is silent. Say so once per run,
+        # not once per channel.
+        if 'Lacourse2018' in method:
+            self._warn_lacourse_config(duration, detector_params)
+
         # Make sure chan is a list
         if isinstance(chan, str):
             chan = [chan]

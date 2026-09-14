@@ -117,6 +117,7 @@ nav:
     - Dataset: reference/api/dataset.md
     - Annotations: reference/api/annotation.md
     - Spindle Processor: reference/api/eventprocessor.md
+    - Detector Extensions: reference/api/extensions.md
     - Slow Wave Processor: reference/api/swprocessor.md
     - K-Complex Processor: reference/api/kcomplexprocessor.md
     - Sleep Cycle Processor: reference/api/cycleprocessor.md

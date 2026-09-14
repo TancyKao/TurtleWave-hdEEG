@@ -2267,10 +2267,13 @@ class TurtleWaveGUI(QMainWindow):
     # update spindle parameters based on selected method
     def update_spindle_params_for_method(self, method_name):
         """Update spindle detection parameters based on selected method"""
-        # Clear previous parameter widgets
+        # Clear previous parameter widgets. The registry is emptied here, not
+        # after the detector is built: if construction raises, the old method's
+        # widgets would otherwise stay registered and leak that method's
+        # parameters (e.g. Lacourse's abs_pow_thresh) into the next run.
         self.clear_layout(self.spindle_params_layout)
+        self.spindle_param_widgets = {}
 
-        
         # Import the detector class to access parameters
         try:
             from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
@@ -2305,9 +2308,6 @@ class TurtleWaveGUI(QMainWindow):
             info_label = QLabel("<b>Detection Parameters:</b>")
             info_label.setAlignment(QtCore.Qt.AlignCenter)
             self.spindle_params_layout.addWidget(info_label)
-            
-            # Initialize dict to store UI elements
-            self.spindle_param_widgets = {}
             
             # Create different parameter groups based on method
             if method_name == "Moelle2011":
@@ -2519,12 +2519,27 @@ class TurtleWaveGUI(QMainWindow):
                 thresh_group = QGroupBox("Detection Thresholds")
                 thresh_layout = QVBoxLayout()
                 
+                abs_tip = (
+                    "Absolute sigma power floor, log10(uV^2). "
+                    "Default 1.25 (published A7). "
+                    "Negative values switch to an adaptive threshold: "
+                    "mean + |value| x SD of the power signal. "
+                    "Adaptive mode is not part of the published A7 "
+                    "configuration; validate the value against scored data "
+                    "before using it in a study.")
                 abs_layout = QHBoxLayout()
-                abs_layout.addWidget(QLabel("Absolute Power:"))
+                abs_label = QLabel("Absolute Power:")
+                abs_label.setToolTip(abs_tip)
+                abs_layout.addWidget(abs_label)
                 abs_thresh_spin = QDoubleSpinBox()
-                abs_thresh_spin.setRange(0.5, 5.0)
+                # Negatives are meaningful here, not an input error: wonambi
+                # reads a negative abs_pow_thresh as "use mean + |value| * SD
+                # of the absolute-power signal" instead of a fixed floor, which
+                # is the only way low-amplitude recordings yield detections.
+                abs_thresh_spin.setRange(-5.0, 5.0)
                 abs_thresh_spin.setSingleStep(0.05)
                 abs_thresh_spin.setValue(detector.abs_pow_thresh)
+                abs_thresh_spin.setToolTip(abs_tip)
                 abs_layout.addWidget(abs_thresh_spin)
                 thresh_layout.addLayout(abs_layout)
                 

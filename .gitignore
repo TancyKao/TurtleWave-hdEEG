@@ -60,3 +60,6 @@ _scratch/
 
 # Misc project artifacts
 USEME.zip
+
+# R session history
+.Rhistory

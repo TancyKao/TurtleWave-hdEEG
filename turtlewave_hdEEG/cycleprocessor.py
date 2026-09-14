@@ -4,8 +4,8 @@ cycleprocessor.py
 Sleep-cycle detection for TurtleWave-hdEEG.
 
 Ports the rule-based NREM-REM cycle detector from the MATLAB
-``SpectraDynamic_Analysis`` toolbox (``cal_SleepCycle_HdEEG.m`` and its
-Feinberg-1979 variant) to Python, and connects it to TurtleWave's existing
+``SpectraDynamic_Analysis`` toolbox (``cal_SleepCycle_HdEEG.m`` and a
+REM-closed variant) to Python, and connects it to TurtleWave's existing
 persistence layers:
 
 * the ``events.cycle`` column of ``neural_events.db`` (previously always empty),
@@ -22,10 +22,17 @@ data is required. Two cycle definitions are supported via ``method``:
     too-short NREM runs are dropped. Always yields cycles even when REM scoring
     is sparse.
 ``'1979'``
-    Feinberg/Floyd-Feinberg. As above, but a cycle only closes when a
-    qualifying REM period follows the NREM block (the first cycle needs REM of
-    at least one epoch, later cycles at least ``rem_min`` epochs). NREM periods
-    not followed by qualifying REM are merged into the next cycle.
+    REM-closed. Same NREM periods and segments as ``'2022'``, but a cycle only
+    closes when the segment after an NREM period contains a contiguous REM run
+    of at least ``rem_min`` epochs (the first cycle needs one epoch). The REM
+    run may sit anywhere in the segment; it need not be adjacent to the NREM
+    period. NREM periods that are not followed by a qualifying REM run are
+    merged forward into the next cycle, so that cycle's NREM span includes the
+    intervening wake and REM; a trailing unpaired NREM period becomes the final
+    cycle. The name is historical: this is *not* the Feinberg & Floyd (1979)
+    definition, which requires adjacent REM, counts only the REM run as the REM
+    period, and discards unpaired NREM periods. See the sleep-cycle how-to for
+    a rule-by-rule comparison.
 """
 
 import logging
@@ -149,12 +156,15 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
         Minimum length, in epochs, of an NREM run for it to count as an NREM
         period (default 30).
     method : {'2022', '1979'}, optional
-        Cycle definition. ``'2022'`` is NREM-based; ``'1979'`` additionally
-        requires a qualifying REM period to close each cycle.
+        Cycle definition. ``'2022'`` is NREM-based: every NREM period is a
+        cycle. ``'1979'`` closes a cycle only on a contiguous REM run of at
+        least ``rem_min`` epochs anywhere in the following segment, merging
+        unpaired NREM periods forward (not the Feinberg 1979 rule; see the
+        module docstring).
     rem_min : int, optional
-        Minimum REM run length, in epochs, required to close a cycle under the
-        ``'1979'`` method (the first cycle needs only one REM epoch). Ignored
-        for ``'2022'`` (default 10).
+        Minimum contiguous REM run length, in epochs, required to close a cycle
+        under the ``'1979'`` method (the first cycle needs only one REM epoch).
+        Ignored for ``'2022'`` (default 10).
     epoch_starts : sequence of float, optional
         Start time in seconds of each epoch, same length as ``hypnogram``. If
         omitted, epoch ``i`` is assumed to start at ``i * epoch_length``.
@@ -174,9 +184,11 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
 
     Notes
     -----
-    Artefact/undefined epochs (-1) are treated as Wake for the absorb/break
-    logic, matching how the MATLAB detector handles gaps. An empty or all-Wake
-    hypnogram returns ``[]``.
+    Artefact/undefined epochs (-1) are recoded as Wake, so a run of them up to
+    ``wake_thresh`` epochs is absorbed into NREM like a short awakening. This
+    differs from the MATLAB ``cal_SleepCycle*.m`` functions, where unscored
+    epochs are neither wake nor sleep and always break an NREM period. An empty
+    or all-Wake hypnogram returns ``[]``.
     """
     hyp = np.asarray(list(hypnogram), dtype=float)
     n = hyp.size

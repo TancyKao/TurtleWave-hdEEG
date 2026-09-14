@@ -5,6 +5,26 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Lacourse2018 output changes with this release: re-detect existing Lacourse2018 rows in `neural_events.db` rather than pooling them with new ones.
+
+### Changed
+
+- `detect_spindles` warns when Lacourse2018 runs with a duration bound other than the published 0.3-2.5 s.
+- GUI: the Lacourse2018 absolute-power threshold accepts negative values, selecting the adaptive mean + |value| x SD threshold.
+- Docs: Lacourse2018 is no longer described as a permissive method.
+- Docs: new reference page for the detector extension classes.
+- Docs: the `'1979'` cycle method is now described as it behaves (REM-closed with forward merging of unpaired NREM periods, no adjacency test) rather than as the Feinberg & Floyd definition; the artefact-as-wake note and the "no cycles under '1979' only" troubleshooting bullet were corrected.
+
+### Fixed
+
+- `Lacourse2018` forced the 10-90 percentile z-score trim to `None` on every construction, so the relative-power and covariance criteria ran against an inflated SD.
+- `Lacourse2018` let Wonambi's in-place mutation of `tolerance` and `abs_pow_thresh` leak across calls, so every segment after the first ran at drifted thresholds.
+- `Lacourse2018` replaced whole dict parameters when given a partial one, dropping `step` and making Wonambi evaluate every sample.
+- `Lacourse2018` no longer crashes when `abs_pow_thresh=None` is passed.
+- GUI: switching spindle method after a failed detector construction leaked the previous method's parameter widgets into the next run.
+
 ## [4.3.1] — 2026-08-31
 
 Re-running cycle detection at a different threshold used to leave events carrying

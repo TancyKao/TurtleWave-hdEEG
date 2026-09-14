@@ -7,6 +7,7 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 ### Event Processing
 
 - [**Spindle Processor**](eventprocessor.md) - Core spindle detection functionality
+- [**Detector Extensions**](extensions.md) - `ImprovedDetectSpindle` / `ImprovedDetectSlowWave`, Wonambi subclasses with re-applied thresholds and method notes
 - [**Slow Wave Processor**](swprocessor.md) - Slow wave detection algorithms
 - [**PAC Processor**](pacprocessor.md) - Phase-amplitude coupling analysis
 

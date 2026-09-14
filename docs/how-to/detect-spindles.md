@@ -210,8 +210,22 @@ If you want to detect more spindles (higher sensitivity):
 
 - Widen the frequency range (e.g. 9-16 Hz)
 - Widen the duration range, or lower the minimum duration
-- Try `Wamsley2012` or `Lacourse2018`, which tend to be more permissive than
-  amplitude-threshold methods like `Ferrarelli2007`
+- Try `Wamsley2012`, which tends to be more permissive than amplitude-threshold
+  methods like `Ferrarelli2007`
+
+!!! note "Lacourse2018 (A7) is not a permissive method"
+    `Lacourse2018` uses four thresholds — `abs_pow_thresh`, `rel_pow_thresh`,
+    `covar_thresh`, `corr_thresh` — passed via `**detector_params`. The usual
+    `det_thresh` / `sel_thresh` overrides do nothing for this method.
+    `abs_pow_thresh` (default 1.25, in log10(uV^2) of 11-16 Hz power) is an
+    absolute floor calibrated on young adults, and it is usually the binding
+    criterion: on lower-amplitude recordings (older adults, Parkinson's, some
+    OSA) it can suppress most or all detections even though the other three
+    criteria pass freely. A negative `abs_pow_thresh` switches to an adaptive
+    `mean + |t|*SD` rule instead of the fixed floor, but that is a calibration
+    choice to validate against scored data, not a published A7 setting. Also
+    pass `duration=(0.3, 2.5)` for this method — the package's usual
+    `(0.5, 3.0)` overrides A7's own bound and cuts recall substantially.
 
 ### For High Specificity
 
