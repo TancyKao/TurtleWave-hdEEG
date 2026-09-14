@@ -72,6 +72,23 @@ threshold variants, run the export (``examples/export_cycle_events.py``) after
 each backfill into an output folder named for the threshold -- e.g.
 ``cycle_event_exports_wake15`` -- before re-running with a different value.
 
+Every subject's annotation XML is rewritten
+-------------------------------------------
+This script leaves ``write_xml`` at its library default (True), so each subject's
+annotation XML is rewritten on every run -- **including a subject whose run finds
+zero cycles**. Marker writing is a replacement: the existing ``'2022'`` cycle
+markers are cleared first, and Wonambi saves the file on that clear, stamping the
+rater's ``modified`` attribute with the current time. A zero-cycle night therefore
+shows a changed XML with a fresh ``modified`` timestamp even though the only
+content change is the *removal* of the previous run's markers, which is the
+correct outcome (the XML, ``sleep_cycles`` and ``events.cycle`` must agree).
+
+Two consequences worth knowing before you run this over a shared folder: file
+timestamps cannot tell you whether cycles were written or cleared -- read the
+``sleep_cycles`` table or ``Annotations.get_cycles()`` instead -- and if the XMLs
+are under version control, expect a one-line ``modified`` diff for every subject
+processed. Nothing else in the file is touched.
+
 Layout assumed
 --------------
 A ``ROOT`` directory with one folder per subject; each subject folder has a
@@ -96,7 +113,10 @@ set the cycle thresholds ``EPOCH_LENGTH`` / ``WAKE_THRESH_MIN`` /
     python examples/backfill_cycles.py
 
 The script prints one PASS/FAIL line per subject and a final tally. One subject
-failing never aborts the whole run.
+failing never aborts the whole run. A subject whose database write succeeded but
+whose PNG could not be drawn still counts as a PASS, with an extra ``WARN:
+database written, plot skipped`` line carrying the plot error -- the derived
+tables are the deliverable, the plot is a convenience.
 """
 
 import glob
@@ -266,7 +286,62 @@ def observed_epoch_length(annot):
         return None
 
 
+def plot_cycles(annot, cycles_by_method, plot_path, subject):
+    """Draw the hypnogram/cycle PNG, returning the error instead of raising.
+
+    Kept out of :func:`turtlewave_hdEEG.finalize_cycles_and_durations` (which
+    is called with ``plot=False``) on purpose: that function plots *after* it
+    has written ``sleep_cycles``, ``stage_durations`` and ``events.cycle``, so
+    an exception from the plotting step would propagate out of a call whose
+    database work had already succeeded and the batch loop would count the
+    subject as FAIL. Running the plot here, separately and after the return,
+    keeps a missing matplotlib, an unwritable output directory or a headless
+    backend problem from misreporting a finished backfill as a failure.
+
+    Parameters
+    ----------
+    annot : CustomAnnotations
+        Loaded annotation wrapper (source of the hypnogram and epoch grid).
+    cycles_by_method : dict
+        ``{method: [cycle dicts]}`` as returned by
+        :func:`turtlewave_hdEEG.finalize_cycles_and_durations`.
+    plot_path : str
+        Destination PNG path.
+    subject : str
+        Subject label for the figure title.
+
+    Returns
+    -------
+    Exception or None
+        ``None`` when the PNG was written; otherwise the exception raised,
+        for the caller to report as a warning.
+    """
+    try:
+        # Imported lazily so a matplotlib-free environment only fails here,
+        # as a warning, rather than at module import.
+        from turtlewave_hdEEG.cycleplot import plot_from_annotations
+        plot_from_annotations(annot, cycles_by_method, plot_path,
+                              epoch_length=EPOCH_LENGTH, subject=subject)
+        return None
+    except Exception as exc:  # noqa: BLE001 - a plot must not fail a backfill
+        return exc
+
+
 def main():
+    """Backfill every subject under ``ROOT``, one PASS/FAIL line each.
+
+    Two behaviours worth knowing, both deliberate:
+
+    * Each subject's annotation XML is rewritten on every run, including a
+      subject that yields zero cycles -- the markers are cleared before new
+      ones are written and Wonambi saves the file on the clear, so the rater's
+      ``modified`` timestamp is refreshed and the file changes on disk even
+      when the only change is the removal of a previous run's markers.
+    * A failure to draw the PNG is reported as ``WARN: database written, plot
+      skipped`` and the subject still counts as a PASS; only a failure before
+      or during the database write counts as FAIL. The final tally names how
+      many passing subjects had their plot skipped.
+    """
     if not os.path.isdir(ROOT):
         print(f"ERROR: ROOT does not exist: {ROOT}")
         return
@@ -290,6 +365,7 @@ def main():
 
     n_pass = 0
     n_fail = 0
+    n_plot_skipped = 0
     for folder in subjects:
         subj_dir = os.path.join(ROOT, folder)
         try:
@@ -324,21 +400,43 @@ def main():
                 f"{subject}_hypnogram_cycles_wake{WAKE_THRESH_MIN:g}"
                 f"_nrem{NREM_MIN_MIN:g}min.png")
 
+            # plot=False: the PNG is drawn below, outside this call, so that a
+            # plotting failure cannot make an already-written database read as
+            # a FAIL. Everything this call does -- sleep_cycles,
+            # stage_durations, events.cycle, the XML markers -- is done when it
+            # returns. It also rewrites the XML (and its `modified` timestamp)
+            # even for a subject with zero cycles; see the module docstring.
             cycles_by_method = finalize_cycles_and_durations(
                 annot, db_path, subject=subject,
                 epoch_length=EPOCH_LENGTH,
                 wake_thresh=wake_thresh_ep,
                 nrem_min=nrem_min_ep,
-                plot=PLOT, plot_path=plot_path)
+                plot=False)
+
+            # --- database and XML are written from this point on ---
+            plot_error = None
+            if PLOT:
+                plot_error = plot_cycles(annot, cycles_by_method, plot_path,
+                                         subject)
 
             summary = ", ".join(
                 f"{m}={len(c)} cyc" for m, c in cycles_by_method.items())
             print(f"    PASS: {summary}")
-            if PLOT:
+            if PLOT and plot_error is None:
                 print(f"    plot: {plot_path}")
+            elif PLOT:
+                # A PASS with a warning: the derived tables are the
+                # deliverable and they are in the database; only the PNG is
+                # missing, and re-running the script redraws it.
+                print(f"    WARN: database written, plot skipped "
+                      f"({type(plot_error).__name__}: {plot_error})")
+                n_plot_skipped += 1
             print()
             n_pass += 1
         except Exception as exc:  # noqa: BLE001 - one bad subject must not abort
+            # Reaches here only for a failure at or before the database write
+            # (bad paths, unscorable hypnogram, SQLite error). Plot failures
+            # are handled above as a warning and never land here.
             print(f"    FAIL: {exc}")
             print("    " + traceback.format_exc().replace("\n", "\n    "))
             n_fail += 1
@@ -346,6 +444,10 @@ def main():
     print("=" * 60)
     print(f"Done. {n_pass} passed, {n_fail} failed, "
           f"{len(subjects)} total.")
+    if n_plot_skipped:
+        print(f"      {n_plot_skipped} of the {n_pass} passing subject(s) "
+              f"had the database written but the plot skipped (see the WARN "
+              f"lines above); re-run to redraw them.")
 
 
 if __name__ == "__main__":

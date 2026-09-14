@@ -15,6 +15,20 @@
 #   4. A scored night with no cycles (all Wake) is a normal, accepted result:
 #      no error, cycles=[], stage_durations written, stale tags cleared.
 #
+# Plus the two follow-ups closed after the 4.3.1 quality gate:
+#
+#   5. store_cycles_to_database's two directions: an empty cycles list WITH a
+#      real method is the valid "clear the store" call and must keep working,
+#      while a call that cannot name the rows to replace (empty cycles and
+#      method=None, or a cycle dict carrying method=None) must raise
+#      ValueError and write nothing -- it used to warn and silently leave the
+#      previous run's rows behind. Non-empty cycles without method= still
+#      work, reading the method off the cycles (as tests/test_turtlewave.py
+#      and tests/test_cycle_connection_reuse.py call it).
+#   6. examples/backfill_cycles.py counts a subject whose database was written
+#      but whose plot failed as a PASS with a warning, and still counts a
+#      database-write failure as a FAIL.
+#
 # No pytest; plain functions with prints + asserts, matching
 # tests/test_cycle_connection_reuse.py. Builds real Wonambi annotation XML
 # (as tests/test_sw_amplitude_floor.py and tests/test_turtlewave.py do)
@@ -28,6 +42,10 @@
 #
 #     PYTHONPATH=$PWD python tests/test_cycle_rerun.py
 
+import contextlib
+import importlib.util
+import io
+import logging
 import os
 import shutil
 import sqlite3
@@ -476,6 +494,301 @@ def test_all_wake_night_is_accepted():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# 5. store_cycles_to_database: clearing needs a method, and says so loudly
+# --------------------------------------------------------------------------
+
+def _cycle_dict(method, cycle_number=1, nrem_start=0.0):
+    """One minimal cycle row, shaped as :meth:`ParalCycles.detect` returns."""
+    return {'method': method, 'cycle_number': cycle_number,
+            'nrem_start_sec': nrem_start, 'nrem_end_sec': nrem_start + 600.0,
+            'rem_end_sec': nrem_start + 900.0, 'nrem_dur_min': 10.0,
+            'nrem_n23_dur_min': 8.0, 'rem_dur_min': 5.0,
+            'cycle_dur_min': 15.0}
+
+
+def _n_cycle_rows(db, subject):
+    return _fetch(db, 'SELECT COUNT(*) FROM sleep_cycles WHERE subject=?',
+                  (subject,))[0][0]
+
+
+def test_store_cycles_method_required_to_identify_rows():
+    """Empty cycles + a real method clears; nothing-to-key-on raises.
+
+    The 4.3.1 gate flagged that ``store_cycles_to_database(method=None,
+    cycles=[])`` only warned. The delete is keyed on ``(subject, method)`` and
+    ``method=NULL`` matches no row, so the call removed nothing, inserted
+    nothing and returned 0 while ``tag_events_with_cycles([])`` had already
+    cleared ``events.cycle`` and the XML markers were gone -- the previous
+    run's ``sleep_cycles`` rows surviving as the only description of cycles
+    that no longer existed anywhere else. It now raises ValueError, matching
+    ``ParalCycles.run`` / ``finalize_cycles_and_durations``, which already
+    raise on an unscorable hypnogram (case 3).
+
+    Both directions are asserted, because over-raising would be just as wrong:
+    ``cycles=[]`` with a real ``method`` is the valid zero-cycle clear that
+    case 2 depends on, and non-empty cycles with no ``method=`` argument is
+    how tests/test_turtlewave.py and tests/test_cycle_connection_reuse.py
+    call it (the method is read off the cycles themselves).
+    """
+    print("\n5. store_cycles_to_database needs a method to name the rows it "
+          "replaces:")
+    tmp = _tmp_dir('storemethod')
+    try:
+        subject = 'sub-m'
+        pc = cp.ParalCycles(annotations=None, subject=subject,
+                            log_level=logging.CRITICAL)
+        # An existing detection DB: _ensure_sleep_cycles_table indexes
+        # events.cycle, so the events table has to be there.
+        db = os.path.join(tmp, 'neural_events.db')
+        _make_events_db(db, 3)
+
+        # (a) Non-empty cycles, no method= -> method read off the cycles.
+        n_written = pc.store_cycles_to_database(
+            [_cycle_dict('2022')], db, subject=subject)
+        rows = _n_cycle_rows(db, subject)
+        print(f"   non-empty cycles, method= omitted -> wrote {n_written}, "
+              f"sleep_cycles rows={rows}")
+        assert n_written == 1 and rows == 1, (
+            "non-empty cycles must still store without an explicit method= "
+            "(it is read off the cycles); raising here would break "
+            "test_turtlewave.py and test_cycle_connection_reuse.py")
+
+        # (b) Empty cycles WITH a method -> the valid clear.
+        n_cleared = pc.store_cycles_to_database(
+            [], db, subject=subject, method='2022')
+        rows = _n_cycle_rows(db, subject)
+        print(f"   cycles=[] with method='2022' -> returned {n_cleared}, "
+              f"sleep_cycles rows={rows}")
+        assert n_cleared == 0 and rows == 0, (
+            "cycles=[] with a real method must delete the subject's rows for "
+            f"that method (the zero-cycle re-run path), found {rows} row(s)")
+
+        # Re-seed for the raising cases, which must write nothing.
+        pc.store_cycles_to_database([_cycle_dict('2022')], db,
+                                    subject=subject, method='2022')
+        assert _n_cycle_rows(db, subject) == 1
+
+        # (c) Empty cycles AND method=None -> raises, previous rows survive.
+        raised = None
+        try:
+            pc.store_cycles_to_database([], db, subject=subject, method=None)
+        except ValueError as e:
+            raised = e
+        rows = _n_cycle_rows(db, subject)
+        print(f"   cycles=[] with method=None -> "
+              f"{'ValueError' if raised else 'DID NOT RAISE'}, "
+              f"sleep_cycles rows still {rows}")
+        assert raised is not None, (
+            "cycles=[] with method=None must raise ValueError: nothing names "
+            "the rows to replace, so it used to warn and silently leave the "
+            "previous run's rows in place")
+        assert 'method' in str(raised), (
+            f"the error should tell the caller to pass method=, got: {raised}")
+        assert rows == 1, (
+            f"the refused call must write nothing: the pre-existing row "
+            f"should survive untouched, found {rows} row(s)")
+
+        # (d) A cycle dict carrying method=None -> also raises, writes nothing.
+        raised = None
+        try:
+            pc.store_cycles_to_database([_cycle_dict(None)], db,
+                                        subject=subject, method='2022')
+        except ValueError as e:
+            raised = e
+        rows = _n_cycle_rows(db, subject)
+        print(f"   cycle dict with method=None -> "
+              f"{'ValueError' if raised else 'DID NOT RAISE'}, "
+              f"sleep_cycles rows still {rows}")
+        assert raised is not None, (
+            "a cycle dict with method=None would be inserted with a NULL "
+            "method that no later replacement can match; it must raise")
+        assert rows == 1, (
+            f"the refused call must write nothing, found {rows} row(s)")
+
+        # (e) The raise happens before a connection is opened, so a mistaken
+        #     call cannot even create the database file.
+        missing = os.path.join(tmp, 'not_created.db')
+        raised = None
+        try:
+            pc.store_cycles_to_database([], missing, subject=subject)
+        except ValueError as e:
+            raised = e
+        exists = os.path.exists(missing)
+        print(f"   refused call on a missing db path -> "
+              f"{'ValueError' if raised else 'DID NOT RAISE'}, "
+              f"file created={exists}")
+        assert raised is not None and not exists, (
+            "the check must run before open_write_connection, which would "
+            "create the missing file for a call that then writes nothing")
+
+        print("[ok] cycles=[] with a real method still clears the store; a "
+              "call that cannot name the rows to replace raises ValueError "
+              "and writes nothing")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 6. examples/backfill_cycles.py: a plot-only failure is not a subject failure
+# --------------------------------------------------------------------------
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BACKFILL_PATH = os.path.join(_REPO_ROOT, 'examples', 'backfill_cycles.py')
+
+
+def _load_backfill():
+    """Import examples/backfill_cycles.py by path, without running main().
+
+    Loaded fresh for each case so one case's monkeypatched module globals
+    (ROOT, PLOT, finalize_cycles_and_durations) cannot leak into the next.
+    """
+    spec = importlib.util.spec_from_file_location(
+        'backfill_cycles_undertest', _BACKFILL_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)          # guarded by if __name__ == '__main__'
+    return mod
+
+
+def _backfill_fixture(tmp, folder='10sd'):
+    """A ROOT/<folder>/wonambi/{neural_events.db, sub-*.xml} tree to backfill."""
+    wonambi_dir = os.path.join(tmp, folder, 'wonambi')
+    os.makedirs(wonambi_dir)
+    hyp = _threshold_sensitive_hypnogram()
+    _build_annotations(wonambi_dir, len(hyp), stem=f'sub-{folder}')
+    ann = CustomAnnotations(os.path.join(wonambi_dir, f'sub-{folder}.xml'))
+    _stage(ann, hyp)
+    db = os.path.join(wonambi_dir, 'neural_events.db')
+    _make_events_db(db, int(len(hyp) * EPOCH_LENGTH // 60) + 2)
+    return db
+
+
+def _run_backfill(mod):
+    """Run mod.main() with stdout captured; return the printed text."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.main()
+    return buf.getvalue()
+
+
+def test_backfill_plot_failure_is_a_warning_not_a_failure():
+    """A failing plot must not turn a written database into a FAIL.
+
+    The gate flagged that the script called finalize_cycles_and_durations with
+    plot=True, so an exception from the plotting step -- missing matplotlib,
+    an unwritable output dir, a backend problem -- propagated out of a call
+    whose sleep_cycles / stage_durations / events.cycle writes had ALREADY
+    succeeded, and the per-subject except block counted the subject as FAIL.
+    Re-running to "fix" it then re-did work that was already correct. The
+    script now plots separately, after the return, and reports a plot failure
+    as a warning on a passing subject. A failure at or before the database
+    write must still count as FAIL.
+    """
+    print("\n6. backfill_cycles.py: plot failure warns (PASS), DB failure "
+          "still FAILs:")
+    tmp = _tmp_dir('backfill')
+    try:
+        # (a) Plot raises; the database write succeeds.
+        db = _backfill_fixture(tmp, folder='10sd')
+        mod = _load_backfill()
+        mod.ROOT = tmp
+        mod.SUBJECTS = ['10sd']
+        mod.PLOT = True
+
+        from turtlewave_hdEEG import cycleplot
+        original_plot = cycleplot.plot_from_annotations
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError('matplotlib exploded')
+
+        cycleplot.plot_from_annotations = _boom
+        try:
+            out = _run_backfill(mod)
+        finally:
+            cycleplot.plot_from_annotations = original_plot
+
+        cycle_rows = _fetch(db, 'SELECT COUNT(*) FROM sleep_cycles')[0][0]
+        stage_rows = _fetch(db, 'SELECT COUNT(*) FROM stage_durations')[0][0]
+        tally = [ln for ln in out.splitlines() if ln.startswith('Done.')]
+        warn = [ln for ln in out.splitlines() if 'plot skipped' in ln]
+        print(f"   sleep_cycles rows={cycle_rows}, stage_durations rows="
+              f"{stage_rows}")
+        print(f"   {warn[0].strip() if warn else 'NO WARN LINE'}")
+        print(f"   {tally[0] if tally else 'NO TALLY LINE'}")
+
+        assert cycle_rows > 0 and stage_rows == 1, (
+            "the database work must have completed before the plot was "
+            f"attempted (sleep_cycles={cycle_rows}, "
+            f"stage_durations={stage_rows})")
+        assert 'PASS:' in out, "the subject should be reported as a PASS"
+        assert warn, (
+            "a plot failure should print a 'database written, plot skipped' "
+            f"warning; got:\n{out}")
+        assert 'matplotlib exploded' in warn[0], (
+            f"the plot error message must appear in the warning line, got: "
+            f"{warn[0]}")
+        assert tally and '1 passed, 0 failed' in tally[0], (
+            f"a plot-only failure must not count as a failed subject, got: "
+            f"{tally}")
+        assert 'FAIL:' not in out, (
+            f"nothing should be reported as FAIL here; got:\n{out}")
+
+        # (b) The database write itself fails -> still FAIL.
+        mod2 = _load_backfill()
+        mod2.ROOT = tmp
+        mod2.SUBJECTS = ['10sd']
+        mod2.PLOT = True
+
+        def _db_boom(*args, **kwargs):
+            raise RuntimeError('database write exploded')
+
+        mod2.finalize_cycles_and_durations = _db_boom
+        out2 = _run_backfill(mod2)
+        tally2 = [ln for ln in out2.splitlines() if ln.startswith('Done.')]
+        print(f"   {tally2[0] if tally2 else 'NO TALLY LINE'}")
+
+        assert 'FAIL: database write exploded' in out2, (
+            f"a database write failure must still be reported as FAIL, got:\n"
+            f"{out2}")
+        assert tally2 and '0 passed, 1 failed' in tally2[0], (
+            f"a database write failure must still count as a failed subject, "
+            f"got: {tally2}")
+
+        # (c) Unpatched: the PNG is actually drawn. Without this, plot_cycles'
+        #     catch-all except would turn a wrong call signature into a
+        #     permanent "plot skipped" warning that no test ever notices.
+        mod3 = _load_backfill()
+        mod3.ROOT = tmp
+        mod3.SUBJECTS = ['10sd']
+        mod3.PLOT = True
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            have_mpl = True
+        except ImportError:
+            have_mpl = False
+        if have_mpl:
+            out3 = _run_backfill(mod3)
+            pngs = [f for f in os.listdir(os.path.dirname(db))
+                    if f.endswith('.png')]
+            print(f"   unpatched run: PNG(s) written={pngs}")
+            assert 'plot skipped' not in out3, (
+                f"plotting should succeed with matplotlib present; got:\n"
+                f"{out3}")
+            assert len(pngs) == 1 and 'hypnogram_cycles' in pngs[0], (
+                f"the hypnogram/cycle PNG should be beside the database, "
+                f"found {pngs}")
+            assert f"plot: " in out3, "the PASS line should name the PNG path"
+        else:
+            print("   unpatched run: SKIPPED (matplotlib not installed)")
+
+        print("[ok] a plot-only failure is a PASS with a warning naming the "
+              "plot error; a database write failure is still a FAIL; and the "
+              "unpatched plot path still writes its PNG")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("TESTING CYCLE RE-RUN REGRESSIONS (4.3.1)")
     print("=========================================")
@@ -484,5 +797,7 @@ if __name__ == "__main__":
     test_zero_cycle_rerun_replaces_everything()
     test_unscored_hypnogram_is_refused()
     test_all_wake_night_is_accepted()
+    test_store_cycles_method_required_to_identify_rows()
+    test_backfill_plot_failure_is_a_warning_not_a_failure()
 
     print("\nAll cycle re-run tests completed!")
