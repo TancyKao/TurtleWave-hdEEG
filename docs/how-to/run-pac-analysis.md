@@ -22,6 +22,33 @@ instead.
     [Upgrade to 4.0 — Step 3](upgrade-to-4.0.md#step-3-regenerate-pac-preferred-phase)
     before trusting any preferred-phase values from old runs.
 
+!!! warning "PAC on continuous data now rejects artefact/arousal/movement time — pre-4.4 PAC rows did not"
+    `analyze_pac` takes a `reject_types` argument (default
+    `['Artefact', 'Arousal', 'Move']`, same as the event detectors), but
+    before 4.4 the argument existed and was silently never passed to the
+    underlying `fetch` call — every PAC result computed on **continuous**
+    data (`use_detected_events=False`, e.g. theta-gamma coupling with no
+    anchoring event) included artefact and arousal windows regardless of what
+    you passed. It is applied for real from 4.4 on. Every extra reject type
+    also costs something specific to PAC on this path: with the default
+    `cat=(1, 1, 1, 0)`, `analyze_pac` concatenates the surviving fragments
+    into one continuous signal rather than analysing masked windows as
+    separate pieces, so each added mask becomes an internal splice — a step
+    discontinuity that the phase filter smears across a neighbourhood on
+    either side, rather than a boundary the analysis respects. `min_dur`
+    does not drop short fragments; it only gates whether the outer buffer is
+    trimmed off the concatenated signal, so it has no bearing on how many
+    splices a wider reject set creates. More masked windows means more
+    splices — a second reason `Resp`/`Snore` stay opt-in here too.
+    **`reject_types` has no effect on the event-locked path shown
+    in the example below** (`use_detected_events=True`) — those segments are
+    built directly around already-detected events, not re-fetched with
+    artefact rejection, so what got masked out is entirely down to the
+    `reject_types` the slow-wave/spindle detection run itself used. **Re-run
+    continuous PAC rather than pooling pre-4.4 `pac_coupling` rows computed
+    that way with new ones** — they were computed over a different amount of
+    signal.
+
 ## Run coupling analysis between detected slow waves and spindles
 
 Mirror

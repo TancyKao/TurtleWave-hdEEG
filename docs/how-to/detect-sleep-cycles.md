@@ -185,7 +185,14 @@ more than one subject spelling.
 
 `examples/backfill_cycles.py` is a hardened, ready-to-run version of this loop
 (subject-id derivation, per-subject try/except so one bad folder doesn't abort
-the batch, and a PASS/FAIL summary):
+the batch, and a PASS/FAIL summary). A subject whose database write succeeds
+but whose PNG cannot be drawn (missing matplotlib, an unwritable output
+directory, a headless-backend problem) still counts as a **PASS**, with an
+extra `WARN: database written, plot skipped` line naming the error — the
+derived tables (`sleep_cycles`, `stage_durations`, `events.cycle`) are the
+deliverable, and the plot is a convenience the script can redraw on a later
+run. Only a failure at or before the database write counts as FAIL. The
+final tally names how many passing subjects had their plot skipped:
 
 ```bash
 python examples/backfill_cycles.py
@@ -242,7 +249,16 @@ block and always runs at the library default — the script has no equivalent
 - **`sleep_cycles`** — one row per `(subject, method, cycle_number)`: NREM/REM
   start/end times and `nrem_dur_min`, `nrem_n23_dur_min`, `rem_dur_min`,
   `cycle_dur_min`. Re-running replaces the existing rows for that
-  `(subject, method)` pair, so it stays idempotent.
+  `(subject, method)` pair, so it stays idempotent. `store_cycles_to_database`
+  (called by `run`/`finalize_cycles_and_durations`, always with `method` set)
+  needs `method` to know which rows to replace: since this release it
+  **raises `ValueError`** rather than silently doing nothing if it's called
+  directly with an empty `cycles` list and `method=None` — deleting nothing
+  and leaving a stale run's rows in place while `events.cycle` and the XML
+  markers had already moved on used to be a warning, which is easy to miss in
+  a batch log. This only matters if you call `store_cycles_to_database`
+  yourself rather than going through `run`/`finalize_cycles_and_durations`,
+  which always pass their own `method`.
 - **`stage_durations`** — one row per subject: minutes in Wake / N1 / N2 / N3
   / REM / artefact, reconciled to the full hypnogram span. Written even when
   no cycles are detected (an all-Wake or unscorable night still has stage
@@ -254,7 +270,17 @@ block and always runs at the library default — the script has no equivalent
   `methods` so its numbering is the one that survives.
 - **Annotation XML** — cycle markers for `tag_method` only, so
   `Annotations.get_cycles()` and the review GUI show cycle bands without a
-  numbering conflict between the two definitions.
+  numbering conflict between the two definitions. `write_cycle_markers`
+  always clears the previous run's markers before writing the new ones —
+  including on a run that finds **zero** cycles — so a re-run under a raised
+  `nrem_min` or a rescored hypnogram never leaves stale markers behind. That
+  clear-then-write is a real write either way: Wonambi's `clear_cycles()`
+  saves the file and stamps the rater's `modified` attribute with the current
+  time, so a zero-cycle night still shows a fresh `modified` timestamp and a
+  changed file on disk, even though the only content change is the *removal*
+  of the previous run's markers. File timestamps and version-control diffs
+  therefore cannot tell "cycles were written" from "cycles were cleared" —
+  read `Annotations.get_cycles()` or the `sleep_cycles` table for that.
 
 ## Plot the hypnogram with cycle bands
 

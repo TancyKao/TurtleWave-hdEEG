@@ -57,7 +57,11 @@ Typical spindle bands are 11-16 Hz (all spindles) or split into slow
 **Duration:**
 
 1. Find the **"Duration (s)"** group
-2. Set the minimum and maximum spindle duration in seconds (default: 0.5-3 s)
+2. Set the minimum and maximum spindle duration in seconds. The boxes are
+   prefilled from the selected method's own default and change when you
+   switch methods: 0.3-3 s for `Ferrarelli2007` and `Wamsley2012`, 0.5-3 s
+   for `Moelle2011`, 0.5-2 s for `Nir2011`, 0.49-3 s for `Ray2015`, and
+   0.3-2.5 s for `Lacourse2018`
 
 **Channel Selection:**
 
@@ -97,14 +101,27 @@ spindles = event_processor.detect_spindles(
     frequency=(11, 13),
     duration=(0.5, 3),
     stage=['NREM2', 'NREM3'],
-    reject_artifacts=True,
-    reject_arousals=False,
+    reject_types=['Artefact', 'Arousal', 'Move'],  # the 4.4 default; pass explicitly to pin it
     cat=(1, 1, 1, 0),  # concatenate across cycles, stages, and discontinuities
     save_to_annotations=False,
     json_dir='wonambi/spindle_results',
     subject='sub-001',
 )
 ```
+
+!!! note "`reject_types` replaces `reject_artifacts`/`reject_arousals`"
+    Since 4.4, the annotation event types excluded from detection (and from
+    the density denominator) are a single `reject_types` list, not two
+    booleans. The default is `['Artefact', 'Arousal', 'Move']` — `Move` is new
+    in 4.4; `Resp` and `Snore` remain opt-in. `reject_artifacts=True` /
+    `reject_arousals=False` above still work as deprecated shims (they only
+    ever add or remove those two names), but they cannot express `Move`,
+    `Resp` or `Snore` — use `reject_types` for anything beyond the default.
+    See
+    [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default)
+    for the reasoning, and
+    [Read the database with pandas and R](read-database-with-pandas-and-r.md#the-tables-youll-query)
+    for how the resolved set is recorded and keyed.
 
 `method` also accepts `'Ferrarelli2007'`, `'Nir2011'`, `'Wamsley2012'`,
 `'Martin2013'`, `'Ray2015'`, or `'Lacourse2018'`. `polar='opposite'` is
@@ -155,7 +172,7 @@ from turtlewave_hdEEG.density import event_density, format_density_table
 density_df = event_density(
     'wonambi/neural_events.db', event_type='spindle', method='Moelle2011',
     stage=['NREM2', 'NREM3'], subject='sub-001',
-    reject_artifacts=True, reject_arousals=False,  # must match the detection call
+    reject_types=['Artefact', 'Arousal', 'Move'],  # must match the detection call
 )
 print(format_density_table(density_df))
 ```
@@ -223,9 +240,11 @@ If you want to detect more spindles (higher sensitivity):
     OSA) it can suppress most or all detections even though the other three
     criteria pass freely. A negative `abs_pow_thresh` switches to an adaptive
     `mean + |t|*SD` rule instead of the fixed floor, but that is a calibration
-    choice to validate against scored data, not a published A7 setting. Also
-    pass `duration=(0.3, 2.5)` for this method — the package's usual
-    `(0.5, 3.0)` overrides A7's own bound and cuts recall substantially.
+    choice to validate against scored data, not a published A7 setting. The
+    default `duration` for this method is `(0.3, 2.5)`, A7's own bound per
+    Lacourse et al. 2018 — leave it unset unless you have a reason to
+    override it. Overriding it to anything else, such as the package's
+    global `(0.5, 3.0)`, cuts recall substantially and logs a warning.
 
 ### For High Specificity
 

@@ -387,10 +387,10 @@ independent back-fills, **both default ON when their target table is
 empty**, and both need `--annot <scoring.xml>`:
 
 - `--backfill-analysed-time` / `--no-backfill-analysed-time` — recomputes the
-  density denominator from the scoring, using the rejection settings
-  (`reject_artifacts`/`reject_arousals`) recorded in `detection_runs` for
-  each pair on record (falling back to the detector defaults, both `True`,
-  with a warning, if none are recorded). Calls `dbwrite.store_analysed_time`
+  density denominator from the scoring, using the `reject_types` recorded in
+  `detection_runs` for each pair on record (falling back to the library
+  default, `Artefact,Arousal,Move` since 4.4, with a warning, if none are
+  recorded). Calls `dbwrite.store_analysed_time`
   with `strict=True` — unlike a detection run (which swallows a denominator
   problem so it never loses an otherwise-successful run), this back-fill's
   entire job is that write, so an unreadable scoring file **raises** instead

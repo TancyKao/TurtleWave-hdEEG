@@ -56,11 +56,12 @@ rather than a CSV at all.
 | Table | One row per | Key columns |
 |---|---|---|
 | `events` | detected event | `event_type`, `channel`, `method`, `stage`, `start_time`, `duration`, `freq_lower`/`freq_upper`, `run_id` |
-| `detection_runs` | detection invocation | `run_id`, `method`, `citation`, `params_json`, `reject_artifacts`, `reject_arousals` |
+| `detection_runs` | detection invocation | `run_id`, `method`, `citation`, `params_json`, `reject_types` (since 4.4; `reject_artifacts`/`reject_arousals` kept for old readers) |
 | `pac_coupling` | channel × scope PAC result | `subject`, `channel`, `event_type`, `method`, `stage`, `mi_norm`, `preferred_phase_deg`, `mean_vector_length` |
-| `analysed_time` | subject × stage × rejection-setting | `analysed_seconds`, `artefact_seconds_excluded` — the density denominator |
+| `analysed_time` | subject × stage × `reject_types` | `analysed_seconds`, `artefact_seconds_excluded` — the density denominator |
 | `sleep_cycles`, `stage_durations` | cycle / stage, per subject | populated by [Finalize Sleep Cycles & Stage Durations](detect-sleep-cycles.md) |
 | `processing_status` | channel × detection scope | `success`, `error_message` — what `resume=True` reads |
+| `db_meta` | one row per `key` | `key='turtlewave_version'` — which release last opened the database for writing (`dbwrite.get_db_meta(conn, 'turtlewave_version')`) |
 
 `events.method` is the canonical, unescaped method string (e.g.
 `'AASM/Massimini2004'`, not `'AASM_Massimini2004'`) — see
@@ -102,8 +103,7 @@ spindles = pd.read_sql_query(
     conn,
 )
 runs = pd.read_sql_query(
-    "SELECT run_id, citation, params_json, reject_artifacts, "
-    "reject_arousals FROM detection_runs",
+    "SELECT run_id, citation, params_json, reject_types FROM detection_runs",
     conn,
 )
 spindles_with_provenance = spindles.merge(runs, on='run_id', how='left')
@@ -154,7 +154,7 @@ density_df = event_density(
     "wonambi/neural_events.db",
     event_type="spindle", method="Moelle2011",
     stage=["NREM2", "NREM3"],
-    reject_artifacts=True, reject_arousals=False,  # must match the detection run
+    reject_types=["Artefact", "Arousal", "Move"],  # must match the detection run
 )
 print(format_density_table(density_df))
 ```
@@ -173,15 +173,21 @@ counts <- dbGetQuery(con, "
 ")
 denom <- dbGetQuery(con, "
     SELECT stage, analysed_seconds FROM analysed_time
-    WHERE subject = 'sub-001' AND reject_artifacts = 1 AND reject_arousals = 0
+    WHERE subject = 'sub-001' AND reject_types = 'Arousal,Artefact,Move'
 ")
 merged <- merge(counts, denom, by = "stage")
 merged$density_per_min <- merged$n_events / (merged$analysed_seconds / 60)
 ```
 
-`reject_artifacts` / `reject_arousals` must match the settings the detection
-run used — they're part of `analysed_time`'s key, since a run that kept
-arousal epochs analysed more seconds than one that dropped them.
+`reject_types` must match the set the detection run used — it's part of
+`analysed_time`'s primary key `(subject, stage, reject_types)`, since a run
+that kept arousal epochs analysed more seconds than one that dropped them.
+The stored key is [`reject_key`](../reference/api/utils.md)'s form: the
+reject types sorted and comma-joined (e.g. `'Arousal,Artefact,Move'`, not
+`'Artefact,Arousal,Move'` or `'Artefact, Arousal, Move'`) — build it with
+`reject_key(...)` rather than hand-writing the string, and never pool
+`analysed_time` or `events` rows across two different keys; they cover
+different amounts of analysed time and are not the same measurement.
 
 ### Density without Python: `v_event_density`
 
@@ -222,9 +228,9 @@ for the full column list and behaviour.
 
     `stage=None` never *raises* over a missing denominator, regardless of
     `missing=`. A stage in the implicit (recorded) scope with no stored
-    `analysed_time` row for your `reject_artifacts=`/`reject_arousals=`
+    `analysed_time` row for your `reject_types=`
     (commonly because `processing_status` carries a row from a run with
-    *different* rejection settings — it isn't keyed by them) is left out of
+    a *different* reject set — it isn't keyed by it) is left out of
     the stage *scope*: no zero-event filler row is added for it, and it takes
     no part in a pooled denominator. But it is **not** dropped from the
     output wholesale — if that stage actually has events, those rows are

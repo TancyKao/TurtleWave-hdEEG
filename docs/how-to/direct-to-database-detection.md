@@ -18,9 +18,10 @@ you.
 
 Each channel's events are written straight into `neural_events.db` in one
 transaction, along with a `detection_runs` provenance row recording the
-method, citation, full parameter dict, reference/polarity, artefact-rejection
-settings and library versions used. No keyword argument is required — this is
-what `write_db=None` (the default on all four detection/analysis calls) does:
+method, citation, full parameter dict, reference/polarity, the resolved
+`reject_types` set (since 4.4; see below) and library versions used. No
+keyword argument is required — this is what `write_db=None` (the default on
+all four detection/analysis calls) does:
 
 ```python
 from wonambi.dataset import Dataset as WonambiDataset
@@ -36,8 +37,7 @@ spindles = event_processor.detect_spindles(
     frequency=(11, 13),
     duration=(0.5, 3),
     stage=["NREM2", "NREM3"],
-    reject_artifacts=True,
-    reject_arousals=False,
+    reject_types=["Artefact", "Arousal", "Move"],  # the 4.4 default; pass explicitly to pin it
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
     json_dir="wonambi/spindle_results",  # locates neural_events.db; no JSON written
@@ -195,14 +195,29 @@ A `detection_runs` row is written per invocation with the method, a literature
 citation (resolved automatically for the built-in methods — Ferrarelli2007,
 Moelle2011, Nir2011, Wamsley2012, Martin2013, Ray2015, Lacourse2018,
 Massimini2004, Ngo2015, Staresina2015, etc.), the full parameter dict, the
-reference channel(s), polarity, requested stages, artefact/arousal rejection
-flags, and `turtlewave_hdEEG` / `wonambi` / `numpy` versions plus the git SHA.
+reference channel(s), polarity, requested stages, `reject_types`, and
+`turtlewave_hdEEG` / `wonambi` / `numpy` versions plus the git SHA.
 
 The run also stores its density denominator — the artefact-free in-stage
 seconds it actually analysed — in `analysed_time`, so
 [`turtlewave_hdEEG.density.event_density`](../reference/api/density.md) can
 derive density straight from the database. See
 [Read the database with pandas and R](read-database-with-pandas-and-r.md).
+
+!!! note "`reject_types`, since 4.4"
+    `analysed_time` is keyed on `(subject, stage, reject_types)`, not just
+    `(subject, stage)` — two runs with different reject sets each get their
+    own denominator row instead of one overwriting the other, and
+    `detection_runs.reject_types` / `v_event_density.reject_types` expose the
+    same key for provenance and SQL queries. The default set changed from
+    `Artefact,Arousal` to `Artefact,Arousal,Move` in this release; see
+    [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default)
+    for the reasoning and
+    [Read the database with pandas and R](read-database-with-pandas-and-r.md#the-tables-youll-query)
+    for the exact key format. `db_meta['turtlewave_version']` also now
+    records which `turtlewave_hdEEG` release last opened the database for
+    writing (overwritten on every write; a per-row version is still in
+    `detection_runs.turtlewave_version` / `analysed_time.turtlewave_version`).
 
 ## What `events.stage` means
 
