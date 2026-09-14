@@ -45,25 +45,111 @@ class XLAnnotations:
             print(f"Loaded existing annotation file: {annot_file}")
 
 
+    #: Half-width, in seconds, of the ``Artefact`` window written around an
+    #: EEGLAB ``boundary`` (splice) marker. The window is
+    #: ``[onset - BOUNDARY_PAD_SECONDS, onset + BOUNDARY_PAD_SECONDS]``.
+    BOUNDARY_PAD_SECONDS = 2.0
+
+    def _recording_length_seconds(self):
+        """Recording length in seconds, for clipping annotation windows.
+
+        Returns
+        -------
+        float or None
+            ``header['n_samples'] / sampling_rate`` when the header carries a
+            sample count, else ``header['recording_duration']``, else ``None``
+            when neither is available -- in which case callers must clip at
+            zero only and leave the upper bound open.
+        """
+        header = getattr(self.dataset, 'header', {}) or {}
+        s_freq = getattr(self.dataset, 'sampling_rate', None)
+
+        n_samples = header.get('n_samples')
+        if n_samples is not None and s_freq:
+            try:
+                return float(n_samples) / float(s_freq)
+            except (TypeError, ValueError):
+                pass
+
+        duration = header.get('recording_duration')
+        if duration is not None:
+            try:
+                return float(duration)
+            except (TypeError, ValueError):
+                pass
+
+        return None
+
     def add_artefacts_from_events(self):
         """
-        Add artefact and arousal annotations from the dataset's event information.
-        
-        Uses the 'isreject' flag in events to identify artefacts.
-        Also identifies arousal events if 'arousal' is in the event type (case-insensitive).
-        
-        Highly optimized for large datasets by pre-filtering relevant events.
+        Add artefact, arousal and other exclusion annotations from the
+        dataset's EEGLAB event information.
+
+        Every event in ``dataset.header['event']`` is matched, case-insensitively,
+        against the rules below and written as a Wonambi event on ``'(all)'``
+        channels. Rules are evaluated in the order listed and an event matches at
+        most one of them: ``boundary`` is tested first and its events are removed
+        from the remaining masks, so a splice marker can never also be counted as,
+        say, a movement.
+
+        | Rule        | Event type matches (lower-cased)                  | Label    |
+        |-------------|--------------------------------------------------|----------|
+        | boundary    | equals `boundary`                                | Artefact |
+        | reject      | contains `reject`                                | Artefact |
+        | arousal     | contains `arousal`                               | Arousal  |
+        | respiratory | contains `hypopnea`/`obstructiveapnea`/`spo2desat`| Resp     |
+        | movement    | contains `move`/`leg`, or equals `lklr`/`lkud`    | Move     |
+        | snore       | contains `snor`/`jaw`                            | Snore    |
+
+        Event timing comes from ``onsets`` and ``durations`` (both in samples;
+        divided by ``dataset.sampling_rate``). A missing, ``None`` or
+        non-numeric duration falls back to 1.0 s. Boundary events are the one
+        exception -- see Notes.
+
+        Returns
+        -------
+        total_count : int
+            Number of annotations written, summed over EVERY rule above (this
+            used to count only Artefact + Arousal).
+        execution_time : float
+            Wall-clock seconds spent.
+
+        Notes
+        -----
+        **Why boundary events are masked.** EEGLAB writes a ``boundary`` event
+        at each point where a segment of data was cut out. The remaining samples
+        are spliced together, so the signal steps discontinuously at that
+        instant. On sub-11vi (107 splices x 257 channels) the median step across
+        a splice was 1.5 uV, but 7 boundaries stepped more than 30 uV on at
+        least one channel -- large enough to seed a false slow wave. Masking
+        +/- 2.0 s around every splice also guarantees that no detected event,
+        and in particular no slow-oscillation/spindle coupling phase estimate,
+        spans a discontinuity. The cost measured on that subject was about 1.6%
+        of analysable time.
+
+        **Why the boundary's own duration is ignored.** For a ``boundary``,
+        EEGLAB's ``duration`` field is the length of the data that was REMOVED,
+        expressed in the ORIGINAL time base, not a span in the surviving
+        recording. Using ``onset + duration`` as the window end therefore
+        rejects perfectly good post-splice data -- about 36 minutes on one
+        measured subject. The window is a fixed +/- ``BOUNDARY_PAD_SECONDS``
+        around the onset instead.
+
+        The window is clipped to ``[0, recording length]``, which covers the
+        boundaries some files place at latency 0 or at the very end of the
+        recording; a window that collapses to zero length after clipping is
+        skipped rather than written.
         """
 
         start_time = time.time()
-        
+
         # Check if event information exists in header
         if 'event' not in self.dataset.header:
             print("No event information found in dataset header.")
             end_time = time.time()
             print(f"Processing time: {end_time - start_time:.4f} seconds")
             return 0, end_time - start_time
-        
+
         event_info = self.dataset.header['event']
         onsets = np.array(event_info.get('onsets', []))
         types = event_info.get('types', [])
@@ -72,33 +158,84 @@ class XLAnnotations:
         # Check if we have any events
         if len(onsets) == 0:
             print("No events found in dataset.")
-            
+
             return 0, time.time() - start_time
-        
+
         s_freq = self.dataset.sampling_rate
-        onset_seconds = onsets / s_freq
-        duration_seconds = np.ones_like(onsets)
-        valid_durations = durations[:len(onset_seconds)]
-        duration_seconds[:len(valid_durations)] = np.where(
-            valid_durations != None, 
-            valid_durations / s_freq, 
-            1.0
-        )
+        # float64 explicitly: `np.ones_like(onsets)` inherited the onsets dtype,
+        # so an integer latency array produced an integer duration array and the
+        # assignment below truncated every sub-second duration to 0 -- a 0.4 s
+        # arousal became a zero-length annotation.
+        onset_seconds = np.asarray(onsets, dtype=np.float64) / float(s_freq)
+        n_events = len(onset_seconds)
+        duration_seconds = np.ones(n_events, dtype=np.float64)
+
+        # `durations` may be shorter than `onsets` (or absent, or hold None /
+        # non-numeric entries). Anything unusable keeps the 1.0 s fallback
+        # instead of raising IndexError or TypeError.
+        for i, raw in enumerate(durations[:n_events]):
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if np.isnan(value):
+                continue
+            duration_seconds[i] = value / float(s_freq)
+
         end_seconds = onset_seconds + duration_seconds
 
         # Pre-compile type checks
         types_arr = np.array([str(t).lower() if t else '' for t in types[:len(onsets)]])
-    
+
+        # Rule 0, evaluated first: EEGLAB splice markers. Matched on the exact
+        # type so an unrelated type merely containing the word is not swept in.
+        boundary_mask = np.array([t.strip() == 'boundary' for t in types_arr],
+                                 dtype=bool)
+        not_boundary = ~boundary_mask
+
         event_masks = {
-            "Artefact": np.char.find(types_arr, 'reject') != -1,
-            "Arousal": np.char.find(types_arr, 'arousal') != -1,
-            "Resp": np.any([np.char.find(types_arr, x) != -1 for x in ['hypopnea', 'obstructiveapnea', 'spo2desat']], axis=0),
-            "Move": np.any([np.char.find(types_arr, x) != -1 for x in ['move', 'leg']] + [types_arr == x for x in ['lklr', 'lkud']], axis=0),
-            "Snore": np.any([np.char.find(types_arr, x) != -1 for x in ['snor', 'jaw']], axis=0)
+            "Artefact": (np.char.find(types_arr, 'reject') != -1) & not_boundary,
+            "Arousal": (np.char.find(types_arr, 'arousal') != -1) & not_boundary,
+            "Resp": np.any([np.char.find(types_arr, x) != -1 for x in ['hypopnea', 'obstructiveapnea', 'spo2desat']], axis=0) & not_boundary,
+            "Move": np.any([np.char.find(types_arr, x) != -1 for x in ['move', 'leg']] + [types_arr == x for x in ['lklr', 'lkud']], axis=0) & not_boundary,
+            "Snore": np.any([np.char.find(types_arr, x) != -1 for x in ['snor', 'jaw']], axis=0) & not_boundary
         }
 
         event_counts = {key: 0 for key in event_masks}
-        
+        event_counts["Boundary"] = 0
+
+        # Boundary windows: fixed +/- BOUNDARY_PAD_SECONDS around the onset,
+        # ignoring the event's own duration (see Notes), clipped to the
+        # recording, and dropped if the clip leaves nothing.
+        boundary_indices = np.where(boundary_mask)[0]
+        if len(boundary_indices) > 0:
+            pad = float(self.BOUNDARY_PAD_SECONDS)
+            rec_length = self._recording_length_seconds()
+
+            b_onsets = onset_seconds[boundary_indices]
+            b_starts = np.maximum(b_onsets - pad, 0.0)
+            b_ends = b_onsets + pad
+            if rec_length is not None:
+                b_starts = np.minimum(b_starts, rec_length)
+                b_ends = np.minimum(b_ends, rec_length)
+
+            keep = b_ends > b_starts
+            n_skipped = int(np.count_nonzero(~keep))
+            if n_skipped:
+                print(f"Skipped {n_skipped} boundary event(s) whose "
+                      f"+/-{pad:g}s window fell outside the recording.")
+            if np.any(keep):
+                success = self.add_annotations_batch(
+                    label="Artefact",
+                    start_times=b_starts[keep],
+                    end_times=b_ends[keep],
+                    channels=None
+                )
+                if success:
+                    event_counts["Boundary"] += int(np.count_nonzero(keep))
+
         # Batch process annotations
         for event_type, mask in event_masks.items():
             indices = np.where(mask)[0]
@@ -112,9 +249,12 @@ class XLAnnotations:
                 )
                 if success:
                     event_counts[event_type] += len(indices)
-            
-        total_count = event_counts["Artefact"] + event_counts["Arousal"]
-    
+
+        # Count EVERY written type: a file holding only Resp/Move/Snore events
+        # (or only boundaries) used to be added to the in-memory tree and then
+        # never saved, because the save gate summed Artefact + Arousal alone.
+        total_count = sum(event_counts.values())
+
         if total_count > 0:
             self.annotations.save()
             print(
@@ -122,10 +262,13 @@ class XLAnnotations:
                 f"{event_counts['Arousal']} arousal annotations from event information. "
                 f"{event_counts['Resp']} respiratory events, "
                 f"{event_counts['Move']} movement events, "
-                f"{event_counts['Snore']} snore events."
+                f"{event_counts['Snore']} snore events, "
+                f"{event_counts['Boundary']} boundary masks "
+                f"(+/-{float(self.BOUNDARY_PAD_SECONDS):g}s, written as Artefact)."
             )
         else:
-            print("No artefacts or arousals found in event information.")
+            print("No artefacts, arousals or other exclusions found in event "
+                  "information.")
 
         execution_time = time.time() - start_time
         print(f"Processing time: {execution_time:.4f} seconds")
@@ -212,7 +355,33 @@ class XLAnnotations:
             return False
 
     def add_annotations_batch(self, label, start_times, end_times, channels=None):
-        """Add multiple annotations at once."""
+        """Add multiple annotations of one label at once.
+
+        The event type is created if the annotation file does not already carry
+        it. Nothing is written to disk here -- the caller is responsible for
+        ``save()``.
+
+        Parameters
+        ----------
+        label : str
+            Event type name, e.g. ``'Artefact'``.
+        start_times : sequence of float
+            Start times in seconds.
+        end_times : sequence of float
+            End times in seconds, same length as ``start_times``. Pairs are
+            zipped, so a shorter sequence silently truncates the batch.
+        channels : sequence of str or None, optional
+            Channel for each annotation. ``None`` (default) writes every
+            annotation on ``'(all)'``.
+
+        Returns
+        -------
+        bool
+            True when the whole batch was added, False if any ``add_event``
+            raised -- in which case annotations added before the failure remain
+            in the in-memory tree, so the count is all-or-nothing only from the
+            caller's point of view.
+        """
         try:
             if label not in self.annotations.event_types:
                 self.annotations.add_event_type(label)
