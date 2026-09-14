@@ -9,20 +9,23 @@ untouched. This is NOT a whole-montage re-detection.
 What it does, in order
 ----------------------
 1. Load the sidecar annotation and the EEG file.
-2. Guard: verify the rater the detector will read carries BOTH the staging AND
-   the sidecar artefacts (``verify_rater_match``) -- else the re-run would
-   silently reject nothing.
-3. Resolve the invariant parameters (``ref_chan`` / ``polar`` / ``cat``) from the
+2. Resolve the invariant parameters (``ref_chan`` / ``polar`` / ``cat``) from the
    original run's provenance, refusing if they can't be recovered and were not
    supplied (``resolve_rerun_params``).
-4. Per selected channel, apply the clean-time gate (``channel_clean_gate``):
+3. Take the reject set from that same provenance, so the re-detected channels
+   are searched over the same time as the channels left alone.
+   ``--reject-types`` overrides it and warns.
+4. Guard: verify the rater the detector will read carries BOTH the staging AND
+   the sidecar artefacts (``verify_rater_match``) -- else the re-run would
+   silently reject nothing.
+5. Per selected channel, apply the clean-time gate (``channel_clean_gate``):
    channels with too little / too-fragmented artefact-free in-stage time are
    FORCED-DROP, not re-detected.
-5. Re-detect the surviving channels with ``write_db=True,
+6. Re-detect the surviving channels with ``write_db=True,
    replace_channels=<survivors>``: artefact epochs are excluded at ESTIMATION
    time by the detector's ``fetch`` (no detect-then-delete), and each channel's
    old rows are DELETE-then-INSERT replaced in one transaction.
-6. Record a ``rerun_log`` provenance row (selected/redetected/dropped channels,
+7. Record a ``rerun_log`` provenance row (selected/redetected/dropped channels,
    sidecar + snapshot paths) so the run is self-describing and rollback-able.
 
 Export / import are intentionally skipped; the DB is the source of truth.
@@ -65,7 +68,9 @@ from turtlewave_hdEEG import (CustomAnnotations, ParalEvents, ParalSWA, ParalKC,
 from turtlewave_hdEEG.rerun import (RerunGuardError, verify_rater_match,
                                     channel_clean_gate, resolve_rerun_params,
                                     resolve_sw_amplitude_thresholds)
-from turtlewave_hdEEG.utils import read_channels_from_csv
+from turtlewave_hdEEG.utils import (read_channels_from_csv,
+                                   resolve_reject_types,
+                                   KNOWN_REJECT_TYPES)
 
 
 LOG = logging.getLogger('turtlewave_hdEEG.rerun_driver')
@@ -108,26 +113,31 @@ def _parse_args(argv):
     p.add_argument('--max-excluded-frac', type=float, default=0.5,
                    help='max fraction of in-stage time excluded before a '
                         'channel is forced-drop. Default 0.5.')
+    p.add_argument('--reject-types', default=None,
+                   help='comma-separated annotation event types to exclude '
+                        'from detection AND from the density denominator '
+                        '(e.g. "Artefact,Arousal,Move"). Default: the set '
+                        'the ORIGINAL run recorded, so the re-detected '
+                        'channels match the ones left alone; the library '
+                        'default only when that run recorded none. Passing '
+                        'this overrides the original and warns. Pass an empty '
+                        'string to reject nothing. Known types: '
+                        + ', '.join(KNOWN_REJECT_TYPES) + '.')
     p.add_argument('--no-reject-artifacts', dest='reject_artifacts',
-                   action='store_false')
+                   action='store_false',
+                   help='deprecated: removes Artefact from --reject-types')
     p.add_argument('--no-reject-arousals', dest='reject_arousals',
-                   action='store_false')
+                   action='store_false',
+                   help='deprecated: removes Arousal from --reject-types')
     p.add_argument('--backup', default=None,
                    help='qc_backup snapshot dir, recorded in rerun_log as the '
                         'rollback point (defaults to the sidecar directory)')
     p.add_argument('--requested-by', default=None,
                    help='reviewer name, recorded in rerun_log')
-    p.set_defaults(reject_artifacts=True, reject_arousals=True)
+    # None, not True: "not given" must stay distinguishable from "asked for",
+    # so --reject-types alone decides the set and the flags only subtract.
+    p.set_defaults(reject_artifacts=None, reject_arousals=None)
     return p.parse_args(argv)
-
-
-def _reject_types(reject_artifacts, reject_arousals):
-    rt = []
-    if reject_artifacts:
-        rt.append('Artefact')
-    if reject_arousals:
-        rt.append('Arousal')
-    return rt
 
 
 def main(argv=None):
@@ -156,16 +166,13 @@ def main(argv=None):
     except Exception:
         s_freq = None
 
-    reject_types = _reject_types(args.reject_artifacts, args.reject_arousals)
-
-    # 2. Rater-match guard -- fail loudly rather than silently un-rejected.
-    try:
-        verify_rater_match(annot, reject_types, logger=LOG)
-    except RerunGuardError as e:
-        LOG.error("Rater-match guard failed: %s", e)
-        return 3
-
-    # 3. Resolve invariant parameters from the original run (or explicit args).
+    # 2. Resolve invariant parameters from the original run (or explicit args).
+    # Runs BEFORE the reject set is fixed: a re-run must repeat what the
+    # original run excluded, not what today's library default excludes. The
+    # re-detected channels are compared against channels this run does not
+    # touch, so a different reject set means the two halves of the montage were
+    # searched over different time -- and the stored density denominator is
+    # keyed on the original set, so it would no longer describe these channels.
     try:
         resolved = resolve_rerun_params(
             db_path, args.event_type, args.method,
@@ -179,9 +186,52 @@ def main(argv=None):
     ref_chan = resolved['ref_chan']
     polar = resolved['polar']
     cat = resolved['cat']
-    orig_params = (resolved['recovered'] or {}).get('params', {}) or {}
+    recovered = resolved['recovered'] or {}
+    orig_params = recovered.get('params', {}) or {}
+    recorded_reject = recovered.get('reject_types') or None
 
-    # 4. Clean-time gate. It is whole-montage (channel-global): it reuses
+    # 3. Reject set: the ORIGINAL run's by default.
+    requested = (None if args.reject_types is None
+                 else [t for t in args.reject_types.split(',') if t.strip()])
+    overridden = (requested is not None or args.reject_artifacts is not None
+                  or args.reject_arousals is not None)
+    if not overridden and recorded_reject:
+        reject_types = list(resolve_reject_types(recorded_reject, logger_=LOG))
+        LOG.info("Reject set recovered from the original run: %s. Pass "
+                 "--reject-types to override.",
+                 ", ".join(reject_types) or "nothing rejected")
+    else:
+        reject_types = list(resolve_reject_types(
+            requested, args.reject_artifacts, args.reject_arousals,
+            logger_=LOG))
+        if not overridden:
+            LOG.warning(
+                "The original run recorded no reject set (a pre-4.4 run whose "
+                "booleans were not stored either), so this re-run uses the "
+                "library default: %s. If that run excluded something else, "
+                "the re-detected channels are searched over different time "
+                "from the channels left alone. Pass --reject-types to state "
+                "what it used.", ", ".join(reject_types) or "nothing")
+        elif recorded_reject and set(reject_types) != set(recorded_reject):
+            LOG.warning(
+                "--reject-types OVERRIDES the original run: that run excluded "
+                "%s, this re-run excludes %s. The re-detected channels will "
+                "have been searched over different time from every channel "
+                "this run leaves alone, and the stored density denominator "
+                "for this scope is keyed on the ORIGINAL set, so it does not "
+                "describe the new rows. Re-detect the whole montage instead "
+                "if you mean to change the reject set.",
+                ", ".join(recorded_reject) or "nothing",
+                ", ".join(reject_types) or "nothing")
+
+    # 4. Rater-match guard -- fail loudly rather than silently un-rejected.
+    try:
+        verify_rater_match(annot, reject_types, logger=LOG)
+    except RerunGuardError as e:
+        LOG.error("Rater-match guard failed: %s", e)
+        return 3
+
+    # 5. Clean-time gate. It is whole-montage (channel-global): it reuses
     # compute_analysed_seconds(chan=None), the only artefact subtraction Wonambi
     # supports faithfully, and the review-GUI sidecar marks artefacts
     # whole-montage. So it is computed ONCE and is all-or-nothing for this run --
@@ -209,21 +259,29 @@ def main(argv=None):
                     gate['excluded_frac'] * 100, len(selected))
         return 5
 
-    # 5. Re-detect survivors with scoped replace.
+    # 6. Re-detect survivors with scoped replace.
     freq = (args.freq[0], args.freq[1])
     common = dict(chan=redetect, ref_chan=ref_chan, grp_name=args.grp_name,
                   frequency=freq, polar=polar, stage=args.stages, cat=cat,
-                  reject_artifacts=args.reject_artifacts,
-                  reject_arousals=args.reject_arousals,
+                  reject_types=reject_types,
                   save_to_annotations=False, json_dir=None,
                   write_db=True, db_path=db_path, resume=False,
                   replace_channels=redetect)
 
     if args.event_type == 'spindle':
         proc = ParalEvents(dataset=data, annotations=annot)
-        duration = orig_params.get('duration')
+        # Per-method first: on a mixed-method run the scalar 'duration' is
+        # None (the methods resolved to different bounds), and replaying it
+        # would silently impose one method's bound on another's re-detection.
+        by_method = orig_params.get('duration_by_method') or {}
+        duration = by_method.get(args.method, orig_params.get('duration'))
         if duration is not None:
             common['duration'] = tuple(duration)
+            LOG.info("Re-using the original run's duration bound for %s: %s",
+                     args.method, tuple(duration))
+        else:
+            LOG.info("The original run recorded no duration bound for %s, so "
+                     "the method's published default is used.", args.method)
         proc.detect_spindles(method=args.method, **common)
     elif args.event_type == 'slow_wave':
         proc = ParalSWA(dataset=data, annotations=annot)
@@ -262,7 +320,7 @@ def main(argv=None):
                                   else orig_params[key])
         proc.detect_kcomplexes(method=args.method, **kc_kwargs)
 
-    # 6. Record the re-run for provenance / rollback.
+    # 7. Record the re-run for provenance / rollback.
     import uuid as _uuid
     conn = dbwrite.open_write_connection(db_path)
     try:

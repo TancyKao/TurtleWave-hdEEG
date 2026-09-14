@@ -132,6 +132,12 @@ test_amplitude = {
 
 
 # 5. Run slow wave detection
+# Annotation event types excluded from detection AND from the density
+# denominator. One list used by every call below: it is stored in
+# detection_runs.reject_types and keys the analysed_time denominator, so
+# detection and density must not disagree about it.
+reject_types = ['Artefact', 'Arousal', 'Move']
+
 print("Running slow wave detection...")
 
 slow_waves = event_processor.detect_slow_waves(
@@ -143,8 +149,7 @@ slow_waves = event_processor.detect_slow_waves(
     p2p_thresh=test_amplitude['peak_to_peak_threshold'],
     polar='normal', # 'normal' or 'opposite'
     stage=test_stages,
-    reject_artifacts=True,
-    reject_arousals=True,
+    reject_types=reject_types,
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
     json_dir=out_dir,
@@ -182,7 +187,7 @@ if not _cli.legacy_json:
         density_df = event_density(
             db_path, event_type='slow_wave', method=test_method,
             stage=test_stages, subject=_cli.subject,
-            reject_artifacts=True, reject_arousals=True)
+            reject_types=reject_types)
         print("Slow wave density (events per minute of artefact-free in-stage time):")
         print(format_density_table(density_df))
     except (ValueError, FileNotFoundError) as e:
@@ -200,7 +205,7 @@ else:
         file_pattern=file_pattern
     )
 
-    # Pass the same rejection settings the detection call used: the density
+    # Pass the same reject set the detection call used: the density
     # denominator must be the recording time the detector actually analysed,
     # otherwise every density is biased.
     density2CSV = event_processor.export_slow_wave_density_to_csv(
@@ -208,8 +213,7 @@ else:
         csv_file=os.path.join(out_dir, f'sw_density_{test_method_str}_{freq_range}_{stages_str}.csv'),
         stage=test_stages,
         file_pattern=file_pattern,
-        reject_artifacts=True,
-        reject_arousals=True
+        reject_types=reject_types
     )
 
     # Pass the UNESCAPED method. test_method_str ('AASM_Massimini2004') is the

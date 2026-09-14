@@ -195,8 +195,20 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             'Lacourse2018'
         frequency : tuple of float
             Frequency range for spindle detection (low and high)
-        duration : tuple of float
-            Duration range for spindles in seconds (min and max)
+        duration : tuple of float or None
+            Duration range for spindles in seconds ``(min, max)``. ``None``
+            (the default) keeps the method's own published bound, which for
+            ``Lacourse2018`` is A7's (0.3, 2.5) s; ``Moelle2011`` and
+            ``Martin2013`` are (0.5, 3) s, ``Ferrarelli2007`` and
+            ``Wamsley2012`` (0.3, 3) s, ``Nir2011`` (0.5, 2) s, ``Ray2015``
+            (0.49, None) s and ``CIRUS`` (0.5, 3) s. A non-``None`` value is
+            applied LAST by Wonambi's constructor and therefore overrides the
+            method default -- passing a global (0.5, 3) s to ``Lacourse2018``
+            silently replaces its published bound and costs about a third of
+            its detections. For this reason
+            :meth:`~turtlewave_hdEEG.eventprocessor.ParalEvents.detect_spindles`
+            defaults to ``duration=None`` and resolves the bound per method
+            before constructing the detector.
         det_thresh : float or None
             Detection threshold (method-specific units). **Ignored by
             ``Lacourse2018``**, which has no single threshold -- see Notes.
@@ -401,6 +413,11 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             if not hasattr(self, 'frequency') or self.frequency is None:
                 self.frequency = (11, 16)
             if not hasattr(self, 'duration') or self.duration is None:
+                # A7's published minDurSpindleSec / maxDurSpindleSec. The
+                # parent constructor has normally already set this (to the
+                # same pair) or to a caller's explicit override, so this is a
+                # mirror that only fires if the attribute is missing -- it
+                # must never overwrite an explicit duration.
                 self.duration = (.3, 2.5)
                 
             self.det_butter = {'freq': self.frequency,

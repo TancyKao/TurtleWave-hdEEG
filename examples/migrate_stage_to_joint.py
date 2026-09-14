@@ -863,11 +863,10 @@ def backfill_analysed_time(conn, db_path, annot_path, dataset_path=None,
     be derived from ``events``. A stage collapse leaves it exactly as empty as
     it was, so density stays unavailable until this runs.
 
-    The rejection settings come from ``detection_runs``, not from a default:
-    they are part of the ``analysed_time`` key, and a denominator computed
-    under settings the run did not use is a wrong denominator, not a missing
-    one. One row set is written per distinct ``(reject_artifacts,
-    reject_arousals)`` pair on record.
+    The reject set comes from ``detection_runs``, not from a default: it is
+    part of the ``analysed_time`` key, and a denominator computed under a set
+    the run did not use is a wrong denominator, not a missing one. One row set
+    is written per distinct ``reject_types`` value on record.
 
     Parameters
     ----------
@@ -888,10 +887,12 @@ def backfill_analysed_time(conn, db_path, annot_path, dataset_path=None,
     Returns
     -------
     dict
-        ``{(reject_artifacts, reject_arousals): {stage: seconds}}`` written.
+        ``{reject_types_key: {stage: seconds}}`` written, where the key is the
+        sorted comma-joined reject set (:func:`turtlewave_hdEEG.utils.reject_key`).
     """
     from turtlewave_hdEEG import CustomAnnotations
-    from turtlewave_hdEEG.utils import derive_subject
+    from turtlewave_hdEEG.utils import (derive_subject, reject_key,
+                                        DEFAULT_REJECT_TYPES)
 
     annotations = CustomAnnotations(annot_path)
     dataset = None
@@ -914,25 +915,38 @@ def backfill_analysed_time(conn, db_path, annot_path, dataset_path=None,
         LOG.warning("No stages in events, so no denominator was computed.")
         return {}
 
+    # ensure_direct_write_schema back-fills detection_runs.reject_types from
+    # the two booleans, so after migration this column is the complete record
+    # of what each run excluded. Read it rather than the booleans: a 4.4 run
+    # that also excluded Move is invisible to the booleans.
     settings = set()
     if _table_exists(conn, 'detection_runs'):
-        for ra, ro in conn.execute(
-                "SELECT DISTINCT reject_artifacts, reject_arousals "
-                "FROM detection_runs"):
-            if ra is None or ro is None:
-                continue
-            settings.add((bool(ra), bool(ro)))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(detection_runs)")}
+        if 'reject_types' in cols:
+            for (rt,) in conn.execute(
+                    "SELECT DISTINCT reject_types FROM detection_runs "
+                    "WHERE reject_types IS NOT NULL"):
+                settings.add(str(rt))
+        else:
+            for ra, ro in conn.execute(
+                    "SELECT DISTINCT reject_artifacts, reject_arousals "
+                    "FROM detection_runs"):
+                if ra is None or ro is None:
+                    continue
+                settings.add(reject_key(
+                    (['Artefact'] if ra else []) + (['Arousal'] if ro else [])))
     if not settings:
+        default_key = reject_key(DEFAULT_REJECT_TYPES)
         LOG.warning(
-            "detection_runs records no artefact/arousal rejection settings, "
-            "so the denominator is computed for the detector defaults "
-            "(reject_artifacts=True, reject_arousals=True). If those runs used "
-            "different settings, density will report the denominator as "
-            "missing rather than give a wrong number.")
-        settings = {(True, True)}
+            "detection_runs records no reject set, so the denominator is "
+            "computed for the library default (%s). If those runs used a "
+            "different set, density will report the denominator as missing "
+            "rather than give a wrong number.", default_key)
+        settings = {default_key}
 
     written = {}
-    for reject_artifacts, reject_arousals in sorted(settings):
+    for key in sorted(settings):
+        types = [t for t in key.split(',') if t]
         # strict=True: store_analysed_time swallows its own failure by
         # default so a completed DETECTION is never lost to a denominator
         # problem. This caller has nothing else to lose -- the denominator is
@@ -940,9 +954,9 @@ def backfill_analysed_time(conn, db_path, annot_path, dataset_path=None,
         # being logged and returning {}.
         rows = dbwrite.store_analysed_time(
             conn, subject, annotations, dataset, stages,
-            reject_artifacts, reject_arousals, source='backfill',
+            reject_types=types, source='backfill',
             annotation_file=annot_path, logger=LOG, strict=True)
-        written[(reject_artifacts, reject_arousals)] = rows
+        written[key] = rows
     return written
 
 

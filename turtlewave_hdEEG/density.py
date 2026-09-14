@@ -47,7 +47,8 @@ DENSITY_COLUMNS = (
     'subject', 'channel', 'event_type', 'method', 'stage',
     'n_events', 'analysed_minutes', 'density_per_min',
     'artefact_minutes_excluded', 'mean_duration_sec',
-    'reject_artifacts', 'reject_arousals', 'denominator_source',
+    'reject_types', 'reject_artifacts', 'reject_arousals',
+    'denominator_source',
 )
 
 
@@ -448,15 +449,15 @@ def _identity_scope_tokens(observed, run_components, has_other_tokens,
 
 def event_density(db_path, event_type=None, method=None, stage=None,
                   channel=None, freq_lower=None, freq_upper=None,
-                  subject=None, reject_artifacts=True, reject_arousals=True,
+                  subject=None, reject_artifacts=None, reject_arousals=None,
                   combine_stages=False, include_zero_channels=True,
-                  missing='raise', logger_=None):
+                  missing='raise', logger_=None, reject_types=None):
     """Per-channel event density derived from the database.
 
     The numerator is a ``GROUP BY`` count over ``events`` for the requested
     scope. The denominator is the artefact-free analysed time stored in
-    ``analysed_time`` for the same stage and the same rejection settings --
-    the time actually fed to the detector, not raw hypnogram time.
+    ``analysed_time`` for the same stage and the same **reject set** -- the
+    time actually fed to the detector, not raw hypnogram time.
 
     Parameters
     ----------
@@ -496,10 +497,8 @@ def event_density(db_path, event_type=None, method=None, stage=None,
     subject : str or None, optional
         Subject keying ``analysed_time``. ``None`` (default) uses the single
         subject in that table, and raises if there is more than one.
-    reject_artifacts, reject_arousals : bool, optional
-        The rejection settings of the detection run whose density is wanted.
-        These select the denominator row, so they must match the run.
-        Default ``True`` for both (the detector defaults).
+    reject_artifacts, reject_arousals : bool or None, optional
+        Deprecated shims for ``reject_types``. Default ``None``.
     combine_stages : bool, optional
         When True and more than one stage is in scope, return one row per
         channel for the pooled stages: the counts are summed, the denominators
@@ -521,6 +520,17 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         ``stage_durations``. Default ``'raise'``.
     logger_ : logging.Logger or None, optional
         Logger for the warnings. Default ``None`` (module logger).
+    reject_types : str or iterable of str or None, optional
+        The reject set of the detection run whose density is wanted. It selects
+        the denominator row, so it must match the run.
+
+        ``None`` (the default), with both booleans also ``None``, means "not
+        specified": when the database holds denominators for exactly ONE reject
+        set that set is used (logged), and when it holds several the library
+        default is used and every set found is named in a warning. A database
+        written before 4.4 therefore still reads correctly with no argument,
+        while a database holding two runs' sets never pools them silently.
+        Default ``None``.
 
     Returns
     -------
@@ -533,7 +543,8 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         ``event_type``, ``method``,
         ``stage``, ``n_events``, ``analysed_minutes``, ``density_per_min``,
         ``artefact_minutes_excluded``, ``mean_duration_sec``,
-        ``reject_artifacts``, ``reject_arousals``, ``denominator_source``.
+        ``reject_types``, ``reject_artifacts``, ``reject_arousals``,
+        ``denominator_source``.
         Empty (with those columns) when no event matches the scope and no
         channel was processed. Rows whose ``stage`` is ``None`` are events the
         detector could not attribute to a scored epoch; they carry
@@ -749,14 +760,36 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                 f"it biases density by the recording's artefact load.")
 
         resolved_subject = _resolve_subject(conn, subject)
+
+        # Which reject set's denominator this read uses. Resolved against what
+        # the database actually holds, so an unqualified call on a database
+        # written under an older default still finds its denominator instead of
+        # reporting every stage as missing.
+        from .dbwrite import resolve_stored_reject_key, _table_columns
+        reject_key_used, reject_types_used = resolve_stored_reject_key(
+            conn, resolved_subject, reject_types, reject_artifacts,
+            reject_arousals, logger=log)
+
+        if 'reject_types' in (_table_columns(conn, 'analysed_time') or ()):
+            denom_sql = ("SELECT stage, analysed_seconds, "
+                         "artefact_seconds_excluded, source FROM analysed_time "
+                         "WHERE subject = ? AND reject_types = ?")
+            denom_params = (resolved_subject, reject_key_used)
+        else:
+            # Pre-4.4 table this reader must not migrate: those rows can only
+            # be Artefact/Arousal, so membership of the resolved set is an
+            # exact translation of the key.
+            denom_sql = ("SELECT stage, analysed_seconds, "
+                         "artefact_seconds_excluded, source FROM analysed_time "
+                         "WHERE subject = ? AND reject_artifacts = ? "
+                         "AND reject_arousals = ?")
+            denom_params = (resolved_subject,
+                            1 if 'Artefact' in reject_types_used else 0,
+                            1 if 'Arousal' in reject_types_used else 0)
+
         denom = {}
         if resolved_subject is not None:
-            for row in conn.execute(
-                    "SELECT stage, analysed_seconds, artefact_seconds_excluded, "
-                    "source FROM analysed_time WHERE subject = ? AND "
-                    "reject_artifacts = ? AND reject_arousals = ?",
-                    (resolved_subject, 1 if reject_artifacts else 0,
-                     1 if reject_arousals else 0)):
+            for row in conn.execute(denom_sql, denom_params):
                 denom[str(row[0])] = {
                     'analysed_seconds': float(row[1]),
                     'artefact_seconds_excluded': row[2],
@@ -860,7 +893,7 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                     log.warning(
                         "stage=None for event_type=%s, method=%s: stage(s) %s "
                         "were searched but have no stored artefact-free time "
-                        "for reject_artifacts=%s, reject_arousals=%s. They are "
+                        "for reject_types=%s. They are "
                         "left out of the stage scope, so no zero-event rows "
                         "are added for them and they take no part in a pooled "
                         "denominator -- but any events actually detected in "
@@ -868,10 +901,11 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                         "density_per_min as NaN and denominator_source "
                         "'missing' (format_density_table renders those as "
                         "'nan/min'). This usually means processing_status "
-                        "carries rows from a run with different rejection "
-                        "settings (it is not keyed by them). Pass stage= "
+                        "carries rows from a run with a different reject set "
+                        "(it is not keyed by it). Pass stage= "
                         "explicitly to make a missing denominator an error.",
-                        et, m, undenominated, reject_artifacts, reject_arousals)
+                        et, m, undenominated,
+                        ",".join(reject_types_used) or '<nothing rejected>')
             # Components -> tokens. For a per-epoch database this is the
             # identity mapping (one token per component) and the behaviour is
             # unchanged; for a joint-token run it collapses to the one token
@@ -896,10 +930,10 @@ def event_density(db_path, event_type=None, method=None, stage=None,
             msg = (
                 f"No artefact-free denominator stored for {who}, "
                 f"stage(s) {missing_stages}, "
-                f"reject_artifacts={reject_artifacts}, "
-                f"reject_arousals={reject_arousals}. Density is undefined "
-                f"without it. Common causes: those rejection settings do not "
-                f"match the detection run (they are part of the analysed_time "
+                f"reject_types={','.join(reject_types_used) or '<nothing>'}. "
+                f"Density is undefined "
+                f"without it. Common causes: that reject set does not "
+                f"match the detection run (it is part of the analysed_time "
                 f"key); the stage was never detected on; or the run predates "
                 f"4.2 and stored no analysed_time. Re-run detection (which "
                 f"stores it), back-fill it, or ask for the stages the run "
@@ -1066,8 +1100,11 @@ def event_density(db_path, event_type=None, method=None, stage=None,
             "analysed cannot have a density.", int(zero_denom.sum()))
 
     rows['subject'] = resolved_subject
-    rows['reject_artifacts'] = bool(reject_artifacts)
-    rows['reject_arousals'] = bool(reject_arousals)
+    # The reject set the DENOMINATOR came from, not what the caller typed: with
+    # nothing specified those differ, and the stamp has to describe the number.
+    rows['reject_types'] = reject_key_used
+    rows['reject_artifacts'] = 'Artefact' in reject_types_used
+    rows['reject_arousals'] = 'Arousal' in reject_types_used
 
     rows = rows[list(DENSITY_COLUMNS)].sort_values(
         ['event_type', 'method', 'stage', 'channel']).reset_index(drop=True)

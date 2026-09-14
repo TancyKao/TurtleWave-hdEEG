@@ -8,7 +8,7 @@ from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSpindle as DetectSpindle
 from turtlewave_hdEEG import dbwrite
-from turtlewave_hdEEG.utils import derive_subject
+from turtlewave_hdEEG.utils import derive_subject, resolve_reject_types
 import json
 import datetime
 import logging
@@ -304,6 +304,64 @@ class ParalEvents:
     #: ``minDurSpindleSec`` / ``maxDurSpindleSec``).
     LACOURSE_DURATION = (0.3, 2.5)
 
+    #: Duration bound applied when :meth:`detect_spindles` is called without
+    #: one, for every method NOT listed in :attr:`DEFAULT_DURATION_BY_METHOD`.
+    #: This is the processor's historical default, kept unchanged so that no
+    #: method's numbers move except the one below.
+    DEFAULT_DURATION = (0.5, 3)
+
+    #: Per-method overrides of :attr:`DEFAULT_DURATION`, consulted only when
+    #: the caller passes no ``duration``. Lacourse2018 resolves to A7's
+    #: published bound: the old global (0.5, 3) s silently cost roughly a
+    #: third of A7's detections, because its four criteria are combined on a
+    #: 0.1 s grid and a 0.5 s minimum demands five consecutive passing
+    #: windows instead of three (measured recall 0.627 vs 0.949 on a 256 Hz
+    #: synthetic). An explicitly passed ``duration`` still wins, for every
+    #: method, and is warned about for Lacourse2018.
+    DEFAULT_DURATION_BY_METHOD = {'Lacourse2018': LACOURSE_DURATION}
+
+    def _resolve_durations(self, method, duration):
+        """Resolve the duration bound each method in a run will apply.
+
+        Parameters
+        ----------
+        method : list of str
+            The run's detection methods, already normalised to a list.
+        duration : tuple of float or None
+            The caller's ``(min, max)`` bound in seconds, or ``None`` to let
+            each method fall back to its own default.
+
+        Returns
+        -------
+        dict
+            Method name -> ``(min, max)`` duration tuple. With an explicit
+            ``duration`` every method maps to that same tuple, which is the
+            historical behaviour; with ``None`` each method maps to
+            :attr:`DEFAULT_DURATION_BY_METHOD` if listed, else
+            :attr:`DEFAULT_DURATION`. A ``duration`` that is not a 2-element
+            sequence is returned unchanged, so the detector -- not this
+            helper -- is what rejects it.
+
+        Notes
+        -----
+        Resolution happens once, before detection and before the provenance
+        record is built, so the duration stored in
+        ``detection_runs.params_json`` is the one the detector was actually
+        constructed with rather than the caller's sentinel.
+        """
+        if duration is None:
+            return {m: self.DEFAULT_DURATION_BY_METHOD.get(m,
+                                                           self.DEFAULT_DURATION)
+                    for m in method}
+        try:
+            lo, hi = duration
+        except (TypeError, ValueError):
+            # Not a 2-element bound. Hand it to the detector unchanged so it
+            # fails on its own terms; resolving a default is not the place to
+            # start validating, and it must not invent a new failure mode.
+            return {m: duration for m in method}
+        return {m: (lo, hi) for m in method}
+
     def _warn_lacourse_config(self, duration, detector_params):
         """Warn once per run about Lacourse2018 parameters that fail silently.
 
@@ -314,11 +372,16 @@ class ParalEvents:
         Parameters
         ----------
         duration : tuple of float
-            The ``(min, max)`` duration bound this run will apply, in seconds.
-            Wonambi lets it override each method's own default, so a caller's
-            global default silently replaces A7's published 0.3-2.5 s.
-            Anything that is not a 2-element sequence is ignored rather than
-            raised on; this helper is advisory and must not end a run.
+            The ``(min, max)`` duration bound this run will apply, in
+            seconds, already resolved by :meth:`_resolve_durations`. A run
+            that passed no ``duration`` resolves to A7's published
+            :attr:`LACOURSE_DURATION`, so the duration warning below does not
+            fire on a default run -- only on a bound the caller chose.
+            Wonambi applies an explicit ``duration`` last, overriding each
+            method's own default, which is why a caller's global (0.5, 3) s
+            silently replaces A7's published 0.3-2.5 s. Anything that is not
+            a 2-element sequence is ignored rather than raised on; this
+            helper is advisory and must not end a run.
         detector_params : dict
             Extra keyword arguments forwarded to
             :class:`~turtlewave_hdEEG.extensions.ImprovedDetectSpindle`.
@@ -327,8 +390,10 @@ class ParalEvents:
         -----
         Three checks, in order of measured impact on yield:
 
-        1. ``duration``. Raising the minimum from A7's 0.3 s to a typical
-           global 0.5 s costs about a third of the detections, because the
+        1. ``duration``. Only reachable by passing one explicitly, since
+           the default resolves to A7's own bound. Raising the minimum from
+           A7's 0.3 s to a typical global 0.5 s costs about a third of the
+           detections, because the
            four criteria are combined on a 0.1 s grid and 0.5 s demands five
            consecutive passing windows instead of three. Measured on a 10 min
            synthetic (59 injected 13 Hz bursts, 30 uV peak-to-peak): recall
@@ -344,6 +409,9 @@ class ParalEvents:
         :class:`~turtlewave_hdEEG.extensions.ImprovedDetectSpindle`.
         """
         lo, hi = self.LACOURSE_DURATION
+        # `duration` arrives already resolved, so a run that asked for no
+        # particular bound compares equal here and stays silent; the warning
+        # is reserved for a bound the caller actually chose.
         # This helper is advisory: it must never be the thing that ends a run.
         # `tuple(duration)` raises TypeError on a scalar, so anything that is
         # not a 2-element sequence is skipped silently and left for the
@@ -395,12 +463,12 @@ class ParalEvents:
                 effective, floor_off)
 
     def detect_spindles(self, method='Ferrarelli2007', chan=None, ref_chan=[], grp_name='eeg',
-                       frequency=(11, 16), duration=(0.5, 3), polar='normal',
-                       reject_artifacts=True, reject_arousals=True,stage=None, cat=None,
+                       frequency=(11, 16), duration=None, polar='normal',
+                       reject_artifacts=None, reject_arousals=None,stage=None, cat=None,
                        save_to_annotations=False, json_dir=None,
                        *, write_db=None, db_path=None, subject=None,
                        resume=False, run_params=None,
-                       replace_channels=None,
+                       replace_channels=None, reject_types=None,
                        **detector_params):
         """
         Detect spindles in the dataset while considering artifacts and arousals.
@@ -417,14 +485,36 @@ class ParalEvents:
             Group name for channel selection
         frequency : tuple
             Frequency range for spindle detection (min, max)
-        duration : tuple
-            Duration range for spindle detection in seconds (min, max)
+        duration : tuple or None, default None
+            Duration range for spindle detection in seconds ``(min, max)``,
+            applied to every method in the run. ``None`` means "use each
+            method's default bound": A7's published (0.3, 2.5) s for
+            ``Lacourse2018`` (:attr:`DEFAULT_DURATION_BY_METHOD`) and the
+            processor's historical (0.5, 3) s for every other method
+            (:attr:`DEFAULT_DURATION`), so no method other than A7 changes.
+            An explicit value overrides the method default -- Wonambi applies
+            it last -- and for ``Lacourse2018`` is warned about, because a
+            0.5 s minimum costs roughly a third of A7's detections.
         polar : str
             'normal' or 'opposite' for handling signal polarity
-        reject_artifacts : bool
-            Whether to exclude segments marked with artifact annotations
-        reject_arousals : bool
-            Whether to exclude segments marked with arousal annotations
+        reject_types : str or iterable of str or None, optional
+            Annotation event types whose time is excluded from detection AND
+            from the density denominator. ``None`` (default) uses
+            :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES` --
+            ``('Artefact', 'Arousal', 'Move')`` from 4.4. ``'Resp'`` and
+            ``'Snore'`` are opt-in: pass them explicitly for a sensitivity
+            analysis, remembering that in a sleep-disordered-breathing cohort
+            their masked time scales with severity, so the surviving sleep is a
+            severity-dependent subsample. An empty list rejects nothing.
+            The resolved set is recorded in ``detection_runs.reject_types`` and
+            keys the ``analysed_time`` denominator, so two runs with different
+            sets no longer overwrite each other's density.
+        reject_artifacts : bool or None, optional
+            Deprecated shim: ``True`` adds ``'Artefact'`` to ``reject_types``,
+            ``False`` removes it, ``None`` (default) leaves it alone. Prefer
+            ``reject_types``.
+        reject_arousals : bool or None, optional
+            Deprecated shim for ``'Arousal'``; same semantics.
         stage : list or str or None
             Sleep stage(s) to analyze
         cat : tuple or None
@@ -526,24 +616,33 @@ class ParalEvents:
                      """)
                      
         
-        # Configure what to reject
-        reject_types = []
-        if reject_artifacts:
-            reject_types.append('Artefact')
-            self.logger.debug("Configured to reject artifacts")
-        if reject_arousals:
-            reject_types.extend(['Arousal'])
-            self.logger.debug("Configured to reject arousals")
+        # Configure what to reject. One resolution for the whole run: the same
+        # tuple is handed to fetch(), recorded in detection_runs and used to key
+        # the analysed_time denominator, so numerator and denominator cannot
+        # describe different time.
+        reject_types = list(resolve_reject_types(
+            reject_types, reject_artifacts, reject_arousals,
+            logger_=self.logger))
+        self.logger.info(
+            "Excluding %s time from detection and from the density "
+            "denominator.", ", ".join(reject_types) or "no event types")
 
         # Make sure method is a list
         if isinstance(method, str):
             method = [method]
 
+        # Resolve the duration bound BEFORE anything reads it, so the value
+        # warned about, recorded in provenance and handed to the detector is
+        # one and the same. Only a `duration=None` call resolves per method;
+        # an explicit bound is passed through to every method unchanged.
+        duration_by_method = self._resolve_durations(method, duration)
+
         # Lacourse2018 (A7) does not take its parameters the way the other six
         # methods do, and every mismatch here is silent. Say so once per run,
         # not once per channel.
         if 'Lacourse2018' in method:
-            self._warn_lacourse_config(duration, detector_params)
+            self._warn_lacourse_config(
+                duration_by_method['Lacourse2018'], detector_params)
 
         # Make sure chan is a list
         if isinstance(chan, str):
@@ -595,7 +694,7 @@ class ParalEvents:
         freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
 
         self.logger.info(f"Starting spindle detection with method={method_db}, frequency={freq_str}")
-        self.logger.debug(f"Parameters: channels={chan}, reject_artifacts={reject_artifacts}, reject_arousals={reject_arousals}")
+        self.logger.debug(f"Parameters: channels={chan}, reject_types={reject_types}")
 
         if detector_params:
             self.logger.info(f"Method-specific parameters: {detector_params}")
@@ -668,13 +767,29 @@ class ParalEvents:
                 except Exception:
                     rec_start = None
                 run_id = str(_uuid_mod.uuid4())
+                # `duration` is per method once a run leaves it unset, so
+                # record the resolved map as well. The scalar key keeps its
+                # shape for existing readers, but ONLY when every method in the
+                # run resolved to the same bound -- which is always true of a
+                # single-method run, so those params are unchanged. A mixed
+                # run whose methods disagree records None rather than the first
+                # method's bound: a reader replaying that scalar (the re-run
+                # driver does) would otherwise impose Lacourse2018's (0.3, 2.5)
+                # on a Moelle2011 re-detection, or the reverse, with nothing
+                # saying so. Such a reader must use duration_by_method.
+                _bounds = {tuple(d) for d in duration_by_method.values()}
                 params_dict = {
-                    'frequency': list(frequency), 'duration': list(duration),
+                    'frequency': list(frequency),
+                    'duration': (list(next(iter(_bounds)))
+                                 if len(_bounds) == 1 else None),
+                    'duration_by_method': {m: list(d) for m, d
+                                           in duration_by_method.items()},
                     'polar': polar, 'method': method_db,
                     'ref_chan': ref_chan, 'cat': cat,
                     'detector_params': detector_params,
-                    'reject_artifacts': reject_artifacts,
-                    'reject_arousals': reject_arousals,
+                    'reject_types': list(reject_types),
+                    'reject_artifacts': 'Artefact' in reject_types,
+                    'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': db_n_fft_sec,
                 }
                 if run_params:
@@ -703,13 +818,14 @@ class ParalEvents:
                     db_conn, 'spindle', method, frequency[0], frequency[1],
                     stage_token=stages_key, channels=chan,
                     replace_channels=replace_channels,
-                    db_path=db_path, logger=self.logger)
+                    db_path=db_path, logger=self.logger,
+                    reject_types=list(reject_types))
 
                 dbwrite.record_run(
                     db_conn, run_id, 'spindle', method_db,
                     dbwrite.method_citation(method_db),
                     json.dumps(params_dict, default=str),
-                    ref_chan, polar, stage, reject_artifacts, reject_arousals,
+                    ref_chan, polar, stage, reject_types=list(reject_types),
                     subject=db_subject)
 
                 # Density denominator: the artefact-free in-stage time this run
@@ -717,7 +833,7 @@ class ParalEvents:
                 # the database alone (turtlewave_hdEEG.density.event_density).
                 dbwrite.store_analysed_time(
                     db_conn, db_subject, self.annotations, self.dataset, stage,
-                    reject_artifacts, reject_arousals,
+                    reject_types=list(reject_types),
                     annotation_file=annot_file, logger=self.logger)
 
                 # Sleep cycles + stage durations, on this run's connection and
@@ -833,10 +949,11 @@ class ParalEvents:
                     for m, meth in enumerate(method):
                         self.logger.info(f"Applying method: {meth}")
                         ### define detection
-                        detection = DetectSpindle(meth, frequency=frequency, duration=duration,
+                        meth_duration = duration_by_method[meth]
+                        detection = DetectSpindle(meth, frequency=frequency, duration=meth_duration,
                         polar=polar, **detector_params)
                         
-                        self.logger.debug(f"Detector parameters for {meth}: frequency={frequency}, duration={duration}")
+                        self.logger.debug(f"Detector parameters for {meth}: frequency={frequency}, duration={meth_duration}")
                         if hasattr(detection, 'det_thresh'):
                             self.logger.debug(f"  det_thresh: {detection.det_thresh}")
                         if hasattr(detection, 'sel_thresh'):
@@ -1515,7 +1632,8 @@ class ParalEvents:
 
     
     def export_spindle_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None,
-                                      reject_artifacts=None, reject_arousals=None):
+                                      reject_artifacts=None, reject_arousals=None,
+                                      reject_types=None):
         """
         Export spindle statistics to CSV with both whole night and stage-specific densities.
 
@@ -1544,18 +1662,15 @@ class ParalEvents:
             Sleep stage(s) to include (e.g., 'NREM2', ['NREM2', 'NREM3'])
             if None, will extract stages from spindles
         file_pattern : str or None
-        reject_artifacts : bool or None, optional
-            Subtract time overlapped by 'Artefact' events from the density
-            denominator. Should match the detection run's setting. ``None``
-            (the default) assumes True and logs a warning saying so; pass the
-            value explicitly to confirm it matches the run and silence the
-            warning.
-        reject_arousals : bool or None, optional
-            Subtract time overlapped by 'Arousal' events from the density
-            denominator. Should match the detection run's setting. ``None``
-            (the default) assumes True and logs a warning saying so; pass the
-            value explicitly to confirm it matches the run and silence the
-            warning.
+        reject_types : str or iterable of str or None, optional
+            Event types whose time is subtracted from the density denominator.
+            Must match the detection run's set, or the denominator covers
+            different seconds from the numerator. ``None`` (the default)
+            assumes :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES` and logs
+            a warning saying so; pass it explicitly to confirm it matches the
+            run and silence the warning.
+        reject_artifacts, reject_arousals : bool or None, optional
+            Deprecated shims for ``reject_types``. Default ``None``.
 
         Returns
         -------
@@ -1700,7 +1815,7 @@ class ParalEvents:
         # shared helper matches what the detector pooled and logs the reject-type
         # assumption so it is never silent. See utils.build_density_denominators.
         dd = build_density_denominators(
-            self.annotations, self.dataset,
+            self.annotations, self.dataset, reject_types=reject_types,
             reject_artifacts=reject_artifacts, reject_arousals=reject_arousals,
             stage_list=stage_list, stages_present=spindle_stages,
             logger=self.logger)

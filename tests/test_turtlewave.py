@@ -2680,14 +2680,16 @@ def test_density_pools_joint_stage_token():
     conn = sqlite3.connect(db)
     try:
         conn.execute("UPDATE events SET stage = 'NREM1REM'")
+        from turtlewave_hdEEG.utils import reject_key, DEFAULT_REJECT_TYPES
+        rk = reject_key(DEFAULT_REJECT_TYPES)
         conn.execute("INSERT OR REPLACE INTO analysed_time (subject, stage, "
-                     "reject_artifacts, reject_arousals, analysed_seconds, "
-                     "artefact_seconds_excluded) VALUES ('sub-P','NREM1',1,1,"
-                     "600.0,0.0)")
+                     "reject_types, reject_artifacts, reject_arousals, "
+                     "analysed_seconds, artefact_seconds_excluded) "
+                     "VALUES ('sub-P','NREM1',?,1,1,600.0,0.0)", (rk,))
         conn.execute("INSERT OR REPLACE INTO analysed_time (subject, stage, "
-                     "reject_artifacts, reject_arousals, analysed_seconds, "
-                     "artefact_seconds_excluded) VALUES ('sub-P','REM',1,1,"
-                     "600.0,0.0)")
+                     "reject_types, reject_artifacts, reject_arousals, "
+                     "analysed_seconds, artefact_seconds_excluded) "
+                     "VALUES ('sub-P','REM',?,1,1,600.0,0.0)", (rk,))
         conn.commit()
         trap = conn.execute("SELECT stage, analysed_minutes, density_per_min, "
                             "denominator_complete FROM v_event_density"
@@ -4249,10 +4251,64 @@ def test_lacourse_duration_bound_drives_yield():
     ``if duration is not None`` AFTER the per-method block), so a processor
     default silently reconfigures A7. This pins the direction and rough size
     of that effect so the trade-off cannot be changed unnoticed.
+
+    Also locks the 2026-09-14 decision that (0.3, 2.5) -- A7 as published --
+    is ``ImprovedDetectSpindle``'s own default for ``Lacourse2018``, not an
+    override a caller must supply. ``_warn_lacourse_config`` must therefore be
+    silent on that default and warn only when a caller explicitly asks for a
+    different bound, e.g. the old global (0.5, 3.0).
     """
     print("\n35. Testing the Lacourse2018 duration bound:")
 
+    import logging
+
     from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+    from turtlewave_hdEEG.eventprocessor import ParalEvents
+
+    # A default construction -- no duration kwarg at all -- must land on A7's
+    # own published bound, not a global spindle default meant for the other
+    # six methods.
+    default_det = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                        polar='normal')
+    assert default_det.duration == (0.3, 2.5), (
+        f"ImprovedDetectSpindle('Lacourse2018') with no duration kwarg "
+        f"defaulted to {default_det.duration!r}, not A7's published "
+        f"(0.3, 2.5) s")
+    print(f"   default construction duration={default_det.duration}")
+
+    # The advisory must track that: silent when the run's duration already
+    # matches the default, and warn only on an explicit non-A7 override.
+    class _CollectingHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    advisor = ParalEvents.__new__(ParalEvents)
+    advisor.logger = logging.getLogger(
+        'turtlewave_hdEEG.eventprocessor.duration_warn_test')
+    advisor.logger.setLevel(logging.DEBUG)
+    handler = _CollectingHandler()
+    advisor.logger.addHandler(handler)
+    try:
+        advisor._warn_lacourse_config(default_det.duration, {})
+        assert not any(r.levelno == logging.WARNING and 'overrides' in
+                       r.getMessage() for r in handler.records), (
+            "the advisory warned about duration on a default (0.3, 2.5) "
+            "construction")
+        handler.records.clear()
+
+        advisor._warn_lacourse_config((0.5, 3.0), {})
+        assert any(r.levelno == logging.WARNING and 'overrides' in
+                   r.getMessage() for r in handler.records), (
+            "the advisory did not warn when duration was explicitly "
+            "overridden to the old global (0.5, 3.0)")
+        print("   advisory: silent at the (0.3, 2.5) default, "
+              "warns at an explicit (0.5, 3.0)")
+    finally:
+        advisor.logger.removeHandler(handler)
 
     s_freq = 256.0
     sig, truth = _synthetic_spindle_train(s_freq=s_freq, minutes=5.0)
@@ -4680,6 +4736,331 @@ def test_migrated_rows_are_replaced_not_duplicated():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_reject_types_is_first_class():
+    """36: the reject set is resolved once, keyed, migrated and read back.
+
+    Before 4.4 the only record of what a run excluded was two booleans, so a
+    run that also excluded ``Move`` wrote a row with the SAME primary key as
+    one that did not and silently replaced its denominator. Four things have
+    to hold for that to be fixed:
+
+    1. one resolver, whose default is ``('Artefact', 'Arousal', 'Move')`` and
+       whose key is order-insensitive;
+    2. a pre-4.4 ``analysed_time`` table migrates to the new key with the set
+       its booleans imply, and the new primary key actually enforces
+       uniqueness on it;
+    3. ``event_density`` picks the row matching the requested set, and warns
+       (rather than pooling) when a second set is present;
+    4. ``db_meta`` records which library version last touched the database.
+    """
+    print("\n36. Testing reject_types as a first-class parameter:")
+
+    import logging
+    from turtlewave_hdEEG import dbwrite
+    from turtlewave_hdEEG.density import event_density
+    from turtlewave_hdEEG.utils import (DEFAULT_REJECT_TYPES,
+                                        KNOWN_REJECT_TYPES,
+                                        resolve_reject_types, reject_key)
+
+    # --- (1) the resolver -------------------------------------------------
+    assert resolve_reject_types() == ('Artefact', 'Arousal', 'Move'), \
+        resolve_reject_types()
+    assert DEFAULT_REJECT_TYPES == ('Artefact', 'Arousal', 'Move')
+    assert 'Resp' in KNOWN_REJECT_TYPES and 'Snore' in KNOWN_REJECT_TYPES
+    assert 'Resp' not in DEFAULT_REJECT_TYPES, "Resp must stay opt-in"
+    assert 'Snore' not in DEFAULT_REJECT_TYPES, "Snore must stay opt-in"
+    print(f"   [ok] default reject set is {resolve_reject_types()}; "
+          f"Resp/Snore opt-in")
+
+    # The booleans subtract from / add to the set; they never define it.
+    assert resolve_reject_types(reject_arousals=False) == ('Artefact', 'Move')
+    assert resolve_reject_types(reject_artifacts=False) == ('Arousal', 'Move')
+    assert resolve_reject_types(['Artefact'], reject_arousals=True) == \
+        ('Artefact', 'Arousal')
+    assert resolve_reject_types([]) == ()
+    assert resolve_reject_types('Artefact') == ('Artefact',)
+    print("   [ok] boolean shims add/remove exactly their one type; "
+          "a bare string is one type, not five characters")
+
+    try:
+        resolve_reject_types(['Artefact', '  '])
+    except ValueError:
+        print("   [ok] an empty reject type raises instead of silently "
+              "matching nothing")
+    else:
+        _fail("an empty reject type was accepted")
+
+    # The key is what the database compares, so it must be order-insensitive.
+    assert reject_key(('Artefact', 'Arousal', 'Move')) == 'Arousal,Artefact,Move'
+    assert reject_key(['Move', 'Arousal', 'Artefact']) == 'Arousal,Artefact,Move'
+    assert reject_key([]) == '' and reject_key(None) == ''
+    print(f"   [ok] reject_key is sorted and order-insensitive: "
+          f"{reject_key(['Move', 'Arousal', 'Artefact'])!r}")
+
+    # --- (2) migrating a pre-4.4 analysed_time ---------------------------
+    from turtlewave_hdEEG import ParalSWA
+    tmp = tempfile.mkdtemp(prefix='tw_reject_')
+    try:
+        db = os.path.join(tmp, 'neural_events.db')
+        # events must exist BEFORE the fixture's view is created, or the view
+        # is unresolvable for a second reason and the RENAME fails on `events`
+        # instead of on `analysed_time` -- testing a different bug from the one
+        # every 4.3 database in the field hits.
+        ParalSWA(None, None,
+                 log_level=logging.CRITICAL).initialize_sqlite_database(db)
+        conn = dbwrite.open_write_connection(db)
+        try:
+            conn.execute("DROP VIEW IF EXISTS v_event_density")
+            conn.execute("DROP TABLE IF EXISTS analysed_time")
+            conn.execute('''
+            CREATE TABLE analysed_time (
+                subject TEXT NOT NULL, stage TEXT NOT NULL,
+                reject_artifacts INTEGER NOT NULL,
+                reject_arousals INTEGER NOT NULL,
+                analysed_seconds REAL NOT NULL,
+                artefact_seconds_excluded REAL, epoch_length REAL,
+                source TEXT, annotation_file TEXT, turtlewave_version TEXT,
+                processing_timestamp TEXT,
+                PRIMARY KEY (subject, stage, reject_artifacts, reject_arousals)
+            )''')
+            for stage, sec, r_a, r_r in (('NREM2', 1800.0, 1, 1),
+                                         ('NREM3', 1200.0, 1, 1),
+                                         ('NREM2', 1900.0, 1, 0)):
+                conn.execute(
+                    "INSERT INTO analysed_time (subject, stage, "
+                    "reject_artifacts, reject_arousals, analysed_seconds, "
+                    "artefact_seconds_excluded, source) "
+                    "VALUES ('sub-R', ?, ?, ?, ?, 0.0, 'detection')",
+                    (stage, r_a, r_r, sec))
+            # A 4.3 database carries v_event_density over analysed_time, and
+            # SQLite >= 3.25 reparses every view when a table is renamed.
+            # Without the fixture's view the migration is tested on a shape no
+            # database in the field has, and the ALTER that fails on all of
+            # them ("error in view v_event_density: no such table:
+            # main.analysed_time") passes here. This is the 4.3 view text.
+            conn.execute('''
+            CREATE VIEW v_event_density AS
+            SELECT e.channel AS channel, e.stage AS stage, COUNT(*) AS n_events,
+                   a.analysed_seconds / 60.0 AS analysed_minutes,
+                   a.reject_artifacts AS reject_artifacts,
+                   a.reject_arousals AS reject_arousals
+            FROM events e JOIN analysed_time a ON a.stage = e.stage
+            GROUP BY e.channel, e.stage, a.reject_artifacts, a.reject_arousals''')
+            conn.commit()
+
+            dbwrite.ensure_analysed_time_schema(conn)
+            assert conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND "
+                "name='v_event_density'").fetchall(), \
+                "the migration dropped v_event_density without rebuilding it"
+            print("   [ok] the migration survives v_event_density over "
+                  "analysed_time, and rebuilds the view")
+            migrated = dict(((r[0], r[1]), r[2]) for r in conn.execute(
+                "SELECT stage, reject_types, analysed_seconds "
+                "FROM analysed_time ORDER BY stage, reject_types"))
+            assert migrated == {('NREM2', 'Arousal,Artefact'): 1800.0,
+                                ('NREM3', 'Arousal,Artefact'): 1200.0,
+                                ('NREM2', 'Artefact'): 1900.0}, migrated
+            print(f"   [ok] pre-4.4 rows migrate to the key their booleans "
+                  f"imply: {sorted(migrated)}")
+
+            # Idempotent, and the new PK is real.
+            dbwrite.ensure_analysed_time_schema(conn)
+            assert conn.execute(
+                "SELECT COUNT(*) FROM analysed_time").fetchone()[0] == 3
+            pk = [r[1] for r in conn.execute("PRAGMA table_info(analysed_time)")
+                  if r[5]]
+            assert pk == ['subject', 'stage', 'reject_types'], pk
+            try:
+                conn.execute(
+                    "INSERT INTO analysed_time (subject, stage, reject_types, "
+                    "reject_artifacts, reject_arousals, analysed_seconds) "
+                    "VALUES ('sub-R','NREM2','Arousal,Artefact',1,1,99.0)")
+            except sqlite3.IntegrityError:
+                print(f"   [ok] re-running the migration is a no-op, and the "
+                      f"primary key is {tuple(pk)}")
+            else:
+                _fail("the new primary key does not enforce uniqueness")
+            conn.rollback()
+
+            # The 4.4 default set is a DIFFERENT row, not a replacement of the
+            # pre-4.4 one. This is the whole point of the key change.
+            dbwrite.record_analysed_time(conn, 'sub-R', 'NREM2', 1700.0,
+                                         artefact_seconds_excluded=100.0)
+            dbwrite.record_analysed_time(conn, 'sub-R', 'NREM3', 1150.0,
+                                         artefact_seconds_excluded=50.0)
+            assert conn.execute(
+                "SELECT analysed_seconds FROM analysed_time WHERE stage='NREM2'"
+                " AND reject_types='Arousal,Artefact'").fetchone()[0] == 1800.0
+            print("   [ok] a default (Move-excluding) run adds a row instead "
+                  "of overwriting the pre-4.4 denominator")
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Events + roster so density has something to divide.
+        conn = dbwrite.open_write_connection(db)
+        try:
+            dbwrite.ensure_direct_write_schema(conn)
+            for i in range(30):
+                t = 100.0 + i * 5.0
+                conn.execute(
+                    "INSERT OR REPLACE INTO events (uuid, event_type, channel, "
+                    "start_time, end_time, duration, stage, epoch_stage, "
+                    "method, freq_lower, freq_upper) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (dbwrite.event_uuid5('spindle', 'C3', t, 'Moelle2011',
+                                         11, 16, 'NREM2'),
+                     'spindle', 'C3', t, t + 1.0, 1.0, 'NREM2', 'NREM2',
+                     'Moelle2011', 11.0, 16.0))
+            dbwrite.upsert_processing_status(conn, 'spindle', 'C3',
+                                             'Moelle2011', 11.0, 16.0,
+                                             'NREM2', True)
+            conn.commit()
+
+            # --- (4) db_meta version stamp --------------------------------
+            stamped = dbwrite.get_db_meta(conn, dbwrite.TURTLEWAVE_VERSION_KEY)
+            assert stamped == turtlewave_hdEEG.__version__, (
+                f"db_meta[{dbwrite.TURTLEWAVE_VERSION_KEY}]={stamped!r}, "
+                f"expected {turtlewave_hdEEG.__version__!r}")
+            print(f"   [ok] db_meta['{dbwrite.TURTLEWAVE_VERSION_KEY}'] = "
+                  f"{stamped!r} after ensure_direct_write_schema")
+        finally:
+            conn.close()
+
+        # --- (3) density picks the matching row --------------------------
+        for types, expect_min in ((['Artefact', 'Arousal'], 30.0),
+                                  (['Artefact', 'Arousal', 'Move'], 1700 / 60.0),
+                                  (['Artefact'], 1900 / 60.0)):
+            df = event_density(db, event_type='spindle', method='Moelle2011',
+                               stage=['NREM2'], subject='sub-R',
+                               reject_types=types)
+            assert len(df) == 1, (types, df)
+            got = float(df.iloc[0]['analysed_minutes'])
+            assert abs(got - expect_min) < 1e-9, (types, got, expect_min)
+            assert df.iloc[0]['reject_types'] == reject_key(types), df.iloc[0]
+            print(f"   [ok] reject_types={types} -> {got:.2f} analysed min, "
+                  f"stamped {df.iloc[0]['reject_types']!r}")
+
+        # A request the database has no denominator for is an error, not a
+        # number borrowed from another reject set.
+        try:
+            event_density(db, event_type='spindle', method='Moelle2011',
+                          stage=['NREM2'], subject='sub-R',
+                          reject_types=['Artefact', 'Arousal', 'Snore'])
+        except ValueError as e:
+            assert 'reject_types' in str(e), str(e)
+            print("   [ok] a reject set with no stored denominator raises "
+                  "instead of dividing by another set's time")
+        else:
+            _fail("a missing reject set silently produced a density")
+
+        # With nothing requested and THREE sets on record, the library default
+        # is used and every set found is named.
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        log = logging.getLogger('tw_reject_test')
+        log.setLevel(logging.WARNING)
+        log.addHandler(_Capture())
+        df = event_density(db, event_type='spindle', method='Moelle2011',
+                           stage=['NREM2'], subject='sub-R', logger_=log)
+        warned = [m for m in records if 'different reject sets' in m]
+        assert warned, records
+        assert 'Arousal,Artefact' in warned[0] and 'Artefact' in warned[0]
+        assert df.iloc[0]['reject_types'] == 'Arousal,Artefact,Move', df.iloc[0]
+        print(f"   [ok] an unqualified call on a mixed database warns and "
+              f"uses the default: {warned[0][:96]}...")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # --- (5) the upgrade path a real user hits ---------------------------
+    # ensure_direct_write_schema is what EVERY detector run calls at
+    # connection time, and it calls the migration unguarded. Run it end to end
+    # on a database with the full 4.3 shape -- events, the pre-4.4
+    # analysed_time, detection_runs with only the two booleans, and
+    # v_event_density over analysed_time -- and require that it completes, that
+    # the view still selects, and that detection_runs.reject_types is
+    # back-filled from the booleans.
+    tmp = tempfile.mkdtemp(prefix='tw_reject_43_')
+    try:
+        db = os.path.join(tmp, 'neural_events.db')
+        ParalSWA(None, None,
+                 log_level=logging.CRITICAL).initialize_sqlite_database(db)
+        conn = dbwrite.open_write_connection(db)
+        try:
+            dbwrite.ensure_direct_write_schema(conn)   # 4.3 column set
+            conn.execute("DROP VIEW IF EXISTS v_event_density")
+            conn.execute("DROP TABLE IF EXISTS analysed_time")
+            conn.execute('''
+            CREATE TABLE analysed_time (
+                subject TEXT NOT NULL, stage TEXT NOT NULL,
+                reject_artifacts INTEGER NOT NULL,
+                reject_arousals INTEGER NOT NULL,
+                analysed_seconds REAL NOT NULL,
+                artefact_seconds_excluded REAL, epoch_length REAL,
+                source TEXT, annotation_file TEXT, turtlewave_version TEXT,
+                processing_timestamp TEXT,
+                PRIMARY KEY (subject, stage, reject_artifacts, reject_arousals)
+            )''')
+            conn.execute(
+                "INSERT INTO analysed_time (subject, stage, reject_artifacts, "
+                "reject_arousals, analysed_seconds, artefact_seconds_excluded) "
+                "VALUES ('sub-V', 'NREM2', 1, 1, 1800.0, 0.0)")
+            for i in range(9):
+                t = 10.0 + i * 5
+                conn.execute(
+                    "INSERT OR REPLACE INTO events (uuid, event_type, channel, "
+                    "start_time, end_time, duration, stage, epoch_stage, "
+                    "method, freq_lower, freq_upper) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (dbwrite.event_uuid5('spindle', 'C3', t, 'Moelle2011',
+                                         11, 16, 'NREM2'),
+                     'spindle', 'C3', t, t + 1.0, 1.0, 'NREM2', 'NREM2',
+                     'Moelle2011', 11.0, 16.0))
+            conn.execute(
+                "INSERT INTO detection_runs (run_id, subject, event_type, "
+                "method, stages, reject_artifacts, reject_arousals) VALUES "
+                "('run-43', 'sub-V', 'spindle', 'Moelle2011', 'NREM2', 1, 1)")
+            conn.execute('''
+            CREATE VIEW v_event_density AS
+            SELECT e.channel AS channel, e.stage AS stage, COUNT(*) AS n_events,
+                   a.analysed_seconds / 60.0 AS analysed_minutes,
+                   a.reject_artifacts AS reject_artifacts,
+                   a.reject_arousals AS reject_arousals
+            FROM events e JOIN analysed_time a ON a.stage = e.stage
+            GROUP BY e.channel, e.stage, a.reject_artifacts, a.reject_arousals''')
+            conn.commit()
+            before = conn.execute(
+                "SELECT channel, n_events, analysed_minutes "
+                "FROM v_event_density").fetchall()
+            assert before == [('C3', 9, 30.0)], before
+        finally:
+            conn.close()
+
+        # The whole point: this is the call every detection run makes first.
+        conn = dbwrite.open_write_connection(db)
+        try:
+            dbwrite.ensure_direct_write_schema(conn)
+            after = conn.execute(
+                "SELECT channel, n_events, analysed_minutes, reject_types "
+                "FROM v_event_density").fetchall()
+            assert after == [('C3', 9, 30.0, 'Arousal,Artefact')], after
+            runs = conn.execute(
+                "SELECT run_id, reject_types FROM detection_runs").fetchall()
+            assert runs == [('run-43', 'Arousal,Artefact')], runs
+            print(f"   [ok] ensure_direct_write_schema completes on a 4.3 "
+                  f"database (events + pre-4.4 analysed_time + detection_runs "
+                  f"+ view); the view still selects {after[0]} and "
+                  f"detection_runs.reject_types is back-filled")
+        finally:
+            conn.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("TESTING TURTLEWAVE-HDEEG PACKAGE UPDATES")
     print("=======================================")
@@ -4733,6 +5114,7 @@ if __name__ == "__main__":
     test_lacourse_config_matches_the_published_a7()
     test_lacourse_state_survives_repeat_calls()
     test_lacourse_duration_bound_drives_yield()
+    test_reject_types_is_first_class()
 
     print("\nAll tests completed!")
 

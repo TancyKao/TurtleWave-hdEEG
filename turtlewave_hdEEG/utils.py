@@ -12,6 +12,176 @@ logger = logging.getLogger('turtlewave_hdEEG.utils')
 #: ``sub-10sd`` in ``sub-10sd_ses-1_task-psg_run-1_desc-inspect_eeg.xml``.
 SUBJECT_RE = re.compile(r"sub-[A-Za-z0-9]+")
 
+#: Event types every detector excludes unless told otherwise.
+#:
+#: ``Move`` joined ``Artefact`` and ``Arousal`` in 4.4: a movement annotation
+#: marks mechanical, non-neural signal (electrode/cable movement produces large
+#: low-frequency deflections), which is exactly the failure mode of the
+#: amplitude-threshold slow-wave and K-complex detectors, and it is what the
+#: largest published spindle study excludes by name (Purcell et al. 2017,
+#: *Nat Commun* 8:15930 -- "any epoch with an overlapping arousal, movement or
+#: signal artefact annotation was removed").
+#:
+#: ``Resp`` and ``Snore`` are deliberately NOT here, and are opt-in instead.
+#: Their cortical consequence (the terminating arousal) is already excluded,
+#: and their mask size is proportional to disease severity, so masking them by
+#: default would make the surviving "clean sleep" a severity-dependent
+#: subsample -- a selection filter, not an artefact filter (Mohammadi et al.
+#: 2021, *Front Neurol* 12:598632, state the same reasoning explicitly).
+DEFAULT_REJECT_TYPES = ('Artefact', 'Arousal', 'Move')
+
+#: Every event type :meth:`XLAnnotations.add_artefacts_from_events` can write,
+#: i.e. the names that are meaningful to pass in ``reject_types``. Other names
+#: are still accepted (Wonambi matches annotation names literally, so a custom
+#: scoring vocabulary must work), but they are warned about once because a
+#: misspelled type rejects nothing and says nothing.
+KNOWN_REJECT_TYPES = ('Artefact', 'Arousal', 'Resp', 'Move', 'Snore')
+
+#: Reject-type names already warned about, so the warning is once per process
+#: rather than once per channel.
+_WARNED_REJECT_TYPES = set()
+
+
+def resolve_reject_types(reject_types=None, reject_artifacts=None,
+                         reject_arousals=None, logger_=None):
+    """Resolve the one reject set a run/denominator/density query uses.
+
+    Single source of truth for "what did this run exclude". Every detector,
+    the density denominator, the density reader and the batch drivers call
+    this, so the set recorded in ``analysed_time``/``detection_runs`` is
+    necessarily the set that was applied.
+
+    Parameters
+    ----------
+    reject_types : str or iterable of str or None, optional
+        The reject set. A bare string is one type (``'Artefact'``, not five
+        characters). ``None`` (default) starts from
+        :data:`DEFAULT_REJECT_TYPES`. An empty list/tuple is honoured as "reject
+        nothing" -- it is not treated as unset.
+    reject_artifacts : bool or None, optional
+        Deprecated shim. ``True`` adds ``'Artefact'`` to the resolved set,
+        ``False`` removes it, ``None`` (default) leaves it as ``reject_types``
+        determined.
+    reject_arousals : bool or None, optional
+        Deprecated shim for ``'Arousal'``; same semantics.
+    logger_ : logging.Logger or None, optional
+        Logger for the unknown-name warning. Default ``None`` (module logger).
+
+    Returns
+    -------
+    tuple of str
+        The resolved types, de-duplicated, in first-appearance order. Pass
+        ``list(...)`` of it to Wonambi's ``fetch(reject_artf=...)``; use
+        :func:`reject_key` for the stored/compared form.
+
+    Raises
+    ------
+    ValueError
+        If a reject type is empty or only whitespace -- an empty name matches
+        no annotation and would silently reject nothing.
+
+    Notes
+    -----
+    The booleans are applied *after* ``reject_types``, so
+    ``resolve_reject_types(reject_artifacts=True, reject_arousals=True)``
+    returns the full default set (including ``'Move'``) rather than just the
+    two named types. That is intentional: the booleans say "also/never exclude
+    this one type", they have never been able to express the whole set, and a
+    caller that wants exactly two types says so with ``reject_types``.
+
+    Examples
+    --------
+    >>> resolve_reject_types()
+    ('Artefact', 'Arousal', 'Move')
+    >>> resolve_reject_types(reject_arousals=False)
+    ('Artefact', 'Move')
+    >>> resolve_reject_types(['Artefact', 'Resp'])
+    ('Artefact', 'Resp')
+    >>> resolve_reject_types('Artefact')
+    ('Artefact',)
+    """
+    log = logger_ or logger
+
+    if reject_types is None:
+        candidates = list(DEFAULT_REJECT_TYPES)
+    elif isinstance(reject_types, str):
+        candidates = [reject_types]
+    else:
+        candidates = list(reject_types)
+
+    resolved = []
+    for raw in candidates:
+        name = str(raw).strip()
+        if not name:
+            raise ValueError(
+                "An empty reject type was requested. An empty name matches no "
+                "annotation, so it would silently reject nothing; drop it or "
+                f"name a real event type (known types: "
+                f"{', '.join(KNOWN_REJECT_TYPES)}).")
+        if name not in resolved:
+            resolved.append(name)
+
+    # The booleans are a narrow override on two named types, applied last.
+    for flag, name in ((reject_artifacts, 'Artefact'),
+                       (reject_arousals, 'Arousal')):
+        if flag is None:
+            continue
+        if flag:
+            if name not in resolved:
+                resolved.append(name)
+        elif name in resolved:
+            resolved.remove(name)
+
+    unknown = [t for t in resolved
+               if t not in KNOWN_REJECT_TYPES and t not in _WARNED_REJECT_TYPES]
+    if unknown:
+        _WARNED_REJECT_TYPES.update(unknown)
+        log.warning(
+            "Reject type(s) %s are not among the types this toolkit writes "
+            "(%s). They are passed to Wonambi unchanged, which matches "
+            "annotation names LITERALLY -- if your scoring does not contain "
+            "that exact name, nothing is rejected and no error is raised. "
+            "Check the spelling against your annotation file.",
+            ", ".join(repr(t) for t in unknown),
+            ", ".join(KNOWN_REJECT_TYPES))
+
+    return tuple(resolved)
+
+
+def reject_key(reject_types):
+    """Normalise a reject set to the text key stored and compared in the database.
+
+    Sorted and comma-joined, so ``['Arousal', 'Artefact']`` and
+    ``('Artefact', 'Arousal')`` produce the same key and a run cannot be
+    recorded twice under two spellings of one set.
+
+    Parameters
+    ----------
+    reject_types : str or iterable of str or None
+        The reject set. ``None`` is treated as the empty set, NOT as the
+        default set: this function normalises an already-resolved set and must
+        never invent one (call :func:`resolve_reject_types` first).
+
+    Returns
+    -------
+    str
+        e.g. ``'Arousal,Artefact,Move'``. ``''`` for an empty set (a run that
+        rejected nothing), which is a real key, not a missing one.
+
+    Examples
+    --------
+    >>> reject_key(('Artefact', 'Arousal', 'Move'))
+    'Arousal,Artefact,Move'
+    >>> reject_key([])
+    ''
+    """
+    if reject_types is None:
+        return ''
+    if isinstance(reject_types, str):
+        reject_types = [reject_types]
+    return ','.join(sorted({str(t).strip() for t in reject_types
+                            if str(t).strip()}))
+
 
 def missing_json_message(json_dir, file_pattern, max_listed=25):
     """Build the error text for a ``file_pattern`` that matched no JSON file.
@@ -563,7 +733,7 @@ def _annotation_overrun(annotations, fallback=0.0):
 
 
 def compute_analysed_seconds(annotations, stage, chan=None,
-                             reject_types=('Artefact', 'Arousal'),
+                             reject_types=DEFAULT_REJECT_TYPES,
                              s_freq=None, epoch_len=30,
                              extra_artefact_intervals=None, logger_=None):
     """Compute the artefact-free in-stage time actually fed to a detector.
@@ -606,8 +776,8 @@ def compute_analysed_seconds(annotations, stage, chan=None,
         only for a future per-channel detection path.
     reject_types : sequence of str or None, optional
         Event types to subtract. Must match what the detection run excluded
-        (built from ``reject_artifacts`` / ``reject_arousals``). Default
-        ``('Artefact', 'Arousal')``. If ``None`` or empty, no artefact seconds
+        (resolve both through :func:`resolve_reject_types`). Default
+        :data:`DEFAULT_REJECT_TYPES`. If ``None`` or empty, no artefact seconds
         are subtracted (only epoch-quality exclusion is applied).
     s_freq : float or None, optional
         Sampling frequency, used only to set the two-sample minimum-segment
@@ -925,20 +1095,21 @@ def build_density_denominators(annotations, dataset, reject_artifacts=None,
                                reject_arousals=None, stage_list=None,
                                stages_present=(),
                                logger=None, epoch_len=30,
-                               extra_artefact_intervals=None):
+                               extra_artefact_intervals=None,
+                               reject_types=None):
     """Build a :class:`DensityDenominators` for the artefact-free denominator.
 
-    Factors the shared setup out of the density exporters: it derives the
-    reject-type list from the two flags, resolves ``s_freq`` from the dataset
-    header, and records which event types are subtracted from the denominator
-    so that choice is never silent.
+    Factors the shared setup out of the density exporters: it resolves the
+    reject set through :func:`resolve_reject_types`, resolves ``s_freq`` from
+    the dataset header, and records which event types are subtracted from the
+    denominator so that choice is never silent.
 
-    ``reject_artifacts`` and ``reject_arousals`` accept ``None`` meaning "not
-    specified by the caller". In that case they default to True (the detector
-    defaults) and a warning is logged, because an unspecified value that does
-    not match the detection run gives a denominator covering the wrong amount
-    of time. Passing them explicitly states that they match the run and
-    downgrades the message to an informational line.
+    All three rejection arguments accept ``None`` meaning "not specified by the
+    caller". When none of them is given, :data:`DEFAULT_REJECT_TYPES` is assumed
+    and a warning is logged, because an unspecified set that does not match the
+    detection run gives a denominator covering the wrong amount of time.
+    Passing ``reject_types`` (or either boolean) states that it matches the run
+    and downgrades the message to an informational line.
 
     Parameters
     ----------
@@ -948,13 +1119,11 @@ def build_density_denominators(annotations, dataset, reject_artifacts=None,
         Used only to read ``header['s_freq']``; missing/failed lookups fall back
         to Wonambi's default minimum-segment floor.
     reject_artifacts : bool or None, optional
-        Subtract 'Artefact' time from the denominator. Must match the detection
-        run. ``None`` (the default) means the caller did not specify it: True
-        is assumed and a warning is logged. Default ``None``.
+        Deprecated shim: add/remove ``'Artefact'`` from ``reject_types``. Must
+        match the detection run. Default ``None`` (leave as ``reject_types``
+        determined).
     reject_arousals : bool or None, optional
-        Subtract 'Arousal' time from the denominator. Must match the detection
-        run. ``None`` (the default) means the caller did not specify it: True
-        is assumed and a warning is logged. Default ``None``.
+        Deprecated shim for ``'Arousal'``; same semantics. Default ``None``.
     stage_list : list of str or None
         Requested detection stage(s); ``None`` means "use stages_present".
     stages_present : iterable of str
@@ -974,6 +1143,9 @@ def build_density_denominators(annotations, dataset, reject_artifacts=None,
         subtract from every per-stage and whole-night denominator. ``None`` (the
         export-path default) leaves the denominators annotation-only. Default
         ``None``.
+    reject_types : str or iterable of str or None, optional
+        The run's reject set, resolved through :func:`resolve_reject_types`.
+        ``None`` (default) means unspecified; see above.
 
     Returns
     -------
@@ -984,22 +1156,16 @@ def build_density_denominators(annotations, dataset, reject_artifacts=None,
     -----
     The rejection settings are taken from this call, not read back from the
     detection run's stored settings, so they are only as correct as what the
-    caller passes. If the run overrode ``reject_artifacts`` or
-    ``reject_arousals``, pass matching values here; otherwise the denominator
-    subtracts a different amount of time from the one the detector actually
-    analysed, and every density derived from it is biased.
+    caller passes. If the run used a different ``reject_types``, pass the
+    matching set here; otherwise the denominator subtracts a different amount
+    of time from the one the detector actually analysed, and every density
+    derived from it is biased.
     """
-    assumed = reject_artifacts is None or reject_arousals is None
-    if reject_artifacts is None:
-        reject_artifacts = True
-    if reject_arousals is None:
-        reject_arousals = True
-
-    reject_types = []
-    if reject_artifacts:
-        reject_types.append('Artefact')
-    if reject_arousals:
-        reject_types.append('Arousal')
+    assumed = (reject_types is None and reject_artifacts is None
+               and reject_arousals is None)
+    resolved = resolve_reject_types(reject_types, reject_artifacts,
+                                    reject_arousals, logger_=logger)
+    reject_types = list(resolved)
 
     s_freq = None
     try:
@@ -1013,18 +1179,15 @@ def build_density_denominators(annotations, dataset, reject_artifacts=None,
         subtracted = " and ".join(reject_types) if reject_types else "nothing"
         if assumed:
             logger.warning(
-                "Density denominator: assuming the detection run excluded "
-                "artefact and arousal epochs (reject_artifacts=True, "
-                "reject_arousals=True), so %s time is subtracted from the "
+                "Density denominator: no reject_types given, so the default "
+                "set is assumed (%s) and that time is subtracted from the "
                 "recording time each density is divided by. If your detection "
-                "run used different settings, pass reject_artifacts= and "
-                "reject_arousals= to match it, otherwise the densities will "
-                "be biased.", subtracted)
+                "run used a different set, pass reject_types= to match it, "
+                "otherwise the densities will be biased.", subtracted)
         else:
             logger.info(
                 "Density denominator: subtracting %s time from the recording "
-                "time (reject_artifacts=%s, reject_arousals=%s, as specified "
-                "by the caller).", subtracted, reject_artifacts, reject_arousals)
+                "time (reject_types as specified by the caller).", subtracted)
 
     return DensityDenominators(annotations, s_freq, reject_types, stage_list,
                                stages_present, epoch_len=epoch_len,

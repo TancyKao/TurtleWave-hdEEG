@@ -7,7 +7,7 @@ from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave as DetectSlowWave
 from turtlewave_hdEEG import dbwrite
-from turtlewave_hdEEG.utils import derive_subject
+from turtlewave_hdEEG.utils import derive_subject, resolve_reject_types
 from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
                                              _json_event_stages,
                                              assert_scoring_covers_stages)
@@ -134,7 +134,8 @@ class ParalSWA:
                      min_dur=None, max_dur=None,
                      detrend=False,
                      polar='normal', # normal vs opposite 
-                     reject_artifacts=True, reject_arousals=True, 
+                     reject_artifacts=None, reject_arousals=None,
+                     reject_types=None,
                      stage=None, 
                      cat=None,
                      peak_thresh_sigma=None,
@@ -201,10 +202,20 @@ class ParalSWA:
             Whether to detrend the signal before detection
         polar : str
             'normal' or 'opposite' for handling signal polarity
-        reject_artifacts : bool
-            Whether to exclude segments marked with artifact annotations
-        reject_arousals : bool
-            Whether to exclude segments marked with arousal annotations
+        reject_types : str or iterable of str or None, optional
+            Annotation event types whose time is excluded from detection AND
+            from the density denominator. ``None`` (default) uses
+            :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES` --
+            ``('Artefact', 'Arousal', 'Move')`` from 4.4. ``Move`` matters most
+            here: a movement annotation marks mechanical, non-neural signal,
+            and a large low-frequency deflection is exactly what an
+            amplitude-threshold slow-wave detector cannot tell from a slow
+            wave. ``'Resp'`` and ``'Snore'`` stay opt-in.
+        reject_artifacts : bool or None, optional
+            Deprecated shim: ``True`` adds ``'Artefact'`` to ``reject_types``,
+            ``False`` removes it, ``None`` (default) leaves it alone.
+        reject_arousals : bool or None, optional
+            Deprecated shim for ``'Arousal'``; same semantics.
         stage : list or str
             Sleep stage(s) to analyze
         cat : tuple
@@ -299,14 +310,16 @@ class ParalSWA:
         if polar not in ['normal', 'opposite']:
             self.logger.warning(f"Invalid polar value '{polar}'. Using 'normal'.")
             polar = 'normal'
-        # Configure what to reject
-        reject_types = []
-        if reject_artifacts:
-            reject_types.append('Artefact')
-            self.logger.debug("Configured to reject artifacts")
-        if reject_arousals:
-            reject_types.extend(['Arousal'])
-            self.logger.debug("Configured to reject arousals")
+        # Configure what to reject. One resolution for the whole run: the same
+        # tuple is handed to fetch(), recorded in detection_runs and used to key
+        # the analysed_time denominator, so numerator and denominator cannot
+        # describe different time.
+        reject_types = list(resolve_reject_types(
+            reject_types, reject_artifacts, reject_arousals,
+            logger_=self.logger))
+        self.logger.info(
+            "Excluding %s time from detection and from the density "
+            "denominator.", ", ".join(reject_types) or "no event types")
 
         # Make sure method is a list
         if isinstance(method, str):
@@ -362,7 +375,7 @@ class ParalSWA:
         freq_str = dbwrite.fmt_freq_token(frequency[0], frequency[1])
 
         self.logger.info(f"Starting slow wave detection with method={method_db}, frequency={freq_str}")
-        self.logger.debug(f"Parameters: channels={chan}, reject_artifacts={reject_artifacts}, reject_arousals={reject_arousals}")
+        self.logger.debug(f"Parameters: channels={chan}, reject_types={reject_types}")
 
         # Log adaptive threshold parameters if applicable
         first_method = method[0] if isinstance(method, list) and len(method) > 0 else method
@@ -455,8 +468,9 @@ class ParalSWA:
                     'ptp_thresh_sigma': ptp_thresh_sigma,
                     'method': method_db,
                     'ref_chan': ref_chan, 'cat': cat,
-                    'reject_artifacts': reject_artifacts,
-                    'reject_arousals': reject_arousals,
+                    'reject_types': list(reject_types),
+                    'reject_artifacts': 'Artefact' in reject_types,
+                    'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': n_fft_sec,
                 }
                 if run_params:
@@ -485,12 +499,13 @@ class ParalSWA:
                     db_conn, event_type, method, frequency[0], frequency[1],
                     stage_token=stages_key, channels=chan,
                     replace_channels=replace_channels,
-                    db_path=db_path, logger=self.logger)
+                    db_path=db_path, logger=self.logger,
+                    reject_types=list(reject_types))
 
                 dbwrite.record_run(
                     db_conn, run_id, event_type, method_db, run_citation,
                     json.dumps(params_dict, default=str),
-                    ref_chan, polar, stage, reject_artifacts, reject_arousals,
+                    ref_chan, polar, stage, reject_types=list(reject_types),
                     subject=db_subject)
 
                 # Density denominator: the artefact-free in-stage time this run
@@ -498,7 +513,7 @@ class ParalSWA:
                 # alone (turtlewave_hdEEG.density.event_density).
                 dbwrite.store_analysed_time(
                     db_conn, db_subject, self.annotations, self.dataset, stage,
-                    reject_artifacts, reject_arousals,
+                    reject_types=list(reject_types),
                     annotation_file=annot_file, logger=self.logger)
 
                 # Sleep cycles + stage durations, on this run's connection and
@@ -1335,7 +1350,8 @@ class ParalSWA:
             return None
 
     def export_slow_wave_density_to_csv(self, json_input, csv_file, stage=None, file_pattern=None,
-                                        reject_artifacts=None, reject_arousals=None):
+                                        reject_artifacts=None, reject_arousals=None,
+                                        reject_types=None):
         """
         Export slow wave statistics to CSV with both whole night and stage-specific densities.
 
@@ -1364,18 +1380,14 @@ class ParalSWA:
             Sleep stage(s) to include
         file_pattern : str or None
             Pattern to filter JSON files
-        reject_artifacts : bool or None, optional
-            Subtract time overlapped by 'Artefact' events from the density
-            denominator. Should match the detection run's setting. ``None``
-            (the default) assumes True and logs a warning saying so; pass the
-            value explicitly to confirm it matches the run and silence the
-            warning.
-        reject_arousals : bool or None, optional
-            Subtract time overlapped by 'Arousal' events from the density
-            denominator. Should match the detection run's setting. ``None``
-            (the default) assumes True and logs a warning saying so; pass the
-            value explicitly to confirm it matches the run and silence the
-            warning.
+        reject_types : str or iterable of str or None, optional
+            Event types whose time is subtracted from the density denominator.
+            Must match the detection run's set, or the denominator covers
+            different seconds from the numerator. ``None`` (the default)
+            assumes :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES` and logs
+            a warning saying so.
+        reject_artifacts, reject_arousals : bool or None, optional
+            Deprecated shims for ``reject_types``. Default ``None``.
         """
         import glob
         from collections import defaultdict
@@ -1495,7 +1507,7 @@ class ParalSWA:
         # shared helper matches what the detector pooled and logs the reject-type
         # assumption so it is never silent. See utils.build_density_denominators.
         dd = build_density_denominators(
-            self.annotations, self.dataset,
+            self.annotations, self.dataset, reject_types=reject_types,
             reject_artifacts=reject_artifacts, reject_arousals=reject_arousals,
             stage_list=stage_list, stages_present=wave_stages,
             logger=self.logger)

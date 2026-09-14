@@ -5,7 +5,9 @@ import argparse
 import glob
 import logging
 
-from turtlewave_hdEEG.utils import read_channels_from_csv
+from turtlewave_hdEEG.utils import (read_channels_from_csv,
+                                   resolve_reject_types,
+                                   KNOWN_REJECT_TYPES)
 from wonambi.dataset import Dataset as WonambiDataset
 from turtlewave_hdEEG import (ParalEvents, CustomAnnotations, fmt_freq_token,
                               join_stage_token)
@@ -27,9 +29,27 @@ def main():
     ap.add_argument("--method", default="Moelle2011", choices=["Moelle2011", "Ferrarelli2007"])
     ap.add_argument("--stages", default="NREM2,NREM3")
     ap.add_argument("--freq", default="9.0,12.0")
-    ap.add_argument("--duration", default="0.5,3")
-    ap.add_argument("--reject_artifacts", action="store_true", default=True)
-    ap.add_argument("--reject_arousals", action="store_true", default=False)
+    # None means "use each method's published default", which is what
+    # detect_spindles(duration=None) now resolves per method (A7's (0.3, 2.5)
+    # for Lacourse2018, (0.5, 3) for the rest). Hard-coding "0.5,3" here cost
+    # A7 roughly a third of its detections.
+    ap.add_argument("--duration", default=None,
+                    help="min,max spindle duration in seconds. Omit to use "
+                         "each method's published default.")
+    ap.add_argument("--reject-types", "--reject_types", dest="reject_types",
+                    default=None,
+                    help="comma-separated annotation event types to exclude "
+                         "from detection AND from the density denominator "
+                         "(e.g. 'Artefact,Arousal,Move'). Default: the library "
+                         "default set. Pass '' to reject nothing. Known "
+                         "types: " + ", ".join(KNOWN_REJECT_TYPES) + ".")
+    # Deprecated no-ops. As store_true with default=True they could only ever
+    # be True, so they never disabled anything; they are kept so existing PBS
+    # scripts keep running, and they now say so.
+    ap.add_argument("--reject_artifacts", action="store_true", default=False,
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--reject_arousals", action="store_true", default=False,
+                    help=argparse.SUPPRESS)
     ap.add_argument("--legacy-json", dest="legacy_json", action="store_true", default=False,
                     help="opt back into the legacy JSON -> CSV -> import pipeline. "
                          "By default events go straight into neural_events.db and "
@@ -106,7 +126,23 @@ def main():
     test_method = args.method
     test_stages = [s.strip() for s in args.stages.split(",") if s.strip()]
     f_lo, f_hi = [float(x) for x in args.freq.split(",")]
-    d_lo, d_hi = [float(x) for x in args.duration.split(",")]
+    duration = None
+    if args.duration:
+        d_lo, d_hi = [float(x) for x in args.duration.split(",")]
+        duration = (d_lo, d_hi)
+
+    for dead, name in ((args.reject_artifacts, "--reject_artifacts"),
+                       (args.reject_arousals, "--reject_arousals")):
+        if dead:
+            logger.warning(
+                "%s is deprecated and does nothing; the reject set is now "
+                "--reject-types (currently %s).", name,
+                args.reject_types or "the library default")
+    requested = (None if args.reject_types is None
+                 else [t for t in args.reject_types.split(",") if t.strip()])
+    reject_types = list(resolve_reject_types(requested, logger_=logger))
+    logger.info("Reject set: %s",
+                ", ".join(reject_types) or "nothing rejected")
 
     # Load dataset/annotations
     logger.info("Loading dataset and annotations...")
@@ -126,10 +162,9 @@ def main():
         method              = test_method,
         chan                = test_channels,
         frequency           = (f_lo, f_hi),
-        duration            = (d_lo, d_hi),
+        duration            = duration,
         stage               = test_stages,
-        reject_artifacts    = args.reject_artifacts,
-        reject_arousals     = args.reject_arousals,
+        reject_types        = reject_types,
         cat                 = (1, 1, 1, 0),
         save_to_annotations = False,
         json_dir            = out_dir,
@@ -206,15 +241,14 @@ def main():
 
         The denominator is the artefact-free in-stage time the detector
         actually analysed, stored in ``analysed_time`` by the run above. The
-        rejection settings are forwarded because they are part of that key: a
-        mismatch selects a denominator covering a different amount of time.
+        reject set is forwarded because it is part of that key: a mismatch
+        selects a denominator covering a different amount of time.
         """
         try:
             df = event_density(
                 db_path, event_type='spindle', method=test_method,
                 stage=test_stages, subject=args.subject,
-                reject_artifacts=args.reject_artifacts,
-                reject_arousals=args.reject_arousals)
+                reject_types=reject_types)
         except (ValueError, FileNotFoundError) as e:
             logger.error(f"Spindle density unavailable: {e}")
             return
@@ -230,9 +264,7 @@ def main():
             combined = event_density(
                 db_path, event_type='spindle', method=test_method,
                 stage=test_stages, subject=args.subject,
-                reject_artifacts=args.reject_artifacts,
-                reject_arousals=args.reject_arousals,
-                combine_stages=True)
+                reject_types=reject_types, combine_stages=True)
             logger.info("Spindle density, stages pooled:\n%s",
                         format_density_table(combined))
 
@@ -274,18 +306,17 @@ def main():
     )
     logger.info(f"Import stats: {import_stats}")
 
-    # Forward the run's own rejection settings. The density denominator is
-    # the recording time the detector actually analysed; leaving these to the
-    # exporter's assumption (both True) while detection ran with
-    # --reject_arousals off subtracts arousal time the detector never
-    # excluded, which biases every density downward.
+    # Forward the run's own reject set. The density denominator is the
+    # recording time the detector actually analysed; leaving it to the
+    # exporter's assumed default while detection ran with a different set
+    # subtracts time the detector never excluded (or fails to subtract time it
+    # did), which biases every density.
     event_processor.export_spindle_density_to_csv(
         json_input       = out_dir,
         csv_file         = dens_csv,
         stage            = test_stages,
         file_pattern     = file_pattern,
-        reject_artifacts = args.reject_artifacts,
-        reject_arousals  = args.reject_arousals
+        reject_types     = reject_types
     )
 
     check_coverage_or_exit()
