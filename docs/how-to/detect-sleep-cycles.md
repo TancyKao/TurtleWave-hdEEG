@@ -43,42 +43,55 @@ always safe.
 
 ## The two cycle definitions
 
-Two NREM-REM cycle definitions are supported via `method`:
+Two NREM-REM cycle definitions are supported via `method`. Both work on
+30-s epochs by default and treat artefact/unscored epochs as wake.
 
-- **`'2022'`** (default `tag_method`) — NREM-based. A cycle is one contiguous
-  NREM period plus the inter-NREM (REM) segment that follows it. Short
-  awakenings are absorbed into NREM and too-short NREM runs are dropped.
-  Always yields cycles even when REM scoring is sparse.
-- **`'1979'`** — REM-closed. Same NREM periods and segments as `'2022'`, but
-  a cycle only closes when the segment after an NREM period contains a
-  contiguous REM run of at least `rem_min` epochs (the first cycle needs one
-  epoch). The REM run may sit anywhere in the segment; it need not be adjacent
-  to the NREM period. NREM periods that are not followed by a qualifying REM
-  run are merged forward into the next cycle, so that cycle's NREM span
-  includes the intervening wake and REM; a trailing unpaired NREM period
-  becomes the final cycle. The name is historical: this is **not** the
-  Feinberg & Floyd (1979) definition — see the comparison below.
+- **`'2022'`** (default `tag_method`) — the modified rule. An NREM period is
+  a run of NREM sleep longer than `nrem_min` epochs (15 min) within which
+  wake bouts of up to `wake_thresh` epochs (5 min) are absorbed; a longer
+  awakening ends the period. The period starts at its first N2/N3 epoch
+  (`nrem_onset='n2n3'`; pass `'any'` for the pre-4.5 any-stage onset) and
+  ends on its last NREM epoch. The REM segment of a cycle is everything from
+  the end of the NREM period to the start of the next one, whatever stages it
+  holds, with no minimum REM duration, so every NREM period yields a cycle.
+  The last segment ends at the last sleep epoch of the night; trailing wake
+  is outside every cycle. Sources: Feinberg & Floyd 1979 for the 15-min NREM
+  minimum, Hartmann 1968 / Talukder 2023 for the 5-min wake tolerance,
+  Aeschbach & Borbély 1993 for the segment-as-REM-period, Březinová 1974 and
+  Le Bon 2002 for the absent REM minimum.
+- **`'1979'`** — Feinberg & Floyd (1979, *Psychophysiology* 16:283). Sleep
+  onset is the first N2/N3 epoch. REM runs separated by fewer than `nrem_min`
+  epochs of NREM sleep (`rem_gap`, default = `nrem_min`) form one REM
+  episode. A REM episode is a REM period if it holds at least `rem_min` REM
+  epochs (5 min); the first REM period of the night needs only one REM epoch,
+  and a REM episode that appears before `nrem_min` epochs of NREM sleep have
+  accumulated is a sleep-onset REM episode, absorbed and flagged `sorem` on
+  cycle 1. Shorter later episodes are absorbed into the surrounding NREM
+  period (their minutes appear in `rem_in_nremp_min`). Wake is never a
+  boundary; it is only subtracted from `nrem_sleep_min`. NREM period *i* runs
+  from the first N2/N3 epoch after REM period *i-1* to the epoch before REM
+  period *i*, and the segment of cycle *i* runs from the first REM epoch of
+  REM period *i* to the epoch before NREM period *i+1* (the paper's NREM
+  cycle, stage-2 onset to stage-2 onset). A trailing NREM period with at
+  least `nrem_min` epochs of NREM sleep and no REM period is returned as an
+  incomplete final cycle, as the paper carries such periods forward.
 
-### How `'1979'` differs from Feinberg & Floyd
+Every cycle dict carries clock-time durations (`nrem_dur_min`, `rem_dur_min`,
+`cycle_dur_min`), sleep-only durations (`nrem_n23_dur_min`, `nrem_sleep_min`,
+`rem_sleep_min`, `rem_in_nremp_min`, `wake_in_seg_min`), a `rem_class`
+(`'full'` when the segment holds at least `rem_min` REM epochs, `'short'`
+for fewer but at least one, `'none'`), and `complete` — `False` on the final
+cycle when fewer than `completion_min` sleep epochs (`'2022'`) or NREM
+epochs (`'1979'`) follow it, Feinberg & Floyd's end-of-night rule. The
+`sleep_cycles` table stores the original columns only; the extra keys are
+available from the returned dicts.
 
-The Feinberg-style column is the rule set used by the MATLAB
-`cal_SleepCycle_Feinberg_method3.m` in the PRJ-10 sleep-cycle project
-(wake runs of up to 5 min absorbed, NREM period longer than 15 min, REM
-period of at least 5 min).
-
-| Rule | `'1979'` | Feinberg-style (PRJ-10 Trad Method 3) |
-|---|---|---|
-| Unscored / artefact epochs | recoded as Wake, absorbable | neither wake nor sleep, always break NREM |
-| REM must start right after the NREM period | not required | required |
-| REM period | whole inter-NREM segment | the contiguous REM run only |
-| Absorbed wake trimmed from NREM period edges | yes | no |
-| NREM period with no qualifying REM | merged forward into the next cycle | dropped |
-| Trailing NREM period with no REM | becomes the final cycle | dropped |
-
-Only the `rem_min` threshold and the first-cycle exemption come from Feinberg.
-`'2022'` is the same as the PRJ-10 "Mod method" apart from the unscored-epoch
-handling, and apart from an NREM period that ends on the last epoch of the
-recording, which `'2022'` keeps as a cycle with zero REM duration.
+!!! warning "Behaviour change in 4.5"
+    Before 4.5, `'2022'` started NREM periods at any NREM stage and counted
+    trailing wake in the last segment, and `'1979'` was a REM-closed variant
+    of `'2022'` that merged unpaired NREM periods forward. Cycles stored in
+    a database by an earlier release keep the old definitions until
+    `examples/backfill_cycles.py` is re-run against it.
 
 By default `finalize_cycles_and_durations` detects and stores **both**
 definitions side by side in `sleep_cycles` (keyed by `(subject, method)`), but
@@ -112,7 +125,8 @@ cycles_by_method = finalize_cycles_and_durations(
     # tag_method='2022',         # which definition owns events.cycle + XML
     # wake_thresh=10,            # max Wake epochs absorbed into NREM
     # nrem_min=30,               # min NREM epochs to count as an NREM period
-    # rem_min=10,                # min REM epochs to close a cycle (1979 only)
+    # rem_min=10,                # min REM epochs for a REM period (1979 only)
+    # nrem_onset='n2n3',         # where a '2022' NREM period starts
 )
 
 for method, cycles in cycles_by_method.items():
@@ -129,8 +143,10 @@ for method, cycles in cycles_by_method.items():
 method requested. Each cycle dict carries `cycle_number`, `method`,
 epoch/second boundaries (`nrem_start_epoch`, `nrem_end_epoch`,
 `rem_start_epoch`, `rem_end_epoch`, `nrem_start_sec`, `nrem_end_sec`,
-`rem_end_sec`), and durations `nrem_dur_min`, `nrem_n23_dur_min` (N2+N3
-minutes only), `rem_dur_min`, `cycle_dur_min`.
+`rem_end_sec`), durations `nrem_dur_min`, `nrem_n23_dur_min` (N2+N3
+minutes only), `nrem_sleep_min`, `rem_dur_min`, `rem_sleep_min`,
+`rem_in_nremp_min`, `wake_in_seg_min`, `cycle_dur_min`, plus `rem_class`,
+`complete` and `sorem`.
 
 ## Backfill an existing database (batch)
 
@@ -230,7 +246,7 @@ before calling `finalize_cycles_and_durations`).
     inside any cycle; an empty or unscored hypnogram fails loudly instead
     of writing that silently.
 
-`rem_min` (the minimum REM run, in epochs, that closes a `'1979'` cycle;
+`rem_min` (the minimum REM epochs for a `'1979'` REM period;
 library default 10 epochs) is not exposed by `backfill_cycles.py`'s CONFIG
 block and always runs at the library default — the script has no equivalent
 `REM_MIN_MIN` constant.
@@ -308,7 +324,7 @@ PNG.
 `finalize_cycles_and_durations` is a convenience wrapper around two lower
 level pieces, useful if you need finer control:
 
-- `detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30, method='2022', rem_min=10, epoch_starts=None)`
+- `detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30, method='2022', rem_min=10, epoch_starts=None, nrem_onset='n2n3', rem_gap=None, completion_min=10)`
   — the pure hypnogram-in, cycle-list-out detector. No dataset, annotations,
   or database required; works on any numeric per-epoch stage sequence
   (Wake=0, NREM1/2/3=1/2/3, REM=4, artefact/undefined=-1).
@@ -328,10 +344,12 @@ If `cycles_by_method[method]` comes back empty:
 - **Check `nrem_min`**: NREM runs shorter than `nrem_min` epochs (default 30,
   i.e. 15 minutes at 30 s epochs) are dropped as too short to count as an
   NREM period.
-- **Under `'1979'`**: an empty result here always coincides with an empty
-  `'2022'` result, because a trailing NREM period with no qualifying REM still
-  becomes the final cycle. `'1979'` can only return *fewer* cycles than
-  `'2022'` (by merging), never zero when `'2022'` found some.
+- **Under `'1979'`**: a night can have `'2022'` cycles and no `'1979'`
+  cycles when no NREM period reaches `nrem_min` epochs of NREM *sleep*
+  (wake subtracted) before the end of the night, or when the only REM
+  episodes are sleep-onset REM. Conversely a fragmented night can have
+  `'1979'` cycles and no `'2022'` cycles, because wake never ends a
+  Feinberg & Floyd NREM period.
 
 ### `ValueError: tag_method` is not one of `methods`
 

@@ -17,22 +17,22 @@ The detector works purely on the hypnogram (per-epoch sleep stages); no spectral
 data is required. Two cycle definitions are supported via ``method``:
 
 ``'2022'``
-    NREM-based. A cycle is one contiguous NREM period plus the inter-NREM
-    (REM) segment that follows it. Short awakenings are absorbed into NREM and
-    too-short NREM runs are dropped. Always yields cycles even when REM scoring
-    is sparse.
+    The modified rule. A cycle is one NREM period plus the segment that
+    follows it, up to the next NREM period. An NREM period is a run of NREM
+    longer than ``nrem_min`` epochs, within which wake bouts of up to
+    ``wake_thresh`` epochs are absorbed, starting at its first N2/N3 epoch.
+    The segment counts as the REM period whatever it holds; there is no
+    minimum REM duration, so every NREM period yields a cycle.
 ``'1979'``
-    REM-closed. Same NREM periods and segments as ``'2022'``, but a cycle only
-    closes when the segment after an NREM period contains a contiguous REM run
-    of at least ``rem_min`` epochs (the first cycle needs one epoch). The REM
-    run may sit anywhere in the segment; it need not be adjacent to the NREM
-    period. NREM periods that are not followed by a qualifying REM run are
-    merged forward into the next cycle, so that cycle's NREM span includes the
-    intervening wake and REM; a trailing unpaired NREM period becomes the final
-    cycle. The name is historical: this is *not* the Feinberg & Floyd (1979)
-    definition, which requires adjacent REM, counts only the REM run as the REM
-    period, and discards unpaired NREM periods. See the sleep-cycle how-to for
-    a rule-by-rule comparison.
+    Feinberg & Floyd (1979). Sleep onset at the first N2/N3 epoch; REM runs
+    separated by less than ``nrem_min`` epochs of NREM sleep form one REM
+    episode; a REM episode of at least ``rem_min`` REM epochs (the first is
+    exempt) is a REM period; wake is never a boundary. NREM periods that are
+    not followed by a REM period are carried forward, as in the paper.
+
+Both rules treat artefact/unscored epochs as wake. Cycle dicts carry
+clock-time and sleep-only durations, a ``rem_class`` and a ``complete`` flag;
+see :func:`detect_cycles`.
 """
 
 import logging
@@ -111,7 +111,9 @@ def _subject_spellings(conn, table, subject, logger=None):
 # Numeric hypnogram codes as produced by ``XLAnnotations.get_hypnogram()``:
 # Wake=0, NREM1/2/3=1/2/3, REM=4, artefact/movement/undefined=-1.
 _NREM_STAGES = (1, 2, 3)
+_N23_STAGES = (2, 3)
 _REM_STAGE = 4
+_SLEEP_STAGES = (1, 2, 3, 4)
 
 # Coarse scores used by the detection rule (mirrors the MATLAB re-mapping).
 _WAKE = 0
@@ -138,7 +140,8 @@ def _bool_runs(mask):
 
 
 def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
-                  method='2022', rem_min=10, epoch_starts=None):
+                  method='2022', rem_min=10, epoch_starts=None,
+                  nrem_onset='n2n3', rem_gap=None, completion_min=10):
     """Detect NREM-REM sleep cycles from a per-epoch hypnogram.
 
     Parameters
@@ -150,24 +153,40 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
     epoch_length : float, optional
         Epoch duration in seconds (default 30).
     wake_thresh : int, optional
-        Maximum length, in epochs, of a Wake bout that is absorbed into the
-        surrounding NREM instead of breaking the cycle (default 10).
+        ``'2022'`` only. Maximum length, in epochs, of a Wake bout that is
+        absorbed into the surrounding NREM instead of ending the NREM period
+        (default 10, i.e. 5 min at 30-s epochs).
     nrem_min : int, optional
-        Minimum length, in epochs, of an NREM run for it to count as an NREM
-        period (default 30).
+        Minimum NREM period length in epochs (default 30, i.e. 15 min).
+        ``'2022'``: an NREM run must be *longer* than this. ``'1979'``: an
+        NREM period must hold at least this many epochs of NREM sleep (wake
+        subtracted), and REM runs separated by fewer NREM-sleep epochs than
+        this belong to one REM period (see ``rem_gap``).
     method : {'2022', '1979'}, optional
-        Cycle definition. ``'2022'`` is NREM-based: every NREM period is a
-        cycle. ``'1979'`` closes a cycle only on a contiguous REM run of at
-        least ``rem_min`` epochs anywhere in the following segment, merging
-        unpaired NREM periods forward (not the Feinberg 1979 rule; see the
-        module docstring).
+        Cycle definition; see Notes. Default ``'2022'``.
     rem_min : int, optional
-        Minimum contiguous REM run length, in epochs, required to close a cycle
-        under the ``'1979'`` method (the first cycle needs only one REM epoch).
-        Ignored for ``'2022'`` (default 10).
+        ``'1979'`` only. Minimum number of REM epochs for a REM episode to
+        count as a REM period (default 10, i.e. 5 min). The first REM period
+        of the night is exempt and needs one REM epoch.
     epoch_starts : sequence of float, optional
         Start time in seconds of each epoch, same length as ``hypnogram``. If
         omitted, epoch ``i`` is assumed to start at ``i * epoch_length``.
+    nrem_onset : {'n2n3', 'any'}, optional
+        ``'2022'`` only. ``'n2n3'`` (default) starts each NREM period at its
+        first N2 or N3 epoch, so leading N1 falls into the preceding segment.
+        ``'any'`` starts it at the first NREM epoch of any stage, which is the
+        pre-4.5 behaviour and matches the MATLAB ``cal_SleepCycle.m``.
+        ``'1979'`` always uses stage-2 onset, as Feinberg & Floyd do.
+    rem_gap : int or None, optional
+        ``'1979'`` only. REM runs separated by fewer than this many epochs of
+        NREM sleep are merged into one REM episode. ``None`` (default) uses
+        ``nrem_min``, which is the Feinberg & Floyd rule (an interruption of
+        less than 15 min of NREM does not end the REM period).
+    completion_min : int, optional
+        Sleep epochs that must follow the last NREM period (``'2022'``) or the
+        last REM period (``'1979'``) for the final cycle to be flagged
+        ``complete`` (default 10, i.e. 5 min; Feinberg & Floyd's completion
+        rule).
 
     Returns
     -------
@@ -175,25 +194,63 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
         One dict per cycle, in chronological order, with keys:
         ``cycle_number`` (1-based), ``method``, ``nrem_start_epoch``,
         ``nrem_end_epoch``, ``rem_start_epoch``, ``rem_end_epoch`` (all
-        inclusive epoch indices; ``rem_*`` is the inter-NREM segment, which may
-        be empty -> ``rem_start_epoch > rem_end_epoch``), ``nrem_start_sec``,
-        ``nrem_end_sec``, ``rem_end_sec`` (cycle end in seconds), and the
-        durations ``nrem_dur_min`` (full period, N1+N2+N3+absorbed wake),
-        ``nrem_n23_dur_min`` (N2+N3 only, within the same period),
-        ``rem_dur_min``, ``cycle_dur_min``.
+        inclusive epoch indices; ``rem_*`` is the segment that follows the
+        NREM period, which may be empty -> ``rem_start_epoch >
+        rem_end_epoch``), ``nrem_start_sec``, ``nrem_end_sec``,
+        ``rem_end_sec`` (cycle end in seconds), the clock-time durations
+        ``nrem_dur_min``, ``rem_dur_min``, ``cycle_dur_min``, the sleep-only
+        durations ``nrem_n23_dur_min`` (N2+N3 in the NREM period),
+        ``nrem_sleep_min`` (N1+N2+N3 in the NREM period), ``rem_sleep_min``
+        (REM epochs in the segment), ``rem_in_nremp_min`` (REM epochs inside
+        the NREM period; non-zero only under ``'1979'``), ``wake_in_seg_min``
+        (wake and unscored epochs in the segment), ``rem_class``
+        (``'full'`` when ``rem_sleep_min`` covers at least ``rem_min``
+        epochs, ``'short'`` for fewer but at least one, ``'none'``),
+        ``complete`` (bool, see ``completion_min``) and ``sorem`` (bool; True
+        on cycle 1 under ``'1979'`` when a REM episode occurred before
+        ``nrem_min`` epochs of NREM sleep had accumulated and was absorbed).
 
     Notes
     -----
-    Artefact/undefined epochs (-1) are recoded as Wake, so a run of them up to
-    ``wake_thresh`` epochs is absorbed into NREM like a short awakening. This
-    differs from the MATLAB ``cal_SleepCycle*.m`` functions, where unscored
-    epochs are neither wake nor sleep and always break an NREM period. An empty
-    or all-Wake hypnogram returns ``[]``.
+    ``'2022'`` (modified rule). Every NREM period is a cycle. An NREM period
+    is a run of NREM epochs, within which wake bouts of up to ``wake_thresh``
+    epochs are absorbed, that is longer than ``nrem_min`` epochs; it starts
+    at its first N2/N3 epoch (``nrem_onset='n2n3'``) and ends on its last NREM
+    epoch. The REM segment of a cycle is everything from the end of the NREM
+    period to the start of the next one, whatever stages it holds, with no
+    minimum REM duration; the last segment ends at the last sleep epoch of
+    the recording, so trailing wake is outside every cycle.
+
+    ``'1979'`` (Feinberg & Floyd 1979, Psychophysiology 16:283). Sleep onset
+    is the first N2/N3 epoch. REM runs separated by fewer than ``rem_gap``
+    epochs of NREM sleep form one REM episode. A REM episode is a REM period
+    if it holds at least ``rem_min`` REM epochs; the first episode after at
+    least ``nrem_min`` epochs of NREM sleep since sleep onset needs only one
+    REM epoch, and an episode before that point is a sleep-onset REM episode
+    that is absorbed. Shorter later episodes are absorbed into the NREM
+    period around them. NREM period *i* runs from the first N2/N3 epoch after
+    REM period *i-1* to the epoch before REM period *i*; wake is never a
+    boundary and is only subtracted from ``nrem_sleep_min``. The REM segment
+    of cycle *i* runs from the first epoch of REM period *i* to the epoch
+    before NREM period *i+1* (Feinberg & Floyd's NREM cycle, stage-2 onset to
+    stage-2 onset), or to the last sleep epoch for the final cycle. A trailing
+    NREM period with at least ``nrem_min`` epochs of NREM sleep and no REM
+    period is returned as an incomplete final cycle.
+
+    Artefact/undefined epochs (-1, or NaN) are treated as wake under both
+    rules. An empty hypnogram, or one with no sleep, returns ``[]``.
     """
     hyp = np.asarray(list(hypnogram), dtype=float)
     n = hyp.size
     if n == 0:
         return []
+    if method not in ('2022', '1979'):
+        raise ValueError(f"Unknown method {method!r}; use '2022' or '1979'")
+    if nrem_onset not in ('n2n3', 'any'):
+        raise ValueError(
+            f"Unknown nrem_onset {nrem_onset!r}; use 'n2n3' or 'any'")
+    if rem_gap is None:
+        rem_gap = nrem_min
 
     if epoch_starts is not None:
         starts = np.asarray(list(epoch_starts), dtype=float)
@@ -212,98 +269,217 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
             return float(starts[i + 1])
         return float(starts[i] + epoch_length)
 
-    # Step 1: coarse re-map. NREM -> 2, REM -> 4, everything else (Wake and
-    # artefact/undefined) -> 0.
-    score = np.full(n, _WAKE, dtype=int)
-    score[np.isin(hyp, _NREM_STAGES)] = _NREM
-    score[hyp == _REM_STAGE] = _REM
-
-    # Step 2: absorb short Wake bouts into the surrounding NREM.
-    for s, e in _bool_runs(score == _WAKE):
-        if (e - s + 1) <= wake_thresh:
-            score[s:e + 1] = _ABSORBED_WAKE
-
-    # Step 3-4: contiguous NREM (real + absorbed wake), dropping short runs.
-    nrem_mask = (score == _NREM) | (score == _ABSORBED_WAKE)
-    nrem_periods = []
-    for s, e in _bool_runs(nrem_mask):
-        if (e - s + 1) <= nrem_min:
-            continue
-        # Step 5: trim leading/trailing absorbed-wake so the NREM period starts
-        # and ends on real NREM.
-        real = np.where(score[s:e + 1] == _NREM)[0]
-        if real.size == 0:
-            continue
-        nrem_periods.append((s + int(real[0]), s + int(real[-1])))
-
-    if not nrem_periods:
+    is_sleep = np.isin(hyp, _SLEEP_STAGES)
+    if not is_sleep.any():
         return []
-
-    # Pair each NREM period with the inter-NREM segment that follows it (up to
-    # the next NREM period, or the end of the recording for the last one).
-    raw_cycles = []
-    for idx, (ns, ne) in enumerate(nrem_periods):
-        seg_start = ne + 1
-        seg_end = (nrem_periods[idx + 1][0] - 1
-                   if idx + 1 < len(nrem_periods) else n - 1)
-        raw_cycles.append({'nrem': (ns, ne), 'seg': (seg_start, seg_end)})
+    last_sleep = int(np.where(is_sleep)[0][-1])
+    is_nrem = np.isin(hyp, _NREM_STAGES)
+    is_n23 = np.isin(hyp, _N23_STAGES)
+    is_rem = hyp == _REM_STAGE
 
     if method == '2022':
-        grouped = [[rc] for rc in raw_cycles]
-    elif method == '1979':
-        # Merge NREM periods until one is followed by a qualifying REM period.
-        grouped = []
-        pending = []
-        for rc in raw_cycles:
-            pending.append(rc)
-            seg_s, seg_e = rc['seg']
-            rem_runs = ([r for r in _bool_runs(score[seg_s:seg_e + 1] == _REM)]
-                        if seg_e >= seg_s else [])
-            longest_rem = max((e - s + 1 for s, e in rem_runs), default=0)
-            need = 1 if not grouped else rem_min
-            if longest_rem >= need:
-                grouped.append(pending)
-                pending = []
-        if pending:  # trailing NREM with no qualifying REM -> final cycle
-            grouped.append(pending)
+        groups = _modified_groups(hyp, is_nrem, is_n23, wake_thresh, nrem_min,
+                                  nrem_onset, last_sleep)
     else:
-        raise ValueError(f"Unknown method {method!r}; use '2022' or '1979'")
+        groups = _feinberg_groups(is_nrem, is_n23, is_rem, nrem_min, rem_min,
+                                  rem_gap, last_sleep)
+    if not groups:
+        return []
 
+    to_min = epoch_length / 60.0
     cycles = []
-    for cyc_num, group in enumerate(grouped, start=1):
-        ns = group[0]['nrem'][0]
-        ne = group[-1]['nrem'][1]
-        seg_start, seg_end = group[-1]['seg']
+    n_groups = len(groups)
+    for cyc_num, g in enumerate(groups, start=1):
+        ns, ne = g['nrem']
+        seg_start, seg_end = g['seg']
         has_seg = seg_end >= seg_start
+        is_last = cyc_num == n_groups
 
-        nrem_dur_min = (ne - ns + 1) * epoch_length / 60.0
-        # N2+N3 minutes within the period (excludes N1 and absorbed wake). The
-        # period boundaries stay defined by N1+N2+N3, matching the MATLAB
-        # detector; this is the separate "consolidated NREM" metric (the
-        # MATLAB avgN2N3Minute).
-        n23_epochs = int(np.count_nonzero(
-            (hyp[ns:ne + 1] == 2) | (hyp[ns:ne + 1] == 3)))
-        nrem_n23_dur_min = n23_epochs * epoch_length / 60.0
-        rem_dur_min = ((seg_end - seg_start + 1) * epoch_length / 60.0
-                       if has_seg else 0.0)
+        nremp = hyp[ns:ne + 1]
+        nrem_dur_min = (ne - ns + 1) * to_min
+        n23_epochs = int(np.count_nonzero(np.isin(nremp, _N23_STAGES)))
+        nrem_sleep_epochs = int(np.count_nonzero(np.isin(nremp, _NREM_STAGES)))
+        rem_in_nremp = int(np.count_nonzero(nremp == _REM_STAGE))
+
+        if has_seg:
+            seg = hyp[seg_start:seg_end + 1]
+            rem_dur_min = (seg_end - seg_start + 1) * to_min
+            rem_sleep_epochs = int(np.count_nonzero(seg == _REM_STAGE))
+            wake_in_seg = int(np.count_nonzero(~np.isin(seg, _SLEEP_STAGES)))
+        else:
+            rem_dur_min = 0.0
+            rem_sleep_epochs = 0
+            wake_in_seg = 0
+
+        if not is_last:
+            complete = True
+        elif method == '2022':
+            complete = (has_seg and int(np.count_nonzero(
+                is_sleep[seg_start:seg_end + 1])) >= completion_min)
+        else:
+            rem_ep = g.get('rem_ep')
+            if rem_ep is None:
+                complete = False
+            else:
+                after = is_nrem[rem_ep[1] + 1:seg_end + 1]
+                complete = int(np.count_nonzero(after)) >= completion_min
+
+        if rem_sleep_epochs >= rem_min:
+            rem_class = 'full'
+        elif rem_sleep_epochs > 0:
+            rem_class = 'short'
+        else:
+            rem_class = 'none'
+
         cycle_end_epoch = seg_end if has_seg else ne
-
         cycles.append({
             'cycle_number': cyc_num,
             'method': method,
-            'nrem_start_epoch': ns,
-            'nrem_end_epoch': ne,
-            'rem_start_epoch': seg_start if has_seg else ne + 1,
-            'rem_end_epoch': seg_end,
+            'nrem_start_epoch': int(ns),
+            'nrem_end_epoch': int(ne),
+            'rem_start_epoch': int(seg_start if has_seg else ne + 1),
+            'rem_end_epoch': int(seg_end if has_seg else ne),
             'nrem_start_sec': epoch_start_sec(ns),
             'nrem_end_sec': epoch_end_sec(ne),
             'rem_end_sec': epoch_end_sec(cycle_end_epoch),
             'nrem_dur_min': round(nrem_dur_min, 3),
-            'nrem_n23_dur_min': round(nrem_n23_dur_min, 3),
+            'nrem_n23_dur_min': round(n23_epochs * to_min, 3),
+            'nrem_sleep_min': round(nrem_sleep_epochs * to_min, 3),
             'rem_dur_min': round(rem_dur_min, 3),
+            'rem_sleep_min': round(rem_sleep_epochs * to_min, 3),
+            'rem_in_nremp_min': round(rem_in_nremp * to_min, 3),
+            'wake_in_seg_min': round(wake_in_seg * to_min, 3),
             'cycle_dur_min': round(nrem_dur_min + rem_dur_min, 3),
+            'rem_class': rem_class,
+            'complete': bool(complete),
+            'sorem': bool(g.get('sorem', False)),
         })
 
+    return cycles
+
+
+def _modified_groups(hyp, is_nrem, is_n23, wake_thresh, nrem_min, nrem_onset,
+                     last_sleep):
+    """NREM periods and segments under the ``'2022'`` rule.
+
+    Returns a list of ``{'nrem': (start, end), 'seg': (start, end)}`` with
+    inclusive epoch indices, or ``[]``.
+    """
+    n = hyp.size
+    # Coarse re-map (mirrors the MATLAB re-mapping): NREM -> 2, REM -> 4,
+    # everything else (Wake and artefact/undefined) -> 0.
+    score = np.full(n, _WAKE, dtype=int)
+    score[is_nrem] = _NREM
+    score[hyp == _REM_STAGE] = _REM
+
+    # Absorb short Wake bouts into the surrounding NREM.
+    for s, e in _bool_runs(score == _WAKE):
+        if (e - s + 1) <= wake_thresh:
+            score[s:e + 1] = _ABSORBED_WAKE
+
+    # Contiguous NREM (real + absorbed wake), dropping short runs, then trim
+    # absorbed wake from both ends so the period starts and ends on NREM.
+    nrem_mask = (score == _NREM) | (score == _ABSORBED_WAKE)
+    periods = []
+    for s, e in _bool_runs(nrem_mask):
+        if (e - s + 1) <= nrem_min:
+            continue
+        real = np.where(score[s:e + 1] == _NREM)[0]
+        if real.size == 0:
+            continue
+        ns = s + int(real[0])
+        ne = s + int(real[-1])
+        if nrem_onset == 'n2n3':
+            n23 = np.where(is_n23[ns:ne + 1])[0]
+            if n23.size == 0:
+                continue
+            ns = ns + int(n23[0])
+            # Re-test the length from the N2/N3 onset over the same run
+            # (absorbed wake included), as the original test did from the
+            # run start.
+            if (e - ns + 1) <= nrem_min:
+                continue
+        periods.append((ns, ne))
+
+    groups = []
+    for idx, (ns, ne) in enumerate(periods):
+        seg_start = ne + 1
+        seg_end = (periods[idx + 1][0] - 1 if idx + 1 < len(periods)
+                   else last_sleep)
+        groups.append({'nrem': (ns, ne), 'seg': (seg_start, seg_end)})
+    return groups
+
+
+def _feinberg_groups(is_nrem, is_n23, is_rem, nrem_min, rem_min, rem_gap,
+                     last_sleep):
+    """NREM periods, REM periods and segments under Feinberg & Floyd 1979.
+
+    Returns a list of ``{'nrem': (s, e), 'seg': (s, e), 'rem_ep': (s, e) or
+    None, 'sorem': bool}`` with inclusive epoch indices, or ``[]``.
+    """
+    onset = np.where(is_n23)[0]
+    if onset.size == 0:
+        return []
+    onset = int(onset[0])
+
+    # REM runs after sleep onset, merged across gaps holding fewer than
+    # rem_gap epochs of NREM sleep.
+    episodes = []
+    for s, e in _bool_runs(is_rem):
+        if s < onset:
+            continue
+        if episodes:
+            ps, pe = episodes[-1]
+            gap_nrem = int(np.count_nonzero(is_nrem[pe + 1:s]))
+            if gap_nrem < rem_gap:
+                episodes[-1] = (ps, e)
+                continue
+        episodes.append((s, e))
+
+    cycles = []
+    cursor = onset          # start of the NREM period being built
+    first_found = False
+    sorem = False
+    for rs, re_ in episodes:
+        rem_epochs = int(np.count_nonzero(is_rem[rs:re_ + 1]))
+        if not first_found:
+            nrem_before = int(np.count_nonzero(is_nrem[cursor:rs]))
+            if nrem_before < nrem_min:
+                sorem = True          # sleep-onset REM: absorbed
+                continue
+            qualifies = rem_epochs >= 1
+        else:
+            qualifies = rem_epochs >= rem_min
+        if not qualifies:
+            continue                  # short REM: absorbed into the NREMP
+        cycles.append({'nrem': (cursor, rs - 1), 'rem_ep': (rs, re_),
+                       'sorem': False})
+        first_found = True
+        nxt = np.where(is_n23[re_ + 1:])[0]
+        if nxt.size == 0:
+            cursor = None
+            break
+        cursor = re_ + 1 + int(nxt[0])
+
+    if cursor is not None:
+        trailing_nrem = int(np.count_nonzero(is_nrem[cursor:last_sleep + 1]))
+        if trailing_nrem >= nrem_min:
+            cycles.append({'nrem': (cursor, last_sleep), 'rem_ep': None,
+                           'sorem': False})
+
+    if not cycles:
+        return []
+    cycles[0]['sorem'] = sorem
+
+    for idx, cyc in enumerate(cycles):
+        ns, ne = cyc['nrem']
+        if cyc['rem_ep'] is None:
+            cyc['seg'] = (ne + 1, ne)          # empty
+            continue
+        seg_start = cyc['rem_ep'][0]
+        seg_end = (cycles[idx + 1]['nrem'][0] - 1 if idx + 1 < len(cycles)
+                   else last_sleep)
+        cyc['seg'] = (seg_start, seg_end)
     return cycles
 
 
@@ -471,7 +647,7 @@ class ParalCycles:
             return None
 
     def detect(self, method='2022', epoch_length=30, wake_thresh=10,
-               nrem_min=30, rem_min=10, hypnogram=None):
+               nrem_min=30, rem_min=10, hypnogram=None, nrem_onset='n2n3'):
         """Run cycle detection on the annotation hypnogram.
 
         Parameters
@@ -499,7 +675,7 @@ class ParalCycles:
         cycles = detect_cycles(
             hypnogram, epoch_length=epoch_length, wake_thresh=wake_thresh,
             nrem_min=nrem_min, method=method, rem_min=rem_min,
-            epoch_starts=epoch_starts)
+            epoch_starts=epoch_starts, nrem_onset=nrem_onset)
         self.logger.info(
             f"Detected {len(cycles)} cycle(s) using method '{method}'.")
         return cycles
@@ -952,7 +1128,7 @@ class ParalCycles:
 
     def run(self, db_path, method='2022', write_xml=True, subject=None,
             epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
-            conn=None, run_id=None, tag_events=True):
+            conn=None, run_id=None, tag_events=True, nrem_onset='n2n3'):
         """Detect cycles, then persist to XML and the database.
 
         This single entry point serves both backfilling an existing
@@ -1049,7 +1225,8 @@ class ParalCycles:
 
         cycles = self.detect(
             method=method, epoch_length=epoch_length, wake_thresh=wake_thresh,
-            nrem_min=nrem_min, rem_min=rem_min, hypnogram=hypnogram)
+            nrem_min=nrem_min, rem_min=rem_min, hypnogram=hypnogram,
+            nrem_onset=nrem_onset)
 
         own = conn is None
         if own:
@@ -1106,7 +1283,8 @@ def finalize_cycles_and_durations(
         methods=('2022', '1979'), tag_method='2022',
         write_xml=True, plot=False, plot_path=None,
         epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
-        log_level=logging.INFO, conn=None, run_id=None, tag_events=True):
+        log_level=logging.INFO, conn=None, run_id=None, tag_events=True,
+        nrem_onset='n2n3'):
     """Populate ``neural_events.db`` with sleep cycles + stage durations.
 
     The explicit post-detection finalize step. Run it once after event
@@ -1179,6 +1357,9 @@ def finalize_cycles_and_durations(
     run_id : str, optional
         Passed through to the event tagging so a detection run tags only its
         own rows. Default ``None`` (tag every row -- the backfill case).
+    nrem_onset : {'n2n3', 'any'}, optional
+        Where a ``'2022'`` NREM period starts; see :func:`detect_cycles`.
+        Default ``'n2n3'``.
     tag_events : bool, optional
         When False, cycles and stage durations are stored but ``events.cycle``
         is not touched. Default ``True``.
@@ -1263,7 +1444,8 @@ def finalize_cycles_and_durations(
                 subject=subject, epoch_length=epoch_length,
                 wake_thresh=wake_thresh, nrem_min=nrem_min, rem_min=rem_min,
                 conn=conn, run_id=run_id,
-                tag_events=(tag_events and m == tag_method))
+                tag_events=(tag_events and m == tag_method),
+                nrem_onset=nrem_onset)
             cycles_by_method[m] = cycles
     finally:
         if own_conn:

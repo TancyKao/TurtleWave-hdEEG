@@ -5,6 +5,23 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Sleep-cycle definitions change with this release. Cycles already stored in a `sleep_cycles` table were computed under the 4.4 rules and are refreshed only by re-running `examples/backfill_cycles.py`; `db_meta['turtlewave_version']` says which release last wrote a database.
+
+### Added
+
+- `detect_cycles(nrem_onset=...)`: `'n2n3'` (default) starts a `'2022'` NREM period at its first N2/N3 epoch; `'any'` keeps the 4.4 any-stage onset. Threaded through `ParalCycles.detect`/`run` and `finalize_cycles_and_durations`.
+- `detect_cycles(rem_gap=..., completion_min=...)` for the Feinberg & Floyd REM-interruption and end-of-night rules.
+- Cycle dicts gain `nrem_sleep_min`, `rem_sleep_min`, `rem_in_nremp_min`, `wake_in_seg_min`, `rem_class`, `complete` and `sorem`. The `sleep_cycles` table is unchanged.
+- `tests/test_detect_cycles.py`: unit tests for both rules.
+
+### Changed
+
+- `'2022'` NREM periods start at the first N2/N3 epoch by default, and the last segment ends at the last sleep epoch instead of the last epoch of the recording, so trailing wake is outside every cycle.
+- `'1979'` is now the Feinberg & Floyd (1979) rule: stage-2 sleep onset, REM runs separated by less than `nrem_min` epochs of NREM sleep merged into one REM episode, 5-min REM minimum with the first REM period exempt, sleep-onset REM absorbed, wake never a boundary, unpaired NREM periods carried forward, end-of-night completion flag. It previously was a REM-closed variant of `'2022'` that merged unpaired NREM periods forward.
+- Docs: the sleep-cycle how-to describes both rules with their sources and drops the "not Feinberg & Floyd" comparison table.
+
 ## [4.4.0] — 2026-09-15
 
 Lacourse2018 output changes with this release: re-detect existing Lacourse2018 rows in `neural_events.db` rather than pooling them with new ones.
