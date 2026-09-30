@@ -563,18 +563,80 @@ def explore_eeglab_structure(filename):
                     result[field] = value
             return result
         
-        # Get the EEG structure
-        if 'EEG' in eeglab_data:
-            eeg = eeglab_data['EEG']
-            eeg_dict = struct_to_dict(eeg)
-            return eeg_dict
-        else:
+        # Get the EEG structure: an 'EEG' variable, or top-level fields
+        from .eeglab_io import find_eeg_struct
+        eeg = find_eeg_struct(eeglab_data)
+        if eeg is None:
             logger.warning("EEG structure not found in file")
             return eeglab_data
+        if eeg is eeglab_data:
+            return {k: struct_to_dict(v) for k, v in eeglab_data.items()
+                    if not k.startswith('__')}
+        return struct_to_dict(eeg)
     
     except Exception as e:
         logger.error(f"Error exploring EEGLAB file: {e}")
         return None
+
+#: 10-5 row prefix -> scalp region, for prefixes that do not contain ``T``
+#: (every prefix containing ``T`` is temporal). Rows run front to back
+#: Fp, AF, F, FC, C, CP, P, PO, O, I with quarter rows between them; a label
+#: goes to the nearest main row, and a label halfway between two rows (FC,
+#: CP, PO) goes to the row nearer the vertex.
+_REGION_BY_PREFIX = {
+    'FP': 'frontal', 'AFP': 'frontal', 'AF': 'frontal', 'AFF': 'frontal',
+    'F': 'frontal', 'NFP': 'frontal', 'FFC': 'frontal',
+    'FC': 'central', 'FCC': 'central', 'C': 'central', 'CCP': 'central',
+    'CP': 'central',
+    'CPP': 'parietal', 'P': 'parietal', 'PPO': 'parietal', 'PO': 'parietal',
+    'POO': 'occipital', 'O': 'occipital', 'OI': 'occipital', 'I': 'occipital',
+    'OCB': 'occipital',
+    'CB': 'neck',
+}
+
+_LABEL_10_5 = re.compile(r'^([A-Z]+?)(Z|\d+)H?$')
+
+
+def region_from_label(label):
+    """Coarse scalp region of a 10-20 / 10-5 electrode label.
+
+    Parameters
+    ----------
+    label : str or None
+        Channel label as loaded, e.g. ``'FC3'``, ``'FFt9h'``, ``'EEG C3-M2'``.
+
+    Returns
+    -------
+    str
+        One of ``'frontal'``, ``'central'``, ``'parietal'``, ``'temporal'``,
+        ``'occipital'``, ``'neck'`` or ``'other'``.
+
+    Notes
+    -----
+    A leading ``'EEG '`` is dropped and only the part before the first ``-``
+    is used, so EDF-style bipolar names read as their first electrode. The
+    label is upper-cased and matched against ``<row prefix><number or Z>``
+    with an optional trailing ``h`` (10-5 half positions). Any prefix
+    containing ``T`` is temporal; the others are looked up in the row table
+    (cerebellar ``Cb`` is ``'neck'``, ``OCb`` is occipital). Mastoid and
+    earlobe sites (``M1``, ``A2``), ``Nz``, EGI ``E<n>`` labels, non-EEG
+    channels and anything unparseable give ``'other'``; EGI labels need
+    their own montage-specific mapping.
+    """
+    if label is None:
+        return 'other'
+    text = str(label).strip()
+    if text[:4].upper() == 'EEG ':
+        text = text[4:].strip()
+    text = text.split('-', 1)[0].strip().upper()
+    match = _LABEL_10_5.match(text)
+    if not match:
+        return 'other'
+    prefix = match.group(1)
+    if 'T' in prefix:
+        return 'temporal'
+    return _REGION_BY_PREFIX.get(prefix, 'other')
+
 
 def _merge_intervals(intervals):
     """Merge overlapping/adjacent ``(start, end)`` spans into disjoint sorted spans.

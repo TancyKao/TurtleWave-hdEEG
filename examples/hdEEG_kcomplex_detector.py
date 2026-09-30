@@ -40,7 +40,7 @@ for _tw_name in ('turtlewave_hdEEG.dataset', 'turtlewave_hdEEG.utils'):
     _tw_log.setLevel(logging.INFO)
     _tw_log.propagate = False
 
-from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
 from turtlewave_hdEEG import ParalKC, CustomAnnotations, fmt_freq_token
 
 # Optional CLI overrides (backward-compatible: no args => unchanged behaviour).
@@ -79,7 +79,7 @@ db_path = os.path.join(root_dir, "wonambi", "neural_events.db")
 
 # 2. Load dataset and annotations --------------------------------------
 print("Loading dataset and annotations...")
-data = WonambiDataset(data_file)
+data = open_dataset(data_file)
 annot = CustomAnnotations(annot_file)
 
 

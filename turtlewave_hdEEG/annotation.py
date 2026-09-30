@@ -8,9 +8,32 @@ import datetime
 import tempfile
 import os
 import time
+import logging
 import numpy as np
 from wonambi.attr import Annotations as WonambiAnnotations
 from wonambi.attr.annotations import create_empty_annotations
+
+from .timeline import (RecordingTimeline, stage_events_from_header,
+                       stage_event_intervals, regrid_stages, sidecar_path)
+
+logger = logging.getLogger('turtlewave_hdEEG.annotation')
+
+#: Staging-source names used in the log and in the timeline sidecar.
+STAGING_SOURCE_HEADER = 'etc.stages (header, as stored)'
+STAGING_SOURCE_TIME_MAP = 'etc.stages through the boundary time map'
+STAGING_SOURCE_EVENTS = 'stage events'
+
+#: Share of stage events allowed to disagree with the time-mapped
+#: ``etc.stages`` before a WARNING is logged.
+STAGE_EVENT_DISAGREEMENT_WARN = 0.01
+
+#: Share of stage events disagreeing with the best reading of a cut file's
+#: ``etc.stages`` above which that reading is rejected and the stage events
+#: themselves become the staging source. Higher than the WARNING threshold on
+#: purpose: a few re-scored or mistyped events should not discard the
+#: full-night hypnogram, but a boundary table that misstates the removed time
+#: shifts every epoch after the error and disagrees wholesale.
+STAGE_EVENT_DISAGREEMENT_REJECT = 0.20
 
 class XLAnnotations:
     """Simplified annotations for large datasets"""
@@ -87,19 +110,26 @@ class XLAnnotations:
 
         Every event in ``dataset.header['event']`` is matched, case-insensitively,
         against the rules below and written as a Wonambi event on ``'(all)'``
-        channels. Rules are evaluated in the order listed and an event matches at
-        most one of them: ``boundary`` is tested first and its events are removed
-        from the remaining masks, so a splice marker can never also be counted as,
-        say, a movement.
+        channels. ``boundary`` is tested first and its events are removed from
+        the remaining masks, so a splice marker can never also be counted as,
+        say, a movement. The other rules are independent of each other: a type
+        that matches two of them is written under both labels.
 
-        | Rule        | Event type matches (lower-cased)                  | Label    |
-        |-------------|--------------------------------------------------|----------|
-        | boundary    | equals `boundary`                                | Artefact |
-        | reject      | contains `reject`                                | Artefact |
-        | arousal     | contains `arousal`                               | Arousal  |
-        | respiratory | contains `hypopnea`/`obstructiveapnea`/`spo2desat`| Resp     |
-        | movement    | contains `move`/`leg`, or equals `lklr`/`lkud`    | Move     |
-        | snore       | contains `snor`/`jaw`                            | Snore    |
+        | Rule        | Event type matches (lower-cased)                        | Label    |
+        |-------------|---------------------------------------------------------|----------|
+        | boundary    | equals `boundary`                                       | Artefact |
+        | reject      | contains `reject`                                       | Artefact |
+        | arousal     | contains `arousal`                                      | Arousal  |
+        | respiratory | contains `hypopnea`/`apnea`/`spo2desat`, or equals `rera`, after removing spaces and underscores | Resp |
+        | movement    | contains `move`/`leg`, or equals `lklr`/`lkud`          | Move     |
+        | snore       | contains `snor`/`jaw`                                   | Snore    |
+
+        ``apnea`` covers ``obstructiveapnea``, ``centralapnea`` and
+        ``mixedapnea``; spaces and underscores are ignored for this rule only,
+        so ``spo2 desat`` and ``central apnea`` match. ``rera`` is an exact
+        match so that ``arousal5rera`` (or ``arousal 4 rera``) is an Arousal
+        only. ``unsure respiratory event`` is not matched. ``spo2artifact``, ``slpcycle*`` and ``slpep*`` match
+        no rule and are not imported.
 
         Event timing comes from ``onsets`` and ``durations`` (both in samples;
         divided by ``dataset.sampling_rate``). A missing, ``None`` or
@@ -195,10 +225,19 @@ class XLAnnotations:
                                  dtype=bool)
         not_boundary = ~boundary_mask
 
+        # Respiratory names come spelled with and without separators
+        # ('spo2desat', 'spo2 desat', 'SpO2_Desat'); drop them for that rule.
+        resp_arr = np.char.replace(np.char.replace(types_arr, ' ', ''), '_', '')
+
         event_masks = {
             "Artefact": (np.char.find(types_arr, 'reject') != -1) & not_boundary,
             "Arousal": (np.char.find(types_arr, 'arousal') != -1) & not_boundary,
-            "Resp": np.any([np.char.find(types_arr, x) != -1 for x in ['hypopnea', 'obstructiveapnea', 'spo2desat']], axis=0) & not_boundary,
+            # Matched on the type with spaces and underscores removed, so
+            # 'spo2 desat' and 'central apnea' match. `rera` is matched
+            # exactly: the masks are not mutually exclusive and a substring
+            # match would also tag `arousal5rera` as Resp.
+            "Resp": np.any([np.char.find(resp_arr, x) != -1 for x in ['hypopnea', 'apnea', 'spo2desat']]
+                           + [resp_arr == 'rera'], axis=0) & not_boundary,
             "Move": np.any([np.char.find(types_arr, x) != -1 for x in ['move', 'leg']] + [types_arr == x for x in ['lklr', 'lkud']], axis=0) & not_boundary,
             "Snore": np.any([np.char.find(types_arr, x) != -1 for x in ['snor', 'jaw']], axis=0) & not_boundary
         }
@@ -278,8 +317,24 @@ class XLAnnotations:
 
     def add_stages_from_header(self):
         """
-        Import stages from header array into annotations using Wonambi's import_staging
-        with Compumedics format.
+        Import sleep stages into the annotations on a 30 s grid over the signal.
+
+        The staging source is chosen from the header and logged at INFO with
+        its numbers (``turtlewave_hdEEG.annotation`` logger):
+
+        | Condition | Staging source |
+        |---|---|
+        | no removed time, and ``30 * len(etc.stages) - T <= 30`` s, or ``T`` unknown | ``etc.stages`` as stored (unchanged behaviour) |
+        | boundary events removed data (any amount) | full-night reading through the time map, or the as-stored reading, whichever the stage events support (ties and no events: time map when consistent); see :meth:`_choose_reading` |
+        | stage events present, and no usable map or no ``etc.stages`` | stage events, each ending at the next onset |
+        | longer, and neither usable | nothing imported, ERROR logged, returns ``False`` |
+
+        ``T`` is the signal length (``n_samples / sampling rate``). The chosen
+        codes go through Wonambi's ``import_staging(source='compumedics')``.
+        On the time-map path the map is also written to
+        ``<annotation xml stem>_timeline.json`` beside the annotation file
+        (see :class:`~turtlewave_hdEEG.timeline.RecordingTimeline`) so that
+        sleep cycles and stage durations can be computed on the full night.
 
         The rater name applied to the imported staging is taken from the instance
         attribute ``self.rater_name`` set at construction, not from an argument.
@@ -288,71 +343,470 @@ class XLAnnotations:
         -------
         bool
             True if successful, False otherwise
+
+        Notes
+        -----
+        A cut recording keeps its full-night ``etc.stages`` while the signal
+        loses the removed data, so importing ``etc.stages`` as stored would put
+        every stage after the first splice on the wrong signal. The time map
+        adds back the data removed at each ``boundary`` event, reads the
+        full-night stage at that original time, and gives each 30 s grid epoch
+        the stage covering most of it (ties to the earlier stage; under half
+        covered, or the final partial epoch, is Undefined).
         """
         try:
-            # Make sure we have a header with stages
-            if not hasattr(self.dataset, 'header') or 'stages' not in self.dataset.header:
+            # Make sure we have a header with stages (or stage events)
+            header = getattr(self.dataset, 'header', None)
+            if header is None:
                 print("No stages found in header")
                 return False
-                
-            # Get stages from header
-            stages = self.dataset.header['stages']
-            
+            stage_events = None
+            if 'stages' not in header:
+                stage_events = self._header_stage_events()
+                if not stage_events:
+                    print("No stages found in header")
+                    return False
+
             # Make sure we have an annotations object
             if not hasattr(self, 'annotations'):
                 print("No annotations object available")
                 return False
-            
-            # Get epoch length - either from header or use default 30s
-            epoch_length = 30 # default 30sec
-            
-            # Get recording start time
-            if 'start_time' in self.dataset.header:
-                rec_start = self.dataset.header['start_time']
-            else:
-                # Default to current date/time if not available.
-                # `datetime` here is the MODULE (see the import at the top), so
-                # this needs the class as well; `datetime.now()` raised
-                # AttributeError, which the broad except below turned into a
-                # silent "return False" -- i.e. a recording that HAS staging
-                # but no header start_time lost its stages without a word.
-                rec_start = datetime.datetime.now()
-            
-            # Create a temporary file with Compumedics format staging
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as temp_file:
-                temp_filename = temp_file.name
-                
-                # Write stages directly in Compumedics format (one stage code per line)
-                for stage_code in stages:
-                    # Convert to string and write to file
-                    temp_file.write(f"{stage_code}\n")
-            
-            try:
-                # Import the staging using Wonambi's import_staging method
-                self.annotations.import_staging(
-                    filename=temp_filename,
-                    source='compumedics',  # Use compumedics format
-                    rater_name=self.rater_name,
-                    rec_start=rec_start,
-                    staging_start=None,  # Use default (no offset)
-                    epoch_length=epoch_length,
-                    poor=['Artefact'],  # Default poor quality markers
-                    as_qual=False  # Don't import as quality markers
-                )
-                
-                print(f"Successfully imported {len(stages)} stages from header as rater '{self.rater_name}'")
-                return True
-                
-            finally:
-                # Clean up the temporary file
-                try:
-                    os.unlink(temp_filename)
-                except Exception as e:
-                    print(f"Warning: Could not delete temporary file {temp_filename}: {e}")
-                    
+
+            choice = self._choose_staging_source(header, stage_events)
+            if choice is None:
+                return False
+            source, stages, timeline = choice
+
+            ok = self._import_stage_codes(stages)
+            if ok and timeline is not None:
+                self._write_timeline_sidecar(timeline, source, stages)
+            elif ok:
+                stale = sidecar_path(self.annot_file)
+                if stale.exists():
+                    logger.warning(
+                        f"{stale.name} exists beside the annotation file but "
+                        f"this staging came from '{source}', not the time map; "
+                        f"the sidecar is stale. Delete it before computing "
+                        f"sleep cycles.")
+            return ok
+
         except Exception as e:
             print(f"Error importing stages from header: {e}")
             return False
+
+    def _sampling_rate(self):
+        """``dataset.sampling_rate``, else ``header['s_freq']``, else None."""
+        s_freq = getattr(self.dataset, 'sampling_rate', None)
+        if not s_freq:
+            s_freq = (getattr(self.dataset, 'header', {}) or {}).get('s_freq')
+        try:
+            return float(s_freq) if s_freq else None
+        except (TypeError, ValueError):
+            return None
+
+    def _signal_seconds(self):
+        """Signal length in seconds and the sample count behind it.
+
+        Returns
+        -------
+        (float or None, int or None)
+            ``n_samples / sampling rate`` and ``n_samples``; falls back to
+            ``header['recording_duration']`` (sample count then derived).
+        """
+        header = getattr(self.dataset, 'header', {}) or {}
+        s_freq = self._sampling_rate()
+        n_samples = header.get('n_samples')
+        if n_samples is not None and s_freq:
+            try:
+                return float(n_samples) / s_freq, int(n_samples)
+            except (TypeError, ValueError):
+                pass
+        duration = header.get('recording_duration')
+        if duration is not None and s_freq:
+            try:
+                return float(duration), int(round(float(duration) * s_freq))
+            except (TypeError, ValueError):
+                pass
+        return None, None
+
+    def _header_stage_events(self):
+        """Stage events (``ns``/``wake``/``n1``/``n2``/``n3``/``rem``) from the header."""
+        header = getattr(self.dataset, 'header', {}) or {}
+        s_freq = self._sampling_rate()
+        if not s_freq or 'event' not in header:
+            return []
+        return stage_events_from_header(header.get('event'), s_freq)
+
+    def _choose_staging_source(self, header, stage_events=None, epoch_length=30):
+        """Pick the staging source for :meth:`add_stages_from_header`.
+
+        Parameters
+        ----------
+        header : dict
+            ``dataset.header``.
+        stage_events : list of (float, str) or None
+            Pre-computed stage events, or ``None`` to read them when needed.
+        epoch_length : float
+            Epoch length of ``etc.stages`` and of the output grid.
+
+        Returns
+        -------
+        (str, list, RecordingTimeline or None) or None
+            Source name, stage codes to import (one per epoch from time 0)
+            and the time map when it was used; ``None`` (ERROR logged) when
+            no source gives aligned staging.
+        """
+        L = float(epoch_length)
+        T, n_samples = self._signal_seconds()
+        s_freq = self._sampling_rate()
+        has_stages = 'stages' in header and header['stages'] is not None
+        reason = None
+
+        if has_stages:
+            stages = header['stages']
+            n_stages = len(stages)
+            if T is None:
+                logger.info(
+                    f"Staging source: {STAGING_SOURCE_HEADER} "
+                    f"({n_stages} epochs; signal length unknown)")
+                return STAGING_SOURCE_HEADER, stages, None
+
+            try:
+                timeline = RecordingTimeline.from_header(
+                    header, s_freq, n_samples, epoch_length=L)
+            except Exception as e:
+                logger.warning(f"Could not build the boundary time map: {e}")
+                timeline = None
+            removed = timeline.removed_seconds if timeline is not None else 0.0
+            n_b = timeline.n_boundaries if timeline is not None else 0
+            fits_signal = L * n_stages - T <= L
+
+            if removed <= 0:
+                # No removed time: the file's own time base is the scoring's.
+                if fits_signal:
+                    logger.info(
+                        f"Staging source: {STAGING_SOURCE_HEADER} "
+                        f"({n_stages} epochs; signal {T:.1f} s)")
+                    if stage_events is None:
+                        stage_events = self._header_stage_events()
+                    self._warn_if_events_disagree(stages, stage_events, s_freq,
+                                                  n_samples, L)
+                    return STAGING_SOURCE_HEADER, stages, None
+            else:
+                chosen = self._choose_reading(timeline, stages, fits_signal,
+                                              stage_events, s_freq, n_samples,
+                                              T, L)
+                if chosen is not None:
+                    return chosen
+
+            reason = (f"etc.stages has {n_stages} epochs "
+                      f"({L * n_stages:.1f} s) but signal plus removed data is "
+                      f"{T + removed:.1f} s "
+                      f"({T:.1f} s + {removed:.1f} s at {n_b} boundary events)")
+        else:
+            reason = "the header has no etc.stages"
+
+        if stage_events is None:
+            stage_events = self._header_stage_events()
+        if stage_events and T is not None:
+            codes = regrid_stages(stage_event_intervals(stage_events, T, L), T, L)
+            logger.info(
+                f"Staging source: {STAGING_SOURCE_EVENTS} "
+                f"({len(stage_events)} stage events -> {len(codes)} epochs over "
+                f"{T:.1f} s; {reason})")
+            return STAGING_SOURCE_EVENTS, codes, None
+
+        logger.error(
+            f"Staging not imported: {reason}, and there are no stage events "
+            f"to fall back on. Importing etc.stages as stored would misalign "
+            f"every stage after the first cut.")
+        return None
+
+    def _choose_reading(self, timeline, stages, fits_signal, stage_events,
+                        s_freq, n_samples, T, L):
+        """Choose between the two readings of ``etc.stages`` on a cut file.
+
+        When boundary events removed data, ``etc.stages`` is either the full
+        night (read through the time map) or already on the cut time base
+        (read as stored). Neither known cleaning pipeline rewrites
+        ``etc.stages`` after a cut, so the full-night reading is the default.
+
+        Parameters
+        ----------
+        timeline : RecordingTimeline
+            Time map with ``removed_seconds > 0``.
+        stages : sequence
+            ``etc.stages`` as stored.
+        fits_signal : bool
+            ``epoch_length * len(stages) - T <= epoch_length``: the as-stored
+            reading is plausible.
+        stage_events : list of (float, str) or None
+            Stage events, read from the header when ``None``.
+        s_freq : float
+            Sampling frequency.
+        n_samples : int
+            Samples in the cut signal.
+        T : float
+            Signal length in seconds.
+        L : float
+            Epoch length in seconds.
+
+        Returns
+        -------
+        (str, list, RecordingTimeline or None) or None
+            The chosen source, codes and time map (``None`` for as stored),
+            or ``None`` when neither reading is usable.
+
+        Notes
+        -----
+        Candidates: the time map when it is consistent, or when
+        ``etc.stages`` ends before the night does (a scorer who stopped early)
+        and the stage events support it (disagreement at most
+        ``STAGE_EVENT_DISAGREEMENT_WARN``); the as-stored reading when
+        ``fits_signal``. ``etc.stages`` running past signal plus removed data
+        never makes the map a candidate.
+        With stage events, the candidate with the smaller share of
+        disagreeing events wins, ties to the time map; the choice is logged
+        with both scores. If the winner still disagrees on more than
+        ``STAGE_EVENT_DISAGREEMENT_REJECT`` it is rejected (WARNING, returns
+        ``None`` so the caller stages from the events); above
+        ``STAGE_EVENT_DISAGREEMENT_WARN`` it is kept with a WARNING. Without stage events
+        the time map wins when consistent; as stored is then used only with
+        a WARNING, and a WARNING is also logged when both readings fit and at
+        least half an epoch was removed, the range in which they label the
+        grid differently.
+        """
+        if stage_events is None:
+            stage_events = self._header_stage_events()
+        map_cmp = timeline.compare_stage_events(stage_events) \
+            if stage_events else (0, 0)
+        stored_cmp = (0, 0)
+        if stage_events and fits_signal:
+            as_stored = RecordingTimeline([], [], s_freq, n_samples,
+                                          stages=[str(x).strip() for x in stages],
+                                          epoch_length=L)
+            stored_cmp = as_stored.compare_stage_events(stage_events)
+
+        def share_bad(cmp):
+            return cmp[1] / cmp[0] if cmp[0] else 1.0
+
+        # The map is a candidate when etc.stages covers the night, or when it
+        # ends early (the scorer stopped before the end) and the stage events
+        # support it. etc.stages running past signal plus removed data means
+        # the boundary table does not account for the length: not a candidate.
+        ends_early = (timeline.original_seconds - L * len(stages)
+                      >= -timeline.consistency_tolerance - 1e-9)
+        candidates = []
+        if timeline.is_consistent or (
+                ends_early and map_cmp[0]
+                and share_bad(map_cmp) <= STAGE_EVENT_DISAGREEMENT_WARN):
+            candidates.append('map')
+        if fits_signal:
+            candidates.append('stored')
+        if not candidates:
+            return None
+
+        have_evidence = bool(map_cmp[0] or stored_cmp[0])
+        if have_evidence:
+            chosen = min(candidates,
+                         key=lambda c: (share_bad(map_cmp if c == 'map' else stored_cmp),
+                                        0 if c == 'map' else 1))
+        else:
+            chosen = candidates[0]      # 'map' when present
+
+        n_stages = len(stages)
+        removed = timeline.removed_seconds
+        stored_txt = (f"{stored_cmp[0] - stored_cmp[1]} of {stored_cmp[0]} as stored"
+                      if fits_signal else "as stored not possible")
+        scores = (f"stage events agree on {map_cmp[0] - map_cmp[1]} of "
+                  f"{map_cmp[0]} through the time map and {stored_txt}"
+                  if have_evidence else "no stage events to check")
+        chosen_cmp = map_cmp if chosen == 'map' else stored_cmp
+
+        if chosen == 'map':
+            codes = timeline.cut_hypnogram()
+            timeline.meta.update({'stage_events_compared': map_cmp[0],
+                                  'stage_events_disagreeing': map_cmp[1]})
+            logger.info(
+                f"Staging source: {STAGING_SOURCE_TIME_MAP} "
+                f"({n_stages} full-night epochs, {timeline.n_boundaries} "
+                f"boundary events removing {removed:.1f} s, signal {T:.1f} s "
+                f"-> {len(codes)} epochs; {scores})")
+            if not have_evidence and fits_signal and removed >= L / 2:
+                logger.warning(
+                    f"etc.stages fits both the full night and the cut signal "
+                    f"({removed:.1f} s removed) and there are no stage events "
+                    f"to tell them apart; read as the full night through the "
+                    f"time map. Check the staging if etc.stages was rescored "
+                    f"after the cut.")
+            result = (STAGING_SOURCE_TIME_MAP, codes, timeline)
+        else:
+            msg = (f"Staging source: {STAGING_SOURCE_HEADER} ({n_stages} epochs "
+                   f"taken to be on the cut time base although "
+                   f"{timeline.n_boundaries} boundary events remove "
+                   f"{removed:.1f} s; signal {T:.1f} s; {scores})")
+            if have_evidence:
+                logger.info(msg)
+            else:
+                logger.warning(msg)
+            result = (STAGING_SOURCE_HEADER, stages, None)
+
+        if chosen_cmp[0] and share_bad(chosen_cmp) > STAGE_EVENT_DISAGREEMENT_REJECT:
+            logger.warning(
+                f"{chosen_cmp[1]} of {chosen_cmp[0]} stage events "
+                f"({100.0 * share_bad(chosen_cmp):.1f} %) disagree even with the "
+                f"better reading of etc.stages ({result[0]}); the boundary "
+                f"events probably misstate the removed time. Falling back to "
+                f"the stage events.")
+            return None
+        if chosen_cmp[0] and share_bad(chosen_cmp) > STAGE_EVENT_DISAGREEMENT_WARN:
+            logger.warning(
+                f"{chosen_cmp[1]} of {chosen_cmp[0]} stage events "
+                f"({100.0 * share_bad(chosen_cmp):.1f} %) disagree with the "
+                f"chosen staging ({result[0]}); check the boundary events "
+                f"before trusting it")
+        return result
+
+    def _warn_if_events_disagree(self, stages, stage_events, s_freq,
+                                 n_samples, L):
+        """WARN when stage events contradict ``etc.stages`` read as stored.
+
+        Used on files with no removed time, where ``etc.stages`` is imported
+        unchanged whatever this finds; the check only reports (for example an
+        unmarked gap in the signal that shifted the stage events).
+
+        Parameters
+        ----------
+        stages : sequence
+            ``etc.stages`` as stored.
+        stage_events : list of (float, str)
+            Stage events from the header; nothing is checked when empty.
+        s_freq : float
+            Sampling frequency.
+        n_samples : int
+            Samples in the signal.
+        L : float
+            Epoch length in seconds.
+
+        Returns
+        -------
+        (int, int)
+            ``(n_compared, n_disagree)``.
+        """
+        if not stage_events:
+            return 0, 0
+        as_stored = RecordingTimeline([], [], s_freq, n_samples,
+                                      stages=[str(x).strip() for x in stages],
+                                      epoch_length=L)
+        n_cmp, n_bad = as_stored.compare_stage_events(stage_events)
+        if n_cmp and n_bad / n_cmp > STAGE_EVENT_DISAGREEMENT_WARN:
+            logger.warning(
+                f"{n_bad} of {n_cmp} stage events ({100.0 * n_bad / n_cmp:.1f} %) "
+                f"disagree with etc.stages as stored, and no boundary events "
+                f"record removed data; the signal may have an unmarked gap. "
+                f"etc.stages was imported unchanged.")
+        return n_cmp, n_bad
+
+    def _import_stage_codes(self, stages, epoch_length=30):
+        """Write Compumedics stage codes to a temp file and import them.
+
+        Parameters
+        ----------
+        stages : sequence
+            One stage code per epoch, starting at the recording start.
+        epoch_length : int
+            Epoch length in seconds.
+
+        Returns
+        -------
+        bool
+            True when Wonambi's ``import_staging`` succeeded.
+        """
+        # Get recording start time
+        if 'start_time' in self.dataset.header:
+            rec_start = self.dataset.header['start_time']
+        else:
+            # Default to current date/time if not available.
+            # `datetime` here is the MODULE (see the import at the top), so
+            # this needs the class as well; `datetime.now()` raised
+            # AttributeError, which the broad except in the caller turned into
+            # a silent "return False" -- i.e. a recording that HAS staging
+            # but no header start_time lost its stages without a word.
+            rec_start = datetime.datetime.now()
+
+        # Create a temporary file with Compumedics format staging
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as temp_file:
+            temp_filename = temp_file.name
+
+            # Write stages directly in Compumedics format (one stage code per line)
+            for stage_code in stages:
+                # Convert to string and write to file
+                temp_file.write(f"{stage_code}\n")
+
+        try:
+            # Import the staging using Wonambi's import_staging method
+            self.annotations.import_staging(
+                filename=temp_filename,
+                source='compumedics',  # Use compumedics format
+                rater_name=self.rater_name,
+                rec_start=rec_start,
+                staging_start=None,  # Use default (no offset)
+                epoch_length=epoch_length,
+                poor=['Artefact'],  # Default poor quality markers
+                as_qual=False  # Don't import as quality markers
+            )
+
+            print(f"Successfully imported {len(stages)} stages from header as rater '{self.rater_name}'")
+            return True
+
+        finally:
+            # Clean up the temporary file
+            try:
+                os.unlink(temp_filename)
+            except Exception as e:
+                print(f"Warning: Could not delete temporary file {temp_filename}: {e}")
+
+    def _write_timeline_sidecar(self, timeline, source, cut_stages):
+        """Write ``<annotation xml stem>_timeline.json`` for a cut recording.
+
+        Parameters
+        ----------
+        timeline : RecordingTimeline
+            The time map used for staging.
+        source : str
+            Staging-source name.
+        cut_stages : list of str
+            The codes imported on the cut file's grid.
+
+        Returns
+        -------
+        Path or None
+            The sidecar path, or ``None`` if writing failed (logged).
+        """
+        try:
+            from . import __version__ as tw_version
+        except ImportError:
+            tw_version = None
+        header = getattr(self.dataset, 'header', {}) or {}
+        start = header.get('start_time')
+        timeline.meta.update({
+            'source': source,
+            'turtlewave_version': tw_version,
+            'created': datetime.datetime.now().isoformat(timespec='seconds'),
+            'recording_start': start.isoformat() if hasattr(start, 'isoformat') else None,
+            'data_file': str(getattr(self.dataset, 'filename', '') or ''),
+            'annotation_file': str(Path(self.annot_file).name),
+            'rater': self.rater_name,
+            'cut_stages': [str(c) for c in cut_stages],
+        })
+        path = sidecar_path(self.annot_file)
+        try:
+            timeline.to_json(path)
+        except Exception as e:
+            logger.error(f"Could not write timeline sidecar {path}: {e}")
+            return None
+        logger.info(f"Timeline sidecar written: {path}")
+        return path
 
     def add_annotations_batch(self, label, start_times, end_times, channels=None):
         """Add multiple annotations of one label at once.

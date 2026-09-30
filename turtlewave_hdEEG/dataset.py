@@ -3,9 +3,13 @@ import json
 import logging
 import scipy.io
 import h5py
+from contextlib import nullcontext as _nullcontext
 from pathlib import Path
 from datetime import datetime
-from wonambi import Dataset as WonambiDataset
+from wonambi import Dataset as WonambiDataset  # noqa: F401  (kept for importers)
+
+from .eeglab_io import (open_dataset, find_eeg_struct, _as_struct,
+                        dedupe_channel_labels)
 
 #: Module logger. EEGLAB metadata extraction is verbose per-field bookkeeping,
 #: so it is logged at DEBUG and stays out of a default run; only decisions that
@@ -32,7 +36,7 @@ class LargeDataset:
             Directory to store memory-mapped files, if None use same directory as input
         """
         self.filename = Path(filename)
-        self.original_dataset = WonambiDataset(filename)
+        self.original_dataset = open_dataset(filename)
         self.memmap_info = None
         
         # Copy basic header info
@@ -63,17 +67,42 @@ class LargeDataset:
         except NotImplementedError:
             # Handle MATLAB v7.3 files using h5py
             logger.info("MATLAB v7.3 file detected. Using h5py to load the file.")
+            # Only the fields this class reads are loaded: walking the whole
+            # root (history, times, chanlocs, ...) took ~3.5 s on a 277-channel
+            # Compumedics file versus ~0.03 s for these keys. The result keeps
+            # the {'EEG': {...}} shape whichever layout the file uses.
             with h5py.File(self.filename, 'r') as f:
-                eeglab_data = self._load_hdf5_data(f)
-            is_h5py = True
+                eeg_group = find_eeg_struct(f)
+                eeglab_data = {}
+                if eeg_group is not None:
+                    subset = {}
+                    for key in self._H5_METADATA_KEYS:
+                        if key not in eeg_group:
+                            continue
+                        item = eeg_group[key]
+                        if isinstance(item, h5py.Group):
+                            subset[key] = self._load_hdf5_data(item, depth=1,
+                                                               path=f"root/{key}")
+                        else:
+                            subset[key] = item[()]
+                    eeglab_data = {'EEG': subset}
+                is_h5py = True
+                # Resolve object references through this one open handle:
+                # reopening the file per reference cost ~1 s for 2,749 events.
+                self._h5_handle = f
+                try:
+                    self._process_h5py_metadata(eeglab_data)
+                    result[0] = eeglab_data
+                except Exception as e:
+                    logger.error(f"Error extracting EEGLAB metadata: {e}")
+                    error[0] = e
+                finally:
+                    self._h5_handle = None
+            return result[0]
 
         try:
-            if is_h5py:
-                # Handle h5py data structure
-                self._process_h5py_metadata(eeglab_data)
-            else:
-                # Handle scipy data structure
-                self._process_scipy_metadata(eeglab_data)
+            # Handle scipy data structure
+            self._process_scipy_metadata(eeglab_data)
             result[0] = eeglab_data
         except Exception as e:
             logger.error(f"Error extracting EEGLAB metadata: {e}")
@@ -86,8 +115,10 @@ class LargeDataset:
 
     def _process_scipy_metadata(self, eeglab_data):
         """Process metadata from scipy.io.loadmat structure"""
-    # Access the EEG structure
-        eeg = eeglab_data.get('EEG', None)
+        # Access the EEG structure: an 'EEG' variable, or the top-level fields
+        eeg = find_eeg_struct(eeglab_data)
+        if eeg is not None:
+            eeg = _as_struct(eeg)
         if eeg is None:
             logger.warning("Could not find EEG structure in the EEGLAB file")
             return
@@ -130,8 +161,8 @@ class LargeDataset:
 
     def _process_h5py_metadata(self, eeglab_data):
         """Process metadata from h5py structure"""
-        # Access the EEG structure
-        eeg = eeglab_data.get('EEG', None)
+        # Access the EEG structure (the loader always wraps it as {'EEG': ...})
+        eeg = find_eeg_struct(eeglab_data)
         if eeg is None:
             logger.warning("Could not find EEG structure in the EEGLAB file")
             return
@@ -298,6 +329,9 @@ class LargeDataset:
                 except:
                     pass
 
+
+    #: Struct fields read by :meth:`_process_h5py_metadata`.
+    _H5_METADATA_KEYS = ('etc', 'event', 'group', 'condition', 'session')
 
     def _load_hdf5_data(self, hdf5_group, depth=0, max_depth=10, path="root"):
         """
@@ -469,8 +503,11 @@ class LargeDataset:
             The resolved data
         """
         try:
-            # We need to reopen the file to resolve references
-            with h5py.File(self.filename, 'r') as f:
+            # Use the handle held open by _extract_eeglab_metadata when there
+            # is one; otherwise reopen the file to resolve the reference.
+            handle = getattr(self, '_h5_handle', None)
+            with (_nullcontext(handle) if handle is not None
+                  else h5py.File(self.filename, 'r')) as f:
                 # Get the referenced object
                 obj = f[reference]
                 # Return the data
@@ -645,6 +682,27 @@ class LargeDataset:
         return output
 
 
+def _dedupe_labels(labels):
+    """Rename repeated labels like :func:`eeglab_io.dedupe_channel_labels`.
+
+    Parameters
+    ----------
+    labels : list
+        Raw labels; ``None`` (undecodable) entries are kept as ``None``.
+
+    Returns
+    -------
+    list
+        Same length; decodable labels made unique, ``None`` left in place.
+    """
+    idx = [i for i, lab in enumerate(labels) if lab is not None]
+    renamed = dedupe_channel_labels([str(labels[i]) for i in idx])
+    out = list(labels)
+    for i, new in zip(idx, renamed):
+        out[i] = new
+    return out
+
+
 def _as_chanloc(label, theta, radius):
     """Coerce one raw EEGLAB channel record into a clean chanloc dict.
 
@@ -679,9 +737,13 @@ def _chanlocs_from_scipy(eeg):
     cl = eeg.chanlocs
     if not isinstance(cl, np.ndarray):
         cl = np.array([cl])
+    chans = list(np.ravel(cl))
+    # Rename repeats (ECG, ECG_2) exactly as open_dataset does, before
+    # dropping channels without coordinates, so the two label lists agree.
+    labels = _dedupe_labels([getattr(ch, 'labels', None) for ch in chans])
     out = []
-    for ch in np.ravel(cl):
-        d = _as_chanloc(getattr(ch, 'labels', None),
+    for ch, lab in zip(chans, labels):
+        d = _as_chanloc(lab,
                         getattr(ch, 'theta', None),
                         getattr(ch, 'radius', None))
         if d:
@@ -738,7 +800,7 @@ def _chanlocs_from_h5py(filename):
     """
     out = []
     with h5py.File(filename, 'r') as f:
-        eeg = f.get('EEG')
+        eeg = find_eeg_struct(f)
         if eeg is None or 'chanlocs' not in eeg:
             return []
         cl = eeg['chanlocs']
@@ -748,8 +810,11 @@ def _chanlocs_from_h5py(filename):
         thetas = np.ravel(np.asarray(cl['theta']))
         radii = np.ravel(np.asarray(cl['radius']))
         n = min(len(labels), len(thetas), len(radii))
+        # Same duplicate renaming as open_dataset (ECG, ECG_2), applied to
+        # every channel before those without coordinates are dropped.
+        names = _dedupe_labels([_deref_label_h5(f, labels[i]) for i in range(n)])
         for i in range(n):
-            d = _as_chanloc(_deref_label_h5(f, labels[i]),
+            d = _as_chanloc(names[i],
                             _deref_scalar_h5(f, thetas[i]),
                             _deref_scalar_h5(f, radii[i]))
             if d:
@@ -786,7 +851,14 @@ def read_eeglab_chanlocs(filename):
     try:
         loaded = scipy.io.loadmat(filename, struct_as_record=False,
                                   squeeze_me=True, variable_names=['EEG'])
-        return _chanlocs_from_scipy(loaded.get('EEG'))
+        eeg = find_eeg_struct(loaded)
+        if eeg is None:
+            # Top-level layout: the EEGLAB fields are separate variables.
+            loaded = scipy.io.loadmat(filename, struct_as_record=False,
+                                      squeeze_me=True,
+                                      variable_names=['srate', 'chanlocs'])
+            eeg = find_eeg_struct(loaded)
+        return _chanlocs_from_scipy(_as_struct(eeg) if eeg is not None else None)
     except NotImplementedError:
         try:
             return _chanlocs_from_h5py(filename)
