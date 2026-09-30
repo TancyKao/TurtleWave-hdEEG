@@ -42,6 +42,25 @@ try:
 except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
     from db_connect import connect_events_db
 
+# Non-EEG rule, default review channels and load-failure wording, shared with
+# turtlewave_gui and waveform_loader. Qt-free.
+try:
+    from frontend.channel_types import (ChannelTypeSummary,
+                                        default_review_channels,
+                                        load_failure_message)
+except ImportError:  # run as a script
+    from channel_types import (ChannelTypeSummary, default_review_channels,
+                               load_failure_message)
+
+try:
+    from turtlewave_hdEEG.utils import region_from_label
+except ImportError:
+    def region_from_label(label):
+        """Library absent: no 10-20 / 10-5 mapping, every label is 'other'."""
+        return 'other'
+
+logger = logging.getLogger('frontend.eeg_review_gui')
+
 
 # ============================================================================
 # Excluded event types
@@ -654,14 +673,15 @@ class EventDatabase:
 # ============================================================================
 
 def _region_for(channel):
-    """Coarse scalp region from an EGI-style ``E<idx>`` label. INDEX-based
-    fallback used only when real electrode coordinates are unavailable — EGI
-    numbering spirals around the head, so these buckets are approximate and do
-    NOT track true scalp position (that's what ``_region_from_xy`` is for).
-    Non-E labels → 'other'."""
+    """Coarse scalp region from a channel label, used only when real electrode
+    coordinates are unavailable. EGI-style ``E<idx>`` labels use an INDEX-based
+    guess (EGI numbering spirals around the head, so these buckets are
+    approximate and do NOT track true scalp position; that is what
+    ``_region_from_xy`` is for). Every other label goes through the 10-20 /
+    10-5 rule in ``turtlewave_hdEEG.utils.region_from_label``."""
     s = str(channel)
     if not s.startswith('E') or not s[1:].isdigit():
-        return 'other'
+        return region_from_label(s)
     i = int(s[1:])
     if i <= 15 or 17 <= i <= 25 or 30 <= i <= 60:
         return 'frontal'
@@ -3583,12 +3603,14 @@ class FilterDock(QDockWidget):
             v = counts.get(k)
             lbl.setText("—" if not v else f"{int(v):,}")
 
-    def populate_channels(self, channels):
+    def populate_channels(self, channels, checked=None):
+        """Fill the channel list; names in ``checked`` start ticked."""
+        checked = set(checked or [])
         self.channel_list.clear()
         for ch in channels:
             it = QtWidgets.QListWidgetItem(str(ch))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Unchecked)
+            it.setCheckState(Qt.Checked if str(ch) in checked else Qt.Unchecked)
             it.setData(Qt.UserRole, str(ch))
             self.channel_list.addItem(it)
 
@@ -3700,7 +3722,11 @@ class EventReviewGUI(QMainWindow):
         self.is_closing = False
         
         # UI state
-        self.selected_channels = ['E112', 'E118', 'Cz']
+        # Waveform channels. Filled from default_review_channels() when an EEG
+        # file (or, failing that, a database) loads, but only while the user
+        # has not changed the selection: their own choice is never replaced.
+        self.selected_channels = []
+        self._channels_user_set = False
         self.selected_event_types = ['spindle', 'slow_wave', 'k_complex']
         
         # Debounce timer for channel selection
@@ -3714,6 +3740,8 @@ class EventReviewGUI(QMainWindow):
         self.setup_ui()
         self.setup_status_bar()
         self.setup_keyboard_shortcuts()
+        # Empty channel list plus a hint until a database or EEG file loads.
+        self.load_channels()
 
     # ------------------------------------------------------------------
     # Chrome helpers (title / toolbar pills / subject)
@@ -5142,8 +5170,11 @@ class EventReviewGUI(QMainWindow):
                 db_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 self.db_size_label.setText(f"DB: {db_size_mb:.1f} MB")
 
-                # Populate filter options + global channel list
+                # Populate filter options + global channel list. With no EEG
+                # file loaded, the database's channels decide the defaults.
                 self.populate_filter_options()
+                if self.eeg_data is None:
+                    self._apply_default_channels(self._all_db_channels())
                 self.load_channels()
 
                 # QC reframe: land on the per-channel dashboard
@@ -5161,48 +5192,109 @@ class EventReviewGUI(QMainWindow):
         self._refresh_status_segments()
     
     def open_eeg_file(self):
-        """Open EEG file using MNE or TurtleWave"""
+        """Ask for an EEG file and load it (see ``load_eeg_file``)."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select EEG File", "",
             "EEG Files (*.set *.edf *.bdf *.fif);;All Files (*)"
         )
-        
         if file_path:
-            try:
-                self.status_bar.showMessage("Loading EEG file...")
-                
-                # Try TurtleWave LargeDataset first
-                try:
-                    self.eeg_data = LargeDataset(file_path, create_memmap=False)
-                    self.eeg_file_path = file_path
-                    self.status_bar.showMessage(f"EEG file loaded: {os.path.basename(file_path)}")
-                except:
-                    # Fallback to MNE
-                    if mne:
-                        if file_path.endswith('.set'):
-                            self.eeg_data = mne.io.read_raw_eeglab(file_path, preload=False)
-                        elif file_path.endswith('.edf'):
-                            self.eeg_data = mne.io.read_raw_edf(file_path, preload=False)
-                        elif file_path.endswith('.bdf'):
-                            self.eeg_data = mne.io.read_raw_bdf(file_path, preload=False)
-                        elif file_path.endswith('.fif'):
-                            self.eeg_data = mne.io.read_raw_fif(file_path, preload=False)
-                        
-                        self.eeg_file_path = file_path
-                        self.status_bar.showMessage(f"EEG file loaded (MNE): {os.path.basename(file_path)}")
-                    else:
-                        raise Exception("MNE not available and TurtleWave failed")
-                
-                # Start background waveform loader
-                self.start_background_loader()
-                self._refresh_chrome()
-                # Auto-attempt live topo coords from the EEGLAB .set chanlocs
-                self._autoload_set_coords()
+            self.load_eeg_file(file_path)
 
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load EEG file: {str(e)}")
-                import traceback
-                traceback.print_exc()
+    def _read_with_mne(self, file_path):
+        """MNE reader for ``file_path`` by extension."""
+        if mne is None:
+            raise RuntimeError("MNE is not installed")
+        readers = {'.set': mne.io.read_raw_eeglab, '.edf': mne.io.read_raw_edf,
+                   '.bdf': mne.io.read_raw_bdf, '.fif': mne.io.read_raw_fif}
+        reader = readers.get(os.path.splitext(file_path)[1].lower())
+        if reader is None:
+            raise RuntimeError("MNE has no reader for this file type")
+        return reader(file_path, preload=False)
+
+    def load_eeg_file(self, file_path):
+        """Load an EEG file: TurtleWave's reader first, then MNE.
+
+        When both fail the dialog explains TurtleWave's reason (not MNE's),
+        in the wording of ``channel_types.load_failure_message``; the full
+        errors go to the log.
+        """
+        import traceback
+        self.status_bar.showMessage("Loading EEG file...")
+        try:
+            self.eeg_data = LargeDataset(file_path, create_memmap=False)
+            self.eeg_file_path = file_path
+            self.status_bar.showMessage(f"EEG file loaded: {os.path.basename(file_path)}")
+        except Exception as tw_error:
+            reason = str(tw_error).strip().splitlines()[0] if str(tw_error).strip() \
+                else type(tw_error).__name__
+            logger.warning(f"TurtleWave could not open this file ({reason}); "
+                           f"trying MNE instead.")
+            logger.debug(traceback.format_exc())
+            try:
+                self.eeg_data = self._read_with_mne(file_path)
+                self.eeg_file_path = file_path
+                self.status_bar.showMessage(
+                    f"EEG file loaded (MNE): {os.path.basename(file_path)}")
+            except Exception as mne_error:
+                logger.error(f"MNE could not open the file either: {mne_error}")
+                traceback.print_exception(type(tw_error), tw_error,
+                                          tw_error.__traceback__)
+                self.status_bar.showMessage("Error")
+                QtWidgets.QMessageBox.critical(
+                    self, "Error", load_failure_message(file_path, tw_error))
+                return
+
+        try:
+            self._apply_default_channels(*self._eeg_channel_info())
+            self.load_channels()
+            # Start background waveform loader
+            self.start_background_loader()
+            self._refresh_chrome()
+            # Auto-attempt live topo coords from the EEGLAB .set chanlocs
+            self._autoload_set_coords()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load EEG file: {str(e)}")
+            traceback.print_exc()
+
+    def _eeg_channel_info(self):
+        """``(channels, chan_type)`` of the loaded EEG file; ``([], None)``
+        when none is loaded. MNE's lower-case types go through the same
+        non-EEG rule."""
+        data = self.eeg_data
+        if data is None:
+            return [], None
+        if hasattr(data, 'channels'):
+            header = getattr(data, 'header', None) or {}
+            return list(data.channels), header.get('chan_type')
+        if hasattr(data, 'ch_names'):
+            try:
+                types = list(data.get_channel_types())
+            except Exception:
+                types = None
+            return list(data.ch_names), types
+        return [], None
+
+    def _apply_default_channels(self, channels, chan_type=None):
+        """Replace the waveform channels with ``default_review_channels``,
+        unless the user has chosen their own and every one of them exists in
+        the newly loaded ``channels``. A choice made on a different montage
+        is dropped (reading it would give blank waveforms)."""
+        names = set(str(c) for c in channels)
+        if self._channels_user_set:
+            missing = [ch for ch in self.selected_channels if ch not in names]
+            if self.selected_channels and not missing:
+                logger.info(f"Keeping your channel selection "
+                            f"({', '.join(self.selected_channels)}): all "
+                            f"present in the new file.")
+                return
+            self._channels_user_set = False
+            self.selected_channels = default_review_channels(channels, chan_type)
+            logger.info(f"Channel selection reset to defaults "
+                        f"({', '.join(self.selected_channels) or 'none'}): "
+                        f"{', '.join(missing) or 'the selection was empty'} "
+                        f"not in the new file.")
+            return
+        self.selected_channels = default_review_channels(channels, chan_type)
     
     def open_annotation_file(self):
         """Open annotation file"""
@@ -5248,16 +5340,23 @@ class EventReviewGUI(QMainWindow):
 
     
     def load_channels(self):
-        """Populate the global filter-dock channel list (DB channels if a
-        database is loaded, else a 1..256 placeholder)."""
+        """Populate the global filter-dock channel list: the database's
+        channels, else the EEG file's EEG channels, else nothing (with a
+        status-bar hint)."""
         try:
             channels = self._all_db_channels() if self.db else []
-            if not channels:
-                channels = [f"E{i}" for i in range(1, 257)]
+            if not channels and self.eeg_data is not None:
+                names, types = self._eeg_channel_info()
+                channels = ChannelTypeSummary(names, types).eeg
             self.channel_list.blockSignals(True)
-            self.filter_dock.populate_channels(channels)
+            self.filter_dock.populate_channels(channels,
+                                               checked=self.selected_channels)
             self.channel_list.blockSignals(False)
-            self.status_bar.showMessage(f"Loaded {len(channels)} channels")
+            if channels:
+                self.status_bar.showMessage(f"Loaded {len(channels)} channels")
+            else:
+                self.status_bar.showMessage(
+                    "No channels yet - open an event database or an EEG file.")
         except Exception as e:
             print(f"Error loading channels: {e}")
             import traceback
@@ -5290,6 +5389,7 @@ class EventReviewGUI(QMainWindow):
     
     def on_channel_changed(self, item=None):
         """Handle channel-list check change — debounced to avoid freezing."""
+        self._channels_user_set = True
         self.selected_channels = []
         for i in range(self.channel_list.count()):
             it = self.channel_list.item(i)
