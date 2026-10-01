@@ -430,6 +430,46 @@ def _cell_order(cell):
     return (REGIONS.index(region), STAGES.index(stage))
 
 
+def _plan(events, total, flag_available=None):
+    """Cells, allocation and per-part split of the draw (no hashing).
+
+    Returns an ordered ``{(region, stage): {'N_h', 'n_h', 'groups', 'take'}}``
+    with ``groups`` ``{part: [uuid, ...]}`` and ``take`` ``{part: n_k}`` over
+    parts ``'A'`` (no figures in scope) or ``'F'``/``'U'``/``'N'``.
+    """
+    cells = defaultdict(list)
+    for uid, region, stage, flagged in events:
+        if region in REGIONS and stage in STAGES:
+            cells[(region, stage)].append((uid, flagged))
+    if not cells:
+        raise ValueError("No in-scope events to sample.")
+    if flag_available is None:
+        flag_available = any(f is not None for _, _, _, f in events)
+    n_cells = len(cells)
+    if total < 2 * n_cells:
+        raise ValueError(f"total={total} is below 2 x {n_cells} cells; every "
+                         f"cell needs room for a flagged and an unflagged "
+                         f"event.")
+    order = sorted(cells, key=_cell_order)
+    rank = {c: i for i, c in enumerate(order)}
+    alloc = allocate_cells({rank[c]: len(cells[c]) for c in order}, total)
+    plan = {}
+    for c in order:
+        n_h = alloc[rank[c]]
+        groups = defaultdict(list)
+        for u, f in cells[c]:
+            groups[_half_of(f, flag_available)].append(u)
+        if flag_available:
+            nf, nu, nn = split_cell(n_h, len(groups['F']), len(groups['U']),
+                                    len(groups['N']))
+            take = {'F': nf, 'U': nu, 'N': nn}
+        else:
+            take = {'A': n_h}
+        plan[c] = {'N_h': len(cells[c]), 'n_h': n_h, 'groups': dict(groups),
+                   'take': take}
+    return plan
+
+
 def select_sample(events, seed, total=120, n_shared=30, flag_available=None):
     """The design's draw on an in-memory population (no database).
 
@@ -462,39 +502,14 @@ def select_sample(events, seed, total=120, n_shared=30, flag_available=None):
     ValueError
         Empty population, ``total < 2 H``, or a cell too small for its parts.
     """
-    cells = defaultdict(list)
-    for uid, region, stage, flagged in events:
-        if region in REGIONS and stage in STAGES:
-            cells[(region, stage)].append((uid, flagged))
-    if not cells:
-        raise ValueError("No in-scope events to sample.")
-    if flag_available is None:
-        flag_available = any(f is not None for _, _, _, f in events)
-    n_cells = len(cells)
-    if total < 2 * n_cells:
-        raise ValueError(f"total={total} is below 2 x {n_cells} cells; every "
-                         f"cell needs room for a flagged and an unflagged "
-                         f"event.")
-    sizes = {c: len(v) for c, v in cells.items()}
-    order = sorted(cells, key=_cell_order)
-    rank = {c: i for i, c in enumerate(order)}
-    alloc = allocate_cells({rank[c]: n for c, n in sizes.items()}, total)
+    plan = _plan(events, total, flag_available)
+    n_cells = len(plan)
     rows = []
-    for c in order:
-        n_h = alloc[rank[c]]
-        groups = defaultdict(list)
-        for u, f in cells[c]:
-            groups[_half_of(f, flag_available)].append(u)
-        if flag_available:
-            nf, nu, nn = split_cell(n_h, len(groups['F']), len(groups['U']),
-                                    len(groups['N']))
-            take = {'F': nf, 'U': nu, 'N': nn}
-        else:
-            take = {'A': n_h}
-        for half, uids in groups.items():
+    for c, cell in plan.items():
+        for half, uids in cell['groups'].items():
             if not uids:
                 continue
-            n_k = take[half]
+            n_k = cell['take'][half]
             if n_k < 1:
                 raise RuntimeError(f"Allocation left non-empty sub-cell "
                                    f"{c}|{half} unsampled.")
@@ -774,6 +789,152 @@ def _sample_id(sc, subject, seed, design_hash, population_hash):
 # Draw
 # ---------------------------------------------------------------------------
 
+def prepare_population(conn, run_id=None, event_type=None, *, scope=None,
+                       amp_ratio_cutoff=AMP_RATIO_CUTOFF,
+                       exclude_channels=None, allow_mixed_params=False):
+    """Read and classify a scope's population once, for repeated previews.
+
+    The expensive half of :func:`preview_allocation` (reading every event of
+    the scope, mapping regions, freezing flags, ``channel_qc`` exclusions);
+    pass the result as ``prepared=`` so a dialog that changes only
+    ``n_total``, ``seed`` or ``n_shared`` does not re-read the database.
+    Reads only. Prepare again when ``channel_qc``, the cutoff, the excluded
+    channels or the events change: a stale preparation previews the old
+    population (:func:`draw_review_sample` always re-reads).
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+    run_id, event_type, scope, amp_ratio_cutoff, exclude_channels,
+    allow_mixed_params
+        As for :func:`draw_review_sample`.
+
+    Returns
+    -------
+    dict
+        Opaque to callers except ``scope``, ``n_population`` and
+        ``n_in_scope``; pass it unchanged to :func:`preview_allocation`.
+
+    Raises
+    ------
+    ValueError
+        As :func:`draw_review_sample` for the scope and population.
+    """
+    sc = _resolve_scope(conn, run_id, event_type, scope)
+    pop = _population(conn, sc, exclude_channels=exclude_channels,
+                      amp_ratio_cutoff=amp_ratio_cutoff,
+                      allow_mixed_params=allow_mixed_params, log=logger)
+    return {'scope': sc, 'population': pop,
+            'n_population': pop['n_population'],
+            'n_in_scope': len(pop['events']),
+            'events': [(e['uuid'], e['region'], e['stage'], e['flagged'])
+                       for e in pop['events']],
+            'amp_ratio_cutoff': amp_ratio_cutoff,
+            'allow_mixed_params': allow_mixed_params}
+
+
+def _design_and_id(sc, pop, n_total, seed, n_shared, amp_ratio_cutoff,
+                   allow_mixed_params):
+    design = _design(pop, n_total, n_shared, amp_ratio_cutoff,
+                     allow_mixed_params)
+    design_json = json.dumps(design, sort_keys=True)
+    design_hash = hashlib.sha256(design_json.encode()).hexdigest()
+    sample_id = _sample_id(sc, pop['subject'], seed, design_hash,
+                           pop['population_hash'])
+    return design, design_json, design_hash, sample_id
+
+
+def _prepare(conn, run_id, event_type, n_total, seed, scope, n_shared,
+             amp_ratio_cutoff, exclude_channels, allow_mixed_params, log):
+    """Scope, population, design and sample id of a draw (reads only)."""
+    sc = _resolve_scope(conn, run_id, event_type, scope)
+    pop = _population(conn, sc, exclude_channels=exclude_channels,
+                      amp_ratio_cutoff=amp_ratio_cutoff,
+                      allow_mixed_params=allow_mixed_params, log=log)
+    design, design_json, design_hash, sample_id = _design_and_id(
+        sc, pop, n_total, seed, n_shared, amp_ratio_cutoff,
+        allow_mixed_params)
+    return sc, pop, design, design_json, design_hash, sample_id
+
+
+def preview_allocation(conn, run_id=None, event_type=None, n_total=120,
+                       seed=1, *, scope=None, n_shared=30,
+                       amp_ratio_cutoff=AMP_RATIO_CUTOFF,
+                       exclude_channels=None, allow_mixed_params=False,
+                       prepared=None):
+    """What :func:`draw_review_sample` would draw, without writing anything.
+
+    Same arguments and the same refusals as :func:`draw_review_sample`
+    (empty or EGI scope, mixed parameters, ``n_total < 2 H``). Reads only:
+    no table is created and nothing is committed, so it is safe for a dialog
+    to call on every keystroke.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+    run_id, event_type, n_total, seed, scope, n_shared, amp_ratio_cutoff,
+    exclude_channels, allow_mixed_params
+        As for :func:`draw_review_sample`.
+    prepared : dict or None, optional
+        Output of :func:`prepare_population`. When given, the population is
+        taken from it and ``run_id``, ``event_type``, ``scope``,
+        ``amp_ratio_cutoff``, ``exclude_channels`` and ``allow_mixed_params``
+        are ignored (the preparation fixed them). Default ``None`` reads the
+        population now.
+
+    Returns
+    -------
+    dict
+        ``sample_id`` (the id the draw would have), ``exists`` (that sample
+        is already drawn), ``scope``, ``subject``, ``run_ids``,
+        ``flag_available``, ``n_population``, ``n_in_scope``,
+        ``n_out_of_scope`` (``{reason: n}``), ``n_no_figures``
+        (``{'region|stage': n}``), ``n_total``, ``n_shared``, ``design``, and
+        ``cells``: one dict per region x stage cell in draw order with
+        ``region``, ``stage``, ``N_h``, ``n_h``, ``census`` (whole cell
+        drawn), ``census_label`` (``N_h`` under 8), ``n_shared`` and
+        ``parts`` ``{part: {'N': N_k, 'n': n_k}}`` over the cell's non-empty
+        parts (``'F'`` flagged, ``'U'`` unflagged, ``'N'`` no figures, or
+        ``'A'`` when the scope has no figures).
+    """
+    if prepared is None:
+        prepared = prepare_population(
+            conn, run_id, event_type, scope=scope,
+            amp_ratio_cutoff=amp_ratio_cutoff,
+            exclude_channels=exclude_channels,
+            allow_mixed_params=allow_mixed_params)
+    sc, pop = prepared['scope'], prepared['population']
+    design, _, _, sample_id = _design_and_id(
+        sc, pop, n_total, seed, n_shared, prepared['amp_ratio_cutoff'],
+        prepared['allow_mixed_params'])
+    plan = _plan(prepared['events'], n_total, pop['flag_available'])
+    exists = False
+    if _cols(conn, 'review_sample_designs'):
+        exists = conn.execute("SELECT 1 FROM review_sample_designs WHERE "
+                              "sample_id = ?", (sample_id,)).fetchone() \
+            is not None
+    per_cell = int(math.ceil(n_shared / float(len(plan)))) if n_shared else 0
+    cells = []
+    for (region, stage), cell in plan.items():
+        parts = {h: {'N': len(u), 'n': cell['take'][h]}
+                 for h, u in cell['groups'].items() if u}
+        cells.append({'region': region, 'stage': stage, 'N_h': cell['N_h'],
+                      'n_h': cell['n_h'],
+                      'census': cell['n_h'] >= cell['N_h'],
+                      'census_label': cell['N_h'] < CENSUS_LABEL_N,
+                      'n_shared': min(per_cell, cell['n_h']),
+                      'parts': parts})
+    return {'sample_id': sample_id, 'exists': exists, 'scope': sc,
+            'subject': pop['subject'], 'run_ids': pop['run_ids'],
+            'flag_available': pop['flag_available'],
+            'n_population': pop['n_population'],
+            'n_in_scope': len(pop['events']),
+            'n_out_of_scope': pop['out_of_scope'],
+            'n_no_figures': pop['no_figures'], 'n_total': int(n_total),
+            'n_shared': sum(c['n_shared'] for c in cells),
+            'design': design, 'cells': cells}
+
+
 def draw_review_sample(conn, run_id=None, event_type=None, n_total=120,
                        seed=1, *, scope=None, n_shared=30,
                        amp_ratio_cutoff=AMP_RATIO_CUTOFF,
@@ -823,16 +984,9 @@ def draw_review_sample(conn, run_id=None, event_type=None, n_total=120,
         ``allow_mixed_params``, or ``n_total < 2 H``.
     """
     log = logger or globals()['logger']
-    sc = _resolve_scope(conn, run_id, event_type, scope)
-    pop = _population(conn, sc, exclude_channels=exclude_channels,
-                      amp_ratio_cutoff=amp_ratio_cutoff,
-                      allow_mixed_params=allow_mixed_params, log=log)
-    design = _design(pop, n_total, n_shared, amp_ratio_cutoff,
-                     allow_mixed_params)
-    design_json = json.dumps(design, sort_keys=True)
-    design_hash = hashlib.sha256(design_json.encode()).hexdigest()
-    sample_id = _sample_id(sc, pop['subject'], seed, design_hash,
-                           pop['population_hash'])
+    sc, pop, design, design_json, design_hash, sample_id = _prepare(
+        conn, run_id, event_type, n_total, seed, scope, n_shared,
+        amp_ratio_cutoff, exclude_channels, allow_mixed_params, log)
 
     ensure_review_sampling_schema(conn, logger=log)
     if conn.execute("SELECT 1 FROM review_sample_designs WHERE sample_id = ?",
@@ -1044,8 +1198,12 @@ def top_up_region(conn, sample_id, region, n=TOP_UP_N, logger=None):
 # Labels, progress and precision
 # ---------------------------------------------------------------------------
 
-def _labels(conn, sample_id, rows, reviewer=None):
+def _labels(conn, sample_id, rows, reviewer=None, voided=None):
     """Valid labels on the sample's events.
+
+    When ``voided`` is a list, every label that does NOT count is appended
+    to it as ``(uuid, reviewer, decision, reason, reviewed_at, why)`` with
+    ``why`` in ``'missing'``, ``'end_moved'``, ``'other_sample_end'``.
 
     Returns ``(labels, stale, missing)``: ``labels[reviewer][uuid] =
     (decision, reason, reviewed_at)``; ``stale`` uuids whose current end time
@@ -1084,8 +1242,8 @@ def _labels(conn, sample_id, rows, reviewer=None):
             sql += " AND reviewer = ?"
             params.append(reviewer)
         for uid, rv, dec, reason, at, sid in conn.execute(sql, params):
-            if uid in stale or uid in missing:
-                continue
+            why = ('missing' if uid in missing
+                   else 'end_moved' if uid in stale else None)
             if sid is not None and sid != sample_id:
                 if (sid, uid) not in other_end:
                     hit = conn.execute(
@@ -1093,9 +1251,14 @@ def _labels(conn, sample_id, rows, reviewer=None):
                         "sample_id = ? AND uuid = ?", (sid, uid)).fetchone()
                     other_end[(sid, uid)] = hit[0] if hit else None
                 old = other_end[(sid, uid)]
-                if old is None or stored_end[uid] is None or abs(
-                        old - stored_end[uid]) > END_TIME_TOL_S:
-                    continue
+                if why is None and (old is None or stored_end[uid] is None
+                                    or abs(old - stored_end[uid])
+                                    > END_TIME_TOL_S):
+                    why = 'other_sample_end'
+            if why is not None:
+                if voided is not None:
+                    voided.append((uid, rv, dec, reason, at, why))
+                continue
             labels[rv][uid] = (dec, reason, at)
     return labels, stale, missing
 
@@ -1172,6 +1335,77 @@ def sample_progress(conn, sample_id, reviewer=None, shared_only=False):
                        if r['uuid'] not in merged and r['uuid'] not in missing],
         'median_gap_s': gaps,
     }
+
+
+#: Columns of :func:`read_sample_labels`, in order.
+SAMPLE_LABEL_COLUMNS = (
+    'sample_id', 'uuid', 'reviewer', 'decision', 'reason', 'reviewed_at',
+    'cell', 'region', 'stage', 'flagged', 'is_shared', 'draw_round',
+    'valid', 'void_reason',
+)
+
+
+def read_sample_labels(conn, sample_id, reviewer=None):
+    """Every stored label on a sample's events, with the voiding rules applied.
+
+    A label is void (``valid`` False) when its event is no longer in
+    ``events`` (``void_reason`` ``'missing'``), when the event's end time
+    moved more than 0.05 s since the draw (``'end_moved'``), or when it was
+    made in another sample whose stored end time differs by more than that
+    (``'other_sample_end'``). These are the rules
+    :func:`compute_review_precision` and :func:`sample_progress` use, so the
+    valid labels of one reviewer number exactly ``sample_progress(...,
+    reviewer)['n_reviewed']``.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+    sample_id : str
+    reviewer : str or None, optional
+        One reviewer's labels; ``None`` returns every reviewer's (including
+        ``'consensus'``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns :data:`SAMPLE_LABEL_COLUMNS`, one row per (event, reviewer)
+        label, ordered by reviewer, cell and key. Unlabelled events are not
+        listed (see :func:`sample_progress`).
+
+    Raises
+    ------
+    ValueError
+        Unknown ``sample_id``.
+    """
+    import pandas as pd
+
+    _design_row(conn, sample_id)
+    rows = _sample_rows(conn, sample_id)
+    by_uuid = {r['uuid']: r for r in rows}
+    voided = []
+    labels, _, _ = _labels(conn, sample_id, rows, reviewer, voided=voided)
+    recs = []
+    for rv, lab in labels.items():
+        for uid, (dec, reason, at) in lab.items():
+            recs.append((rv, uid, dec, reason, at, True, None))
+    for uid, rv, dec, reason, at, why in voided:
+        recs.append((rv, uid, dec, reason, at, False, why))
+    out = []
+    for rv, uid, dec, reason, at, valid, why in recs:
+        r = by_uuid[uid]
+        out.append({'sample_id': sample_id, 'uuid': uid, 'reviewer': rv,
+                    'decision': dec, 'reason': reason, 'reviewed_at': at,
+                    'cell': r['cell'], 'region': r['region'],
+                    'stage': r['stage'],
+                    'flagged': (None if r['flagged'] is None
+                                else bool(r['flagged'])),
+                    'is_shared': bool(r['is_shared']),
+                    'draw_round': r['draw_round'], 'valid': valid,
+                    'void_reason': why, '_key': r['sort_key']})
+    df = pd.DataFrame(out, columns=list(SAMPLE_LABEL_COLUMNS) + ['_key'])
+    if not df.empty:
+        df = df.sort_values(['reviewer', 'cell', '_key'])
+    return df.drop(columns='_key').reset_index(drop=True)
 
 
 def _resolve_primary(labels, rows):

@@ -26,7 +26,9 @@ from .dbwrite import (ensure_detection_thresholds_schema,
 from .event_metrics import EventFigures, PeakFreq, event_figures
 from .review_sampling import (draw_review_sample, top_up_region,
                               sample_progress, compute_review_precision,
-                              label_agreement, ensure_review_sampling_schema)
+                              label_agreement, ensure_review_sampling_schema,
+                              preview_allocation, read_sample_labels,
+                              prepare_population)
 from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
                       set_journal_mode, VALID_JOURNAL_MODES,
                       resolve_db_target, read_analysed_time,

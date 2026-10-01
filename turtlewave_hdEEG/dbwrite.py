@@ -5236,36 +5236,53 @@ def read_detection_thresholds(db_or_conn, run_id, channel=None, method=None,
             conn.close()
 
 
-#: Columns of :func:`event_population_summary`, in order.
+#: Columns of :func:`event_population_summary`, in order. The first 18 are
+#: the 4.6 pre-release set and keep their order; later columns are appended.
 POPULATION_SUMMARY_COLUMNS = (
     'channel', 'stage', 'n', 'n_near_splice',
     'n_freq', 'share_off_band', 'n_prom', 'share_low_prom',
     'n_bound', 'share_at_floor',
     'n_amp', 'amp_ratio_median', 'amp_ratio_q25', 'amp_ratio_q75',
     'n_thresh', 'thresh_ratio_median', 'thresh_ratio_q25', 'thresh_ratio_q75',
+    'share_at_ceiling',
+    'n_off_band', 'off_band_below_share', 'off_band_above_share',
+    'off_band_mode_lo', 'off_band_mode_hi', 'off_band_mode_share',
 )
 
+#: Fewest off-band events for which the modal 1 Hz bin is reported.
+OFF_BAND_MODE_MIN_N = 5
 
-def event_population_summary(db_or_conn, run_id, event_type):
+
+def event_population_summary(db_or_conn, run_id, event_type, pooled=False,
+                             stages=None):
     """Per-channel x stage population of the per-event review figures.
 
     The Channels (QC) tab's diagnostic: how many of a channel's events are
-    off-band, low-prominence or at the duration floor, and how far they stand
-    above background and above the detector threshold. Scoped to ONE run
-    (two runs on one scope have different thresholds and figures) and grouped
-    by the event's own scored epoch stage (``events.epoch_stage``; NULL is
-    reported as ``'unscored'``), not by the run's joint stage token.
+    off-band (and where their peaks lie), low-prominence or at a duration
+    bound, and how far they stand above background and above the detector
+    threshold. Scoped to ONE run (two runs on one scope have different
+    thresholds and figures) and grouped by the event's own scored epoch stage
+    (``events.epoch_stage``; NULL is reported as ``'unscored'``), not by the
+    run's joint stage token.
 
     Every share is over the events for which that figure was computed, and
-    its denominator is the ``n_*`` column beside it: ``n_freq`` for
-    ``share_off_band`` (``in_band`` not NULL; for spindles a peak was found
-    and the event is not near a splice, for slow waves a half-wave was
-    measured), ``n_prom`` for ``share_low_prom``, ``n_bound`` for
-    ``share_at_floor`` (``near_bound = -1``). ``amp_ratio`` and
-    ``thresh_ratio`` are skewed, so they are summarised by median and
-    interquartile range over ``n_amp`` / ``n_thresh`` events. Lead with
-    ``share_off_band``: ``share_low_prom`` mostly tracks a channel's
-    signal-to-noise (Method Spec M2).
+    its denominator is an ``n_*`` column: ``n_freq`` for ``share_off_band``
+    (``in_band`` not NULL; for spindles a peak was found and the event is not
+    near a splice, for slow waves a half-wave was measured), ``n_prom`` for
+    ``share_low_prom``, ``n_bound`` for ``share_at_floor`` (``near_bound =
+    -1``) and ``share_at_ceiling`` (``near_bound = +1``), and ``n_off_band``
+    (events with ``in_band = 0``) for ``off_band_below_share`` /
+    ``off_band_above_share`` (peak frequency below the event's
+    ``freq_lower`` / above its ``freq_upper``) and ``off_band_mode_share``.
+    The peak frequency is ``peak_freq_ap`` for spindles and ``wave_freq`` for
+    slow waves / K-complexes. ``off_band_mode_lo`` / ``off_band_mode_hi`` is
+    the integer-aligned 1 Hz bin ``[k, k + 1)`` holding the most off-band
+    peaks (lowest bin on a tie), NULL when ``n_off_band`` is under
+    :data:`OFF_BAND_MODE_MIN_N`. ``amp_ratio`` and ``thresh_ratio`` are
+    skewed, so they are summarised by median and interquartile range over
+    ``n_amp`` / ``n_thresh`` events. Lead with ``share_off_band``:
+    ``share_low_prom`` mostly tracks a channel's signal-to-noise (Method
+    Spec M2).
 
     Parameters
     ----------
@@ -5275,13 +5292,23 @@ def event_population_summary(db_or_conn, run_id, event_type):
         The run to summarise.
     event_type : str
         ``'spindle'``, ``'slow_wave'`` or ``'k_complex'``.
+    pooled : bool, optional
+        One row per channel over all its stages (``stage = 'all'``), every
+        share, median and quartile recomputed on the pooled events. Default
+        False (one row per channel x stage).
+    stages : sequence of str or None, optional
+        Keep only events whose own epoch stage is one of these (``'unscored'``
+        selects NULL ``epoch_stage``) before aggregating; with ``pooled=True``
+        this pools only those stages (e.g. the run's ``['NREM2', 'NREM3']``,
+        leaving out unscored and out-of-run-stage events). ``None`` (default)
+        keeps every event; an empty sequence returns an empty frame.
 
     Returns
     -------
     pandas.DataFrame
-        Columns :data:`POPULATION_SUMMARY_COLUMNS`, one row per channel x
-        stage, ordered by channel and stage. Empty (with those columns) for a
-        run without events or a database without the figure columns.
+        Columns :data:`POPULATION_SUMMARY_COLUMNS`, ordered by channel and
+        stage. Empty (with those columns) for a run without events or a
+        database without the figure columns.
     """
     import pandas as pd
 
@@ -5295,47 +5322,79 @@ def event_population_summary(db_or_conn, run_id, event_type):
         conn = db_or_conn
     try:
         present = _table_columns(conn, 'events')
-        needed = {c for c, _ in _EVENT_FIGURE_COLUMNS} | {'epoch_stage', 'run_id'}
+        needed = ({c for c, _ in _EVENT_FIGURE_COLUMNS}
+                  | {'epoch_stage', 'run_id', 'freq_lower', 'freq_upper'})
         if not present or not needed <= set(present):
             return pd.DataFrame(columns=columns)
-        counts = pd.read_sql_query(
-            """
-            SELECT channel, COALESCE(epoch_stage, 'unscored') AS stage_label,
-                   COUNT(*) AS n,
-                   SUM(CASE WHEN near_splice = 1 THEN 1 ELSE 0 END) AS n_near_splice,
-                   COUNT(in_band) AS n_freq,
-                   AVG(CASE WHEN in_band IS NULL THEN NULL
-                            ELSE 1.0 - in_band END) AS share_off_band,
-                   COUNT(low_prominence) AS n_prom,
-                   AVG(low_prominence * 1.0) AS share_low_prom,
-                   COUNT(near_bound) AS n_bound,
-                   AVG(CASE WHEN near_bound IS NULL THEN NULL
-                            WHEN near_bound = -1 THEN 1.0 ELSE 0.0 END)
-                       AS share_at_floor,
-                   COUNT(amp_ratio) AS n_amp,
-                   COUNT(thresh_ratio) AS n_thresh
-            FROM events WHERE run_id = ? AND event_type = ?
-            GROUP BY channel, stage_label
-            """, conn, params=[str(run_id), str(event_type)])
-        # Aliased: a bare `stage` in GROUP BY resolves to events.stage (the
-        # run's joint token), not to the epoch stage.
-        counts = counts.rename(columns={'stage_label': 'stage'})
-        if counts.empty:
-            return pd.DataFrame(columns=columns)
-        values = pd.read_sql_query(
+        ev = pd.read_sql_query(
             "SELECT channel, COALESCE(epoch_stage, 'unscored') AS stage, "
-            "amp_ratio, thresh_ratio FROM events "
+            "near_splice, in_band, low_prominence, near_bound, amp_ratio, "
+            "thresh_ratio, COALESCE(peak_freq_ap, wave_freq) AS peak, "
+            "freq_lower, freq_upper FROM events "
             "WHERE run_id = ? AND event_type = ?",
             conn, params=[str(run_id), str(event_type)])
-        grouped = values.groupby(['channel', 'stage'])
-        quant = pd.DataFrame({
-            f'{col}_{name}': grouped[col].quantile(q)
-            for col in ('amp_ratio', 'thresh_ratio')
-            for name, q in (('median', 0.5), ('q25', 0.25), ('q75', 0.75))
-        }).reset_index()
-        out = counts.merge(quant, on=['channel', 'stage'], how='left')
-        return (out[columns].sort_values(['channel', 'stage'])
-                .reset_index(drop=True))
+        if stages is not None:
+            ev = ev[ev['stage'].isin([str(st) for st in stages])].copy()
+        if ev.empty:
+            return pd.DataFrame(columns=columns)
+        if pooled:
+            ev['stage'] = 'all'
+        num = ['near_splice', 'in_band', 'low_prominence', 'near_bound',
+               'amp_ratio', 'thresh_ratio', 'peak', 'freq_lower', 'freq_upper']
+        ev[num] = ev[num].apply(pd.to_numeric, errors='coerce')
+        nb = ev['near_bound']
+        ev['_splice'] = (ev['near_splice'] == 1).astype(int)
+        ev['_off'] = 1.0 - ev['in_band']
+        ev['_floor'] = (nb == -1).astype(float).where(nb.notna())
+        ev['_ceil'] = (nb == 1).astype(float).where(nb.notna())
+        off = ev['in_band'] == 0
+        ev['_ob'] = off.astype(int)
+        ev['_below'] = (off & (ev['peak'] < ev['freq_lower'])).astype(int)
+        ev['_above'] = (off & (ev['peak'] > ev['freq_upper'])).astype(int)
+
+        keys = ['channel', 'stage']
+        g = ev.groupby(keys)
+        out = pd.DataFrame({
+            'n': g.size(),
+            'n_near_splice': g['_splice'].sum(),
+            'n_freq': g['in_band'].count(),
+            'share_off_band': g['_off'].mean(),
+            'n_prom': g['low_prominence'].count(),
+            'share_low_prom': g['low_prominence'].mean(),
+            'n_bound': g['near_bound'].count(),
+            'share_at_floor': g['_floor'].mean(),
+            'n_amp': g['amp_ratio'].count(),
+            'n_thresh': g['thresh_ratio'].count(),
+            'share_at_ceiling': g['_ceil'].mean(),
+            'n_off_band': g['_ob'].sum(),
+        })
+        for col in ('amp_ratio', 'thresh_ratio'):
+            for name, q in (('median', 0.5), ('q25', 0.25), ('q75', 0.75)):
+                out[f'{col}_{name}'] = g[col].quantile(q)
+        n_ob = out['n_off_band'].where(out['n_off_band'] > 0)
+        out['off_band_below_share'] = g['_below'].sum() / n_ob
+        out['off_band_above_share'] = g['_above'].sum() / n_ob
+
+        out['off_band_mode_lo'] = np.nan
+        out['off_band_mode_hi'] = np.nan
+        out['off_band_mode_share'] = np.nan
+        peaks = ev.loc[off & ev['peak'].notna(), keys + ['peak']].copy()
+        if not peaks.empty:
+            peaks['bin'] = np.floor(peaks['peak']).astype(int)
+            counts = (peaks.groupby(keys + ['bin']).size()
+                      .rename('k').reset_index()
+                      .sort_values(keys + ['k', 'bin'],
+                                   ascending=[True, True, False, True])
+                      .drop_duplicates(keys).set_index(keys))
+            idx = counts.index.intersection(out.index)
+            ok = out.loc[idx, 'n_off_band'] >= OFF_BAND_MODE_MIN_N
+            idx = idx[ok.to_numpy()]
+            out.loc[idx, 'off_band_mode_lo'] = counts.loc[idx, 'bin'].astype(float)
+            out.loc[idx, 'off_band_mode_hi'] = counts.loc[idx, 'bin'] + 1.0
+            out.loc[idx, 'off_band_mode_share'] = (
+                counts.loc[idx, 'k'] / out.loc[idx, 'n_off_band'])
+        out = out.reset_index()
+        return (out[columns].sort_values(keys).reset_index(drop=True))
     finally:
         if own:
             conn.close()

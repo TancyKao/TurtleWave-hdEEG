@@ -15,7 +15,10 @@
   of a splice are ``near_splice`` with NULL signal figures, and nothing else
   differs except the background window count near the splice.
 * ``event_population_summary`` returns one row per channel x stage with the
-  documented columns and denominators.
+  documented columns and denominators; on a constructed case the ceiling
+  share, the off-band below / above shares and the modal 1 Hz bin (NULL under
+  5 off-band events) are exact, and ``pooled=True`` gives one row per
+  channel with medians recomputed on the pooled events.
 * Slow-wave and K-complex runs leave the spindle-only columns NULL, fill
   ``wave_freq`` from the negative half-wave, and store the Massimini
   ``thresh_ratio`` as ``min(det_trough / max_trough_amp, det_ptp / min_ptp)``,
@@ -329,6 +332,142 @@ def test_population_summary():
                   'thresh_ratio_median']].to_string(index=False))
 
 
+def _summary_db(path):
+    """Constructed events for the off-band / bound / pooled columns."""
+    fig_cols = [c for c, _ in dbwrite._EVENT_FIGURE_COLUMNS]
+    conn = sqlite3.connect(path)
+    conn.execute(f"CREATE TABLE events (uuid TEXT, event_type TEXT, "
+                 f"channel TEXT, epoch_stage TEXT, run_id TEXT, "
+                 f"freq_lower REAL, freq_upper REAL, "
+                 f"{', '.join(fig_cols)})")
+    rows = []
+
+    def add(chan, stage, in_band, peak, near_bound, amp):
+        vals = dict.fromkeys(fig_cols)
+        vals.update(in_band=in_band, peak_freq_ap=peak, near_bound=near_bound,
+                    amp_ratio=amp, near_splice=0, low_prominence=0)
+        rows.append([f'u{len(rows)}', 'spindle', chan, stage, 'run-1', 11.0,
+                     16.0] + [vals[c] for c in fig_cols])
+    # A / NREM2: 10 off-band (7 below 11 Hz, 3 above 16 Hz; five in 8-9 Hz),
+    # 5 in band. near_bound: three +1, two -1, the rest 0, two NULL.
+    off = [8.2, 8.5, 8.9, 8.1, 9.5, 16.5, 17.2, 8.7, 20.0, 9.9]
+    bounds = [1, 1, 1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, None, None]
+    for i, pk in enumerate(off + [12, 13, 13.5, 14, 15]):
+        add('A', 'NREM2', 0 if i < 10 else 1, pk, bounds[i], 1.0 + i)
+    # A / NREM3: 4 off-band (under the mode minimum of 5).
+    for i, pk in enumerate([8.4, 8.6, 17.5, 9.1]):
+        add('A', 'NREM3', 0, pk, 0, 30.0 + i)
+    # B / NREM2: in band only.
+    for i in range(6):
+        add('B', 'NREM2', 1, 12.5, 0, 2.0)
+    conn.executemany(f"INSERT INTO events VALUES "
+                     f"({', '.join('?' * len(rows[0]))})", rows)
+    conn.commit()
+    return conn
+
+
+def test_population_summary_off_band():
+    """Ceiling share, off-band peak side and modal bin, pooled rows."""
+    print("\n4b. event_population_summary off-band columns (constructed):")
+    old18 = ('channel', 'stage', 'n', 'n_near_splice', 'n_freq',
+             'share_off_band', 'n_prom', 'share_low_prom', 'n_bound',
+             'share_at_floor', 'n_amp', 'amp_ratio_median', 'amp_ratio_q25',
+             'amp_ratio_q75', 'n_thresh', 'thresh_ratio_median',
+             'thresh_ratio_q25', 'thresh_ratio_q75')
+    assert dbwrite.POPULATION_SUMMARY_COLUMNS[:18] == old18
+    with Workdir() as tmp:
+        conn = _summary_db(os.path.join(tmp, 's.db'))
+        df = dbwrite.event_population_summary(conn, 'run-1', 'spindle')
+        assert list(df.columns) == list(dbwrite.POPULATION_SUMMARY_COLUMNS)
+        row = {(r.channel, r.stage): r for r in df.itertuples()}
+        a2, a3, b2 = row[('A', 'NREM2')], row[('A', 'NREM3')], row[('B', 'NREM2')]
+        assert a2.n == 15 and a2.n_bound == 13
+        assert abs(a2.share_at_ceiling - 3 / 13) < 1e-12
+        assert abs(a2.share_at_floor - 2 / 13) < 1e-12
+        assert a2.n_off_band == 10 and abs(a2.share_off_band - 10 / 15) < 1e-12
+        assert abs(a2.off_band_below_share - 0.7) < 1e-12
+        assert abs(a2.off_band_above_share - 0.3) < 1e-12
+        assert (a2.off_band_mode_lo, a2.off_band_mode_hi) == (8.0, 9.0)
+        assert abs(a2.off_band_mode_share - 0.5) < 1e-12
+        assert a3.n_off_band == 4 and np.isnan(a3.off_band_mode_lo) \
+            and np.isnan(a3.off_band_mode_hi) and np.isnan(a3.off_band_mode_share)
+        assert abs(a3.off_band_below_share - 0.75) < 1e-12
+        assert b2.n_off_band == 0 and np.isnan(b2.off_band_below_share) \
+            and np.isnan(b2.off_band_mode_lo)
+
+        pooled = dbwrite.event_population_summary(conn, 'run-1', 'spindle',
+                                                  pooled=True)
+        assert list(pooled.columns) == list(df.columns)
+        assert list(pooled.channel) == ['A', 'B'] and set(pooled.stage) == {'all'}
+        pa = pooled[pooled.channel == 'A'].iloc[0]
+        amps = [r[0] for r in conn.execute(
+            "SELECT amp_ratio FROM events WHERE channel = 'A'")]
+        assert pa.n == 19 and pa.n_off_band == 14
+        assert abs(pa.amp_ratio_median - float(np.median(amps))) < 1e-12
+        assert abs(pa.amp_ratio_q25 - float(np.percentile(amps, 25))) < 1e-12
+        assert (pa.off_band_mode_lo, pa.off_band_mode_hi) == (8.0, 9.0)
+        assert abs(pa.off_band_mode_share - 7 / 14) < 1e-12
+        assert abs(pa.off_band_below_share - 10 / 14) < 1e-12
+        assert pooled['n'].sum() == df['n'].sum()
+
+        # stages= keeps only those epoch stages before pooling: add
+        # unscored and NREM1 events on A, which the run stages must drop.
+        fig_cols = [c for c, _ in dbwrite._EVENT_FIGURE_COLUMNS]
+        extra = []
+        for st in (None, None, 'NREM1'):
+            vals = dict.fromkeys(fig_cols)
+            vals.update(in_band=0, peak_freq_ap=25.5, near_bound=1,
+                        amp_ratio=99.0, near_splice=0, low_prominence=0)
+            extra.append([f'x{len(extra)}', 'spindle', 'A', st, 'run-1', 11.0,
+                          16.0] + [vals[c] for c in fig_cols])
+        conn.executemany(f"INSERT INTO events VALUES "
+                         f"({', '.join('?' * len(extra[0]))})", extra)
+        conn.commit()
+        every = dbwrite.event_population_summary(conn, 'run-1', 'spindle',
+                                                 pooled=True)
+        assert every[every.channel == 'A'].iloc[0].n == 22
+        run_only = dbwrite.event_population_summary(
+            conn, 'run-1', 'spindle', pooled=True, stages=['NREM2', 'NREM3'])
+        ra = run_only[run_only.channel == 'A'].iloc[0]
+        cols = [c for c in dbwrite.POPULATION_SUMMARY_COLUMNS if c != 'stage']
+        for col in cols:
+            x, y = ra[col], pa[col]
+            assert (x == y) or (isinstance(x, float) and np.isnan(x)
+                                and np.isnan(y)), (col, x, y)
+        by_stage = dbwrite.event_population_summary(conn, 'run-1', 'spindle',
+                                                    stages=['NREM3'])
+        assert list(by_stage.stage.unique()) == ['NREM3'] \
+            and by_stage.n.sum() == 4
+        unscored = dbwrite.event_population_summary(conn, 'run-1', 'spindle',
+                                                    stages=['unscored'])
+        assert unscored.n.sum() == 2
+        assert dbwrite.event_population_summary(conn, 'run-1', 'spindle',
+                                                stages=[]).empty
+
+        # Mode-bin tie: 8-9 and 9-10 Hz hold two peaks each -> lowest bin.
+        tie = []
+        for pk in (8.1, 8.6, 9.2, 9.7, 20.0):
+            vals = dict.fromkeys(fig_cols)
+            vals.update(in_band=0, peak_freq_ap=pk, near_bound=0,
+                        amp_ratio=1.0, near_splice=0, low_prominence=0)
+            tie.append([f't{len(tie)}', 'spindle', 'C', 'NREM2', 'run-1',
+                        11.0, 16.0] + [vals[c] for c in fig_cols])
+        conn.executemany(f"INSERT INTO events VALUES "
+                         f"({', '.join('?' * len(tie[0]))})", tie)
+        conn.commit()
+        c2 = dbwrite.event_population_summary(conn, 'run-1', 'spindle')
+        c2 = c2[c2.channel == 'C'].iloc[0]
+        assert (c2.off_band_mode_lo, c2.off_band_mode_hi) == (8.0, 9.0), c2
+        assert abs(c2.off_band_mode_share - 0.4) < 1e-12
+        conn.close()
+    print("[ok] stages= pools only the given epoch stages (unscored and NREM1 "
+          "dropped; equals the un-augmented pooled row); a 2-2 tie between "
+          "8-9 and 9-10 Hz reports the lower bin")
+    print("[ok] share_at_ceiling over n_bound; off-band below/above shares and "
+          "the 8-9 Hz modal bin over n_off_band; mode NULL under 5 off-band "
+          "events; pooled rows recompute medians and the mode on all stages")
+
+
 def test_slow_wave_and_kcomplex_figures():
     """SW/KC: spindle-only NULL, wave_freq from half-wave, Massimini ratio."""
     print("\n5. Slow-wave and K-complex figures:")
@@ -390,6 +529,7 @@ def test_slow_wave_and_kcomplex_figures():
 
 TESTS = [test_spindle_columns_and_golden, test_detection_vs_continuous_read,
          test_splice_differences_are_local, test_population_summary,
+         test_population_summary_off_band,
          test_slow_wave_and_kcomplex_figures]
 
 

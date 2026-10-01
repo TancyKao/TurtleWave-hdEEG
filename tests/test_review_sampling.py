@@ -28,6 +28,9 @@ Asserted here:
   sub-cell and leave other events' flags unchanged; a domain cutting across
   sub-cells (``near_splice``) uses whole-sub-cell weights; an uneven partial
   review is weighted by the labelled count ``m_k``, not ``n_k``.
+* ``preview_allocation`` writes nothing and equals the drawn allocation;
+  ``read_sample_labels`` voids a deleted or moved-end event and its valid
+  labels match ``sample_progress`` ``n_reviewed``.
 * ``label_agreement``: hand-computed kappa, positive / negative agreement,
   undefined kappa, clustered bootstrap only with >= 10 subjects.
 
@@ -581,6 +584,101 @@ def test_uneven_partial_review():
     conn.close()
 
 
+def test_preview_matches_draw():
+    """preview_allocation writes nothing and equals the drawn allocation."""
+    conn = make_db(tmpdb())
+    conn.execute(f"UPDATE events SET {', '.join(c + ' = NULL' for c in FIG_COLS)}"
+                 f" WHERE channel = 'C3'")
+    conn.commit()
+    schema_before = conn.execute("SELECT name, sql FROM sqlite_master").fetchall()
+    changes = conn.total_changes
+    prev = rs.preview_allocation(conn, run_id='run-B', seed=7)
+    assert conn.total_changes == changes and not conn.in_transaction
+    assert conn.execute("SELECT name, sql FROM sqlite_master").fetchall() \
+        == schema_before, "preview created something"
+    assert prev['exists'] is False and prev['flag_available'] is True
+    assert sum(c['n_h'] for c in prev['cells']) == 120 == prev['n_total']
+    assert prev['n_shared'] == 30 and prev['n_no_figures']
+    sid = rs.draw_review_sample(conn, run_id='run-B', seed=7)
+    assert sid == prev['sample_id']
+    rows = rs._sample_rows(conn, sid)
+    drawn = Counter(r['cell'] for r in rows)
+    pop_k = {r['cell']: r['pop_k'] for r in rows}
+    shared = Counter(f"{r['region']}|{r['stage']}" for r in rows if r['is_shared'])
+    for c in prev['cells']:
+        cell = f"{c['region']}|{c['stage']}"
+        assert shared[cell] == c['n_shared'], (cell, shared[cell], c)
+        for part, v in c['parts'].items():
+            assert drawn[f'{cell}|{part}'] == v['n'], (cell, part, v)
+            assert pop_k[f'{cell}|{part}'] == v['N'], (cell, part, v)
+    assert sum(len(c['parts']) for c in prev['cells']) == len(drawn)
+    assert rs.preview_allocation(conn, run_id='run-B', seed=7)['exists'] is True
+    conn.close()
+    print(f"  preview: {len(prev['cells'])} cells, {len(drawn)} parts equal to "
+          f"the draw; no write, no schema change; exists after drawing: OK")
+
+
+def test_prepared_preview_and_small_total():
+    """prepared= gives the same preview; shared count capped at n_h."""
+    conn = make_db(tmpdb())
+    prep = rs.prepare_population(conn, run_id='run-B')
+    for total, seed, shared in ((120, 1, 30), (40, 9, 30), (20, 3, 30)):
+        a = rs.preview_allocation(conn, run_id='run-B', n_total=total,
+                                  seed=seed, n_shared=shared)
+        b = rs.preview_allocation(conn, n_total=total, seed=seed,
+                                  n_shared=shared, prepared=prep)
+        assert a == b, (total, seed)
+    small = rs.preview_allocation(conn, n_total=20, seed=3, n_shared=30,
+                                  prepared=prep)
+    assert len(small['cells']) == 10
+    assert all(c['n_h'] == 2 and c['n_shared'] == 2 for c in small['cells'])
+    assert small['n_shared'] == 20, small['n_shared']
+    sid = rs.draw_review_sample(conn, run_id='run-B', n_total=20, seed=3,
+                                n_shared=30)
+    assert sid == small['sample_id']
+    n_shared = conn.execute("SELECT COUNT(*) FROM review_samples WHERE "
+                            "sample_id = ? AND is_shared = 1",
+                            (sid,)).fetchone()[0]
+    assert n_shared == 20, n_shared
+    t0 = time.time()
+    for seed in range(20):
+        rs.preview_allocation(conn, n_total=120, seed=seed, prepared=prep)
+    t_prep = (time.time() - t0) / 20
+    conn.close()
+    print(f"  prepared preview equals the direct one (3 settings); total 20 "
+          f"with 30 shared -> 2 shared per cell, 20 in all (draw agrees); "
+          f"{t_prep * 1000:.1f} ms per prepared preview: OK")
+
+
+def test_read_sample_labels():
+    """Voiding rules: missing and moved-end labels are invalid."""
+    conn = make_db(tmpdb())
+    sid = rs.draw_review_sample(conn, run_id='run-B', seed=8)
+    rows = _label_all(conn, sid, 'alice', lambda r: 'accept')
+    dbwrite.store_event_review(conn, rows[5]['uuid'], 'reject', 'bob',
+                               reason='artefact')
+    moved, gone = rows[0]['uuid'], rows[1]['uuid']
+    conn.execute("UPDATE events SET end_time = end_time + 0.2 WHERE uuid = ?",
+                 (moved,))
+    conn.execute("DELETE FROM events WHERE uuid = ?", (gone,))
+    conn.commit()
+    df = rs.read_sample_labels(conn, sid, reviewer='alice')
+    assert list(df.columns) == list(rs.SAMPLE_LABEL_COLUMNS)
+    assert len(df) == 120
+    why = dict(zip(df.uuid, df.void_reason))
+    assert why[moved] == 'end_moved' and why[gone] == 'missing'
+    n_valid = int(df.valid.sum())
+    prog = rs.sample_progress(conn, sid, reviewer='alice')
+    assert n_valid == prog['n_reviewed'] == 118, (n_valid, prog['n_reviewed'])
+    est = rs.compute_review_precision(conn, sid, reviewer='alice', write=False)
+    assert est[est.domain_type == 'scope'].iloc[0].n_reviewed == n_valid
+    both = rs.read_sample_labels(conn, sid)
+    assert set(both.reviewer) == {'alice', 'bob'} and len(both) == 121
+    conn.close()
+    print(f"  read_sample_labels: {n_valid} valid = sample_progress n_reviewed; "
+          f"moved end -> end_moved, deleted -> missing: OK")
+
+
 TESTS = [
     test_allocation,
     test_srswor,
@@ -594,6 +692,9 @@ TESTS = [
     test_no_figure_events,
     test_domain_uses_subcell_weights,
     test_uneven_partial_review,
+    test_preview_matches_draw,
+    test_prepared_preview_and_small_total,
+    test_read_sample_labels,
     test_label_agreement,
     test_qt_free,
 ]
