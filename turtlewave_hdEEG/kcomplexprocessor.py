@@ -10,7 +10,8 @@ from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
 from turtlewave_hdEEG import dbwrite
-from turtlewave_hdEEG.utils import derive_subject, resolve_reject_types
+from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
+                                    warn_interpolated_channels)
 from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
                                              assert_scoring_covers_stages)
 
@@ -199,6 +200,11 @@ class ParalKC:
 
         if isinstance(chan, str):
             chan = [chan]
+        # Channels whose signal the cleaning pipeline reconstructed from
+        # neighbours: flagged once per run and recorded in provenance, never
+        # dropped.
+        interp_selected = warn_interpolated_channels(
+            self.dataset, chan, self.logger)
         if isinstance(stage, str):
             stage = [stage]
 
@@ -375,6 +381,7 @@ class ParalKC:
                     'reject_artifacts': 'Artefact' in reject_types,
                     'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': n_fft_sec,
+                    'interpolated_channels': list(interp_selected),
                 }
                 if run_params:
                     params_dict.update(run_params)
@@ -407,7 +414,8 @@ class ParalKC:
                     dbwrite.method_citation(method_db),
                     json.dumps(params_dict, default=str),
                     ref_chan, polar, stage, reject_types=list(reject_types),
-                    subject=db_subject)
+                    subject=db_subject,
+                    interpolated_channels=interp_selected)
 
                 # Density denominator: the artefact-free in-stage time this run
                 # actually analysed, so density can be derived from the database
@@ -423,7 +431,8 @@ class ParalKC:
                 # loop, scoped to this run.
                 dbwrite.ensure_cycles_populated(
                     db_conn, self.annotations, db_subject, db_path=db_path,
-                    logger=self.logger)
+                    logger=self.logger, stages=stage,
+                    reject_types=list(reject_types))
 
                 if resume:
                     db_skip = dbwrite.resume_skip_channels(

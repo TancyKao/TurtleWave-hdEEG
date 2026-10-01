@@ -11,7 +11,7 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
 
 # Import necessary modules - adjust paths as needed
-from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
 from wonambi.attr import Annotations as WonambiAnnotations
 from wonambi_hdEEG import ParalEvents, CustomAnnotations
 
@@ -45,7 +45,7 @@ def run_spindle_detection_test(data_file, annot_file=None, output_dir=None):
     # Step 1: Load dataset and annotations
     logger.info(f"Loading dataset: {data_file}")
     try:
-        data = WonambiDataset(data_file)
+        data = open_dataset(data_file)
         logger.info(f"Dataset loaded successfully")
         
         # Log basic dataset info

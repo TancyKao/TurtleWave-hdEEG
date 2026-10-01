@@ -664,10 +664,18 @@ def _backfill_fixture(tmp, folder='10sd'):
 
 
 def _run_backfill(mod):
-    """Run mod.main() with stdout captured; return the printed text."""
+    """Run mod.main() on the module's test root with stdout captured.
+
+    The script takes its root from a required ``--root`` argument (no
+    built-in default), so the root and subjects set on the module by each
+    case are passed as arguments, with ``--yes`` for the confirmation.
+    """
+    argv = ['--root', mod.ROOT, '--subjects', *mod.SUBJECTS, '--yes']
+    if not mod.PLOT:
+        argv.append('--no-plot')
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        mod.main()
+        mod.main(argv)
     return buf.getvalue()
 
 

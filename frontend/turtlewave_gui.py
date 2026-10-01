@@ -63,6 +63,20 @@ try:
 except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
     from db_connect import connect_events_db
 
+# Channel-type rule, Dataset Information text and load-failure wording, shared
+# with the review GUI. Qt-free.
+try:
+    from frontend.channel_types import (ChannelTypeSummary, format_dataset_info,
+                                        load_failure_message)
+except ImportError:  # run as a script
+    from channel_types import (ChannelTypeSummary, format_dataset_info,
+                               load_failure_message)
+
+
+def _as_names(channels):
+    """Channel names as a list of str; ``None`` and numpy arrays are fine."""
+    return [] if channels is None else [str(c) for c in channels]
+
 
 #: The single event scan XLAnnotations offers, and what it actually writes.
 #: ``add_artefacts_from_events`` walks the EEGLAB event list once and adds
@@ -321,6 +335,10 @@ class TurtleWaveGUI(QMainWindow):
         self.available_channels = []
         self.dataset = None
         self.annotations = None
+        # One "Show non-EEG channels" state shared by the Spindle, Slow Wave,
+        # K-Complex and PAC tabs; a view filter only, never written anywhere.
+        self.show_non_eeg = False
+        self.non_eeg_checks = {}
         
         # slow wave variables
         self.sw_method = "Massimini2004"
@@ -1036,6 +1054,7 @@ class TurtleWaveGUI(QMainWindow):
         # Available channels
         avail_layout = QVBoxLayout()
         avail_layout.addWidget(QLabel("Available Channels:"))
+        avail_layout.addWidget(self._make_non_eeg_check('sw'))
         self.sw_available_list = QListWidget()
         self.sw_available_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         avail_layout.addWidget(self.sw_available_list)
@@ -1509,6 +1528,7 @@ class TurtleWaveGUI(QMainWindow):
         if not self.selected_channels:
             QMessageBox.critical(self, "Error", "No channels selected. Please select at least one channel.")
             return
+        self._log_non_eeg_selection(self.selected_channels)
         
         # Get selected sleep stages
         self.selected_stages = [stage for stage, check in self.sw_stage_checks.items() if check.isChecked()]
@@ -2007,6 +2027,7 @@ class TurtleWaveGUI(QMainWindow):
 
         avail_layout = QVBoxLayout()
         avail_layout.addWidget(QLabel("Available Channels:"))
+        avail_layout.addWidget(self._make_non_eeg_check('kc'))
         self.kc_available_list = QListWidget()
         self.kc_available_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         avail_layout.addWidget(self.kc_available_list)
@@ -2263,6 +2284,7 @@ class TurtleWaveGUI(QMainWindow):
         if not self.selected_channels:
             QMessageBox.critical(self, "Error", "No channels selected. Please select at least one channel.")
             return
+        self._log_non_eeg_selection(self.selected_channels)
 
         self.kc_selected_stages = [s for s, c in self.kc_stage_checks.items() if c.isChecked()]
         if not self.kc_selected_stages:
@@ -2536,8 +2558,7 @@ class TurtleWaveGUI(QMainWindow):
         self.update_channel_lists()
 
     def add_all_kc_channels(self):
-        self.selected_channels = list(self.available_channels)
-        self.update_channel_lists()
+        self._add_all_listed()
 
     def remove_all_kc_channels(self):
         self.selected_channels = []
@@ -2658,6 +2679,7 @@ class TurtleWaveGUI(QMainWindow):
         # Available channels
         avail_layout = QVBoxLayout()
         avail_layout.addWidget(QLabel("Available Channels:"))
+        avail_layout.addWidget(self._make_non_eeg_check('spindle'))
         self.available_list = QListWidget()
         self.available_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         avail_layout.addWidget(self.available_list)
@@ -3418,6 +3440,7 @@ class TurtleWaveGUI(QMainWindow):
         # Available channels
         avail_layout = QVBoxLayout()
         avail_layout.addWidget(QLabel("Available Channels:"))
+        avail_layout.addWidget(self._make_non_eeg_check('pac'))
         self.pac_available_list = QListWidget()
         self.pac_available_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         avail_layout.addWidget(self.pac_available_list)
@@ -3608,11 +3631,15 @@ class TurtleWaveGUI(QMainWindow):
             self.write_log(f"Successfully loaded dataset: {os.path.basename(self.data_file_path)}")
         
         except Exception as e:
+            # The dialog gets a message written for the researcher; the log
+            # keeps the original exception and its traceback.
+            import traceback
             self.write_log(f"Error loading dataset: {str(e)}")
+            self.write_log(traceback.format_exc().rstrip())
             QtCore.QMetaObject.invokeMethod(
                 self, "show_error", 
                 QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(str, f"Failed to load dataset: {str(e)}")
+                QtCore.Q_ARG(str, load_failure_message(self.data_file_path, e))
             )
         
         # Update UI in main thread
@@ -3639,8 +3666,13 @@ class TurtleWaveGUI(QMainWindow):
             self.review_btn.setEnabled(True)
 
 
-        # Update channel list
+        # A new file starts with non-EEG channels hidden, then the lists are
+        # repainted (update_channel_lists also relabels / hides the checkbox).
+        self._set_non_eeg_checks(False)
+        self.show_non_eeg = False
         self.update_channel_lists()
+        if hasattr(self, 'pac_available_list'):
+            self.update_pac_channel_lists()
         
         # Populate detection methods from database if it exists
         self.populate_detection_methods()
@@ -3673,88 +3705,148 @@ class TurtleWaveGUI(QMainWindow):
         self.statusBar().showMessage("Error")
     
     def update_dataset_info(self):
-        """Update dataset information display"""
-        import datetime
-        if self.dataset:
-            try:
-                n_channels = len(self.dataset.channels)
-                sampling_rate = self.dataset.sampling_rate
-                n_samples = self.dataset.header['n_samples']
-                start_time = self.dataset.header['start_time']
-                total_duration = n_samples / sampling_rate
-                end_time = start_time + datetime.timedelta(seconds=total_duration)
+        """Rewrite the Setup tab's Dataset Information text.
 
-                # Format info text
-                info = (
-                    f"Dataset Information:\n"
-                    f"File: {os.path.basename(self.data_file_path)}\n"
-                    f"Number of Channels: {n_channels}\n"
-                    f"Sampling Rate: {sampling_rate} Hz\n"
-                    f"Recording Start Time:  {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"Recording End Time:  {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"Total Duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)\n"
-                    f"Output Directory: {self.output_dir}\n"
-                    f"Annotation File: {self.annot_file_path}\n\n"
-                    f"Channels: {', '.join(self.dataset.channels[:10])}... (and {n_channels-10} more)"
-                )
-                
-                self.info_text.setText(info)
-            
-            except Exception as e:
-                self.write_log(f"Error getting dataset info: {str(e)}")
-    
+        Each line is built in its own guarded step (see
+        ``channel_types.format_dataset_info``), so one unreadable header field
+        costs that line only and the box never keeps the "No dataset loaded"
+        text once a file has loaded.
+        """
+        if not self.dataset:
+            return
+        try:
+            info = format_dataset_info(self.dataset, self.data_file_path,
+                                       self.output_dir, self.annot_file_path,
+                                       log=self.write_log)
+        except Exception as e:
+            self.write_log(f"Error getting dataset info: {str(e)}")
+            info = (f"File: {os.path.basename(self.data_file_path)}\n"
+                    f"Dataset information could not be read (see log)")
+        self.info_text.setText(info)
+
+    # ------------------------------------------------------------------
+    # Non-EEG channel filter (shared by the Spindle, SW, K-Complex, PAC tabs)
+    # ------------------------------------------------------------------
+
+    def _make_non_eeg_check(self, key):
+        """The "Show non-EEG channels" checkbox for one tab; hidden until a
+        file with positively non-EEG channels is loaded."""
+        check = QCheckBox("Show non-EEG channels")
+        check.setChecked(self.show_non_eeg)
+        check.setVisible(False)
+        check.toggled.connect(self.on_non_eeg_toggled)
+        self.non_eeg_checks[key] = check
+        return check
+
+    def _set_non_eeg_checks(self, checked):
+        for check in self.non_eeg_checks.values():
+            check.blockSignals(True)
+            check.setChecked(checked)
+            check.blockSignals(False)
+
+    def on_non_eeg_toggled(self, checked):
+        """Tick on any tab ticks all four, then every list is repainted."""
+        self.show_non_eeg = bool(checked)
+        self._set_non_eeg_checks(self.show_non_eeg)
+        self.update_channel_lists()
+        if hasattr(self, 'pac_available_list'):
+            self.update_pac_channel_lists()
+
+    def _channel_summary(self):
+        """Channel-type split of the loaded file (empty when none is loaded)."""
+        return ChannelTypeSummary.from_dataset(self.dataset)
+
+    def _refresh_non_eeg_checks(self, summary):
+        """Label, tooltip and visibility of the four checkboxes: shown only
+        when the loaded file positively types some channels as non-EEG."""
+        show = bool(summary.other)
+        label = summary.checkbox_label() if show else "Show non-EEG channels"
+        tip = summary.checkbox_tooltip() if show else ""
+        for check in self.non_eeg_checks.values():
+            check.setText(label)
+            check.setToolTip(tip)
+            check.setVisible(show)
+
+    def _listed_channels(self, summary=None):
+        """File channels the Available lists show under the current filter,
+        file order (selected ones included)."""
+        summary = summary or self._channel_summary()
+        channels = _as_names(self.available_channels)
+        if self.show_non_eeg:
+            return channels
+        return [ch for ch in channels if not summary.is_non_eeg(ch)]
+
+    @staticmethod
+    def _selected_item(channel, summary):
+        """List item for ``channel``: non-EEG and interpolated channels carry
+        a tooltip, interpolated ones are also italic. The text is always the
+        bare channel name, because add/remove read it back."""
+        item = QListWidgetItem(channel)
+        tip = summary.item_tooltip(channel)
+        if tip:
+            item.setToolTip(tip)
+        if summary.is_interpolated(channel):
+            font = item.font()
+            font.setItalic(True)
+            item.setFont(font)
+        return item
+
+    def _fill_available(self, lst, channels, summary):
+        """Refill an Available list with decorated items, file order."""
+        for channel in channels:
+            lst.addItem(self._selected_item(channel, summary))
+
+    def _add_all_listed(self):
+        """"Add All >>" on the Spindle / SW / K-Complex tabs: add every channel
+        the Available list shows. Channels already selected stay selected,
+        including non-EEG ones hidden since; result is in file order."""
+        listed = set(self._listed_channels())
+        keep = set(self.selected_channels)
+        in_file = _as_names(self.available_channels)
+        chosen = [ch for ch in in_file if ch in listed or ch in keep]
+        file_set = set(in_file)
+        extra = [ch for ch in self.selected_channels if ch not in file_set]
+        self.selected_channels = chosen + extra
+        self.update_channel_lists()
+
+    def _log_non_eeg_selection(self, selected):
+        """One log line each when a run starts with non-EEG or interpolated
+        channels selected."""
+        summary = self._channel_summary()
+        for note in (summary.run_note(selected or []),
+                     summary.interp_run_note(selected or [])):
+            if note:
+                self.write_log(note)
+
     def update_channel_lists(self):
-        """Update channel selection listboxes"""
-        # Clear spindle tab listboxes
-        self.available_list.clear()
-        self.selected_list.clear()
-        
-        # Clear SW tab listboxes if they exist (they might be created after this is called)
-        if hasattr(self, 'sw_available_list') and self.sw_available_list is not None:
-            self.sw_available_list.clear()
-        if hasattr(self, 'sw_selected_list') and self.sw_selected_list is not None:
-            self.sw_selected_list.clear()
+        """Repaint the Available / Selected lists of the Spindle, Slow Wave and
+        K-Complex tabs from ``self.selected_channels``.
 
-        # Clear K-Complex tab listboxes if they exist
-        if hasattr(self, 'kc_available_list') and self.kc_available_list is not None:
-            self.kc_available_list.clear()
-        if hasattr(self, 'kc_selected_list') and self.kc_selected_list is not None:
-            self.kc_selected_list.clear()
+        Available shows the file's channels in file order, minus selected
+        ones and, unless "Show non-EEG channels" is ticked, minus channels the
+        file types as non-EEG. Selected always shows every selected channel,
+        so it is exactly what will run; non-EEG ones carry a tooltip.
+        """
+        summary = self._channel_summary()
+        self._refresh_non_eeg_checks(summary)
+        selected = set(self.selected_channels)
+        available = [ch for ch in self._listed_channels(summary)
+                     if ch not in selected]
 
-        # eeg_channels = []
-        # for channel in self.available_channels:
-        #     if (channel.startswith('E') and len(channel) > 1 and channel[1:].isdigit()) or channel == 'Cz':
-        #         eeg_channels.append(channel)
-            
-        # # If no EEG channels found, use all available channels
-        # if not eeg_channels:
-        #     eeg_channels = self.available_channels.copy()
-        #     self.write_log(f"No specific EEG channels found. Including all {len(eeg_channels)} channels.")
-        
-        eeg_channels = self.available_channels.copy()
-        # Filter selected channels to keep only EEG channels
-        # self.selected_channels = [ch for ch in self.selected_channels if ch in eeg_channels]
+        pairs = [(self.available_list, self.selected_list)]
+        for avail_name, sel_name in (('sw_available_list', 'sw_selected_list'),
+                                     ('kc_available_list', 'kc_selected_list')):
+            avail = getattr(self, avail_name, None)
+            sel = getattr(self, sel_name, None)
+            if avail is not None and sel is not None:
+                pairs.append((avail, sel))
 
-        # Add available channels to spindle tab
-        for channel in eeg_channels:
-            if channel not in self.selected_channels:
-                self.available_list.addItem(channel)
-                # Also add to SW tab if it exists
-                if hasattr(self, 'sw_available_list') and self.sw_available_list is not None:
-                    self.sw_available_list.addItem(channel)
-                # Also add to K-Complex tab if it exists
-                if hasattr(self, 'kc_available_list') and self.kc_available_list is not None:
-                    self.kc_available_list.addItem(channel)
-
-        # Add selected channels to spindle tab
-        for channel in self.selected_channels:
-            self.selected_list.addItem(channel)
-            # Also add to SW tab if it exists
-            if hasattr(self, 'sw_selected_list') and self.sw_selected_list is not None:
-                self.sw_selected_list.addItem(channel)
-            # Also add to K-Complex tab if it exists
-            if hasattr(self, 'kc_selected_list') and self.kc_selected_list is not None:
-                self.kc_selected_list.addItem(channel)
+        for avail, sel in pairs:
+            avail.clear()
+            sel.clear()
+            self._fill_available(avail, available, summary)
+            for channel in self.selected_channels:
+                sel.addItem(self._selected_item(channel, summary))
     
     def add_channels(self):
         """Add selected channels to the selected list"""
@@ -3789,9 +3881,8 @@ class TurtleWaveGUI(QMainWindow):
         self.update_channel_lists()
     
     def add_all_channels(self):
-        """Add all channels to the selected list"""
-        self.selected_channels = list(self.available_channels)
-        self.update_channel_lists()
+        """Add every listed channel to the selected list"""
+        self._add_all_listed()
     
     def remove_all_channels(self):
         """Remove all channels from the selected list"""
@@ -3832,9 +3923,8 @@ class TurtleWaveGUI(QMainWindow):
         self.update_channel_lists()
 
     def add_all_sw_channels(self):
-        """Add all channels to the SW selected list"""
-        self.selected_channels = list(self.available_channels)
-        self.update_channel_lists()
+        """Add every listed channel to the SW selected list"""
+        self._add_all_listed()
 
     def remove_all_sw_channels(self):
         """Remove all channels from the SW selected list"""
@@ -3875,9 +3965,12 @@ class TurtleWaveGUI(QMainWindow):
         self.update_pac_channel_lists()
 
     def add_all_pac_channels(self):
-        """Add all available channels to the PAC selected list"""
+        """Add every listed PAC channel to the PAC selected list; channels
+        already selected stay selected."""
         if hasattr(self, 'pac_available_channels'):
-            self.pac_selected_channels = list(self.pac_available_channels)
+            listed = self._pac_listed_channels(self._channel_summary())
+            self.pac_selected_channels = list(self.pac_selected_channels) + [
+                ch for ch in listed if ch not in self.pac_selected_channels]
             self.update_pac_channel_lists()
 
     def remove_all_pac_channels(self):
@@ -3885,21 +3978,29 @@ class TurtleWaveGUI(QMainWindow):
         self.pac_selected_channels = []
         self.update_pac_channel_lists()
 
+    def _pac_listed_channels(self, summary):
+        """Database channels the PAC Available list shows. The file's non-EEG
+        channels are hidden unless ticked; a database channel that is not in
+        the loaded file keeps showing (its type is unknown)."""
+        channels = list(getattr(self, 'pac_available_channels', None) or [])
+        if self.show_non_eeg:
+            return channels
+        return [ch for ch in channels if not summary.is_non_eeg(ch)]
+
     def update_pac_channel_lists(self):
         """Update PAC channel selection listboxes"""
-        # Clear listboxes
+        summary = self._channel_summary()
+        self._refresh_non_eeg_checks(summary)
         self.pac_available_list.clear()
         self.pac_selected_list.clear()
-        
-        # Add available channels
-        if hasattr(self, 'pac_available_channels'):
-            for channel in self.pac_available_channels:
-                if channel not in self.pac_selected_channels:
-                    self.pac_available_list.addItem(channel)
-        
-        # Add selected channels
+
+        selected = set(self.pac_selected_channels)
+        self._fill_available(
+            self.pac_available_list,
+            [ch for ch in self._pac_listed_channels(summary)
+             if ch not in selected], summary)
         for channel in self.pac_selected_channels:
-            self.pac_selected_list.addItem(channel)
+            self.pac_selected_list.addItem(self._selected_item(channel, summary))
 
 
     
@@ -4542,6 +4643,7 @@ class TurtleWaveGUI(QMainWindow):
             QMessageBox.critical(self, "Error", "No channels selected. Please select at least one channel.")
             return
         selected_channels = self.pac_selected_channels
+        self._log_non_eeg_selection(selected_channels)
 
         # Get time window
         time_window = self.time_window_spin.value()
@@ -4599,22 +4701,20 @@ class TurtleWaveGUI(QMainWindow):
         self.pac_thread.start()
 
     def map_regions_to_channels(self, regions):
-        """Map brain regions to actual channel names"""
-        # This is a placeholder implementation
-        # In a real implementation, you would have a mapping of regions to channels
-        # based on the EEG montage
-        
-        # For now, use a simple prefix-based mapping
+        """Map region names ("Frontal", "Temporal", ...) to database channels
+        by their 10-20 / 10-5 labels (``utils.region_from_label``)."""
+        from turtlewave_hdEEG.utils import region_from_label
+
         if not hasattr(self, 'database_channels'):
             return []
-        
+
         mapped_channels = []
         for region in regions:
-            prefix = region[0]  # Use first letter as prefix (F for Frontal, etc.)
+            wanted = str(region).lower()
             for channel in self.database_channels:
-                if channel.startswith(prefix):
+                if region_from_label(channel) == wanted:
                     mapped_channels.append(channel)
-        
+
         return mapped_channels
 
     def run_pac_analysis(self):
@@ -5108,6 +5208,7 @@ class TurtleWaveGUI(QMainWindow):
         if not self.selected_channels:
             QMessageBox.critical(self, "Error", "No channels selected. Please select at least one channel.")
             return
+        self._log_non_eeg_selection(self.selected_channels)
 
         
         # Get selected sleep stages

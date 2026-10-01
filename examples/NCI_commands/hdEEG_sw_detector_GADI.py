@@ -13,7 +13,7 @@ import logging
 from turtlewave_hdEEG.utils import (read_channels_from_csv,
                                    resolve_reject_types,
                                    KNOWN_REJECT_TYPES)
-from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
 from turtlewave_hdEEG import (ParalSWA, CustomAnnotations, fmt_freq_token,
                               join_stage_token)
 from turtlewave_hdEEG.dbwrite import verify_channel_coverage
@@ -183,7 +183,7 @@ def main():
 
     # Load dataset and annotations
     logger.info("Loading dataset and annotations...")
-    data = WonambiDataset(data_file)
+    data = open_dataset(data_file)
     annot = CustomAnnotations(annot_file)
 
     event_processor = ParalSWA(dataset=data, annotations=annot)

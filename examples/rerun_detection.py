@@ -61,7 +61,7 @@ import logging
 import os
 import sys
 
-from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
 
 from turtlewave_hdEEG import (CustomAnnotations, ParalEvents, ParalSWA, ParalKC,
                               dbwrite)
@@ -160,7 +160,7 @@ def main(argv=None):
 
     # 1. Load sidecar annotation + EEG.
     annot = CustomAnnotations(args.annot)
-    data = WonambiDataset(args.eeg)
+    data = open_dataset(args.eeg)
     try:
         s_freq = data.header['s_freq']
     except Exception:

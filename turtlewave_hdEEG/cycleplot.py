@@ -57,7 +57,7 @@ _CODE_TO_LABEL = {0: 'Wake', 4: 'REM', 1: 'N1', 2: 'N2', 3: 'N3'}
 
 def plot_hypnogram_cycles(hypnogram, cycles_by_method, out_path,
                           epoch_length=30, epoch_starts=None,
-                          subject=None, stage_colors=None):
+                          subject=None, stage_colors=None, epoch_ends=None):
     """Render a hypnogram with per-method sleep-cycle bars and save it to PNG.
 
     The hypnogram is drawn as a coloured staircase with rows ordered
@@ -93,6 +93,11 @@ def plot_hypnogram_cycles(hypnogram, cycles_by_method, out_path,
     stage_colors : dict, optional
         Override for the stage-colour palette (keys ``Wake``, ``N1``, ``N2``,
         ``N3``, ``REM``). Defaults to the module-level ``_STAGE_COLORS``.
+    epoch_ends : sequence of float, optional
+        End time in seconds of each epoch, same length as ``hypnogram``. Give
+        it for variable-length epochs (a cut recording's exact epochs); if
+        omitted, epoch ``i`` ends where epoch ``i + 1`` starts and the last
+        ends ``epoch_length`` after its start.
 
     Returns
     -------
@@ -120,7 +125,15 @@ def plot_hypnogram_cycles(hypnogram, cycles_by_method, out_path,
     else:
         starts = np.arange(n, dtype=float) * epoch_length
 
+    ends = None
+    if epoch_ends is not None:
+        ends = np.asarray(list(epoch_ends), dtype=float)
+        if ends.size != n:
+            raise ValueError("epoch_ends must match hypnogram length")
+
     def end_sec(i):
+        if ends is not None:
+            return float(ends[i])
         if i + 1 < n:
             return float(starts[i + 1])
         return float(starts[i] + epoch_length)
@@ -219,12 +232,14 @@ def plot_hypnogram_cycles(hypnogram, cycles_by_method, out_path,
 
 
 def plot_from_annotations(annotations, cycles_by_method, out_path,
-                          epoch_length=30, subject=None):
+                          epoch_length=30, subject=None, hypnogram=None,
+                          epoch_starts=None):
     """Read the hypnogram off an annotation object and plot the cycles.
 
     Convenience wrapper around :func:`plot_hypnogram_cycles` that pulls the
-    hypnogram and per-epoch start times from a ``CustomAnnotations`` /
-    ``XLAnnotations`` object.
+    hypnogram and per-epoch start and end times from a ``CustomAnnotations``
+    object (``get_hypnogram_intervals()`` when it has it, else
+    ``get_hypnogram()`` and ``epochs``).
 
     Parameters
     ----------
@@ -241,14 +256,35 @@ def plot_from_annotations(annotations, cycles_by_method, out_path,
         no epoch grid.
     subject : str, optional
         Subject label for the figure title.
+    hypnogram : sequence of int, optional
+        Numeric hypnogram to plot instead of the annotation's own, for
+        example the full-night hypnogram of a cut recording. When given, the
+        annotation's epoch times are not used: epochs start at
+        ``epoch_starts`` or ``i * epoch_length``.
+    epoch_starts : sequence of float, optional
+        Start time of each epoch of ``hypnogram``. Only used with
+        ``hypnogram``.
 
     Returns
     -------
     str
         ``out_path`` (the file that was written).
     """
-    hypnogram = annotations.get_hypnogram()
+    if hypnogram is not None:
+        return plot_hypnogram_cycles(
+            hypnogram, cycles_by_method, out_path, epoch_length=epoch_length,
+            epoch_starts=epoch_starts, subject=subject)
 
+    if hasattr(annotations, 'get_hypnogram_intervals'):
+        ivals = annotations.get_hypnogram_intervals()
+        return plot_hypnogram_cycles(
+            [c for _, _, c in ivals], cycles_by_method, out_path,
+            epoch_length=epoch_length,
+            epoch_starts=[s for s, _, _ in ivals] if ivals else None,
+            epoch_ends=[e for _, e, _ in ivals] if ivals else None,
+            subject=subject)
+
+    hypnogram = annotations.get_hypnogram()
     epoch_starts = None
     try:
         epochs = annotations.epochs

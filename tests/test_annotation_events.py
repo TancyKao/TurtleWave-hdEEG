@@ -20,6 +20,10 @@ to disk and read back:
 * **Files holding only Resp/Move/Snore events were never written.** The save
   gate summed Artefact + Arousal only, so those annotations were added to the
   in-memory tree and dropped on exit.
+* **Compumedics respiratory names.** ``centralapnea``, ``mixedapnea``,
+  ``obstructive apnea`` (with a space) and the exact string ``rera`` are
+  respiratory. ``arousal5rera`` is an Arousal only, because ``rera`` is matched
+  exactly. ``spo2artifact``, ``slpcycle1`` and ``slpepsws`` match no rule.
 
 Run standalone: ``python tests/test_annotation_events.py``. Any failure raises
 and the process exits non-zero.
@@ -284,6 +288,64 @@ def test_resp_only_file_is_saved():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_compumedics_respiratory_names():
+    """Compumedics scorer event names: which are Resp, which are not."""
+    print("\n5. Compumedics respiratory names:")
+
+    resp_names = ['centralapnea', 'mixedapnea', 'obstructive apnea', 'obstructiveapnea',
+                  'rera', 'RERA', ' rera ', 'spo2desat', 'Hypopnea',
+                  # separators are ignored for the respiratory rule
+                  'spo2 desat', 'SpO2_Desat', 'central apnea', 'mixed_apnea']
+    arousal_only = ['arousal5rera', 'arousal 4 rera', 'arousal_5_rera']
+    ignored = ['spo2artifact', 'spo2 artifact', 'slpcycle1', 'slpcycle12', 'slpepsws',
+               'slpepnrem', 'rerax', 'prera', 'rera2',
+               # left unmapped pending a research decision
+               'unsure respiratory event']
+    names = resp_names + arousal_only + ignored
+
+    tmp = tempfile.mkdtemp(prefix='tw_annot_ev_compu_')
+    try:
+        onset = {name: 5.0 + 10.0 * i for i, name in enumerate(names)}
+        length = 10.0 * len(names) + 20.0
+        dataset = _dataset(tmp, duration=length, events={
+            'onsets': [onset[n] * S_FREQ for n in names],
+            'types': names,
+            'durations': [int(4.0 * S_FREQ)] * len(names),
+        })
+        annot_file = os.path.join(tmp, 'compu.xml')
+        xl = XLAnnotations(dataset, annot_file, rater_name='tester')
+        count, _ = xl.add_artefacts_from_events()
+
+        resp = [s for s, _ in _written_events(annot_file, 'Resp')]
+        want = sorted(onset[n] for n in resp_names)
+        assert resp == want, (
+            f"Resp events at {resp}, expected {want}; missing "
+            f"{[n for n in resp_names if onset[n] not in resp]}, unexpected "
+            f"{[n for n in names if onset[n] in resp and n not in resp_names]}")
+        print(f"   [ok] Resp: {resp_names}")
+
+        arousal = [s for s, _ in _written_events(annot_file, 'Arousal')]
+        assert arousal == sorted(onset[n] for n in arousal_only), (
+            f"{arousal_only} must be Arousals, got {arousal}")
+        for n in arousal_only:
+            assert onset[n] not in resp, (
+                f"{n} was also tagged Resp: 'rera' must be an exact match")
+        print(f"   [ok] {arousal_only} -> Arousal only, not Resp")
+
+        for label in ('Artefact', 'Move', 'Snore'):
+            written = _written_events(annot_file, label)
+            assert not written, f"{label} received {written}"
+        seen = set(resp) | set(arousal)
+        for name in ignored:
+            assert onset[name] not in seen, f"{name!r} was written to the annotations"
+        assert count == len(resp_names) + len(arousal_only), (
+            f"returned count {count}, expected {len(resp_names) + len(arousal_only)} "
+            f"(the ignored names must not be counted)")
+        print(f"   [ok] {ignored} produce nothing; returned count {count}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("TESTING XLAnnotations.add_artefacts_from_events")
     print("==============================================")
@@ -292,5 +354,6 @@ if __name__ == "__main__":
     test_boundary_windows_are_clipped_to_the_recording()
     test_integer_latencies_keep_subsecond_durations()
     test_resp_only_file_is_saved()
+    test_compumedics_respiratory_names()
 
     print("\nAll annotation event tests passed.")

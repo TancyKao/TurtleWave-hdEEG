@@ -42,7 +42,7 @@ Usage:
 import os
 import sys
 from turtlewave_hdEEG.utils import read_channels_from_csv
-from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
 from turtlewave_hdEEG import ParalEvents, CustomAnnotations, fmt_freq_token
 import logging
 import argparse as _ap
@@ -119,7 +119,7 @@ db_path = os.path.join(root_dir, "wonambi",'neural_events.db')
 
 # 2. Load dataset and annotations
 print("Loading dataset and annotations...")
-data = WonambiDataset(data_file)
+data = open_dataset(data_file)
 annot = CustomAnnotations(annot_file)
 
 # 3. Create ParalEvents instance

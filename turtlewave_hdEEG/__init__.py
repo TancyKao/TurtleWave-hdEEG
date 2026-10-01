@@ -2,10 +2,12 @@
 turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 """
 
-__version__ = '4.4.0'
+__version__ = '4.5.0'
 
 # Import important classes to expose at the package level
 from .dataset import LargeDataset
+from .eeglab_io import open_dataset, EEGLABFormatError
+from .timeline import RecordingTimeline
 from .visualization import EventViewer
 from .annotation import XLAnnotations, CustomAnnotations
 from .eventprocessor import ParalEvents
@@ -27,6 +29,7 @@ from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
                       assert_stage_format_compatible)
 from .density import event_density, format_density_table
 from .utils import (derive_subject, normalize_subject, read_channels_from_csv,
+                    region_from_label,
                     DEFAULT_REJECT_TYPES, KNOWN_REJECT_TYPES,
                     resolve_reject_types, reject_key)
 from .rerun import (RerunGuardError, verify_rater_match, channel_clean_gate,

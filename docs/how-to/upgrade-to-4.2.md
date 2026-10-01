@@ -180,6 +180,20 @@ This is most people: the outputs just get simpler.
   `examples/backfill_pac_to_db.py`/`backfill_cycles.py`/`csv_to_db_import.py`
   — but budget for their removal in 5.0.
 
+  The two example scripts take their folders on the command line, with
+  `--root` required, and ask before writing. Check first with `--dry-run`:
+
+  ```bash
+  python examples/backfill_cycles.py --root /data/study --dry-run
+  python examples/backfill_cycles.py --root /data/study
+
+  python examples/csv_to_db_import.py --root /data/study --subjects sub-01 sub-02 --dry-run
+  python examples/csv_to_db_import.py --root /data/study --subjects sub-01 sub-02
+  ```
+
+  `csv_to_db_import.py` also takes `--no-slow-waves` and `--no-spindles`.
+  Without a terminal, both scripts abort unless you pass `--yes`.
+
 ## Regenerate outputs you rely on
 
 Detection results themselves are unaffected — 4.2 does not change what gets

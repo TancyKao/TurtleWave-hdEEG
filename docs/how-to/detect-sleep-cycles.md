@@ -26,6 +26,23 @@ scored hypnogram and the events already in the database.
     annotation XML is never written by a detection run itself — see
     [What lands in the database](direct-to-database-detection.md#cycles-and-stage-durations-populate-automatically).
 
+    A detection run **never re-detects stored cycles**. Cycles you stored
+    with your own thresholds (a backfill with a shorter Wake bout, say) stay as
+    they are; only `finalize_cycles_and_durations`, or
+    `ensure_cycles_populated(..., force=True)`, recomputes them. What a
+    detection run does add is missing per-cycle coverage: if a cut
+    recording already has cycles but no `analysed_time_cycles` rows for the
+    run's stages and reject set, those rows are computed from the **stored**
+    cycles, with one INFO line saying how many were added.
+
+    A recording staged from its stage events has no full-night hypnogram, so
+    its cycles can never be computed. The first finalize records that as
+    "cycles unavailable" (a `stage_durations` row with `time_base='cut'` and no
+    `sleep_cycles` rows). Later detection runs skip the step with one INFO
+    line instead of retrying and logging the ERROR again. To get cycles,
+    re-annotate the recording so the sidecar holds a full-night hypnogram,
+    then run `finalize_cycles_and_durations`.
+
 ## When to use this
 
 **Problem:** You have detected events (spindles, slow waves, K-complexes)
@@ -43,42 +60,55 @@ always safe.
 
 ## The two cycle definitions
 
-Two NREM-REM cycle definitions are supported via `method`:
+Two NREM-REM cycle definitions are supported via `method`. Both work on
+30-s epochs by default and treat artefact/unscored epochs as wake.
 
-- **`'2022'`** (default `tag_method`) — NREM-based. A cycle is one contiguous
-  NREM period plus the inter-NREM (REM) segment that follows it. Short
-  awakenings are absorbed into NREM and too-short NREM runs are dropped.
-  Always yields cycles even when REM scoring is sparse.
-- **`'1979'`** — REM-closed. Same NREM periods and segments as `'2022'`, but
-  a cycle only closes when the segment after an NREM period contains a
-  contiguous REM run of at least `rem_min` epochs (the first cycle needs one
-  epoch). The REM run may sit anywhere in the segment; it need not be adjacent
-  to the NREM period. NREM periods that are not followed by a qualifying REM
-  run are merged forward into the next cycle, so that cycle's NREM span
-  includes the intervening wake and REM; a trailing unpaired NREM period
-  becomes the final cycle. The name is historical: this is **not** the
-  Feinberg & Floyd (1979) definition — see the comparison below.
+- **`'2022'`** (default `tag_method`) — the modified rule. An NREM period is
+  a run of NREM sleep longer than `nrem_min` epochs (15 min) within which
+  wake bouts of up to `wake_thresh` epochs (5 min) are absorbed; a longer
+  awakening ends the period. The period starts at its first N2/N3 epoch
+  (`nrem_onset='n2n3'`; pass `'any'` for the pre-4.5 any-stage onset) and
+  ends on its last NREM epoch. The REM segment of a cycle is everything from
+  the end of the NREM period to the start of the next one, whatever stages it
+  holds, with no minimum REM duration, so every NREM period yields a cycle.
+  The last segment ends at the last sleep epoch of the night; trailing wake
+  is outside every cycle. Sources: Feinberg & Floyd 1979 for the 15-min NREM
+  minimum, Hartmann 1968 / Talukder 2023 for the 5-min wake tolerance,
+  Aeschbach & Borbély 1993 for the segment-as-REM-period, Březinová 1974 and
+  Le Bon 2002 for the absent REM minimum.
+- **`'1979'`** — Feinberg & Floyd (1979, *Psychophysiology* 16:283). Sleep
+  onset is the first N2/N3 epoch. REM runs separated by fewer than `nrem_min`
+  epochs of NREM sleep (`rem_gap`, default = `nrem_min`) form one REM
+  episode. A REM episode is a REM period if it holds at least `rem_min` REM
+  epochs (5 min); the first REM period of the night needs only one REM epoch,
+  and a REM episode that appears before `nrem_min` epochs of NREM sleep have
+  accumulated is a sleep-onset REM episode, absorbed and flagged `sorem` on
+  cycle 1. Shorter later episodes are absorbed into the surrounding NREM
+  period (their minutes appear in `rem_in_nremp_min`). Wake is never a
+  boundary; it is only subtracted from `nrem_sleep_min`. NREM period *i* runs
+  from the first N2/N3 epoch after REM period *i-1* to the epoch before REM
+  period *i*, and the segment of cycle *i* runs from the first REM epoch of
+  REM period *i* to the epoch before NREM period *i+1* (the paper's NREM
+  cycle, stage-2 onset to stage-2 onset). A trailing NREM period with at
+  least `nrem_min` epochs of NREM sleep and no REM period is returned as an
+  incomplete final cycle, as the paper carries such periods forward.
 
-### How `'1979'` differs from Feinberg & Floyd
+Every cycle dict carries clock-time durations (`nrem_dur_min`, `rem_dur_min`,
+`cycle_dur_min`), sleep-only durations (`nrem_n23_dur_min`, `nrem_sleep_min`,
+`rem_sleep_min`, `rem_in_nremp_min`, `wake_in_seg_min`), a `rem_class`
+(`'full'` when the segment holds at least `rem_min` REM epochs, `'short'`
+for fewer but at least one, `'none'`), and `complete` — `False` on the final
+cycle when fewer than `completion_min` sleep epochs (`'2022'`) or NREM
+epochs (`'1979'`) follow it, Feinberg & Floyd's end-of-night rule. The
+`sleep_cycles` table stores the original columns only; the extra keys are
+available from the returned dicts.
 
-The Feinberg-style column is the rule set used by the MATLAB
-`cal_SleepCycle_Feinberg_method3.m` in the PRJ-10 sleep-cycle project
-(wake runs of up to 5 min absorbed, NREM period longer than 15 min, REM
-period of at least 5 min).
-
-| Rule | `'1979'` | Feinberg-style (PRJ-10 Trad Method 3) |
-|---|---|---|
-| Unscored / artefact epochs | recoded as Wake, absorbable | neither wake nor sleep, always break NREM |
-| REM must start right after the NREM period | not required | required |
-| REM period | whole inter-NREM segment | the contiguous REM run only |
-| Absorbed wake trimmed from NREM period edges | yes | no |
-| NREM period with no qualifying REM | merged forward into the next cycle | dropped |
-| Trailing NREM period with no REM | becomes the final cycle | dropped |
-
-Only the `rem_min` threshold and the first-cycle exemption come from Feinberg.
-`'2022'` is the same as the PRJ-10 "Mod method" apart from the unscored-epoch
-handling, and apart from an NREM period that ends on the last epoch of the
-recording, which `'2022'` keeps as a cycle with zero REM duration.
+!!! warning "Behaviour change in 4.5"
+    Before 4.5, `'2022'` started NREM periods at any NREM stage and counted
+    trailing wake in the last segment, and `'1979'` was a REM-closed variant
+    of `'2022'` that merged unpaired NREM periods forward. Cycles stored in
+    a database by an earlier release keep the old definitions until
+    `examples/backfill_cycles.py` is re-run against it.
 
 By default `finalize_cycles_and_durations` detects and stores **both**
 definitions side by side in `sleep_cycles` (keyed by `(subject, method)`), but
@@ -112,7 +142,8 @@ cycles_by_method = finalize_cycles_and_durations(
     # tag_method='2022',         # which definition owns events.cycle + XML
     # wake_thresh=10,            # max Wake epochs absorbed into NREM
     # nrem_min=30,               # min NREM epochs to count as an NREM period
-    # rem_min=10,                # min REM epochs to close a cycle (1979 only)
+    # rem_min=10,                # min REM epochs for a REM period (1979 only)
+    # nrem_onset='n2n3',         # where a '2022' NREM period starts
 )
 
 for method, cycles in cycles_by_method.items():
@@ -129,8 +160,10 @@ for method, cycles in cycles_by_method.items():
 method requested. Each cycle dict carries `cycle_number`, `method`,
 epoch/second boundaries (`nrem_start_epoch`, `nrem_end_epoch`,
 `rem_start_epoch`, `rem_end_epoch`, `nrem_start_sec`, `nrem_end_sec`,
-`rem_end_sec`), and durations `nrem_dur_min`, `nrem_n23_dur_min` (N2+N3
-minutes only), `rem_dur_min`, `cycle_dur_min`.
+`rem_end_sec`), durations `nrem_dur_min`, `nrem_n23_dur_min` (N2+N3
+minutes only), `nrem_sleep_min`, `rem_dur_min`, `rem_sleep_min`,
+`rem_in_nremp_min`, `wake_in_seg_min`, `cycle_dur_min`, plus `rem_class`,
+`complete` and `sorem`.
 
 ## Backfill an existing database (batch)
 
@@ -195,32 +228,43 @@ run. Only a failure at or before the database write counts as FAIL. The
 final tally names how many passing subjects had their plot skipped:
 
 ```bash
-python examples/backfill_cycles.py
+# 1. See which databases and XMLs would be modified, then exit
+python examples/backfill_cycles.py --root /data/study --dry-run
+
+# 2. Run it; it lists the files and asks before writing
+python examples/backfill_cycles.py --root /data/study
+
+# Only some subjects, no question asked (needed without a terminal)
+python examples/backfill_cycles.py --root /data/study --subjects sub-01 sub-02 --yes
 ```
 
-Edit its `ROOT` (and optional `SUBJECTS` allowlist) constants at the top of
-the file before running.
+`--root` is required: the folder holding one subfolder per subject, each with
+`wonambi/neural_events.db` and a `sub-*.xml`. `--subjects` lists subfolder
+names (default: every folder that has a database). `--dry-run` prints what
+would be modified and exits. Without `--yes` the script lists every database
+and XML it will write and asks `Proceed? [y/N]`; with no terminal (a batch job,
+a pipe) it aborts without writing unless you pass `--yes`.
 
-Its CONFIG block also exposes two thresholds, in minutes, plus the epoch
-length used to convert them for `detect_cycles`: `WAKE_THRESH_MIN` (minutes
+The thresholds are options too, in minutes, plus the epoch
+length used to convert them for `detect_cycles`: `--wake-thresh-min` (minutes
 of Wake absorbed into a surrounding NREM period; library default 5 min, i.e.
 `wake_thresh=10` epochs at 30 s — a Wake bout **up to and including** this
-many minutes is absorbed), `NREM_MIN_MIN` (minimum length of an NREM period
+many minutes is absorbed), `--nrem-min-min` (minimum length of an NREM period
 to count at all; library default 15 min, i.e. `nrem_min=30` epochs — an
 NREM run must be **longer than** this many minutes to survive; a run of
-exactly `NREM_MIN_MIN` is dropped), and `EPOCH_LENGTH` (the scoring's epoch
+exactly `--nrem-min-min` is dropped), and `--epoch-length` (the scoring's epoch
 length in seconds, used to convert both of the above from minutes to epochs
 before calling `finalize_cycles_and_durations`).
 
 !!! warning
-    `EPOCH_LENGTH` is a property of the sleep scoring, not a tunable
+    `--epoch-length` is a property of the sleep scoring, not a tunable
     parameter — it must match the epoch length the hypnogram was actually
     scored at (30 s for standard AASM scoring). Setting it to the wrong
     value silently rescales every minute-based threshold and duration in
     the run, with no error to flag the mismatch.
 
 !!! note
-    Re-running with different `WAKE_THRESH_MIN` / `NREM_MIN_MIN` values
+    Re-running with different `--wake-thresh-min` / `--nrem-min-min` values
     replaces the subject's existing `sleep_cycles` rows, `events.cycle`
     tags, and XML cycle markers outright — the database does not record
     which threshold produced them, so name `export_cycle_events.py` output
@@ -230,19 +274,88 @@ before calling `finalize_cycles_and_durations`).
     inside any cycle; an empty or unscored hypnogram fails loudly instead
     of writing that silently.
 
-`rem_min` (the minimum REM run, in epochs, that closes a `'1979'` cycle;
-library default 10 epochs) is not exposed by `backfill_cycles.py`'s CONFIG
-block and always runs at the library default — the script has no equivalent
-`REM_MIN_MIN` constant.
+`rem_min` (the minimum REM epochs for a `'1979'` REM period;
+library default 10 epochs) is not exposed by `backfill_cycles.py` and always runs at the library
+default — the script has no equivalent option.
 
 !!! note
     `finalize_cycles_and_durations` (and `ParalCycles.run`) are strictly
     post-detection: they annotate an existing `neural_events.db` and never
-    create one. If `db_path` doesn't exist — most often a mistyped `ROOT` in
+    create one. If `db_path` doesn't exist — most often a mistyped `--root` in
     `backfill_cycles.py` — they raise `FileNotFoundError` naming the path
     rather than silently creating an empty database that would only fail
     later, on `no such table: main.events`. Run event detection first, or
     correct the path.
+
+## Cycles on a cut recording
+
+**Problem:** The recording had data cut out before you received it (EEGLAB
+`pop_select` boundary events, as in Compumedics exports), and cycles and stage
+minutes must still describe the whole night.
+
+**Solution:** Annotate the file first so the timeline sidecar
+(`<xml stem>_timeline.json`) exists beside the XML, then call the finalize step
+with `timeline='auto'`, the default. See
+[How to analyse Compumedics and other cut EEGLAB recordings](analyse-compumedics-recordings.md)
+for the annotation step and
+[About cut recordings and time bases](../explanation/cut-recordings-and-time-bases.md)
+for the reasoning.
+
+```python
+cycles_by_method = finalize_cycles_and_durations(
+    annot,
+    db_path,
+    subject=subject,
+    timeline="auto",          # "auto" (default), "none" or a RecordingTimeline
+    coverage_floor_min=5.0,   # per-cycle, per-stage analysed-time floor, minutes
+)
+```
+
+`timeline` takes three kinds of value.
+
+- `'auto'` loads the sidecar if there is one. With a valid sidecar, cycles and
+  stage durations are computed on the full-night hypnogram at 30 s, and the
+  cycle boundaries are converted to the cut file's time. With no sidecar, it
+  behaves as in earlier releases, provided the XML has uniform 30 s epochs.
+- `'none'` ignores any sidecar. It raises `ValueError` if the XML has
+  variable-length epochs.
+- A `RecordingTimeline` object is used as given.
+
+On a cut file the converted values are not the full-night values. In
+`sleep_cycles`, `nrem_start_sec`, `nrem_end_sec` and `rem_end_sec` hold cut
+time, snapped to an epoch edge, and the originals are kept in
+`nrem_start_orig`, `nrem_end_orig` and `rem_end_orig`. The `time_base` column
+says which: `'cut'` for a converted row. The `*_min` durations stay full-night.
+Consequently `cycle_dur_min` is the full-night span of the cycle and does not
+equal the difference of the second columns on a cut file. Tables written by
+earlier releases gain the new columns on the next write, with NULL in the old
+rows. `stage_durations` gains `time_base` the same way.
+
+The `analysed_time_cycles` table reports how much of each cycle a detector
+could actually use, per `(subject, method, cycle_number, stage, reject_types)`:
+`fullnight_seconds`, `removed_seconds` (lost to the cut), `masked_seconds`
+(lost to artefact rejection), `analysed_seconds`, `coverage`
+(`analysed_seconds / fullnight_seconds`) and `low_coverage`, set when
+`analysed_seconds` is under `coverage_floor_min` (5 minutes by default,
+stored in `coverage_floor_seconds`). Filter on `low_coverage` before you pool
+cycle-level results. Rows are per single stage (`NREM1`, `NREM2`, `NREM3`,
+`REM` by default; `stages=` changes this) and exist only when the sidecar holds
+a full-night hypnogram. `coverage` is capped at 1 and is NULL when the
+cycle has no full-night time in the stage. Read the table with
+`turtlewave_hdEEG.density.read_cycle_analysed_time(db_path, subject=None)`,
+which returns a DataFrame with `low_coverage` as bool.
+
+### Sidecar failure modes
+
+| Situation | Result |
+|---|---|
+| No sidecar, uniform 30 s epochs | Works as in earlier releases (`timeline='auto'`). |
+| No sidecar, variable-length epochs | `ValueError`. Re-run the annotation step; the finalize step never guesses. |
+| Sidecar present but its `annotation_file`, schema, `cut_epochs` or `last_second` disagree with the XML | `SidecarMismatchError` listing the first three differing epochs. Re-run the annotation step to rewrite the XML and sidecar together. |
+| Sidecar from before 4.5.0 (schema 1) | `SidecarMismatchError`; re-annotate. |
+| `timeline='none'` on a cut file | The sidecar is ignored, so a variable-length XML raises `ValueError` as in the second row. Use it only for uniform-epoch files. |
+| Sidecar from a file staged from its stage events (`fullnight_stages` is empty) | No cycles. One `ERROR` is logged; `sleep_cycles`, `events.cycle` and `analysed_time_cycles` are cleared for the subject. `stage_durations` is written from the cut file's epoch durations with `time_base='cut'`, and its `epoch_length` is the median epoch duration, not 30. |
+| An unknown `timeline` value | `ValueError`. |
 
 ## What lands in the database
 
@@ -262,7 +375,9 @@ block and always runs at the library default — the script has no equivalent
 - **`stage_durations`** — one row per subject: minutes in Wake / N1 / N2 / N3
   / REM / artefact, reconciled to the full hypnogram span. Written even when
   no cycles are detected (an all-Wake or unscorable night still has stage
-  durations).
+  durations). `time_base` is `'original'` normally and `'cut'`
+  for a file staged from its stage events; there `epoch_length` is the median
+  epoch duration.
 - **`events.cycle`** — every event in the `events` table gets tagged with its
   cycle number under `tag_method` (`'2022'` by default). Because tagging
   rewrites event rows by time window regardless of method ("last run wins"),
@@ -298,7 +413,7 @@ plot_from_annotations(annot, cycles_by_method, out_png, subject=subject)
 ```
 
 `examples/backfill_cycles.py` produces the same plot for every subject it
-processes; `PLOT = True` in its CONFIG block is the default, and `PLOT = False`
+processes; drawing the plot is the default, and `--no-plot`
 turns it off. It passes its own `plot_path`, named for the wake and NREM
 thresholds rather than for the methods, so each threshold pair keeps its own
 PNG.
@@ -308,7 +423,7 @@ PNG.
 `finalize_cycles_and_durations` is a convenience wrapper around two lower
 level pieces, useful if you need finer control:
 
-- `detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30, method='2022', rem_min=10, epoch_starts=None)`
+- `detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30, method='2022', rem_min=10, epoch_starts=None, nrem_onset='n2n3', rem_gap=None, completion_min=10)`
   — the pure hypnogram-in, cycle-list-out detector. No dataset, annotations,
   or database required; works on any numeric per-epoch stage sequence
   (Wake=0, NREM1/2/3=1/2/3, REM=4, artefact/undefined=-1).
@@ -328,10 +443,12 @@ If `cycles_by_method[method]` comes back empty:
 - **Check `nrem_min`**: NREM runs shorter than `nrem_min` epochs (default 30,
   i.e. 15 minutes at 30 s epochs) are dropped as too short to count as an
   NREM period.
-- **Under `'1979'`**: an empty result here always coincides with an empty
-  `'2022'` result, because a trailing NREM period with no qualifying REM still
-  becomes the final cycle. `'1979'` can only return *fewer* cycles than
-  `'2022'` (by merging), never zero when `'2022'` found some.
+- **Under `'1979'`**: a night can have `'2022'` cycles and no `'1979'`
+  cycles when no NREM period reaches `nrem_min` epochs of NREM *sleep*
+  (wake subtracted) before the end of the night, or when the only REM
+  episodes are sleep-onset REM. Conversely a fragmented night can have
+  `'1979'` cycles and no `'2022'` cycles, because wake never ends a
+  Feinberg & Floyd NREM period.
 
 ### `ValueError: tag_method` is not one of `methods`
 
@@ -355,12 +472,12 @@ backfill annotates an existing neural_events.db and never creates one -- run
 event detection first, or correct the path.
 ```
 
-The realistic trigger is a mistyped `ROOT` in `backfill_cycles.py` (or a
+The realistic trigger is a mistyped `--root` in `backfill_cycles.py` (or a
 subject folder that hasn't had spindle/slow-wave/K-complex detection run
 yet). Before this check existed, a bad path was silently created as an
 empty database and the run died later on `no such table: main.events`,
 leaving a stray file behind — on a network share, in whatever journal mode
-the creating call chose. Fix `ROOT`/`db_path` so it points at a
+the creating call chose. Fix `--root`/`db_path` so it points at a
 `neural_events.db` that event detection has already populated, or run
 detection first.
 

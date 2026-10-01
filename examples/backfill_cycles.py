@@ -53,7 +53,7 @@ and the resulting epoch counts are printed in the run header.
 A fourth CONFIG line, ``PLOT``, is not a threshold. It is True by default: each
 subject also gets ``{subject}_hypnogram_cycles_wake{WAKE_THRESH_MIN}_nrem{NREM_MIN_MIN}min.png``
 beside its database (cycle bands over the hypnogram, one row per method), and
-the path is printed. Set ``PLOT = False`` to turn plotting off. It needs
+the path is printed. Pass ``--no-plot`` (or set ``PLOT = False``) to turn plotting off. It needs
 matplotlib and renders headless. Both thresholds are in the filename, so
 re-running with a different ``WAKE_THRESH_MIN`` or ``NREM_MIN_MIN`` leaves the
 earlier PNG in place next to the new one rather than overwriting it.
@@ -91,7 +91,7 @@ processed. Nothing else in the file is touched.
 
 Layout assumed
 --------------
-A ``ROOT`` directory with one folder per subject; each subject folder has a
+A root directory (``--root``) with one folder per subject; each subject folder has a
 ``wonambi/`` subdirectory holding ``neural_events.db`` and the Wonambi
 annotation XML (``sub-*.xml``)::
 
@@ -106,11 +106,18 @@ annotation XML (``sub-*.xml``)::
 
 Usage
 -----
-Edit the CONFIG block below -- set ``ROOT``, optionally list ``SUBJECTS``, and
-set the cycle thresholds ``EPOCH_LENGTH`` / ``WAKE_THRESH_MIN`` /
-``NREM_MIN_MIN`` -- then::
+The root folder is a required argument; there is no built-in default, so
+running the script (or ``--help``) never touches a database by accident::
 
-    python examples/backfill_cycles.py
+    python examples/backfill_cycles.py --root /path/to/Emotion --dry-run
+    python examples/backfill_cycles.py --root /path/to/Emotion --subjects 10sd 11xy
+
+``--dry-run`` lists the databases and annotation XMLs that would be modified
+and exits. Without it the same list is printed and the script asks for
+confirmation (``--yes`` skips the question; without a terminal and without
+``--yes`` it stops). The CONFIG block below holds the defaults for the cycle
+thresholds; ``--epoch-length``, ``--wake-thresh-min``, ``--nrem-min-min`` and
+``--no-plot`` override them.
 
 The script prints one PASS/FAIL line per subject and a final tally. One subject
 failing never aborts the whole run. A subject whose database write succeeded but
@@ -119,8 +126,10 @@ database written, plot skipped`` line carrying the plot error -- the derived
 tables are the deliverable, the plot is a convenience.
 """
 
+import argparse
 import glob
 import os
+import sys
 import traceback
 
 from turtlewave_hdEEG import CustomAnnotations, finalize_cycles_and_durations
@@ -130,12 +139,8 @@ from turtlewave_hdEEG.utils import derive_subject as _derive_subject
 # CONFIG  --  edit the paths and the cycle thresholds below
 # ===========================================================================
 
-# Root directory containing one folder per subject (each with a wonambi/ subdir).
-ROOT = "/Users/tancykao/Library/CloudStorage/Dropbox/05_Woolcock_DS/AnalyzeTools/turtleRef/Emotion"
-
-# Optional explicit subject list (folder names under ROOT). Leave empty to
-# auto-discover every subject folder that contains wonambi/neural_events.db.
-SUBJECTS = []  # e.g. ["10sd", "11xy"]
+# The root folder and the subject list are command-line arguments (--root,
+# --subjects); there is deliberately no default root.
 
 # Epoch length of the hypnogram, seconds. A property of the recording's scoring,
 # not a tunable -- match the annotation XML. A wrong value leaves the cycle
@@ -286,7 +291,8 @@ def observed_epoch_length(annot):
         return None
 
 
-def plot_cycles(annot, cycles_by_method, plot_path, subject):
+def plot_cycles(annot, cycles_by_method, plot_path, subject,
+                epoch_length=EPOCH_LENGTH):
     """Draw the hypnogram/cycle PNG, returning the error instead of raising.
 
     Kept out of :func:`turtlewave_hdEEG.finalize_cycles_and_durations` (which
@@ -309,6 +315,8 @@ def plot_cycles(annot, cycles_by_method, plot_path, subject):
         Destination PNG path.
     subject : str
         Subject label for the figure title.
+    epoch_length : float, optional
+        Epoch length in seconds. Default :data:`EPOCH_LENGTH`.
 
     Returns
     -------
@@ -321,14 +329,80 @@ def plot_cycles(annot, cycles_by_method, plot_path, subject):
         # as a warning, rather than at module import.
         from turtlewave_hdEEG.cycleplot import plot_from_annotations
         plot_from_annotations(annot, cycles_by_method, plot_path,
-                              epoch_length=EPOCH_LENGTH, subject=subject)
+                              epoch_length=epoch_length, subject=subject)
         return None
     except Exception as exc:  # noqa: BLE001 - a plot must not fail a backfill
         return exc
 
 
-def main():
-    """Backfill every subject under ``ROOT``, one PASS/FAIL line each.
+def parse_args(argv=None):
+    """Command-line arguments.
+
+    Parameters
+    ----------
+    argv : list of str or None
+        Arguments; ``None`` reads ``sys.argv``.
+
+    Returns
+    -------
+    argparse.Namespace
+    """
+    ap = argparse.ArgumentParser(
+        description="Backfill sleep cycles and stage durations into existing "
+                    "neural_events.db files (rewrites sleep_cycles, "
+                    "stage_durations, events.cycle and the XML cycle markers).")
+    ap.add_argument('--root', required=True,
+                    help="folder with one subfolder per subject, each holding "
+                         "wonambi/neural_events.db and a sub-*.xml")
+    ap.add_argument('--subjects', nargs='*', default=None,
+                    help="subject folder names under --root (default: every "
+                         "folder with wonambi/neural_events.db)")
+    ap.add_argument('--epoch-length', type=float, default=EPOCH_LENGTH)
+    ap.add_argument('--wake-thresh-min', type=float, default=WAKE_THRESH_MIN)
+    ap.add_argument('--nrem-min-min', type=float, default=NREM_MIN_MIN)
+    ap.add_argument('--no-plot', action='store_true', help="skip the PNGs")
+    ap.add_argument('--dry-run', action='store_true',
+                    help="list what would be modified and exit")
+    ap.add_argument('--yes', action='store_true',
+                    help="do not ask for confirmation")
+    return ap.parse_args(argv)
+
+
+def confirm(targets, assume_yes=False):
+    """Print the files that will be modified and ask before writing.
+
+    Parameters
+    ----------
+    targets : list of (str, str, str)
+        ``(folder, db_path, xml_path)`` per subject.
+    assume_yes : bool
+        Skip the question.
+
+    Returns
+    -------
+    bool
+        True to proceed.
+    """
+    print("These databases and annotation XMLs will be modified "
+          "(sleep_cycles, stage_durations, events.cycle, XML cycle markers):")
+    for folder, db_path, xml_path in targets:
+        print(f"  [{folder}] {db_path}")
+        print(f"  {' ' * (len(folder) + 2)} {xml_path}")
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print("No terminal to confirm on; pass --yes to proceed.")
+        return False
+    return input("Proceed? [y/N] ").strip().lower() in ('y', 'yes')
+
+
+def main(argv=None):
+    """Backfill every subject under ``--root``, one PASS/FAIL line each.
+
+    Parameters
+    ----------
+    argv : list of str or None
+        Command-line arguments (see :func:`parse_args`).
 
     Two behaviours worth knowing, both deliberate:
 
@@ -342,32 +416,55 @@ def main():
       or during the database write counts as FAIL. The final tally names how
       many passing subjects had their plot skipped.
     """
-    if not os.path.isdir(ROOT):
-        print(f"ERROR: ROOT does not exist: {ROOT}")
+    args = parse_args(argv)
+    root = args.root
+    epoch_length = args.epoch_length
+    if not os.path.isdir(root):
+        print(f"ERROR: --root does not exist: {root}")
         return
 
-    subjects = SUBJECTS if SUBJECTS else discover_subjects(ROOT)
+    subjects = args.subjects if args.subjects else discover_subjects(root)
     if not subjects:
-        print(f"No subjects with wonambi/neural_events.db found under {ROOT}")
+        print(f"No subjects with wonambi/neural_events.db found under {root}")
         return
+
+    targets = []
+    for folder in subjects:
+        try:
+            db_path, xml_path = resolve_paths(os.path.join(root, folder))
+            targets.append((folder, db_path, xml_path))
+        except FileNotFoundError as exc:
+            print(f"[{folder}] skipped: {exc}")
+    if not targets:
+        return
+    if args.dry_run:
+        confirm(targets, assume_yes=True)
+        print("Dry run: nothing was modified.")
+        return
+    if not confirm(targets, assume_yes=args.yes):
+        print("Aborted: nothing was modified.")
+        return
+    subjects = [t[0] for t in targets]
 
     # Thresholds are configured in minutes for readability; the library takes
     # epoch counts.
-    wake_thresh_ep = int(round(WAKE_THRESH_MIN * 60 / EPOCH_LENGTH))
-    nrem_min_ep = int(round(NREM_MIN_MIN * 60 / EPOCH_LENGTH))
+    wake_min, nrem_min_min = args.wake_thresh_min, args.nrem_min_min
+    plot = PLOT and not args.no_plot
+    wake_thresh_ep = int(round(wake_min * 60 / epoch_length))
+    nrem_min_ep = int(round(nrem_min_min * 60 / epoch_length))
 
     print(f"Backfilling cycles + stage durations for {len(subjects)} "
-          f"subject(s) under:\n  {ROOT}")
-    print(f"  epoch length    : {EPOCH_LENGTH} s")
-    print(f"  wake threshold  : {WAKE_THRESH_MIN} min ({wake_thresh_ep} epochs)")
-    print(f"  min NREM period : {NREM_MIN_MIN} min ({nrem_min_ep} epochs)")
+          f"subject(s) under:\n  {root}")
+    print(f"  epoch length    : {epoch_length} s")
+    print(f"  wake threshold  : {wake_min} min ({wake_thresh_ep} epochs)")
+    print(f"  min NREM period : {nrem_min_min} min ({nrem_min_ep} epochs)")
     print("  (re-run replaces any cycles already stored for these subjects)\n")
 
     n_pass = 0
     n_fail = 0
     n_plot_skipped = 0
     for folder in subjects:
-        subj_dir = os.path.join(ROOT, folder)
+        subj_dir = os.path.join(root, folder)
         try:
             db_path, xml_path = resolve_paths(subj_dir)
             subject = derive_subject(subj_dir, xml_path)
@@ -383,10 +480,10 @@ def main():
             # against the annotation's own grid and skip rather than write
             # wrong durations.
             observed = observed_epoch_length(annot)
-            if observed is not None and abs(observed - EPOCH_LENGTH) > 1e-6:
+            if observed is not None and abs(observed - epoch_length) > 1e-6:
                 print(f"    WARN: annotation epoch grid is {observed:g} s but "
-                      f"EPOCH_LENGTH is {EPOCH_LENGTH:g} s; skipping this "
-                      f"subject. Set EPOCH_LENGTH to {observed:g} and re-run.")
+                      f"--epoch-length is {epoch_length:g} s; skipping this "
+                      f"subject. Pass --epoch-length {observed:g} and re-run.")
                 n_fail += 1
                 continue
 
@@ -397,8 +494,8 @@ def main():
             # than on top of it.
             plot_path = os.path.join(
                 os.path.dirname(db_path),
-                f"{subject}_hypnogram_cycles_wake{WAKE_THRESH_MIN:g}"
-                f"_nrem{NREM_MIN_MIN:g}min.png")
+                f"{subject}_hypnogram_cycles_wake{wake_min:g}"
+                f"_nrem{nrem_min_min:g}min.png")
 
             # plot=False: the PNG is drawn below, outside this call, so that a
             # plotting failure cannot make an already-written database read as
@@ -408,23 +505,23 @@ def main():
             # even for a subject with zero cycles; see the module docstring.
             cycles_by_method = finalize_cycles_and_durations(
                 annot, db_path, subject=subject,
-                epoch_length=EPOCH_LENGTH,
+                epoch_length=epoch_length,
                 wake_thresh=wake_thresh_ep,
                 nrem_min=nrem_min_ep,
                 plot=False)
 
             # --- database and XML are written from this point on ---
             plot_error = None
-            if PLOT:
+            if plot:
                 plot_error = plot_cycles(annot, cycles_by_method, plot_path,
-                                         subject)
+                                         subject, epoch_length=epoch_length)
 
             summary = ", ".join(
                 f"{m}={len(c)} cyc" for m, c in cycles_by_method.items())
             print(f"    PASS: {summary}")
-            if PLOT and plot_error is None:
+            if plot and plot_error is None:
                 print(f"    plot: {plot_path}")
-            elif PLOT:
+            elif plot:
                 # A PASS with a warning: the derived tables are the
                 # deliverable and they are in the database; only the PNG is
                 # missing, and re-running the script redraws it.

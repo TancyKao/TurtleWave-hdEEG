@@ -23,7 +23,7 @@ import sys
 import logging
 import argparse
 import sqlite3
-from wonambi.dataset import Dataset as WonambiDataset
+from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
 #from wonambi.attr import Annotations
 from turtlewave_hdEEG.utils import read_channels_from_csv
 from turtlewave_hdEEG import ParalPAC, CustomAnnotations, derive_subject
@@ -480,7 +480,7 @@ def main():
     
     # Load dataset and annotations
     print("Loading dataset and annotations...")
-    data = WonambiDataset(data_file)
+    data = open_dataset(data_file)
     
     if os.path.exists(annot_file):
         annot = CustomAnnotations(annot_file)

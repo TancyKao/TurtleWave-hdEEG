@@ -8,7 +8,8 @@ from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSpindle as DetectSpindle
 from turtlewave_hdEEG import dbwrite
-from turtlewave_hdEEG.utils import derive_subject, resolve_reject_types
+from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
+                                    warn_interpolated_channels)
 import json
 import datetime
 import logging
@@ -62,11 +63,17 @@ def _build_epoch_lookup(annotations, logger, required):
         If ``required`` and the scoring cannot be read or contains no epochs.
     """
     try:
-        epochs = sorted(
-            ((float(e['start']), float(e['end']), str(e['stage']))
-             for e in annotations.get_epochs()),
-            key=lambda x: x[0]
-        ) if annotations is not None else []
+        if annotations is None:
+            epochs = []
+        elif hasattr(annotations, 'get_stage_intervals'):
+            # The canonical hypnogram: one (start, end, stage) per epoch,
+            # variable-length on a cut recording's exact epochs.
+            epochs = list(annotations.get_stage_intervals())
+        else:
+            epochs = sorted(
+                ((float(e['start']), float(e['end']), str(e['stage']))
+                 for e in annotations.get_epochs()),
+                key=lambda x: x[0])
     except Exception as e:
         if required:
             raise ValueError(
@@ -647,7 +654,13 @@ class ParalEvents:
         # Make sure chan is a list
         if isinstance(chan, str):
             chan = [chan]
-        
+
+        # Channels whose signal the cleaning pipeline reconstructed from
+        # neighbours: flagged once per run and recorded in provenance, never
+        # dropped.
+        interp_selected = warn_interpolated_channels(
+            self.dataset, chan, self.logger)
+
         # Make sure stage is a list
         if isinstance(stage, str):
             stage = [stage]
@@ -791,6 +804,7 @@ class ParalEvents:
                     'reject_artifacts': 'Artefact' in reject_types,
                     'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': db_n_fft_sec,
+                    'interpolated_channels': list(interp_selected),
                 }
                 if run_params:
                     params_dict.update(run_params)
@@ -826,7 +840,8 @@ class ParalEvents:
                     dbwrite.method_citation(method_db),
                     json.dumps(params_dict, default=str),
                     ref_chan, polar, stage, reject_types=list(reject_types),
-                    subject=db_subject)
+                    subject=db_subject,
+                    interpolated_channels=interp_selected)
 
                 # Density denominator: the artefact-free in-stage time this run
                 # actually analysed. Stored now so density can be derived from
@@ -842,7 +857,8 @@ class ParalEvents:
                 # loop, scoped to this run.
                 dbwrite.ensure_cycles_populated(
                     db_conn, self.annotations, db_subject, db_path=db_path,
-                    logger=self.logger)
+                    logger=self.logger, stages=stage,
+                    reject_types=list(reject_types))
 
                 if resume:
                     db_skip = dbwrite.resume_skip_channels(

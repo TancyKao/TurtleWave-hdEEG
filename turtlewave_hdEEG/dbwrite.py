@@ -1469,7 +1469,7 @@ def ensure_analysed_time_schema(conn, logger=None):
 
         analysed_seconds REAL NOT NULL,   -- artefact-free in-stage seconds
         artefact_seconds_excluded REAL,   -- in-stage seconds removed
-        epoch_length REAL,                -- nominal scoring epoch (s)
+        epoch_length REAL,                -- 30, or median epoch on a cut file
         source TEXT,                      -- 'detection' | 'backfill' | ...
         annotation_file TEXT,
         turtlewave_version TEXT,
@@ -1566,6 +1566,31 @@ def ensure_analysed_time_schema(conn, logger=None):
 
     conn.execute('CREATE INDEX IF NOT EXISTS idx_analysed_time_subject '
                  'ON analysed_time(subject)')
+
+    # Per-cycle coverage on cut recordings (4.5). Separate from analysed_time
+    # so the whole-night denominator and v_event_density are untouched.
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS analysed_time_cycles (
+        subject TEXT NOT NULL,
+        method TEXT NOT NULL,             -- cycle definition, '2022' | '1979'
+        cycle_number INTEGER NOT NULL,
+        stage TEXT NOT NULL,              -- single scored stage, e.g. 'NREM2'
+        reject_types TEXT NOT NULL,       -- sorted key, as in analysed_time
+
+        fullnight_seconds REAL,           -- 30 s x full-night epochs of stage
+        removed_seconds REAL,             -- of those, cut out of the file
+        masked_seconds REAL,              -- in the file but Poor or rejected
+        analysed_seconds REAL,            -- artefact-free, fed to detectors
+        coverage REAL,                    -- analysed / fullnight; NULL if 0
+        low_coverage INTEGER,             -- analysed < coverage floor
+        coverage_floor_seconds REAL,
+
+        annotation_file TEXT,
+        turtlewave_version TEXT,
+        processing_timestamp TEXT,
+
+        PRIMARY KEY (subject, method, cycle_number, stage, reject_types)
+    )''')
     conn.commit()
 
 
@@ -1679,7 +1704,11 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
     reject_artifacts, reject_arousals : bool or None, optional
         Deprecated shims for ``reject_types``. Default ``None``.
     epoch_length : float, optional
-        Nominal scoring epoch length in seconds. Default ``30``.
+        Nominal scoring epoch length in seconds, stored as given for a
+        uniform grid. Default ``30``. When ``annotations`` has variable-length
+        epochs (a cut recording's exact epochs) the median epoch duration is
+        stored instead (:func:`turtlewave_hdEEG.timeline.nominal_epoch_length`);
+        it describes the file and is never a multiplier for epoch counts.
     source : str, optional
         Provenance tag. Default ``'detection'``.
     annotation_file : str or None, optional
@@ -1721,6 +1750,8 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
         return {}
 
     from .utils import build_density_denominators, resolve_reject_types
+    from .timeline import nominal_epoch_length
+    epoch_length = nominal_epoch_length(annotations, epoch_length)
 
     # Resolve ONCE, so the set the denominator is computed with and the set it
     # is keyed under cannot differ.
@@ -1798,6 +1829,143 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
     return written
 
 
+def store_cycle_analysed_time(conn, subject, method, cycles, timeline,
+                              annotations, stages, reject_types=None,
+                              coverage_floor_min=5.0, annotation_file=None,
+                              logger=None):
+    """Replace the ``analysed_time_cycles`` rows of one subject and method.
+
+    For each cycle and stage: how much of the cycle's full-night stage time
+    is in the cut file, how much of that the detectors analysed, and whether
+    that is enough to use.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. Commits, does not close.
+    subject : str
+        Subject id (normalised here).
+    method : str
+        Cycle definition the cycles came from.
+    cycles : list of dict
+        Cut-file cycles: ``cycle_number``, cut seconds in ``nrem_start_sec``
+        / ``rem_end_sec`` (on exact-epoch edges) and the original-night
+        ``nrem_start_orig`` / ``rem_end_orig``, which give the cycle's
+        full-night epoch range. Cycles from ``cycleprocessor._cycles_to_cut``
+        and cycles rebuilt from stored ``sleep_cycles`` rows both qualify;
+        without ``*_orig`` the full-night epoch indices
+        (``nrem_start_epoch`` ... ``rem_end_epoch``) are used. An empty list
+        deletes this scope's rows and writes none.
+    timeline : RecordingTimeline
+        The cut file's map with its full-night ``stages``.
+    annotations : object
+        The cut file's annotations (``get_stage_intervals()`` and the Wonambi
+        reading API used by
+        :func:`turtlewave_hdEEG.utils.compute_analysed_seconds`).
+    stages : sequence of str
+        Wonambi stage names to report, e.g. ``['NREM2', 'NREM3']``.
+    reject_types : sequence of str or None, optional
+        Reject set (resolved through
+        :func:`turtlewave_hdEEG.utils.resolve_reject_types`; part of the key).
+    coverage_floor_min : float, optional
+        ``low_coverage`` is 1 when analysed time is under this many minutes.
+        Default 5.0.
+    annotation_file : str or None, optional
+        Provenance.
+    logger : logging.Logger or None, optional
+
+    Returns
+    -------
+    int
+        Rows written.
+
+    Notes
+    -----
+    Per cycle ``[lo, hi)`` on the cut file and stage ``s``:
+
+    * ``fullnight_seconds`` = ``timeline.epoch_length`` x full-night epochs
+      of ``s`` in ``[nrem_start_orig, rem_end_orig)``;
+    * ``in_cut`` = summed duration of the XML epochs of ``s`` wholly inside
+      ``[lo, hi]``; ``removed_seconds = fullnight - in_cut``;
+    * ``analysed_seconds`` = :func:`compute_analysed_seconds` with
+      ``cycle=(lo, hi)``; ``masked_seconds = in_cut - analysed``;
+    * ``coverage = analysed / fullnight`` (NULL when ``fullnight`` is 0).
+
+    Exact-epoch edges are rounded to whole seconds (at most 0.5 s per splice
+    edge), so ``in_cut`` can exceed ``fullnight`` by a few seconds; the
+    differences are floored at 0 and ``coverage`` capped at 1.
+    """
+    from .timeline import stage_name_for_code
+    from .utils import (compute_analysed_seconds, normalize_subject,
+                        reject_key, resolve_reject_types)
+    log = logger if logger is not None else logging.getLogger(__name__)
+    subject = normalize_subject(str(subject))
+    resolved = resolve_reject_types(reject_types)
+    key = reject_key(resolved)
+    stages = [str(s) for s in stages]
+    floor = 60.0 * float(coverage_floor_min)
+    full_names = [stage_name_for_code(c) for c in timeline.fullnight_hypnogram()]
+    L = float(timeline.epoch_length)
+    ivals = annotations.get_stage_intervals()
+    prov = provenance()
+    now = datetime.datetime.now().isoformat()
+
+    ensure_analysed_time_schema(conn, logger=logger)
+    placeholders = ",".join("?" * len(stages))
+    conn.execute(
+        f"DELETE FROM analysed_time_cycles WHERE subject = ? AND method = ? "
+        f"AND reject_types = ? AND stage IN ({placeholders})",
+        (subject, str(method), key, *stages))
+    rows = []
+    for cyc in cycles:
+        lo, hi = float(cyc['nrem_start_sec']), float(cyc['rem_end_sec'])
+        # The cycle's full-night epochs, from its original-night bounds
+        # (which sit on the 30 s grid); epoch indices only as a fallback.
+        if cyc.get('nrem_start_orig') is not None and \
+                cyc.get('rem_end_orig') is not None:
+            first = int(round(float(cyc['nrem_start_orig']) / L))
+            stop = int(round(float(cyc['rem_end_orig']) / L))
+        else:
+            first = int(cyc['nrem_start_epoch'])
+            stop = 1 + (int(cyc['rem_end_epoch'])
+                        if cyc['rem_end_epoch'] >= cyc['rem_start_epoch']
+                        else int(cyc['nrem_end_epoch']))
+        for stg in stages:
+            fullnight = L * sum(1 for n in full_names[first:stop] if n == stg)
+            in_cut = sum(e - s for s, e, st in ivals
+                         if st == stg and s >= lo and e <= hi) \
+                if hi > lo else 0.0
+            analysed = 0.0
+            if in_cut > 0:
+                analysed, _ = compute_analysed_seconds(
+                    annotations, stg, reject_types=list(resolved),
+                    s_freq=timeline.s_freq, cycle=(lo, hi), logger_=log)
+            coverage = (min(analysed / fullnight, 1.0) if fullnight > 0
+                        else None)
+            rows.append((
+                subject, str(method), int(cyc['cycle_number']), stg, key,
+                float(fullnight), max(float(fullnight) - in_cut, 0.0),
+                max(in_cut - analysed, 0.0), float(analysed), coverage,
+                1 if analysed < floor else 0, floor,
+                None if annotation_file is None else str(annotation_file),
+                prov['turtlewave_version'], now))
+    conn.executemany('''
+        INSERT OR REPLACE INTO analysed_time_cycles
+            (subject, method, cycle_number, stage, reject_types,
+             fullnight_seconds, removed_seconds, masked_seconds,
+             analysed_seconds, coverage, low_coverage, coverage_floor_seconds,
+             annotation_file, turtlewave_version, processing_timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', rows)
+    conn.commit()
+    n_low = sum(r[10] for r in rows)
+    log.info(
+        "Stored %d analysed_time_cycles row(s) for subject '%s', method '%s' "
+        "(%d cycle(s) x %d stage(s); %d under the %.1f min coverage floor).",
+        len(rows), subject, method, len(cycles), len(stages), n_low,
+        float(coverage_floor_min))
+    return len(rows)
+
+
 def subject_has_cycles(conn, subject, methods=('2022', '1979')):
     """Report whether a subject's cycles and stage durations are already stored.
 
@@ -1849,9 +2017,204 @@ def subject_has_cycles(conn, subject, methods=('2022', '1979')):
     return bool(_matches('stage_durations'))
 
 
+class _StageIntervalHypnogram:
+    """Cycle-detection view of an object that only has ``get_stage_intervals``.
+
+    Supplies ``get_hypnogram``, ``epochs``, ``epoch_durations`` and
+    ``has_uniform_epochs`` from the ``(start, end, stage)`` list and passes
+    every other attribute (``annot_file``, cycle-marker methods) through.
+
+    Parameters
+    ----------
+    source : object
+        Object exposing ``get_stage_intervals()``.
+    """
+
+    def __init__(self, source):
+        self._source = source
+
+    def __getattr__(self, name):
+        return getattr(self._source, name)
+
+    def get_stage_intervals(self):
+        return sorted(((float(s), float(e), str(st)) for s, e, st
+                       in self._source.get_stage_intervals()),
+                      key=lambda x: x[0])
+
+    @property
+    def epochs(self):
+        return [{'start': s, 'end': e, 'stage': st}
+                for s, e, st in self.get_stage_intervals()]
+
+    def get_hypnogram(self):
+        from .annotation import HYPNOGRAM_CODES
+        return [HYPNOGRAM_CODES.get(st, -1)
+                for _, _, st in self.get_stage_intervals()]
+
+    def epoch_durations(self):
+        return [e - s for s, e, _ in self.get_stage_intervals()]
+
+    def has_uniform_epochs(self, tol=1e-6):
+        d = self.epoch_durations()
+        return not d or (max(d) - min(d)) <= tol
+
+
+def _subject_rows_spellings(conn, table, subject):
+    """Stored spellings of ``subject`` in ``table`` (normalised match)."""
+    from .utils import normalize_subject
+    canonical = normalize_subject(str(subject))
+    if 'subject' not in (_table_columns(conn, table) or ()):
+        return []
+    return [str(r[0]) for r in conn.execute(
+        f"SELECT DISTINCT subject FROM {table} "
+        f"WHERE subject IS NOT NULL AND subject != ''")
+        if normalize_subject(str(r[0])) == canonical]
+
+
+def subject_cycles_unavailable(conn, subject):
+    """Whether a subject is stored as having no computable sleep cycles.
+
+    A cut recording staged from its stage events has no full-night
+    hypnogram, so no cycles are ever stored for it; what is stored is a
+    ``stage_durations`` row with ``time_base='cut'``. That row is the record
+    of "cycles unavailable", so later detection runs can skip the step.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+    subject : str
+        Subject id, any spelling.
+
+    Returns
+    -------
+    bool
+        True when ``stage_durations`` holds a ``time_base='cut'`` row for the
+        subject and ``sleep_cycles`` holds none.
+    """
+    if 'time_base' not in (_table_columns(conn, 'stage_durations') or ()):
+        return False
+    sd = _subject_rows_spellings(conn, 'stage_durations', subject)
+    if not sd:
+        return False
+    placeholders = ",".join("?" * len(sd))
+    n_cut = conn.execute(
+        f"SELECT COUNT(*) FROM stage_durations WHERE subject IN "
+        f"({placeholders}) AND time_base = 'cut'", sd).fetchone()[0]
+    return bool(n_cut) and not _subject_rows_spellings(conn, 'sleep_cycles',
+                                                       subject)
+
+
+def fill_cycle_coverage_from_stored(conn, annotations, subject, methods,
+                                    stages, reject_types=None, logger=None):
+    """Write missing ``analysed_time_cycles`` rows from the stored cycles.
+
+    Used when a cut recording's cycles are already in ``sleep_cycles`` and a
+    detection run brings a stage or reject set with no coverage rows. The
+    stored cycles (whatever thresholds produced them) are kept; only the
+    coverage of that scope is computed, from their cut-file bounds and their
+    ``*_orig`` full-night bounds.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+    annotations : object
+        The cut file's annotations; its sidecar supplies the full-night
+        hypnogram (:func:`turtlewave_hdEEG.timeline.load_sidecar_for`).
+    subject : str
+    methods : sequence of str
+        Cycle definitions whose stored cycles get rows.
+    stages : sequence of str
+    reject_types : sequence of str or None, optional
+    logger : logging.Logger or None, optional
+
+    Returns
+    -------
+    int
+        Rows written; 0 when there is no full-night sidecar.
+
+    Raises
+    ------
+    timeline.SidecarMismatchError
+        The sidecar no longer matches the annotation file.
+    """
+    from .timeline import load_sidecar_for
+    annot_file = getattr(annotations, 'annot_file', None)
+    tl = (load_sidecar_for(annot_file, annotations, require=False)
+          if annot_file else None)
+    if tl is None or not tl.stages or not stages:
+        return 0
+    spellings = _subject_rows_spellings(conn, 'sleep_cycles', subject)
+    if not spellings:
+        return 0
+    placeholders = ",".join("?" * len(spellings))
+    floor_rows = conn.execute(
+        "SELECT coverage_floor_seconds FROM analysed_time_cycles "
+        "WHERE subject = ? AND coverage_floor_seconds IS NOT NULL LIMIT 1",
+        (spellings[0],)).fetchall() \
+        if _table_columns(conn, 'analysed_time_cycles') else []
+    floor_min = floor_rows[0][0] / 60.0 if floor_rows else 5.0
+    total = 0
+    for m in methods:
+        rows = conn.execute(
+            f"SELECT cycle_number, nrem_start, rem_end, nrem_start_orig, "
+            f"rem_end_orig FROM sleep_cycles WHERE subject IN ({placeholders}) "
+            f"AND method = ? AND time_base = 'cut' ORDER BY cycle_number",
+            (*spellings, str(m))).fetchall()
+        if not rows:
+            continue
+        cycles = [{'cycle_number': r[0], 'nrem_start_sec': r[1],
+                   'rem_end_sec': r[2], 'nrem_start_orig': r[3],
+                   'rem_end_orig': r[4]} for r in rows]
+        total += store_cycle_analysed_time(
+            conn, subject, m, cycles, tl, annotations, stages,
+            reject_types=reject_types, coverage_floor_min=floor_min,
+            annotation_file=annot_file, logger=logger)
+    return total
+
+
+def _cycle_coverage_missing(conn, subject, stages, reject_types):
+    """Whether a cut recording's stored cycles lack coverage rows for a scope.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+    subject : str
+        Canonical subject id.
+    stages : sequence of str or None
+        The run's stages; ``None`` checks nothing.
+    reject_types : sequence of str or None
+        The run's reject set.
+
+    Returns
+    -------
+    bool
+        True when ``sleep_cycles`` holds cut-time-base cycles for the subject
+        and ``analysed_time_cycles`` has no row for at least one of
+        ``stages`` under this reject set.
+    """
+    if not stages:
+        return False
+    from .utils import reject_key, resolve_reject_types
+    if 'time_base' not in (_table_columns(conn, 'sleep_cycles') or ()):
+        return False
+    n_cut = conn.execute(
+        "SELECT COUNT(*) FROM sleep_cycles WHERE subject = ? AND "
+        "time_base = 'cut'", (subject,)).fetchone()[0]
+    if not n_cut:
+        return False
+    if not _table_columns(conn, 'analysed_time_cycles'):
+        return True
+    key = reject_key(resolve_reject_types(reject_types))
+    have = {r[0] for r in conn.execute(
+        "SELECT DISTINCT stage FROM analysed_time_cycles WHERE subject = ? "
+        "AND reject_types = ?", (subject, key))}
+    return any(str(s) not in have for s in stages)
+
+
 def ensure_cycles_populated(conn, annotations, subject, db_path=None,
                             methods=('2022', '1979'), tag_method='2022',
-                            epoch_length=30, force=False, logger=None):
+                            epoch_length=30, force=False, logger=None,
+                            stages=None, reject_types=None):
     """Fill ``sleep_cycles`` and ``stage_durations`` during a detection run.
 
     Before this existed both tables were created by every run and filled by
@@ -1885,8 +2248,10 @@ def ensure_cycles_populated(conn, annotations, subject, db_path=None,
         The detector's open write connection.
     annotations : object
         Annotation wrapper exposing ``get_hypnogram()`` and ``epochs``
-        (:class:`turtlewave_hdEEG.annotation.CustomAnnotations`). A plain
-        Wonambi ``Annotations`` has neither; that is detected and skipped with
+        (:class:`turtlewave_hdEEG.annotation.CustomAnnotations`), or any
+        object with ``get_stage_intervals()`` returning ``(start, end,
+        stage)`` per epoch, which is read through that. A plain Wonambi
+        ``Annotations`` has none of these; that is detected and skipped with
         a warning rather than raising.
     subject : str
         Subject id keying the two tables.
@@ -1905,6 +2270,16 @@ def ensure_cycles_populated(conn, annotations, subject, db_path=None,
         ``False`` (a no-op on the second and later detectors of a run).
     logger : logging.Logger or None, optional
         Logger for the summary and any failure. Default ``None``.
+    stages : sequence of str or None, optional
+        The detection run's stages, given ``analysed_time_cycles`` rows on a
+        cut recording. When the subject's cycles are already stored but lack
+        rows for one of these stages (under ``reject_types``), the rows are
+        computed from the STORED cycles (:func:`fill_cycle_coverage_from_stored`);
+        stored cycles are never re-detected here unless ``force``. Default
+        ``None`` (the cycle module's default stages).
+    reject_types : sequence of str or None, optional
+        The detection run's reject set, keying ``analysed_time_cycles``.
+        Default ``None`` (library default).
 
     Returns
     -------
@@ -1920,18 +2295,44 @@ def ensure_cycles_populated(conn, annotations, subject, db_path=None,
             "were not stored. events.cycle will stay NULL.")
         return None
     if not hasattr(annotations, 'get_hypnogram'):
-        log.warning(
-            "The annotation object (%s) has no get_hypnogram(), so sleep "
-            "cycles and stage durations were not stored. Pass a "
-            "turtlewave_hdEEG.CustomAnnotations to have them filled "
-            "automatically.", type(annotations).__name__)
-        return None
+        if hasattr(annotations, 'get_stage_intervals'):
+            annotations = _StageIntervalHypnogram(annotations)
+        else:
+            log.warning(
+                "The annotation object (%s) has neither get_hypnogram() nor "
+                "get_stage_intervals(), so sleep cycles and stage durations "
+                "were not stored. Pass a turtlewave_hdEEG.CustomAnnotations "
+                "to have them filled automatically.",
+                type(annotations).__name__)
+            return None
 
     try:
+        from .utils import normalize_subject
         if not force and subject_has_cycles(conn, subject, methods=methods):
-            log.debug(
-                "Sleep cycles and stage durations are already stored for "
-                "'%s'; not recomputing.", subject)
+            # Stored cycles are never re-detected here: they may come from
+            # user-chosen thresholds (a backfill with wake_thresh=2, say), and
+            # a detection run only ever knows the library defaults. A cut
+            # recording missing coverage rows for this run's scope gets them
+            # computed from the stored cycles instead.
+            if _cycle_coverage_missing(conn, normalize_subject(str(subject)),
+                                       stages, reject_types):
+                n = fill_cycle_coverage_from_stored(
+                    conn, annotations, subject, methods, stages,
+                    reject_types=reject_types, logger=log)
+                log.info(
+                    "Sleep cycles already stored for '%s' (not re-detected); "
+                    "added %d analysed_time_cycles row(s) for stages %s.",
+                    subject, n, list(stages))
+            else:
+                log.debug(
+                    "Sleep cycles and stage durations are already stored for "
+                    "'%s'; not recomputing.", subject)
+            return {}
+        if not force and subject_cycles_unavailable(conn, subject):
+            log.info(
+                "Sleep cycles are unavailable for '%s' (staged from stage "
+                "events, so there is no full-night hypnogram); stage "
+                "durations are already stored. Not recomputing.", subject)
             return {}
 
         # Lazy import: keeps dbwrite free of an import edge on cycleprocessor
@@ -1944,7 +2345,8 @@ def ensure_cycles_populated(conn, annotations, subject, db_path=None,
             # and must never block on plotting.
             write_xml=False, plot=False,
             epoch_length=epoch_length, conn=conn,
-            tag_events=False, log_level=log.level or logging.INFO)
+            tag_events=False, log_level=log.level or logging.INFO,
+            stages=stages, reject_types=reject_types)
         log.info(
             "Stored sleep cycles for subject '%s': %s (annotation XML NOT "
             "modified). events.cycle is tagged after detection, from '%s'.",
@@ -2361,7 +2763,8 @@ def ensure_direct_write_schema(conn, logger=None):
         wonambi_version TEXT,
         numpy_version TEXT,
         git_sha TEXT,
-        timestamp TEXT
+        timestamp TEXT,
+        interpolated_channels TEXT -- JSON list; NULL = run predates 4.5
     )''')
 
     # (2a) detection_runs.subject: added so a run is attributable to a
@@ -2381,6 +2784,16 @@ def ensure_direct_write_schema(conn, logger=None):
         if logger is not None:
             logger.info("Migrated detection_runs table: added column "
                         "reject_types")
+
+    # (2a3) detection_runs.interpolated_channels: the run's selected channels
+    # that the recording marks as interpolated, as a JSON list ('[]' = none).
+    # Left NULL on older rows: whether they included one is unknown, not "no".
+    if dr_cols and 'interpolated_channels' not in dr_cols:
+        cur.execute("ALTER TABLE detection_runs "
+                    "ADD COLUMN interpolated_channels TEXT")
+        if logger is not None:
+            logger.info("Migrated detection_runs table: added column "
+                        "interpolated_channels")
     if dr_cols:
         conn.execute('''
         UPDATE detection_runs SET reject_types = CASE
@@ -2676,7 +3089,8 @@ def ensure_density_view(conn, logger=None):
 
 def record_run(conn, run_id, event_type, method, citation, params_json,
                ref_chan, polar, stages, reject_artifacts=None,
-               reject_arousals=None, subject=None, reject_types=None):
+               reject_arousals=None, subject=None, reject_types=None,
+               interpolated_channels=None):
     """Write one ``detection_runs`` provenance row for an invocation.
 
     Parameters
@@ -2710,7 +3124,13 @@ def record_run(conn, run_id, event_type, method, citation, params_json,
         :func:`turtlewave_hdEEG.utils.reject_key`; the two boolean columns are
         written as membership of it so a pre-4.4 reader still sees something
         true. Default ``None`` (resolves to the library default).
+    interpolated_channels : iterable of str or None, optional
+        The run's selected channels that the recording marks as interpolated
+        (:func:`turtlewave_hdEEG.utils.interpolated_channels`). Stored as a
+        JSON list, ``'[]'`` when there are none. ``None`` (default) stores
+        NULL, meaning "not checked", which is how pre-4.5 rows read.
     """
+    import json
     from .utils import reject_key, resolve_reject_types
     resolved = resolve_reject_types(reject_types, reject_artifacts,
                                     reject_arousals)
@@ -2719,8 +3139,9 @@ def record_run(conn, run_id, event_type, method, citation, params_json,
     INSERT OR REPLACE INTO detection_runs
         (run_id, subject, event_type, method, citation, params_json, ref_chan,
          polar, stages, reject_types, reject_artifacts, reject_arousals,
-         turtlewave_version, wonambi_version, numpy_version, git_sha, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         turtlewave_version, wonambi_version, numpy_version, git_sha, timestamp,
+         interpolated_channels)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         run_id, (None if subject is None else str(subject)),
         event_type, method, citation, params_json,
@@ -2728,6 +3149,8 @@ def record_run(conn, run_id, event_type, method, citation, params_json,
         1 if 'Artefact' in resolved else 0, 1 if 'Arousal' in resolved else 0,
         prov['turtlewave_version'], prov['wonambi_version'],
         prov['numpy_version'], git_sha(), datetime.datetime.now().isoformat(),
+        (None if interpolated_channels is None
+         else json.dumps([str(c) for c in interpolated_channels])),
     ))
     conn.commit()
 

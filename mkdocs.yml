@@ -102,6 +102,7 @@ nav:
     - Write Detection Results Directly to the Database: how-to/direct-to-database-detection.md
     - Read the Database with pandas and R: how-to/read-database-with-pandas-and-r.md
     - Finalize Sleep Cycles & Stage Durations: how-to/detect-sleep-cycles.md
+    - Analyse Compumedics & Cut Recordings: how-to/analyse-compumedics-recordings.md
     - Review EEG Events: how-to/review-eeg-events.md
     - Re-run Detection on Reviewer-Selected Channels: how-to/rerun-detection-on-channels.md
     - Maintenance & Migration:
@@ -115,7 +116,9 @@ nav:
   - Reference:
     - API Reference: reference/api/index.md
     - Dataset: reference/api/dataset.md
+    - EEGLAB I/O: reference/api/eeglab_io.md
     - Annotations: reference/api/annotation.md
+    - Recording Timeline: reference/api/timeline.md
     - Spindle Processor: reference/api/eventprocessor.md
     - Detector Extensions: reference/api/extensions.md
     - Slow Wave Processor: reference/api/swprocessor.md
@@ -136,6 +139,7 @@ nav:
     - Naming, Subject Identity & Provenance Conventions: explanation/naming-and-identity-conventions.md
     - Database Concurrency and Journalling: explanation/database-concurrency-and-journalling.md
     - EEG Review GUI Architecture: explanation/eeg-review-gui-architecture.md
+    - Cut Recordings and Time Bases: explanation/cut-recordings-and-time-bases.md
 
 extra:
   social:

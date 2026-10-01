@@ -9,6 +9,11 @@ import numpy as np
 from collections import OrderedDict
 import time
 
+try:
+    from frontend.channel_types import default_review_channels
+except ImportError:  # run as a script: frontend/ is on sys.path
+    from channel_types import default_review_channels
+
 
 class WaveformCache:
     """LRU cache for waveform data"""
@@ -114,6 +119,22 @@ class WaveformBackgroundLoader(QThread):
                 # Sleep briefly if queue is empty
                 time.sleep(0.1)
     
+    def _default_channels(self):
+        """Channels to load when the GUI has none selected: the shared
+        ``default_review_channels`` rule applied to the loaded EEG file."""
+        data = self.parent_gui.eeg_data
+        if hasattr(data, 'channels'):
+            header = getattr(data, 'header', None) or {}
+            return default_review_channels(list(data.channels),
+                                           header.get('chan_type'))
+        if hasattr(data, 'ch_names'):
+            try:
+                types = list(data.get_channel_types())
+            except Exception:
+                types = None
+            return default_review_channels(list(data.ch_names), types)
+        return []
+
     def load_waveform(self, event_row):
         """Load waveform for an event - ONLY loads selected channels for performance"""
         try:
@@ -132,7 +153,9 @@ class WaveformBackgroundLoader(QThread):
             # Get selected channels from parent GUI
             selected_channels = getattr(self.parent_gui, 'selected_channels', None)
             if not selected_channels:
-                selected_channels = ['E112', 'E118', 'Cz']  # Default fallback
+                selected_channels = self._default_channels()
+            if not selected_channels:
+                return
             
             start_time = event_row['start_time']
             end_time = event_row['end_time']
