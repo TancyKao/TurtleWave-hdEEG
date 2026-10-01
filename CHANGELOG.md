@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0] - 2026-10-01
+## [4.6.0] — 2026-10-01
+
+Per-event review is sample-based validation of a detection run. Review decisions are evidence about the detector and never remove events unless `exclude_rejected` is asked for.
+
+Per-event figures and detection thresholds are not recorded for runs made before 4.6; re-detect to get them.
+
+### Added
+
+- Per-event figures stored at detection time: duration-bound and splice-proximity flags, half-waves above background, 1/f-corrected peak frequency with its prominence, amplitude against background and against the detector threshold, and slow-wave half-wave shape.
+- `detection_thresholds` table holding the thresholds each detection run used.
+- `event_reviews` table and `events_reviewed` view for per-event review decisions.
+- `exclude_rejected` on `event_density` and `export_events_to_csv`.
+- `review_sampling`: stratified review samples, precision estimates and label agreement between reviewers.
+- `event_population_summary` for per-channel, per-stage population checks.
+- Review GUI: population checks and a stage toggle on the Channels tab.
+- Review GUI: event selection and an Event panel for recording decisions.
+- Review GUI: reason grids per event type.
+- Review GUI: neighbouring-channel view and an EOG/EMG/ECG strip.
+- Review GUI: reviewer name recorded with every decision.
+- Review GUI: review-sample mode, blind to flags until a decision is made, and a precision report.
+
+### Changed
+
+- Detectors' `cat` defaults to `(1, 1, 1, 0)`; the previous `None` default failed every channel.
+- The review GUI no longer adds review columns to the `events` table.
+- CSV exports gain the per-event figure and detector-value columns.
+
+## [4.5.0] — 2026-10-01
 
 Staging of recordings that had data cut out (EEGLAB `boundary` events) was misaligned before 4.5.0, because `etc.stages` was imported as stored. Emotion 16js/18sb, MCI clean_rebuilt and LocalSleep excerpt outputs built on the header staging import should be re-annotated and re-detected, and not pooled with pre-4.5 rows.
 
