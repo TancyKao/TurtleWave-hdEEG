@@ -141,6 +141,12 @@ check('1.3', "get_run_info parses params_json (duration_by_method)",
       info.get('params', {}).get('duration_by_method')
       == {'Moelle2011': [0.5, 3.0]} and info.get('method') == 'Moelle2011',
       repr(info.get('params')))
+check('1.4b', "not-recorded texts name no backfill script and say how to "
+      "get the figures", 'backfill' not in er.NOT_RECORDED_RUN
+      and 'backfill' not in er.FIGURES_OFF_RUN
+      and er.NOT_RECORDED_RUN.endswith('Figures are stored by detection runs '
+                                       'made with 4.6 or later; re-detect '
+                                       'this run to get them.'))
 check('1.4', "no events-table review columns are added",
       not {'reviewed', 'review_decision'} & set(db._table_columns('events')))
 

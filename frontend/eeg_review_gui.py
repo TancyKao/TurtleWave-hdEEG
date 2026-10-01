@@ -72,6 +72,15 @@ method_has_ratio = _er.method_has_ratio
 no_ratio_note = _er.no_ratio_note
 
 try:
+    from frontend import sample_review as _sr
+    from frontend.review_sample_widgets import (SampleBar, DrawSampleDialog,
+                                                PrecisionReportDialog)
+except ImportError:  # run as a script
+    import sample_review as _sr
+    from review_sample_widgets import (SampleBar, DrawSampleDialog,
+                                       PrecisionReportDialog)
+
+try:
     from frontend.channel_types import (neighbour_channels, physio_channels)
 except ImportError:  # run as a script
     from channel_types import neighbour_channels, physio_channels
@@ -2164,10 +2173,15 @@ class EventDecisionPanel(QWidget):
     prevClicked = pyqtSignal()
     nextClicked = pyqtSignal()
     autoAdvanceToggled = pyqtSignal(bool)
+    openReportClicked = pyqtSignal()
+    revisitClicked = pyqtSignal()
 
     EMPTY_TEXT = ('Click an event band, or press ] for the next unreviewed '
                   'event.')
+    EMPTY_SAMPLE_TEXT = 'Press ] for the next sample event.'
     HINT = 'A accept · R reject · U unsure · ] next · Ctrl+Z undo'
+    HINT_SAMPLE = ('A accept · R reject · U unsure · ] next in sample · '
+                   '} next on channel · Ctrl+Z undo')
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2271,6 +2285,26 @@ class EventDecisionPanel(QWidget):
         self.hint_lbl.setWordWrap(True)
         self.hint_lbl.setStyleSheet("color:#888888;font-size:11px;")
         lay.addWidget(self.hint_lbl)
+        # end of the review sample (replaces the hint line)
+        self.end_box = QWidget()
+        eb = QVBoxLayout(self.end_box)
+        eb.setContentsMargins(0, 0, 0, 0)
+        self.end_lbl = QLabel("")
+        self.end_lbl.setWordWrap(True)
+        eb.addWidget(self.end_lbl)
+        er_row = QHBoxLayout()
+        self.btn_open_report = QPushButton("Open precision report")
+        self.btn_open_report.setFocusPolicy(Qt.NoFocus)
+        self.btn_open_report.clicked.connect(self.openReportClicked.emit)
+        self.btn_revisit = QPushButton("")
+        self.btn_revisit.setFocusPolicy(Qt.NoFocus)
+        self.btn_revisit.clicked.connect(self.revisitClicked.emit)
+        er_row.addWidget(self.btn_open_report)
+        er_row.addWidget(self.btn_revisit)
+        eb.addLayout(er_row)
+        self.end_box.setVisible(False)
+        lay.addWidget(self.end_box)
+        self._sample_mode = False
         self.set_empty(self.EMPTY_TEXT)
 
     # ---- comment field keys --------------------------------------------
@@ -2347,6 +2381,9 @@ class EventDecisionPanel(QWidget):
     # ---- states ----------------------------------------------------------
     def set_empty(self, message):
         self.set_rows([])
+        if getattr(self, '_sample_mode', False) and \
+                message == self.EMPTY_TEXT:
+            message = self.EMPTY_SAMPLE_TEXT
         self.empty_lbl.setText(message)
         self.note_lbl.setVisible(False)
         self.set_current('Not reviewed', [])
@@ -2378,7 +2415,9 @@ class EventDecisionPanel(QWidget):
         for d, b in self.btn.items():
             b.setStyleSheet("border:2px solid #5a8fce;" if d == decision
                             else "")
-        self.hint_lbl.setText(hint or self.HINT)
+        self.hint_lbl.setText(hint or (self.HINT_SAMPLE
+                                       if getattr(self, '_sample_mode', False)
+                                       else self.HINT))
 
     def set_reason(self, token):
         i = self.reason_combo.findData(token or '')
@@ -2386,6 +2425,32 @@ class EventDecisionPanel(QWidget):
 
     def set_progress(self, text):
         self.progress_lbl.setText(text or '')
+
+    def set_sample_mode(self, on):
+        """Sample-mode labels: checkbox, hint, Prev/Next tooltips."""
+        self._sample_mode = bool(on)
+        self.auto_chk.setText("Go to next sample event after deciding" if on
+                              else "Go to next unreviewed after deciding")
+        self.hint_lbl.setText(self.HINT_SAMPLE if on else self.HINT)
+        tip = ("Previous / next undecided sample event" if on
+               else "Previous / next unreviewed event on this channel")
+        self.prev_btn.setToolTip(tip)
+        self.next_btn.setToolTip(tip)
+        if not self._rows:
+            self.empty_lbl.setText(self.EMPTY_SAMPLE_TEXT if on
+                                   else self.EMPTY_TEXT)
+        if not on:
+            self.set_end(None)
+
+    def set_end(self, text, n_unsure=0):
+        """Show the end-of-sample block (``text``) or hide it (``None``)."""
+        on = bool(text)
+        self.end_box.setVisible(on)
+        self.hint_lbl.setVisible(not on)
+        if on:
+            self.end_lbl.setText(text)
+            self.btn_revisit.setText(f"Revisit the {n_unsure} unsure")
+            self.btn_revisit.setVisible(n_unsure > 0)
 
 
 class ChannelDetailDock(QWidget):
@@ -4471,6 +4536,8 @@ class EpochsPanel(QWidget):
         self.plot.addItem(self._ov_marker)
         self.plot.addItem(self._strip_range)
         self.plot.addItem(self._ep_cursor)
+        for it in getattr(self, '_sample_marks', []):
+            self.plot.addItem(it)
         self.plot.setXRange(0, max(self._trec, self._epochs.end), padding=0)
         if self._agg is None or len(self._agg) == 0:
             return
@@ -5004,6 +5071,19 @@ class EpochsPanel(QWidget):
     def chip_text(self):
         """The chip as shown, with its ✕ (empty when no filter is on)."""
         return (self.chip_lbl.text() + ' ✕') if self.chip.isVisible() else ''
+
+    def set_sample_marks(self, times):
+        """2 px accent ticks on the epoch strip at the sample events of the
+        drilled channel (empty list: none)."""
+        for it in getattr(self, '_sample_marks', []):
+            self.plot.removeItem(it)
+        self._sample_marks = []
+        for t in times or []:
+            it = pg.InfiniteLine(pos=float(t), angle=90, movable=False,
+                                 pen=pg.mkPen(THEME['accent'], width=2))
+            it.setZValue(18)
+            self.plot.addItem(it)
+            self._sample_marks.append(it)
 
     def _refresh_neighbours(self):
         """Hand the selection to the Neighbours group (it reads only when
@@ -5594,6 +5674,52 @@ def qc_density_stage_scope(event_stages, wake_stages=None):
     return sorted(scope) or None
 
 
+#: Confirmation text of Review > Show other reviewers. Nothing records that
+#: a decision was made with others visible (event_reviews has no ``blind``
+#: column yet), so the text says so rather than promising it.
+SHOW_OTHERS_WARNING = (
+    "Decisions you make while other reviewers' choices are visible are not "
+    "independent and should not be used for inter-rater agreement. This is "
+    "not recorded automatically.")
+
+
+class _ReportSource:
+    """What :class:`PrecisionReportDialog` reads, bound to the window's
+    database and loaded sample."""
+
+    def __init__(self, win):
+        self.win = win
+        s = win._sample
+        self.design = s['design']
+        self.n_total = len(s['rows'])
+        self.db_path = win.db.db_path
+        self.db_name = os.path.basename(win.db.db_path)
+        self.current_reviewer = win.reviewer_name
+        ids = []
+        try:
+            ids = json.loads(self.design.get('run_ids') or '[]')
+        except (TypeError, ValueError):
+            pass
+        run = win._run_info(ids[0]) if ids else {}
+        self.run_text = _er.run_label(run, ids[0] if ids else None) + (
+            f" (+{len(ids) - 1} run{'s' if len(ids) > 2 else ''})"
+            if len(ids) > 1 else '')
+
+    def labels(self):
+        return _sr.reviewer_labels(self.win.db.conn, self.design['sample_id'])
+
+    def frame(self, reviewer):
+        return _sr.precision_frame(self.win.db.conn,
+                                   self.design['sample_id'], reviewer)
+
+    def event_line(self, uuid):
+        r = self.win._sample['rows'].get(uuid, {})
+        return f"{r.get('channel')} {_er.fmt_hms1(r.get('start_time'))}"
+
+    def status(self, text):
+        self.win.status_bar.showMessage(text)
+
+
 class _FiguresNotComputable(Exception):
     """The figures cannot be computed faithfully; the message says why."""
 
@@ -5678,6 +5804,13 @@ class EventReviewGUI(QMainWindow):
         self._auto_advance = _setting_bool('review/auto_advance', True)
         self._pop_worker = None
         self._pop_view = None
+        # review sample (spec section 2)
+        self._sample = None               # loaded sample of the scope in view
+        self._sample_active = False
+        self._revisit = None              # unsure uuids while revisiting
+        self._sample_cursor = None        # last sample event visited
+        self._sample_times = []           # this session's decision times
+        self._report = None
         self.recording_start_time = None
 
         # Chrome / QC state
@@ -5787,15 +5920,27 @@ class EventReviewGUI(QMainWindow):
         a.triggered.connect(self._prompt_reviewer_name)
         m_review.addAction(a)
         self.act_reviewer_name = a
-        m_review.addSeparator()
-        # review-sample entries (Draw / Resume / Exit / Precision report)
-        # are added here once the sampling module exists.
         self.m_review = m_review
+        for text, slot, attr in (
+                ('Draw review sample…', '_open_draw_dialog', 'act_draw_sample'),
+                ('Resume review sample', '_start_sample', 'act_resume_sample'),
+                ('Exit review sample', '_exit_sample', 'act_exit_sample')):
+            a = QAction(text, self)
+            a.triggered.connect(lambda _=False, n=slot: getattr(self, n)())
+            m_review.addAction(a)
+            setattr(self, attr, a)
+        m_review.aboutToShow.connect(self._update_review_menu)
+        m_review.addSeparator()
         a = QAction('Show other reviewers', self, checkable=True)
         a.setChecked(False)   # off at every launch, never persisted
         a.toggled.connect(self._on_show_others)
         m_review.addAction(a)
         self.act_show_others = a
+        m_review.addSeparator()
+        a = QAction('Precision report…', self)
+        a.triggered.connect(lambda: self._open_report())
+        m_review.addAction(a)
+        self.act_precision_report = a
 
         m_view = mb.addMenu('&View')
         a = QAction('Outlier threshold…', self)
@@ -5991,6 +6136,15 @@ class EventReviewGUI(QMainWindow):
         self.epochs_panel.eventSelected.connect(self._on_event_selected)
         self.epochs_panel.decisionRequested.connect(
             self._on_decision_requested)
+        self.sample_bar = SampleBar()
+        self.epochs_panel.layout().insertWidget(0, self.sample_bar)
+        self.sample_bar.drawClicked.connect(self._open_draw_dialog)
+        self.sample_bar.resumeClicked.connect(self._start_sample)
+        self.sample_bar.exitClicked.connect(self._exit_sample)
+        self.sample_bar.reportClicked.connect(self._open_report)
+        self.sample_bar.showOthersToggled.connect(self._on_bar_show_others)
+        evp.openReportClicked.connect(self._open_report)
+        evp.revisitClicked.connect(self._revisit_unsure)
         self.epochs_panel.selectionCleared.connect(self._on_selection_cleared)
         self.epochs_panel.checkFilterCleared.connect(
             self._on_check_filter_cleared)
@@ -6634,6 +6788,9 @@ class EventReviewGUI(QMainWindow):
             self.tabs.setCurrentIndex(1)
         # keys (]/[, A/R/U) reach the panel without a click on the trace
         self.epochs_panel.setFocus(Qt.OtherFocusReason)
+        self._update_sample_marks()
+        if not self._sample_active:
+            self._refresh_sample_bar()
 
     # ------------------------------------------------------------------
     # Per-event selection, figures and decisions (UX spec sections 3-7)
@@ -6679,7 +6836,13 @@ class EventReviewGUI(QMainWindow):
         word = _er.EVENT_SINGULAR.get(evt, evt)
         rv = self.epochs_panel._reviews.get(self.selected_event_uuid)
         stage = row.get('epoch_stage') or '—'
-        return (f"{prefix} {word} on {row.get('channel')} at "
+        lead = ''
+        if self._sample_active and self._sample is not None and \
+                self.selected_event_uuid in self._sample['rows']:
+            lead = (f"Sample event "
+                    f"{self._sample['pos'][self.selected_event_uuid] + 1} of "
+                    f"{len(self._sample['order'])} · ")
+        return lead + (f"{prefix} {word} on {row.get('channel')} at "
                 f"{_er.fmt_hms1(row.get('start_time'))} · {stage} · "
                 f"{_er.decision_word(*(rv[:2] if rv else (None, None)))} — "
                 f"A accept · R reject · U unsure")
@@ -6746,6 +6909,9 @@ class EventReviewGUI(QMainWindow):
             interpolated=interp, outlier_thr=ep._amp_thr, amp_col=ep._amp_col,
             ptp_units_uv=self.db.ptp_units_microvolts() if self.db else False,
             figure_note=note)
+        srow = self._sample_row_for(str(row.get('uuid')))
+        if srow is not None:
+            rows = [srow] + rows
         panel.set_rows(rows)
         panel.set_note(_er.LOAD_EEG_NOTE if state == 'missing' else '')
         panel.set_controls_enabled(True)
@@ -6897,6 +7063,14 @@ class EventReviewGUI(QMainWindow):
         if ev is None or ev.empty or ep._channel is None:
             panel.set_progress('')
             return
+        if self._sample_active and self._sample is not None:
+            pr = self._sample_progress()
+            if pr is not None:
+                panel.set_progress(
+                    f"Progress  {pr['n_reviewed']} of {pr['n_total']} in "
+                    f"sample · {pr['n_accept']} accepted · {pr['n_reject']} "
+                    f"rejected · {pr['n_unsure']} unsure")
+                return
         n_all = int(ev['uuid'].notna().sum()) or len(ev)
         decs = [v[0] for u, v in ep._reviews.items()]
         counts = {d: decs.count(d) for d in ('accept', 'reject', 'unsure')}
@@ -7107,6 +7281,16 @@ class EventReviewGUI(QMainWindow):
                 if self.selected_event_uuid is not None:
                     self._refresh_current_line()
                 self._refresh_progress()
+            # revisit list, end message and sample position belong to the
+            # previous reviewer: the next one starts at their first
+            # undecided event
+            self._revisit = None
+            self._sample_cursor = None
+            self._sample_times = []
+            self.detail_dock_w.event_panel.set_end(None)
+            self._refresh_sample_bar()
+            if self._sample_active:
+                self._refresh_progress()
             if old:
                 self.status_bar.showMessage(
                     "Changing the name shows that reviewer's decisions and "
@@ -7131,10 +7315,7 @@ class EventReviewGUI(QMainWindow):
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle("Show other reviewers' decisions?")
         box.setText("Show other reviewers' decisions?")
-        box.setInformativeText(
-            "Decisions you make while they are shown are recorded as not "
-            "independent, and the Precision report leaves them out of "
-            "inter-rater agreement.")
+        box.setInformativeText(SHOW_OTHERS_WARNING)
         show = box.addButton('Show them', QtWidgets.QMessageBox.AcceptRole)
         box.addButton('Cancel', QtWidgets.QMessageBox.RejectRole)
         box.exec_()
@@ -7149,6 +7330,11 @@ class EventReviewGUI(QMainWindow):
                 return
             self._show_others_confirmed = True
         self._show_others = bool(checked)
+        bar = getattr(self, 'sample_bar', None)
+        if bar is not None and bar.others_chk.isChecked() != bool(checked):
+            bar.others_chk.blockSignals(True)
+            bar.others_chk.setChecked(bool(checked))
+            bar.others_chk.blockSignals(False)
         if self.selected_event_uuid is not None:
             self._refresh_current_line()
 
@@ -7219,6 +7405,13 @@ class EventReviewGUI(QMainWindow):
             else:
                 msg += f" · next unreviewed {_er.fmt_hms1(nxt)}"
             msg += ' · Ctrl+Z to undo'
+        if self._sample_active and self._sample is not None:
+            self._refresh_progress()
+            self._after_sample_write(
+                uuid, decision, reason, row,
+                (before['decision'], before.get('reason')) if chg else None,
+                advance)
+            return True
         if advance and self._auto_advance and not chg:
             if ep.n_unreviewed():
                 ep.next_unreviewed()
@@ -7266,6 +7459,8 @@ class EventReviewGUI(QMainWindow):
         b = ent['before']
         now = ('not reviewed' if b is None
                else _er.decision_word(b['decision'], b.get('reason')))
+        self._refresh_sample_bar()
+        self._refresh_report()
         self.status_bar.showMessage(
             f"Undid {ent['action']} of {ent['channel']} "
             f"{_er.fmt_hms1(ent['start'])} — now {now}")
@@ -7297,9 +7492,432 @@ class EventReviewGUI(QMainWindow):
             f"Cleared your decision on {row.get('channel')} "
             f"{_er.fmt_hms1(row.get('start_time'))} · Ctrl+Z to undo")
 
+    # ------------------------------------------------------------------
+    # Review sample (UX spec section 2; library review_sampling)
+    # ------------------------------------------------------------------
+    def _current_scope(self):
+        """Detection scope of the events in view: the drilled channel's run,
+        else the dashboard's population run, else the newest run matching
+        the dashboard filters."""
+        if self.db is None:
+            return None
+        evt = self.qc_widget.current_event_type()
+        run_id = None
+        df = self.epochs_panel._df
+        if df is not None and len(df) and 'run_id' in df.columns:
+            vc = df['run_id'].dropna().value_counts()
+            run_id = vc.index[0] if len(vc) else None
+        if run_id is None and self._pop_view and self._pop_view[1]:
+            run_id = self._pop_view[1]['res'].get('run_id')
+        if run_id is None:
+            methods, band = self._current_method_freq()
+            q = "SELECT run_id FROM events WHERE event_type = ? AND run_id IS NOT NULL"
+            p = [evt]
+            if methods:
+                q += f" AND method IN ({','.join('?' * len(methods))})"
+                p += list(methods)
+            if band:
+                q += " AND freq_lower = ? AND freq_upper = ?"
+                p += [float(band[0]), float(band[1])]
+            try:
+                hit = self.db.conn.execute(q + " LIMIT 1", p).fetchone()
+            except Exception:
+                hit = None
+            run_id = hit[0] if hit else None
+        try:
+            return _sr.scope_for_run(self.db.conn, run_id, evt)
+        except Exception:
+            return None
+
+    def _sample_scope_tag(self, scope):
+        """`` · Moelle2011 9–12 Hz`` when two runs share the dashboard view."""
+        view = self._pop_view[1] if self._pop_view else None
+        if view and len(view['res'].get('runs_in_view') or []) > 1 and scope:
+            return (f" · {scope['method']} {float(scope['freq_lower']):g}–"
+                    f"{float(scope['freq_upper']):g} Hz")
+        return ''
+
+    def _load_sample(self, design):
+        conn = self.db.conn
+        rows = _sr.sample_rows(conn, design['sample_id'])
+        order = _sr.presentation_order(conn, design['sample_id'])
+        order += [u for u in sorted(rows) if u not in set(order)]
+        self._sample = {'id': design['sample_id'], 'design': design,
+                        'rows': rows, 'order': order,
+                        'pos': {u: i for i, u in enumerate(order)}}
+        return self._sample
+
+    def _sample_progress(self):
+        s = self._sample
+        if s is None or not self.reviewer_name:
+            return None
+        from turtlewave_hdEEG.review_sampling import sample_progress
+        return sample_progress(self.db.conn, s['id'],
+                               reviewer=self.reviewer_name)
+
+    def _refresh_sample_bar(self):
+        bar = self.sample_bar
+        if self.db is None:
+            bar.set_state('none', _sr.NO_SAMPLE_TEXT)
+            return
+        scope = self._current_scope()
+        tag = self._sample_scope_tag(scope)
+        if self._sample_active and self._sample is not None:
+            pr = self._sample_progress()
+            n, tot = (pr['n_reviewed'], pr['n_total']) if pr else (0, 0)
+            u = pr['n_unsure'] if pr else 0
+            if self._revisit is not None and self._revisit:
+                bar.set_state('revisit', _sr.bar_text(
+                    'revisit', n_revisit=len(self._revisit), scope_tag=tag))
+            elif pr and not pr['next_uuids']:
+                bar.set_state('done', _sr.bar_text(
+                    'done', n=n, total=tot, unsure=u, scope_tag=tag))
+            else:
+                eta = _sr.session_eta(self._sample_times, tot - n)
+                bar.set_state('active', _sr.bar_text(
+                    'active', n=n, total=tot, unsure=u, eta_s=eta,
+                    scope_tag=tag))
+            return
+        designs = _sr.samples_for_scope(self.db.conn, scope) if scope else []
+        if not designs:
+            bar.set_state('none', _sr.bar_text('none', scope_tag=tag))
+            self._sample = None
+            return
+        # keep the sample chosen this session (drawn or reopened) while the
+        # scope is the same; only a different scope loads its newest design
+        if self._sample is None or self._sample.get('scope') != scope:
+            self._load_sample(designs[0])
+            self._sample['scope'] = scope
+        pr = self._sample_progress()
+        bar.set_state('idle', _sr.bar_text(
+            'idle', design=self._sample['design'],
+            total=len(self._sample['rows']),
+            n=pr['n_reviewed'] if pr else 0, reviewer=self.reviewer_name,
+            scope_tag=tag))
+
+    def _set_panel_sample_mode(self, on):
+        evp = self.detail_dock_w.event_panel
+        evp.set_sample_mode(on)
+        self._update_sample_marks()
+
+    def _update_sample_marks(self):
+        ep = self.epochs_panel
+        if not self._sample_active or self._sample is None:
+            ep.set_sample_marks([])
+            return
+        ep.set_sample_marks([float(r['start_time'])
+                             for r in self._sample['rows'].values()
+                             if r['channel'] == ep._channel])
+
+    def _start_sample(self):
+        """Resume (or start) the sample of the events in view."""
+        if self.db is None:
+            return
+        if not self._ensure_reviewer_name():
+            return
+        if self._sample is None:
+            self._refresh_sample_bar()
+        if self._sample is None:
+            self.status_bar.showMessage('No review sample for this run yet.')
+            return
+        filtered = self.epochs_panel.clear_check_filter(emit=False)
+        self._sample_active = True
+        self._revisit = None
+        self._set_panel_sample_mode(True)
+        self.tabs.setCurrentIndex(1)
+        self._refresh_sample_bar()
+        self._sample_nav(+1, quiet_wrap=True, include_cursor=True)
+        if filtered:
+            self.status_bar.showMessage(_sr.FILTER_OFF)
+
+    def _exit_sample(self):
+        self._sample_active = False
+        self._revisit = None
+        self._set_panel_sample_mode(False)
+        self.detail_dock_w.event_panel.set_end(None)
+        self._refresh_sample_bar()
+        self._refresh_progress()
+        self.status_bar.showMessage('Left the review sample.')
+
+    def _sample_candidates(self):
+        """Undecided (or, when revisiting, unsure) sample uuids for the
+        current reviewer, as a set."""
+        if self._revisit is not None:
+            return set(self._revisit)
+        pr = self._sample_progress()
+        return set(pr['next_uuids']) if pr else set()
+
+    def _sample_nav(self, step, quiet_wrap=False, include_cursor=False):
+        """``]`` / ``[`` in sample mode: next / previous undecided sample
+        event in the library's presentation order, any channel.
+
+        The search starts AT the cursor when the cursor event is still
+        undecided and is not the selection (after ``}`` browsing, or with
+        ``include_cursor`` on Resume), so the reviewer comes back to it;
+        otherwise just past it (``]`` on an undecided event skips it).
+        """
+        s = self._sample
+        if s is None:
+            return None
+        todo = self._sample_candidates()
+        if not todo:
+            self._show_sample_end()
+            return None
+        order = s['order']
+        # The sample position is the cursor, moved only by ] / [ and by a
+        # sample-mode advance; } / {, clicks and the report never move it,
+        # so browsing to a later sample event cannot make ] skip the ones
+        # in between.
+        cur = s['pos'].get(self._sample_cursor, -1)
+        back_to_cursor = (cur >= 0 and self._sample_cursor in todo and (
+            include_cursor or self.selected_event_uuid != self._sample_cursor))
+        if step > 0:
+            start = cur if back_to_cursor else cur + 1
+            after = [u for u in order[max(start, 0):] if u in todo]
+            pick = after[0] if after else None
+            if pick is None:
+                pick = next(u for u in order if u in todo)
+                if not quiet_wrap:
+                    self.status_bar.showMessage(
+                        'Back to the first undecided sample event.')
+                    return self._goto_sample_event(pick, status=False)
+        else:
+            end = cur + 1 if back_to_cursor else max(cur, 0)
+            before = [u for u in order[:end] if u in todo]
+            pick = before[-1] if before else None
+            if pick is None:
+                return None
+        return self._goto_sample_event(pick)
+
+    def _goto_sample_event(self, uuid, status=True, move_cursor=True):
+        """Drill the event's channel when needed, page and select it.
+        ``move_cursor`` is False for jumps that are not sample navigation
+        (the report's disagreement list)."""
+        row = self._sample['rows'].get(uuid) if self._sample else None
+        if row is None:
+            return None
+        ch = str(row['channel'])
+        ep = self.epochs_panel
+        moved = ch != ep._channel
+        if moved:
+            self.on_qc_drill(ch, switch_tab=False)
+            self.qc_widget.select_channel(ch)
+            self._update_sample_marks()
+        if move_cursor:
+            self._sample_cursor = uuid
+        if not ep.select_event(uuid):
+            self.status_bar.showMessage(
+                f"Sample event on {ch} at {_er.fmt_hms1(row['start_time'])} "
+                f"is not in the events in view; clear the method or band "
+                f"filter to reach it.")
+            return None
+        if status:
+            i = self._sample['pos'][uuid] + 1
+            self.status_bar.showMessage(
+                f"Sample event {i} of {len(self._sample['order'])}"
+                + (f" · moved to {ch}." if moved else ''))
+        return uuid
+
+    def _show_sample_end(self):
+        pr = self._sample_progress()
+        if pr is None:
+            return
+        u = pr['n_unsure']
+        text = _sr.end_text(pr['n_total'], self.reviewer_name, u)
+        self.detail_dock_w.event_panel.set_end(text, u)
+        self._revisit = None
+        self._refresh_sample_bar()
+        self.status_bar.showMessage(
+            f"Review sample complete: {pr['n_reviewed']} of {pr['n_total']} "
+            f"decided by {self.reviewer_name}.")
+
+    def _revisit_unsure(self):
+        """Make ``]`` / ``[`` step through this reviewer's unsure sample
+        events."""
+        s = self._sample
+        if s is None or not self.reviewer_name:
+            return
+        mine = _sr.reviewer_labels(self.db.conn, s['id']).get(
+            self.reviewer_name, {})
+        self._revisit = [u for u in s['order']
+                         if mine.get(u, (None,))[0] == 'unsure']
+        self.detail_dock_w.event_panel.set_end(None)
+        self._refresh_sample_bar()
+        if self._revisit:
+            self._goto_sample_event(self._revisit[0])
+
+    def _after_sample_write(self, uuid, decision, reason, row, chg, advance):
+        """Status, auto-advance and progress after a write in sample mode."""
+        import time as _time
+        s = self._sample
+        if uuid not in s['rows']:
+            self.status_bar.showMessage(_sr.OUTSIDE_SAMPLE)
+            self._refresh_sample_bar()
+            return
+        self._sample_times.append(_time.time())
+        if self._revisit is not None and decision in ('accept', 'reject'):
+            self._revisit = [u for u in self._revisit if u != uuid]
+        self._refresh_sample_bar()
+        self._refresh_report()
+        todo = self._sample_candidates()
+        evt = self.epochs_panel._event_type
+        word = _er.EVENT_SINGULAR.get(evt, evt)
+        if chg:
+            head = (f"Changed from {_er.decision_word(*chg)} to "
+                    f"{_er.decision_word(decision, reason)}")
+        else:
+            head = (f"{_er.DECISION_TITLE[decision]} {word} on "
+                    f"{row.get('channel')} at "
+                    f"{_er.fmt_hms1(row.get('start_time'))}"
+                    + (f" ({_er.REASON_SHORT.get(reason, reason)})"
+                       if reason else ''))
+        if not todo:
+            if self._revisit is not None:
+                self._revisit = None
+                self._refresh_sample_bar()
+            self._show_sample_end()
+            return
+        order = s['order']
+        cur = s['pos'].get(self._sample_cursor, -1)
+        nxt = next((u for u in order[max(cur, 0):] if u in todo),
+                   next(u for u in order if u in todo))
+        nrow = s['rows'][nxt]
+        msg = (f"{head} · next in sample: {nrow['channel']} at "
+               f"{_er.fmt_hms1(nrow['start_time'])} · Ctrl+Z to undo")
+        if advance and self._auto_advance and not chg:
+            self._goto_sample_event(nxt, status=False)
+        self.status_bar.showMessage(msg)
+
+    def _sample_row_for(self, uuid):
+        """The Event panel's ``sample`` row, shown only after the current
+        reviewer has decided this sample event (the stratum and flags are
+        never shown before a decision; ``is_shared`` never)."""
+        if not self._sample_active or self._sample is None:
+            return None
+        srow = self._sample['rows'].get(uuid)
+        mine = self.epochs_panel._reviews.get(uuid)
+        # accept / reject only: an unsure event is revisited later and must
+        # not be primed by its stratum or flags
+        if srow is None or not mine or mine[0] not in ('accept', 'reject'):
+            return None
+        return {'key': 'sample', 'label': 'Sample',
+                'value': _sr.stratum_text(srow),
+                'sub': [f"event {self._sample['pos'][uuid] + 1} of "
+                        f"{len(self._sample['order'])}"],
+                'tooltip': _sr.weight_tooltip(srow.get('weight')),
+                'level': None}
+
+    # ---- draw dialog and report ------------------------------------------
+    def _update_review_menu(self):
+        has = self._sample is not None
+        self.act_resume_sample.setEnabled(has and not self._sample_active)
+        self.act_exit_sample.setEnabled(self._sample_active)
+        self.act_precision_report.setEnabled(has)
+
+    def _exec_dialog(self, dlg):
+        """``dlg.exec_()``; separate so tests can drive the dialog."""
+        return dlg.exec_()
+
+    def _open_draw_dialog(self):
+        if self.db is None:
+            return
+        if not self._ensure_reviewer_name():
+            return
+        scope = self._current_scope()
+        if scope is None:
+            self.status_bar.showMessage(
+                'Drill into a channel of one detection run first.')
+            return
+        from turtlewave_hdEEG import review_sampling as _rsm
+        _rsm.ensure_review_sampling_schema(self.db.conn)
+        pop, err = None, None
+        try:
+            pop = _sr.population_for(self.db.conn, scope)
+        except ValueError as e:
+            err = str(e)
+        designs = _sr.samples_for_scope(self.db.conn, scope)
+        note = None
+        if designs:
+            d0 = dict(designs[0])
+            d0['_n_rows'] = len(_sr.sample_rows(self.db.conn, d0['sample_id']))
+            counts = {rv: len(lab) for rv, lab in _sr.reviewer_labels(
+                self.db.conn, d0['sample_id']).items()}
+            note = _sr.existing_sample_note(d0, counts)
+        run = self._run_info(self._pop_view[1]['res'].get('run_id')) \
+            if self._pop_view and self._pop_view[1] else {}
+        ev = _sr.EVENT_PLURAL.get(scope['event_type'], scope['event_type'])
+        line = (f"{ev} · {scope['method']} {float(scope['freq_lower']):g}–"
+                f"{float(scope['freq_upper']):g} Hz · "
+                f"{_er.run_label(run, run.get('run_id'))}")
+        dlg = DrawSampleDialog(pop['subject'] if pop else self.subject, line,
+                               pop, existing_note=note, parent=self,
+                               error=err)
+        self._draw_dialog = dlg
+        if self._exec_dialog(dlg) != QtWidgets.QDialog.Accepted or pop is None:
+            return
+        size, seed = dlg.size_spin.value(), dlg.seed_spin.value()
+        before = {d['sample_id'] for d in designs}
+        try:
+            sid = _rsm.draw_review_sample(self.db.conn, scope=scope,
+                                          n_total=size, seed=seed)
+        except ValueError as e:
+            self.status_bar.showMessage(f"Sample not drawn: {e}")
+            return
+        design = next(d for d in _sr.samples_for_scope(self.db.conn, scope)
+                      if d['sample_id'] == sid)
+        self._load_sample(design)
+        self._sample['scope'] = scope
+        n = len(self._sample['rows'])
+        groups = len({(r['region'], r['stage'])
+                      for r in self._sample['rows'].values()})
+        self._start_sample()
+        self.status_bar.showMessage(
+            f"Drew {n} events across {groups} region × stage groups "
+            f"(seed {seed})." if sid not in before else
+            f"This size and seed give the sample drawn on "
+            f"{str(design['drawn_at'])[:10]}; reopened it.")
+
+    def _open_report(self):
+        if self.db is None:
+            return
+        if self._sample is None:
+            self._refresh_sample_bar()
+        if self._sample is None:
+            self.status_bar.showMessage('No review sample for this run yet.')
+            return
+        src = _ReportSource(self)
+        dlg = PrecisionReportDialog(src, self)
+        dlg.eventRequested.connect(self._on_report_event)
+        self._report = dlg
+        dlg.show()
+        return dlg
+
+    def _refresh_report(self):
+        dlg = getattr(self, '_report', None)
+        if dlg is not None and dlg.isVisible():
+            dlg.refresh()
+
+    def _on_report_event(self, uuid):
+        if self._sample and uuid in self._sample['rows']:
+            self.tabs.setCurrentIndex(1)
+            self._goto_sample_event(uuid, move_cursor=False)
+
+    def _on_bar_show_others(self, on):
+        if self.act_show_others.isChecked() != bool(on):
+            self.act_show_others.setChecked(bool(on))
+        if self.sample_bar.others_chk.isChecked() != \
+                self.act_show_others.isChecked():
+            self.sample_bar.others_chk.blockSignals(True)
+            self.sample_bar.others_chk.setChecked(
+                self.act_show_others.isChecked())
+            self.sample_bar.others_chk.blockSignals(False)
+
     # ---- navigation --------------------------------------------------------
     def _nav_unreviewed(self, step):
         self._disarm(cancel_message=False)
+        if self._sample_active:
+            self._sample_nav(step)
+            return
         ep = self.epochs_panel
         u = ep.next_unreviewed() if step > 0 else ep.prev_unreviewed()
         if ep.last_nav == 'wrapped':

@@ -10,6 +10,9 @@ import json
 import sqlite3
 import uuid as _uuid
 
+#: Namespace of the fixture's event uuids (fixed, so a seeded run repeats).
+_FIXTURE_NS = _uuid.UUID('2b1f0e6c-5d4a-4c3b-9a8f-7e6d5c4b3a29')
+
 import numpy as np
 
 BASE_EVENTS_DDL = """
@@ -124,7 +127,10 @@ def make_rows(channel, n, run_id, rng, *, event_type='spindle',
         else:
             fig = (None,) * 14
         s = float(starts[i])
-        rows.append((str(_uuid.uuid4()), event_type, channel, s,
+        # deterministic: uuid5 of a number from the caller's seeded rng
+        uid = str(_uuid.uuid5(_FIXTURE_NS, f"{channel}|{run_id}|{i}|"
+                                           f"{int(rng.integers(2 ** 62))}"))
+        rows.append((uid, event_type, channel, s,
                      s + float(dur[i]), float(dur[i]), '+'.join(stages),
                      method, band[0], band[1], -20.0, 40.0, 60.0, run_id,
                      str(stage[i])) + fig + (9.8, 5.16, None, None, None))

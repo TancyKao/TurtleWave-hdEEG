@@ -61,7 +61,20 @@ MINUS = '−'
 
 
 def decision_word(decision, reason=None):
-    """``not reviewed`` / ``accepted`` / ``rejected (artefact)`` / ``unsure``."""
+    """``not reviewed`` / ``accepted`` / ``rejected (artefact)`` / ``unsure``.
+
+    Parameters
+    ----------
+    decision : str or None
+        ``'accept'``, ``'reject'``, ``'unsure'`` or empty.
+    reason : str or None, optional
+        Stored reason token, shown in brackets. Default ``None``.
+
+    Returns
+    -------
+    str
+        The status-line word.
+    """
     if not decision:
         return 'not reviewed'
     word = DECISION_PAST.get(decision, str(decision))
@@ -83,7 +96,18 @@ def _finite(v):
 
 
 def fmt_uv(v):
-    """µV: one decimal when |v| < 100, integer otherwise, U+2212 minus."""
+    """µV: one decimal when |v| < 100, integer otherwise, U+2212 minus.
+
+    Parameters
+    ----------
+    v : float or None
+        Amplitude in microvolts.
+
+    Returns
+    -------
+    str
+        Formatted value, or ``'—'`` when missing or not finite.
+    """
     f = _finite(v)
     if f is None:
         return '—'
@@ -92,6 +116,20 @@ def fmt_uv(v):
 
 
 def fmt_num(v, nd=2):
+    """A number with a fixed number of decimals and a U+2212 minus.
+
+    Parameters
+    ----------
+    v : float or None
+        The value.
+    nd : int, optional
+        Decimals. Default 2.
+
+    Returns
+    -------
+    str
+        Formatted value, or ``'—'`` when missing or not finite.
+    """
     f = _finite(v)
     if f is None:
         return '—'
@@ -99,7 +137,18 @@ def fmt_num(v, nd=2):
 
 
 def fmt_hms1(seconds):
-    """``HH:MM:SS.s`` of recording time."""
+    """``HH:MM:SS.s`` of recording time.
+
+    Parameters
+    ----------
+    seconds : float or None
+        Seconds from recording start.
+
+    Returns
+    -------
+    str
+        ``HH:MM:SS.s``, or ``'—'`` when missing.
+    """
     f = _finite(seconds)
     if f is None:
         return '—'
@@ -109,7 +158,20 @@ def fmt_hms1(seconds):
 
 
 def fmt_when(iso, today=None):
-    """``HH:MM`` today, else ``YYYY-MM-DD HH:MM``."""
+    """``HH:MM`` today, else ``YYYY-MM-DD HH:MM``.
+
+    Parameters
+    ----------
+    iso : str or None
+        ISO 8601 timestamp.
+    today : datetime.date or None, optional
+        The date treated as today. Default the current date.
+
+    Returns
+    -------
+    str
+        The formatted time, or ``'—'`` when ``iso`` is empty.
+    """
     if not iso:
         return '—'
     try:
@@ -148,8 +210,9 @@ _RATIO_METHODS_FALLBACK = ('Moelle2011', 'Ferrarelli2007', 'Nir2011',
                            'Massimini2004', 'AASM/Massimini2004')
 
 NOT_RECORDED_RUN = ('Event checks are not recorded for this run (detected '
-                    'with 4.5 or earlier). Re-detect with 4.6, or run the '
-                    'event-figures backfill example, to add them.')
+                    'with 4.5 or earlier). Figures are stored by detection '
+                    'runs made with 4.6 or later; re-detect this run to get '
+                    'them.')
 THRESHOLD_NOT_RECORDED = ('Threshold not recorded for this run (detected '
                           'with 4.5 or earlier)')
 THRESHOLD_NOT_RECORDED_TIP = ('Re-run detection with TurtleWave 4.6 or later '
@@ -159,7 +222,18 @@ TOO_FEW_TIP = 'Too few events on this channel to judge (n = {n}).'
 
 
 def method_has_ratio(method):
-    """Whether :data:`THRESHOLD_UNITS` allows an amp/threshold ratio."""
+    """Whether :data:`THRESHOLD_UNITS` allows an amp/threshold ratio.
+
+    Parameters
+    ----------
+    method : str
+        Detection method name.
+
+    Returns
+    -------
+    bool
+        True when at least one threshold of the method allows a ratio.
+    """
     try:
         from turtlewave_hdEEG.extensions import THRESHOLD_UNITS
     except ImportError:
@@ -169,7 +243,18 @@ def method_has_ratio(method):
 
 
 def no_ratio_note(method):
-    """Tooltip for a ``—`` amp/thr cell on a 4.6 run of ``method``."""
+    """Tooltip for a ``—`` amp/thr cell on a 4.6 run of ``method``.
+
+    Parameters
+    ----------
+    method : str
+        Detection method name.
+
+    Returns
+    -------
+    str
+        The reason no amp/threshold ratio is shown.
+    """
     m = str(method)
     if m == 'CIRUS':
         return 'Not available for CIRUS: the detector does not return a threshold.'
@@ -188,6 +273,14 @@ def pool_population(summary, medians=None):
     per-stage medians, so they come from ``medians`` (``channel,
     med_amp_ratio, med_thresh_ratio``, computed over the channel's events);
     without it they fall back to the stage median of the largest stage.
+
+    Parameters
+    ----------
+    summary : pandas.DataFrame or None
+        Output of ``dbwrite.event_population_summary``.
+    medians : pandas.DataFrame or None, optional
+        ``channel, med_amp_ratio, med_thresh_ratio`` over each channel's events.
+        Default ``None``.
 
     Returns
     -------
@@ -266,6 +359,17 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
     for that column (shown ``—``) and no flag. ``pct_low_prom`` is spindle
     only; ``med_thresh_ratio`` only when the method allows a ratio.
 
+    Parameters
+    ----------
+    pop : pandas.DataFrame
+        Output of :func:`pool_population`.
+    hard_z, soft_z : float, optional
+        Robust-z limits of a hard and a soft flag (defaults 3.5 and 2.0).
+    event_type : str, optional
+        ``'spindle'`` keeps the low-prominence column. Default ``'spindle'``.
+    ratio_allowed : bool, optional
+        False when the method allows no amp/threshold ratio. Default True.
+
     Returns
     -------
     (pandas.DataFrame, dict)
@@ -309,7 +413,20 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
 
 
 def fmt_check(col, v):
-    """Cell text of one check column: ``34 %`` or ``1.8×``; ``—`` missing."""
+    """Cell text of one check column: ``34 %`` or ``1.8×``; ``—`` missing.
+
+    Parameters
+    ----------
+    col : str
+        A key of :data:`CHECK_COLUMNS`.
+    v : float or None
+        The value.
+
+    Returns
+    -------
+    str
+        The cell text.
+    """
     f = _finite(v)
     if f is None:
         return '—'
@@ -329,6 +446,17 @@ _PHRASE = {
 
 def dock_check_items(row, event_type, medians, limit=3):
     """Flagged phrases for the dock line, hard first then by z, at most 3.
+
+    Parameters
+    ----------
+    row : pandas.Series or dict
+        The channel's row from :func:`population_flags`.
+    event_type : str
+        Event type, for the plural in the phrase.
+    medians : dict
+        Montage median per check column.
+    limit : int, optional
+        Most items returned. Default 3.
 
     Returns
     -------
@@ -363,7 +491,22 @@ DOCK_HINT = ('Most events failing? Drop channel. Run band wrong for this site? '
 
 
 def dock_check_line(channel, items, recorded=True):
-    """Plain text of the dock line (the widget renders the same as links)."""
+    """Plain text of the dock line (the widget renders the same as links).
+
+    Parameters
+    ----------
+    channel : str
+        Channel name.
+    items : list of dict
+        Output of :func:`dock_check_items`.
+    recorded : bool, optional
+        False when the run stored no figures. Default True.
+
+    Returns
+    -------
+    str
+        The line text.
+    """
     if not recorded:
         return f"{channel}: event checks not recorded for this run"
     if not items:
@@ -372,7 +515,24 @@ def dock_check_line(channel, items, recorded=True):
 
 
 def filter_chip_text(col, event_type, n_shown, n_total, ratio=None):
-    """Epochs-tab chip text for a check filter."""
+    """Epochs-tab chip text for a check filter.
+
+    Parameters
+    ----------
+    col : str
+        A key of :data:`CHECK_COLUMNS`.
+    event_type : str
+        Event type, for the plural.
+    n_shown, n_total : int
+        Events failing the check, and events in the slice.
+    ratio : float or None, optional
+        The montage median for a ratio column. Default ``None``.
+
+    Returns
+    -------
+    str
+        The chip text, ending in ``✕``.
+    """
     ev = EVENT_PLURAL.get(event_type, event_type)
     if col == 'pct_off_band':
         head = f"Showing off-band {ev} only"
@@ -388,7 +548,22 @@ def filter_chip_text(col, event_type, n_shown, n_total, ratio=None):
 
 
 def failing_mask(df, col, ratio=None):
-    """Events of a drilled slice that fail check ``col`` (bool Series)."""
+    """Events of a drilled slice that fail check ``col`` (bool Series).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        The drilled channel's events, with the figure columns.
+    col : str
+        A key of :data:`CHECK_COLUMNS`.
+    ratio : float or None, optional
+        The montage median, for the two ratio columns. Default ``None``.
+
+    Returns
+    -------
+    pandas.Series
+        True for events that fail the check.
+    """
     def num(c):
         return (pd.to_numeric(df[c], errors='coerce') if c in df.columns
                 else pd.Series(np.nan, index=df.index))
@@ -404,7 +579,22 @@ def failing_mask(df, col, ratio=None):
 
 
 def header_tooltips(band=None, min_dur=None, n_no_peak=None):
-    """Header tooltips of the five check columns and ``checks``."""
+    """Header tooltips of the five check columns and ``checks``.
+
+    Parameters
+    ----------
+    band : tuple of float or None, optional
+        Run band, for the off-band tooltip.
+    min_dur : float or None, optional
+        Run minimum duration in seconds, for the at-floor tooltip.
+    n_no_peak : int or None, optional
+        Events with no spectral peak on the channel.
+
+    Returns
+    -------
+    dict
+        Tooltip text keyed by column.
+    """
     lo, hi = band if band else (None, None)
     btxt = f"{lo:g}–{hi:g} Hz" if lo is not None else 'run band'
     mtxt = f"{min_dur:g} s" if min_dur is not None else 'not recorded'
@@ -444,7 +634,21 @@ def header_tooltips(band=None, min_dur=None, n_no_peak=None):
 # ---------------------------------------------------------------------------
 
 def run_duration_bounds(run, method):
-    """``(min, max)`` duration bounds of ``method`` in a run, or None."""
+    """``(min, max)`` duration bounds of ``method`` in a run, or None.
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict with ``params``.
+    method : str
+        The event's method.
+
+    Returns
+    -------
+    tuple or None
+        ``(min, max)`` in seconds, either possibly ``None``, or ``None`` when the
+        run records no limits.
+    """
     params = (run or {}).get('params') or {}
     by = params.get('duration_by_method') or {}
     b = by.get(str(method)) if isinstance(by, dict) else None
@@ -461,7 +665,17 @@ def run_duration_bounds(run, method):
 
 
 def run_has_figures(run):
-    """True when the run stored 4.6 per-event figures."""
+    """True when the run stored 4.6 per-event figures.
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict.
+
+    Returns
+    -------
+    bool
+    """
     params = (run or {}).get('params') or {}
     return bool(params.get('event_figures'))
 
@@ -469,13 +683,33 @@ def run_has_figures(run):
 def run_figures_switched_off(run):
     """True for a 4.6 run detected with the figures turned off
     (``params_json['event_figures']`` present but ``None``), as opposed to a
-    run detected with 4.5 or earlier, which has no such key."""
+    run detected with 4.5 or earlier, which has no such key.
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict.
+
+    Returns
+    -------
+    bool
+    """
     params = (run or {}).get('params') or {}
     return 'event_figures' in params and not params.get('event_figures')
 
 
 def run_is_46(run):
-    """True when the run was detected with 4.6 or later."""
+    """True when the run was detected with 4.6 or later.
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict.
+
+    Returns
+    -------
+    bool
+    """
     params = (run or {}).get('params') or {}
     if 'event_figures' in params:
         return True
@@ -540,6 +774,15 @@ def run_stages(run):
     ``params_json['stages']`` when present, else the ``stages`` column, which
     holds a ``str(list)`` repr (``"['NREM2', 'NREM3']"``), a joint token
     (``'NREM2NREM3'``) or a single stage.
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict.
+
+    Returns
+    -------
+    list of str
     """
     params = (run or {}).get('params') or {}
     raw = params.get('stages') if params.get('stages') else (run or {}).get(
@@ -560,6 +803,15 @@ def run_ref_chan(run):
 
     ``params_json['ref_chan']`` when the key is present (``[]`` there means
     no re-reference), else the ``ref_chan`` column (a ``str(list)`` repr).
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict.
+
+    Returns
+    -------
+    list of str
     """
     params = (run or {}).get('params') or {}
     raw = params['ref_chan'] if 'ref_chan' in params else (run or {}).get(
@@ -598,7 +850,19 @@ def rereference(data, labels, target, ref):
 
 
 def run_label(run, run_id):
-    """``run 2026-09-14 (3f2a9c1)`` or ``run not recorded``."""
+    """``run 2026-09-14 (3f2a9c1)`` or ``run not recorded``.
+
+    Parameters
+    ----------
+    run : dict or None
+        ``get_run_info``-style dict.
+    run_id : str or None
+        The run id; its first 7 characters are shown.
+
+    Returns
+    -------
+    str
+    """
     if not run:
         return 'run not recorded'
     date = str(run.get('timestamp') or '')[:10] or 'date unknown'
@@ -619,8 +883,8 @@ FIGURES_OFF_FIG = ('not computed for this run (event figures were switched '
                    'off when it was detected)')
 FIGURES_FAILED_FIG = 'figures not computed for this channel'
 FIGURES_OFF_RUN = ('Event checks were switched off when this run was '
-                   'detected. Re-detect with event figures on, or run the '
-                   'event-figures backfill example, to add them.')
+                   'detected. Figures are stored by detection runs made with '
+                   'event figures on; re-detect this run to get them.')
 LOAD_EEG_NOTE = 'Load the EEG file to compute these figures for this older run.'
 FIGURE_KEYS = ('halfwaves', 'cycles_nominal', 'peak_freq', 'amp_bg',
                'wave_freq')
@@ -660,6 +924,24 @@ def threshold_row(method, ev, thresholds, run_recorded, ratio=None):
     (:func:`run_is_46`): with no stored thresholds, a 4.5 run reads
     :data:`THRESHOLD_NOT_RECORDED`, a 4.6 run (figures on or off) the plain
     ``Threshold not recorded for this run``.
+
+    Parameters
+    ----------
+    method : str
+        The event's detection method.
+    ev : dict
+        The ``events`` row.
+    thresholds : pandas.DataFrame or dict or None
+        The run's thresholds for this event.
+    run_recorded : bool
+        Whether the run was detected with 4.6 or later.
+    ratio : float or None, optional
+        The stored ``thresh_ratio``. Default ``None``.
+
+    Returns
+    -------
+    dict
+        A row as built by :func:`build_event_rows`.
     """
     th = _thresholds_dict(thresholds)
     m = str(method)
@@ -1009,7 +1291,19 @@ def _peak_row(ev, fig, dur, lo, hi, near_splice, splice_txt, fig_tip):
 
 
 def has_stored_figures(ev, event_type):
-    """True when the row carries any 4.6 figure."""
+    """True when the row carries any 4.6 figure.
+
+    Parameters
+    ----------
+    ev : dict
+        The ``events`` row.
+    event_type : str
+        ``'spindle'`` or a slow-wave type.
+
+    Returns
+    -------
+    bool
+    """
     keys = (('halfwaves_above_bg', 'cycles_nominal', 'peak_freq_ap',
              'amp_ratio', 'near_splice', 'bg_n_windows')
             if event_type == 'spindle' else
@@ -1022,7 +1316,28 @@ def has_stored_figures(ev, event_type):
 # ---------------------------------------------------------------------------
 
 def neighbour_header(target, chosen, source, window_s, region=None, k=6):
-    """``NEIGHBOURS · PPOz + 6 nearest by electrode position · 4 s ...``."""
+    """``NEIGHBOURS · PPOz + 6 nearest by electrode position · 4 s ...``.
+
+    Parameters
+    ----------
+    target : str
+        The selected channel.
+    chosen : sequence of str
+        The neighbour channels shown.
+    source : str
+        How they were chosen: electrode positions, same region, or selected channels.
+    window_s : float
+        Window length in seconds.
+    region : str or None, optional
+        Region name for the same-region case. Default ``None``.
+    k : int, optional
+        Neighbours asked for. Default 6.
+
+    Returns
+    -------
+    str
+        The header text.
+    """
     n = len(chosen)
     win = f"{window_s:g} s around the event"
     if source == 'position':
@@ -1047,6 +1362,17 @@ def load_population(db_path, event_type, methods=None, freq_band=None):
     Opens its own read connection (safe to call from a worker thread). The
     run is the most recent ``detection_runs`` row among the runs whose events
     match the dashboard filters, the same rule ``get_run_rejections`` uses.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to ``neural_events.db``.
+    event_type : str
+        Event type in view.
+    methods : sequence of str or None, optional
+        Detection methods in view. Default ``None`` (all).
+    freq_band : tuple of float or None, optional
+        Band in view. Default ``None`` (all).
 
     Returns
     -------
