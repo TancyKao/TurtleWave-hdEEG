@@ -5,6 +5,7 @@ Optimized for high-density EEG event review with virtualized table and timeline
 """
 
 import sys
+import json
 import sqlite3
 import logging
 import pandas as pd
@@ -64,6 +65,60 @@ except ImportError:
         return 'other'
 
 logger = logging.getLogger('frontend.eeg_review_gui')
+
+
+# ============================================================================
+# Per-event review decisions
+#
+# Stored by the library in ``event_reviews`` (keyed by uuid and reviewer), so a
+# re-detection that rewrites ``events`` keeps them. Looked up lazily: the GUI
+# still opens a database with a library that predates the table, and then saves
+# no decisions rather than inventing a schema of its own.
+# ============================================================================
+
+#: Fallback vocabularies, used only when the library does not provide them.
+#: Must equal ``turtlewave_hdEEG.dbwrite.REVIEW_DECISIONS`` / ``REVIEW_REASONS``
+#: exactly (the library's CHECK constraint refuses anything else);
+#: tests/test_review_gui_event_decisions.py asserts it.
+REVIEW_DECISIONS = ('accept', 'reject', 'unsure')
+REVIEW_REASONS = ('artefact', 'eye-movement', 'not-in-raw', 'filter-ringing',
+                  'off-band', 'too-short', 'arousal', 'single-channel',
+                  'not-isolated', 'wrong-morphology', 'other')
+
+
+def _review_backend():
+    """``turtlewave_hdEEG.dbwrite`` when it can store event reviews, else None.
+
+    Only ``ensure_event_reviews_schema`` and ``store_event_review`` are
+    required; the vocabularies fall back to the copies above.
+    """
+    try:
+        from turtlewave_hdEEG import dbwrite as dw
+    except ImportError:
+        return None
+    if all(hasattr(dw, n) for n in ('ensure_event_reviews_schema',
+                                    'store_event_review')):
+        return dw
+    return None
+
+
+def _sqlite_columns(conn, table):
+    """Column names of ``table`` on ``conn``; empty when it does not exist."""
+    try:
+        return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    except sqlite3.Error:
+        return []
+
+
+def review_vocabulary():
+    """``(REVIEW_DECISIONS, REVIEW_REASONS)``: ``dbwrite``'s constants when
+    the library is importable, else the local copies above."""
+    try:
+        from turtlewave_hdEEG import dbwrite as dw
+    except ImportError:
+        dw = None
+    return (tuple(getattr(dw, 'REVIEW_DECISIONS', REVIEW_DECISIONS)),
+            tuple(getattr(dw, 'REVIEW_REASONS', REVIEW_REASONS)))
 
 
 # ============================================================================
@@ -256,9 +311,7 @@ class EventDatabase:
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_channel_starttime ON events(channel, start_time)",
             "CREATE INDEX IF NOT EXISTS idx_stage ON events(stage)",
-            "CREATE INDEX IF NOT EXISTS idx_reviewed ON events(reviewed)",
             "CREATE INDEX IF NOT EXISTS idx_eventtype_channel ON events(event_type, channel)",
-            "CREATE INDEX IF NOT EXISTS idx_review_decision ON events(review_decision)",
             "CREATE INDEX IF NOT EXISTS idx_method ON events(method)",
             "CREATE INDEX IF NOT EXISTS idx_freq_band ON events(freq_lower, freq_upper)",
         ]
@@ -271,26 +324,34 @@ class EventDatabase:
         
         self.conn.commit()
     
-    def create_review_tables(self):
-        """Create additional columns for review functionality"""
-        cursor = self.conn.cursor()
-        
-        # Only keep essential review columns
-        new_columns = [
-            ('reviewed', 'INTEGER DEFAULT 0'),
-            ('review_decision', 'TEXT'),
-            ('reviewer', 'TEXT'),
-            ('review_timestamp', 'TEXT'),
-            ('review_comments', 'TEXT'),
-        ]
-        
-        for col_name, col_def in new_columns:
-            try:
-                cursor.execute(f'ALTER TABLE events ADD COLUMN {col_name} {col_def}')
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+    @property
+    def has_review_backend(self):
+        """True when the library can store per-event decisions."""
+        return _review_backend() is not None
 
-        self.conn.commit()
+    def create_review_tables(self):
+        """Ensure the ``event_reviews`` table, and nothing else.
+
+        Decisions live in their own table keyed by ``(uuid, reviewer)``, so a
+        re-detection that replaces ``events`` rows cannot wipe them. The
+        ``events`` table is never altered here. Only the review-table step is
+        run: the full ``ensure_direct_write_schema`` would overwrite
+        ``db_meta.turtlewave_version`` from a GUI session. Without a library
+        that provides the table this is a no-op and decisions are not saved.
+        """
+        dw = _review_backend()
+        if dw is None:
+            return
+        try:
+            dw.ensure_event_reviews_schema(self.conn)
+            self.conn.commit()
+        except Exception as err:   # never block opening the database
+            logger.warning(f"Could not create the event_reviews table "
+                           f"({err}); review decisions will not be saved.")
+
+    def _table_columns(self, table):
+        """Column names of ``table``; empty when it does not exist."""
+        return _sqlite_columns(self.conn, table)
 
     # ------------------------------------------------------------------
     # QC-by-outlier-triage state (GUI-side only; the detection-output
@@ -469,14 +530,10 @@ class EventDatabase:
             before 4.4.0 had those two booleans and no way to exclude anything
             else.
         """
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute("PRAGMA table_info(detection_runs)")
-            columns = {r[1] for r in cursor.fetchall()}
-        except sqlite3.OperationalError:
-            return None
+        columns = set(_sqlite_columns(self.conn, 'detection_runs'))
         if not columns:
             return None
+        cursor = self.conn.cursor()
         has_types = 'reject_types' in columns
 
         where = []
@@ -517,6 +574,45 @@ class EventDatabase:
         return order_reject_types(
             (['Artefact'] if rj_a else []) + (['Arousal'] if rj_r else []))
 
+    def get_run_info(self, run_id):
+        """One ``detection_runs`` row as a dict, with its parameters parsed.
+
+        Parameters
+        ----------
+        run_id : str
+            The run an event row names in its ``run_id`` column. Two runs can
+            cover the same scope, so look up by the row's own run, never by
+            method alone.
+
+        Returns
+        -------
+        dict
+            Every stored column (``method``, ``stages``, ``event_type``, ...)
+            plus ``params``: ``params_json`` decoded to a dict (``{}`` when it
+            is absent or not valid JSON). Empty when ``run_id`` is missing,
+            unknown, or the database has no ``detection_runs`` table.
+        """
+        if run_id is None or (isinstance(run_id, float) and np.isnan(run_id)):
+            return {}
+        if not self._table_columns('detection_runs'):
+            return {}
+        try:
+            cur = self.conn.execute(
+                "SELECT * FROM detection_runs WHERE run_id = ?", (str(run_id),))
+            row = cur.fetchone()
+            names = [d[0] for d in cur.description]
+        except sqlite3.Error:
+            return {}
+        if row is None:
+            return {}
+        info = dict(zip(names, row))
+        try:
+            params = json.loads(info.get('params_json') or '{}')
+        except (TypeError, ValueError):
+            params = {}
+        info['params'] = params if isinstance(params, dict) else {}
+        return info
+
     def get_events(self, event_type=None, channels=None, stages=None,
                    reviewed_only=False, unreviewed_only=False, confidence_threshold=0.0,
                    methods=None, freq_band=None, columns=None):
@@ -526,8 +622,17 @@ class EventDatabase:
         instead of ``SELECT *`` — used by the QC/Epochs path, which only needs
         a handful of columns out of 23. WHERE clauses can still reference
         non-selected columns. Default None keeps ``SELECT *`` for the Events
-        tab, which needs the display columns.
+        tab, which needs the display columns. Requested columns the table
+        does not have (``run_id`` / ``epoch_stage`` on a database written
+        before the direct-write path) are left out rather than failing.
+
+        ``reviewed_only`` / ``unreviewed_only`` test for any row in
+        ``event_reviews`` (any reviewer). Without that table nothing is
+        reviewed.
         """
+        if columns:
+            have = set(self._table_columns('events'))
+            columns = [c for c in columns if c in have] if have else columns
         sel = "*" if not columns else ", ".join(columns)
         query = f"SELECT {sel} FROM events WHERE 1=1"
         params = []
@@ -585,11 +690,16 @@ class EventDatabase:
                 if freq_conditions:
                     query += f" AND ({' OR '.join(freq_conditions)})"
         
-        # Filter by review status
-        if reviewed_only:
-            query += " AND reviewed = 1"
-        elif unreviewed_only:
-            query += " AND (reviewed = 0 OR reviewed IS NULL)"
+        # Filter by review status (event_reviews, keyed by uuid)
+        if reviewed_only or unreviewed_only:
+            has_reviews = bool(self._table_columns('event_reviews'))
+            if reviewed_only:
+                query += (" AND EXISTS (SELECT 1 FROM event_reviews r "
+                          "WHERE r.uuid = events.uuid)"
+                          if has_reviews else " AND 0")
+            elif has_reviews:
+                query += (" AND NOT EXISTS (SELECT 1 FROM event_reviews r "
+                          "WHERE r.uuid = events.uuid)")
         
         # Confidence threshold
         if confidence_threshold > 0:
@@ -600,40 +710,107 @@ class EventDatabase:
         
         return pd.read_sql_query(query, self.conn, params=params)
     
-    def add_review(self, uuid, decision, reviewer="", comments=""):
-        """Add review decision for an event"""
-        cursor = self.conn.cursor()
-        timestamp = datetime.now().isoformat()
-        
-        cursor.execute('''
-            UPDATE events 
-            SET reviewed = 1, review_decision = ?, review_comments = ?, 
-                reviewer = ?, review_timestamp = ?
-            WHERE uuid = ?
-        ''', (decision, comments, reviewer, timestamp, uuid))
+    def add_review(self, uuid, decision, reviewer="", comments="", reason=None):
+        """Store one reviewer's decision on one event in ``event_reviews``.
+
+        A wrapper over ``turtlewave_hdEEG.dbwrite.store_event_review``; a
+        second call by the same reviewer replaces their earlier decision, a
+        different reviewer adds a row beside it.
+
+        Parameters
+        ----------
+        uuid : str
+            The event's ``events.uuid``.
+        decision : {'accept', 'reject', 'unsure'}
+        reviewer : str, optional
+        comments : str, optional
+            Free text, stored as the review's ``comment``.
+        reason : str or None, optional
+            One of ``REVIEW_REASONS``.
+
+        Returns
+        -------
+        bool
+            True when stored; False when the library has no review table
+            (nothing is written).
+        """
+        dw = _review_backend()
+        if dw is None:
+            return False
+        dw.store_event_review(self.conn, str(uuid), decision,
+                              reviewer or '', reason=reason,
+                              comment=comments or None)
         self.conn.commit()
-    
+        return True
+
+    def get_reviews_for(self, uuids, reviewer=None):
+        """Decisions on the given events.
+
+        Parameters
+        ----------
+        uuids : iterable of str
+        reviewer : str or None, optional
+            Only this reviewer's decisions. Default ``None``: any reviewer,
+            the most recent decision winning when several reviewed one event.
+
+        Returns
+        -------
+        dict
+            ``{uuid: (decision, reason, reviewer)}`` for the reviewed ones
+            only; empty without an ``event_reviews`` table.
+        """
+        ids = [str(u) for u in uuids if u is not None and u == u]
+        if not ids or not self._table_columns('event_reviews'):
+            return {}
+        out = {}
+        for k in range(0, len(ids), 900):     # SQLite variable limit
+            chunk = ids[k:k + 900]
+            sql = ("SELECT uuid, decision, reason, reviewer FROM event_reviews "
+                   f"WHERE uuid IN ({','.join('?' * len(chunk))})")
+            params = list(chunk)
+            if reviewer is not None:
+                sql += " AND reviewer = ?"
+                params.append(str(reviewer))
+            # oldest first, so the newest decision is the one kept;
+            # reviewed_at is to the second, so rowid (write order) breaks ties
+            sql += " ORDER BY reviewed_at, rowid"
+            try:
+                for u, dec, rsn, who in self.conn.execute(sql, params):
+                    out[u] = (dec, rsn, who)
+            except sqlite3.Error as err:
+                logger.warning(f"Could not read event_reviews ({err}).")
+                return {}
+        return out
+
     def get_review_stats(self):
-        """Get comprehensive review statistics"""
+        """Counts over ``event_reviews`` for events still in ``events``.
+
+        Returns
+        -------
+        dict
+            ``total`` events, ``reviewed`` events (any reviewer), and
+            ``<decision>_count`` = events with at least one such decision.
+        """
         cursor = self.conn.cursor()
         stats = {}
-        
         cursor.execute("SELECT COUNT(*) FROM events")
         stats['total'] = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM events WHERE reviewed = 1")
-        stats['reviewed'] = cursor.fetchone()[0]
-        
+        stats['reviewed'] = 0
+        if not self._table_columns('event_reviews'):
+            return stats
         cursor.execute("""
-            SELECT review_decision, COUNT(*) 
-            FROM events 
-            WHERE reviewed = 1 
-            GROUP BY review_decision
+            SELECT COUNT(DISTINCT r.uuid)
+            FROM event_reviews r JOIN events e ON e.uuid = r.uuid
+        """)
+        stats['reviewed'] = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT r.decision, COUNT(DISTINCT r.uuid)
+            FROM event_reviews r JOIN events e ON e.uuid = r.uuid
+            GROUP BY r.decision
         """)
         for decision, count in cursor.fetchall():
             if decision:
                 stats[f'{decision}_count'] = count
-        
         return stats
     
     def get_unique_methods(self, event_type=None):
@@ -665,9 +842,28 @@ class EventDatabase:
         return [(row[0], row[1]) for row in cursor.fetchall()]
     
     def export_reviewed_events(self, output_path):
-        """Export all reviewed events to CSV"""
-        query = "SELECT * FROM events WHERE reviewed = 1 ORDER BY channel, start_time"
+        """Write reviewed events to CSV, one row per (event, reviewer).
+
+        Every ``events`` column, then ``reviewer``, ``review_decision``,
+        ``review_reason``, ``review_comment``, ``reviewed_at``. Returns the
+        number of rows written (0, with a header-only file, without an
+        ``event_reviews`` table).
+        """
+        if not self._table_columns('event_reviews'):
+            df = pd.read_sql_query("SELECT * FROM events WHERE 0", self.conn)
+            df.to_csv(output_path, index=False)
+            return 0
+        query = """
+            SELECT e.*, r.reviewer AS reviewer, r.decision AS review_decision,
+                   r.reason AS review_reason, r.comment AS review_comment,
+                   r.reviewed_at AS reviewed_at
+            FROM events e JOIN event_reviews r ON r.uuid = e.uuid
+            ORDER BY e.channel, e.start_time, r.reviewer
+        """
         df = pd.read_sql_query(query, self.conn)
+        # an old database still carries the GUI's former review columns on
+        # events; the event_reviews values above are the ones that count
+        df = df.loc[:, ~df.columns.duplicated(keep='last')]
         df.to_csv(output_path, index=False)
         return len(df)
 
@@ -2666,6 +2862,14 @@ QC_EVENT_COLS = ['channel', 'start_time', 'end_time', 'stage',
                  'min_amp', 'max_amp', 'peak2peak_amp',
                  'freq_lower', 'freq_upper']
 
+# The drilled channel's slice adds the columns that identify the event a
+# reviewer selects and the run whose parameters judge it. Fetched for one
+# channel at drill time (~1.5k rows, a few ms) instead of montage-wide, where
+# they cost ~+300 ms and ~+100 MB per refresh on a 372k-event subject.
+# get_events drops any of these an older database lacks.
+QC_DRILL_COLS = QC_EVENT_COLS + ['uuid', 'duration', 'run_id', 'method',
+                                 'epoch_stage']
+
 
 def _band_for(df_slice, event_type):
     """Source the filtered-trace passband from the EVENT ROWS themselves
@@ -2788,6 +2992,47 @@ def _compute_epoch_outliers(df_slice, hypno=None, epoch_len=DEFAULT_EPOCH_S,
     return g[cols]
 
 
+#: Band / ticker colour of a reviewed event, by decision. Reject is magenta,
+#: not red, so it never reads as the outlier flag.
+DECISION_COLOR = {'accept': '#69b35d', 'reject': '#c45bb0',
+                  'unsure': '#e0a334'}
+
+
+def _event_frame(df_slice, amp_thr, amp_col):
+    """Per-drill event frame for bands, picking and unreviewed paging.
+
+    Columns ``_start``, ``_end``, ``_is_out`` (amp above ``amp_thr``) and
+    ``uuid`` (str, or None when the database has none), sorted by start time
+    with a 0..n-1 index, so position in the frame is start-time order. Built
+    once per drill; ``_end`` falls back to start + duration, then start +
+    0.5 s.
+    """
+    cols = ['_start', '_end', '_is_out', 'uuid']
+    if df_slice is None or len(df_slice) == 0 \
+            or 'start_time' not in df_slice.columns:
+        return pd.DataFrame(columns=cols)
+    st = pd.to_numeric(df_slice['start_time'], errors='coerce')
+    if 'end_time' in df_slice.columns:
+        en = pd.to_numeric(df_slice['end_time'], errors='coerce')
+    elif 'duration' in df_slice.columns:
+        en = st + pd.to_numeric(df_slice['duration'], errors='coerce')
+    else:
+        en = st + 0.5
+    en = en.fillna(st + 0.5)
+    amp = (pd.to_numeric(df_slice[amp_col], errors='coerce')
+           if amp_col in df_slice.columns
+           else pd.Series(np.nan, index=df_slice.index))
+    uu = (df_slice['uuid'].map(lambda u: None if u is None or u != u
+                               else str(u))
+          if 'uuid' in df_slice.columns
+          else pd.Series(None, index=df_slice.index, dtype=object))
+    out = pd.DataFrame({'_start': st, '_end': en,
+                        '_is_out': (amp > amp_thr).fillna(False),
+                        'uuid': uu.astype(object)})
+    out = out.dropna(subset=['_start'])
+    return out.sort_values('_start', kind='mergesort').reset_index(drop=True)
+
+
 class _EpochStripViewBox(pg.ViewBox):
     """ViewBox that captures Shift+drag and emits a snapped epoch range.
     Plain click is left to scene().sigMouseClicked on the parent plot.
@@ -2849,8 +3094,16 @@ class EpochsPanel(QWidget):
     headless-gate compatibility but is hidden in the UI (replaced by the
     strip's epoch context).
 
+    Every event in the window is a band on both traces (grey, red outlier,
+    decision colour once reviewed). Clicking the raw trace or the ticker
+    selects the event there (:attr:`eventSelected`); selection never moves
+    the artefact brush.
+
     Keys: Left/Right step ±1 epoch (via button shortcuts); P/N jump to
-    previous/next epoch with outliers; Esc clears any strip-range selection.
+    previous/next epoch with outliers; Esc clears any strip-range selection;
+    A/R/U request accept/reject/unsure on the selected event
+    (:attr:`decisionRequested`); ]/[ select the next/previous unreviewed
+    event.
     """
 
     dropChannelRequested = pyqtSignal(str)
@@ -2858,6 +3111,13 @@ class EpochsPanel(QWidget):
     markArtefactRequested = pyqtSignal(str, float, float)   # ch, t0, t1
     unmarkArtefactRequested = pyqtSignal(int)                # interval id
     requestChannel = pyqtSignal(str)                         # re-drill ch
+    eventSelected = pyqtSignal(str)                          # event uuid
+    decisionRequested = pyqtSignal(str)        # 'accept' | 'reject' | 'unsure'
+
+    #: A click this close (s) to an event that does not contain it selects it.
+    PICK_TOLERANCE_S = 0.25
+    _DECISION_KEYS = {Qt.Key_A: 'accept', Qt.Key_R: 'reject',
+                      Qt.Key_U: 'unsure'}
 
     # Kept for callers that read it: the synthetic-grid length only. Staging
     # quantities come from the epoch table (index_at / span), never from this.
@@ -2882,6 +3142,12 @@ class EpochsPanel(QWidget):
         self._amp_n = 0               # n events behind the threshold
         self._band = DEFAULT_BAND.get('slow_wave', (0.5, 2.0))
         self._band_label = ''         # band source, shown on filt header
+        # per-event selection + decisions (see _event_frame / set_reviews)
+        self._ev = _event_frame(None, float('inf'), 'max_amp')
+        self._reviews = {}            # uuid -> (decision, reason, reviewer)
+        self._selected_uuid = None
+        self._event_items = []        # bands on raw/filt, redrawn in place
+        self._ticker_items = []
         # injected by the main window:
         self.read_window = None   # (ch, t0, t1) -> (t, data, sfreq) | None
         lay = QVBoxLayout(self)
@@ -3029,6 +3295,11 @@ class EpochsPanel(QWidget):
         self.filt_plot.setXLink(self.raw_plot)
         self.ticker.setXLink(self.raw_plot)
         self._sync_axis_widths()   # shared left-axis column (re-asserted per epoch)
+        # click an event band (raw trace) or a ticker bar to select it
+        self.raw_plot.scene().sigMouseClicked.connect(
+            lambda ev: self._on_trace_click(ev, self.raw_plot))
+        self.ticker.scene().sigMouseClicked.connect(
+            lambda ev: self._on_trace_click(ev, self.ticker))
         # brush region — lives on raw_plot, draggable even with viewbox
         # mouse pan/zoom disabled (LinearRegionItem handles its own mouse).
         # Outline-only until dragged: transparent fill by default, fill
@@ -3114,15 +3385,20 @@ class EpochsPanel(QWidget):
 
     # ---- population ---------------------------------------------------
     def set_channel(self, channel, df_slice, all_events, event_type=None,
-                     hypno=None, trec=None, marked=None, epochs=None):
+                     hypno=None, trec=None, marked=None, epochs=None,
+                     reviews=None):
         """Drill into ``channel``.
 
         ``epochs`` is the scored-epoch table (an :class:`EpochTable` or a
         list of ``(start_s, end_s, stage)``); pass it for any annotation
         file. ``hypno`` (a bare stage list, one 30 s epoch each) is kept for
         older callers; with neither, a synthetic 30 s grid over ``trec`` is
-        used.
+        used. ``reviews`` is ``{uuid: (decision, reason, reviewer)}`` for
+        this channel's events (see :meth:`set_reviews`). Any selected event
+        is cleared.
         """
+        self._reviews = dict(reviews or {})
+        self._selected_uuid = None
         self._channel = channel
         self._all_events = all_events
         self._df = df_slice
@@ -3148,6 +3424,7 @@ class EpochsPanel(QWidget):
                if df_slice is not None and self._amp_col in df_slice.columns
                else pd.Series(dtype=float))
         self._amp_thr, self._amp_n = _mad_threshold(amp)
+        self._ev = _event_frame(df_slice, self._amp_thr, self._amp_col)
         # filtered-trace passband, sourced from the event rows themselves
         lo, hi, src = _band_for(df_slice, self._event_type)
         self._band = (lo, hi)
@@ -3385,7 +3662,7 @@ class EpochsPanel(QWidget):
             self.trace_note.setText(
                 "load an EEG file to enable the signal trace")
         self._draw_window_overlays()
-        self._draw_trace_outliers(t0, t1)
+        self._draw_trace_events(t0, t1)
         self._draw_ticker(t0, t1)
 
     # ---- epoch-event utilities ----------------------------------------
@@ -3421,42 +3698,216 @@ class EpochsPanel(QWidget):
             sub['_end'] = sub['_start'] + 0.5
         return sub
 
-    def _draw_trace_outliers(self, t0, t1):
-        """Red translucent overlay on raw + filt for each outlier event in
-        the active epoch. raw/filt are cleared by _goto_epoch, so just add."""
-        sub = self._epoch_events(t0, t1)
-        if sub.empty:
+    def _window_events(self, t0, t1):
+        """Rows of the per-drill event frame overlapping ``[t0, t1]``."""
+        ev = self._ev
+        if ev is None or ev.empty:
+            return ev
+        return ev[(ev['_start'] < t1) & (ev['_end'] > t0)]
+
+    def _band_style(self, uuid, is_out):
+        """``(brush, pen, z)`` of one event band. A decision outranks the
+        outlier flag (it is the reviewer's own answer); the selected event
+        keeps its fill and gains an opaque accent edge on top."""
+        dec = self._reviews.get(uuid) if uuid is not None else None
+        if dec and dec[0] in DECISION_COLOR:
+            c = QtGui.QColor(DECISION_COLOR[dec[0]])
+            rgb = (c.red(), c.green(), c.blue())
+            brush, pen, z = (*rgb, 55), pg.mkPen(*rgb, 170), 4
+        elif is_out:
+            brush, pen, z = (224, 83, 63, 46), pg.mkPen(224, 83, 63, 140), 4
+        else:
+            brush, pen, z = (136, 136, 136, 34), pg.mkPen(136, 136, 136, 110), 3
+        if uuid is not None and uuid == self._selected_uuid:
+            pen, z = pg.mkPen(THEME['accent'], width=2), 8
+        return brush, pen, z
+
+    def _draw_trace_events(self, t0, t1):
+        """One band per event in the window, on both raw and filtered traces:
+        grey for ordinary events, red for amplitude outliers, tinted by
+        decision once reviewed, accent-edged when selected. Replaces the
+        previous bands in place, so selecting or deciding redraws only these
+        items, never the traces or the artefact brush."""
+        for p, it in self._event_items:
+            p.removeItem(it)
+        self._event_items = []
+        sub = self._window_events(t0, t1)
+        if sub is None or sub.empty:
             return
-        for _, r in sub[sub['_is_out']].iterrows():
-            s, e = float(r['_start']), float(r['_end'])
+        for s, e, out, u in zip(sub['_start'].to_numpy(dtype=float),
+                                sub['_end'].to_numpy(dtype=float),
+                                sub['_is_out'].to_numpy(dtype=bool),
+                                sub['uuid'].tolist()):
+            brush, pen, z = self._band_style(u, out)
             for p in (self.raw_plot, self.filt_plot):
-                p.addItem(pg.LinearRegionItem(
-                    values=[s, e],
-                    brush=(224, 83, 63, 46),
-                    pen=pg.mkPen(224, 83, 63, 140),
-                    movable=False))
+                it = pg.LinearRegionItem(values=[s, e], brush=brush, pen=pen,
+                                         movable=False)
+                it.setZValue(z)
+                p.addItem(it)
+                self._event_items.append((p, it))
 
     def _draw_ticker(self, t0, t1):
         # Pure visual indicator: grey bars = regular events, red (taller) =
-        # outliers. No text — counts live in the epoch header line; the
-        # outlier rule lives in the strip header at the top of the tab.
-        sub = self._epoch_events(t0, t1)
-        if sub.empty:
+        # outliers, decision colour once reviewed. No text — counts live in
+        # the epoch header line; the outlier rule lives in the strip header.
+        # Same event set as the bands (_window_events): an event straddling
+        # in from the previous epoch gets its bar pinned at the window edge.
+        for it in self._ticker_items:
+            self.ticker.removeItem(it)
+        self._ticker_items = []
+        sub = self._window_events(t0, t1)
+        if sub is None or sub.empty:
             return
-        reg = sub[~sub['_is_out']]
-        out = sub[sub['_is_out']]
+        uu = sub['uuid']
+        dec = uu.map(lambda u: (self._reviews.get(u) or (None,))[0]
+                     if u is not None and u == u else None)
+        reviewed = dec.notna()
+        layers = [(sub[~sub['_is_out'] & ~reviewed], 0.4, 9, THEME['text_3']),
+                  (sub[sub['_is_out'] & ~reviewed], 0.6, 14, THEME['bad'])]
+        for d, col in DECISION_COLOR.items():
+            m = dec == d
+            layers.append((sub[m & ~sub['_is_out']], 0.4, 9, col))
+            layers.append((sub[m & sub['_is_out']], 0.6, 14, col))
         # Visible widths: 0.4 s reg / 0.6 s outlier — narrower than the
         # smallest spindle (~0.5 s) but reliably visible at 1920 px.
-        if len(reg):
-            x = reg['_start'].to_numpy(dtype=float)
-            self.ticker.addItem(pg.BarGraphItem(
-                x=x, width=0.4, y0=0, height=9,
-                brush=THEME['text_3'], pen=None))
-        if len(out):
-            x = out['_start'].to_numpy(dtype=float)
-            self.ticker.addItem(pg.BarGraphItem(
-                x=x, width=0.6, y0=0, height=14,
-                brush=THEME['bad'], pen=None))
+        for rows, w, h, brush in layers:
+            if len(rows):
+                x = np.maximum(rows['_start'].to_numpy(dtype=float),
+                               t0 + w / 2.0)
+                it = pg.BarGraphItem(x=x, width=w, y0=0, height=h,
+                                     brush=brush, pen=None)
+                self.ticker.addItem(it)
+                self._ticker_items.append(it)
+        sel = sub[uu == self._selected_uuid] if self._selected_uuid else sub[:0]
+        if len(sel):
+            it = pg.BarGraphItem(x=np.maximum(
+                                     sel['_start'].to_numpy(dtype=float),
+                                     t0 + 0.3),
+                                 width=0.6, y0=0, height=16, brush=None,
+                                 pen=pg.mkPen(THEME['accent'], width=2))
+            it.setZValue(5)
+            self.ticker.addItem(it)
+            self._ticker_items.append(it)
+
+    # ---- event selection + decisions ----------------------------------
+    def set_reviews(self, reviews):
+        """Replace the decision map ``{uuid: (decision, reason, reviewer)}``
+        and recolour the current window's bands and ticker."""
+        self._reviews = dict(reviews or {})
+        self._redraw_event_layers()
+
+    def _redraw_event_layers(self):
+        t0, t1 = self.span(self._epoch)
+        self._draw_trace_events(t0, t1)
+        self._draw_ticker(t0, t1)
+
+    def selected_event(self):
+        """The selected event's row of the drilled slice, or ``None``."""
+        if self._selected_uuid is None or self._df is None \
+                or 'uuid' not in self._df.columns:
+            return None
+        hit = self._df[self._df['uuid'] == self._selected_uuid]
+        return hit.iloc[0] if len(hit) else None
+
+    def _event_at(self, x):
+        """uuid of the event containing time ``x`` in the current window
+        (the one whose centre is nearest when several overlap), else the
+        nearest one within :attr:`PICK_TOLERANCE_S`; ``None`` otherwise."""
+        t0, t1 = self.span(self._epoch)
+        sub = self._window_events(t0, t1)
+        if sub is None or sub.empty:
+            return None
+        sub = sub[sub['uuid'].notna()]
+        if sub.empty:
+            return None
+        s = sub['_start'].to_numpy(dtype=float)
+        e = sub['_end'].to_numpy(dtype=float)
+        inside = (s <= x) & (x <= e)
+        if inside.any():
+            ix = np.flatnonzero(inside)
+            best = ix[np.argmin(np.abs((s[ix] + e[ix]) / 2.0 - x))]
+            return str(sub['uuid'].iloc[best])
+        gap = np.minimum(np.abs(s - x), np.abs(e - x))
+        best = int(np.argmin(gap))
+        if gap[best] <= self.PICK_TOLERANCE_S:
+            return str(sub['uuid'].iloc[best])
+        return None
+
+    def _on_trace_click(self, ev, plot):
+        """Left click on the raw trace or the ticker selects an event."""
+        try:
+            if ev.button() != Qt.LeftButton:
+                return
+            vb = plot.getPlotItem().vb
+            pos = ev.scenePos()
+            if not vb.sceneBoundingRect().contains(pos):
+                return
+            x = float(vb.mapSceneToView(pos).x())
+        except Exception:
+            return
+        uuid = self._event_at(x)
+        if uuid is not None:
+            self.select_event(uuid)
+        self.setFocus()      # so A/R/U and ]/[ reach keyPressEvent
+
+    def select_event(self, uuid, emit=True):
+        """Select the event ``uuid`` of the drilled channel.
+
+        Pages to the event's epoch only when it is not in the current
+        window, so selecting inside the window never moves the artefact
+        brush. Emits :attr:`eventSelected` unless ``emit`` is False.
+        Returns True when the event exists.
+        """
+        ev = self._ev
+        if uuid is None or ev is None or ev.empty:
+            return False
+        hit = ev[ev['uuid'] == str(uuid)]
+        if hit.empty:
+            return False
+        self._selected_uuid = str(uuid)
+        s, e = float(hit['_start'].iloc[0]), float(hit['_end'].iloc[0])
+        t0, t1 = self.span(self._epoch)
+        if s < t1 and e > t0:
+            self._redraw_event_layers()
+        else:
+            self._goto_epoch(self.index_at(s))
+        if emit:
+            self.eventSelected.emit(self._selected_uuid)
+        return True
+
+    def _step_unreviewed(self, step):
+        """Select the next (``step`` > 0) or previous unreviewed event in
+        start-time order, from the selected event when it is on screen,
+        else from the current epoch's start. Returns its uuid or None."""
+        ev = self._ev
+        if ev is None or ev.empty:
+            return None
+        ok = ev['uuid'].notna() & ~ev['uuid'].isin(list(self._reviews))
+        t0, t1 = self.span(self._epoch)
+        pos = None
+        if self._selected_uuid is not None:
+            hit = ev.index[(ev['uuid'] == self._selected_uuid)
+                           & (ev['_start'] < t1) & (ev['_end'] > t0)]
+            pos = int(hit[0]) if len(hit) else None
+        if pos is not None:
+            cand = ev.index[ok & ((ev.index > pos) if step > 0
+                                  else (ev.index < pos))]
+        else:
+            cand = ev.index[ok & ((ev['_start'] >= t0) if step > 0
+                                  else (ev['_start'] < t0))]
+        if not len(cand):
+            return None
+        u = str(ev.at[cand[0] if step > 0 else cand[-1], 'uuid'])
+        self.select_event(u)
+        return u
+
+    def next_unreviewed(self):
+        """Select the next unreviewed event (``]``)."""
+        return self._step_unreviewed(+1)
+
+    def prev_unreviewed(self):
+        """Select the previous unreviewed event (``[``)."""
+        return self._step_unreviewed(-1)
 
     def _sync_axis_widths(self):
         """Pin a common left-axis column width on ticker + raw + filt so their
@@ -3494,13 +3945,25 @@ class EpochsPanel(QWidget):
     def keyPressEvent(self, ev):
         # Left/Right are wired as button shortcuts; P/N for outlier hopping;
         # Esc clears any strip-range selection.
+        # A/R/U ask for a decision on the selected event; ]/[ walk the
+        # unreviewed events.
         k = ev.key()
+        plain = not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier
+                                       | Qt.MetaModifier))
         if k == Qt.Key_P:
             self._prev_outlier(); return
         if k == Qt.Key_N:
             self._next_outlier(); return
         if k == Qt.Key_Escape:
             self._clear_strip_range(); return
+        if plain and k in self._DECISION_KEYS:
+            if self._selected_uuid is not None:
+                self.decisionRequested.emit(self._DECISION_KEYS[k])
+            return
+        if plain and k == Qt.Key_BracketRight:
+            self.next_unreviewed(); return
+        if plain and k == Qt.Key_BracketLeft:
+            self.prev_unreviewed(); return
         super().keyPressEvent(ev)
 
     # ---- strip shift-drag range ---------------------------------------
@@ -4026,6 +4489,7 @@ class EventReviewGUI(QMainWindow):
         self.eeg_data = None
         self.annotations = None
         self.reviewer_name = ""   # provenance field; intentionally unset
+        self.selected_event_uuid = None   # event picked on the Epochs trace
         self.recording_start_time = None
 
         # Chrome / QC state
@@ -4129,6 +4593,12 @@ class EventReviewGUI(QMainWindow):
         a = QAction('Flag selected channel for re-detect (F)', self)
         a.triggered.connect(self._flag_selected_qc_row)
         m_edit.addAction(a)
+
+        m_review = mb.addMenu('&Review')
+        a = QAction('Reviewer name…', self)
+        a.triggered.connect(self._prompt_reviewer_name)
+        m_review.addAction(a)
+        self.act_reviewer_name = a
 
         m_view = mb.addMenu('&View')
         a = QAction('Outlier threshold…', self)
@@ -4306,6 +4776,9 @@ class EventReviewGUI(QMainWindow):
         self.epochs_panel.unmarkArtefactRequested.connect(
             self._unmark_artefact)
         self.epochs_panel.requestChannel.connect(self.on_qc_drill)
+        self.epochs_panel.eventSelected.connect(self._on_event_selected)
+        self.epochs_panel.decisionRequested.connect(
+            self._on_decision_requested)
         self.epochs_panel.read_window = self._read_eeg_window
         self._review_qc_sidecar = None
 
@@ -4907,16 +5380,118 @@ class EventReviewGUI(QMainWindow):
         except Exception:
             pass
 
+    def _drill_slice(self, ch, df=None):
+        """Events of channel ``ch`` for the Epochs panel, with
+        :data:`QC_DRILL_COLS`, under the dashboard's current event type,
+        method and band filters. Falls back to the montage-wide QC frame
+        (no uuid, so no selection) when there is no database or the read
+        fails."""
+        if self.db is not None:
+            try:
+                methods, freq_band = self._current_method_freq()
+                return self.db.get_events(
+                    event_type=self.qc_widget.current_event_type(),
+                    channels=[str(ch)], methods=methods,
+                    freq_band=freq_band, columns=QC_DRILL_COLS)
+            except Exception as err:
+                logger.warning(f"Could not read the events of {ch} ({err}); "
+                               f"event selection is unavailable.")
+        if df is not None and len(df):
+            return df[df['channel'] == ch]
+        return None
+
     def on_qc_drill(self, ch, switch_tab=True):
         df = getattr(self, '_qc_events_df', None)
-        sl = df[df['channel'] == ch] if df is not None and len(df) else None
+        sl = self._drill_slice(ch, df)
         evt = self.qc_widget.current_event_type()
+        self.selected_event_uuid = None
         self.epochs_panel.set_channel(
             ch, sl, df, event_type=evt,
             epochs=self._epoch_table(), trec=self._recording_seconds(),
-            marked=self._marked_for(ch))
+            marked=self._marked_for(ch), reviews=self._reviews_for_slice(sl))
         if switch_tab:
             self.tabs.setCurrentIndex(1)
+        # keys (]/[, A/R/U) reach the panel without a click on the trace
+        self.epochs_panel.setFocus(Qt.OtherFocusReason)
+
+    # ------------------------------------------------------------------
+    # Per-event selection and decisions (D2 stubs; the decision panel,
+    # reason picker and reviewer prompt follow in D3/D7)
+    # ------------------------------------------------------------------
+    def _reviews_for_slice(self, sl):
+        """``{uuid: (decision, reason, reviewer)}`` for a drilled slice."""
+        if self.db is None or sl is None or not len(sl) \
+                or 'uuid' not in sl.columns:
+            return {}
+        try:
+            return self.db.get_reviews_for(sl['uuid'].tolist())
+        except Exception as err:
+            logger.warning(f"Could not read event reviews ({err}).")
+            return {}
+
+    def _on_event_selected(self, uuid):
+        """Record the selection and name it in the status bar."""
+        self.selected_event_uuid = uuid
+        panel = self.epochs_panel
+        row = panel.selected_event()
+        ev = panel._ev
+        pos = ev.index[ev['uuid'] == uuid] if ev is not None else []
+        n_of = (f" ({int(pos[0]) + 1} of {len(ev)} on channel)"
+                if len(pos) else "")
+        etype = str(panel._event_type).replace('_', ' ')
+        t = row['start_time'] if row is not None else None
+        self.status_bar.showMessage(
+            f"Selected {etype} on {panel._channel} at {_hms(t)}{n_of}")
+
+    def _on_decision_requested(self, decision):
+        """Store ``decision`` for the selected event when the library can."""
+        uuid = self.selected_event_uuid
+        if uuid is None:
+            return
+        if self.db is None or not self.db.has_review_backend:
+            self.status_bar.showMessage(
+                "Decision not saved: this TurtleWave library cannot store "
+                "event reviews.")
+            return
+        # Never save under an invented name: two people would overwrite
+        # each other's decisions under one reviewer key.
+        if not (self.reviewer_name or '').strip():
+            self.status_bar.showMessage(
+                "Decision not saved: set a reviewer name first "
+                "(Review ▸ Reviewer name…)")
+            return
+        try:
+            self.db.add_review(uuid, decision,
+                               reviewer=self.reviewer_name.strip())
+        except Exception as err:
+            self.status_bar.showMessage(f"Decision not saved: {err}")
+            return
+        panel = self.epochs_panel
+        reviews = dict(panel._reviews)
+        reviews.update(self.db.get_reviews_for([uuid]))
+        panel.set_reviews(reviews)
+        self.status_bar.showMessage(f"Saved: {decision} · {uuid}")
+
+    def set_reviewer_name(self, name):
+        """Set the name every decision of this session is saved under.
+
+        Interim until the D7 reviewer prompt replaces it. Blank input clears
+        the name, after which decisions are not saved. Returns the name set.
+        """
+        self.reviewer_name = str(name or '').strip()
+        self.status_bar.showMessage(
+            f"Reviewer: {self.reviewer_name}" if self.reviewer_name
+            else "Reviewer: not set")
+        return self.reviewer_name
+
+    def _prompt_reviewer_name(self):
+        """Review > Reviewer name...: ask for the name, never invent one."""
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "Reviewer name",
+            "Name or initials saved with each decision:",
+            text=self.reviewer_name)
+        if ok:
+            self.set_reviewer_name(name)
 
 
 
