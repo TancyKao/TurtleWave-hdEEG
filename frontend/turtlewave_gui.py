@@ -44,10 +44,19 @@ try:
                                           resolve_stage_tokens,
                                           join_stage_token)
     from turtlewave_hdEEG.density import event_density
+    # The reject-set vocabulary. Imported rather than restated so the GUI can
+    # never offer a type the library does not know, nor drift from the default
+    # set the detectors apply when nothing is passed.
+    from turtlewave_hdEEG.utils import (DEFAULT_REJECT_TYPES,
+                                        KNOWN_REJECT_TYPES)
 
     #from wonambi.dataset import Dataset as WonambiDataset
 except ImportError as e:
     print(f"Error importing TurtleWave hdEEG package: {e}")
+    # Keep the module importable without the library so a missing dependency
+    # shows up as one error at startup rather than a NameError per widget.
+    DEFAULT_REJECT_TYPES = ('Artefact', 'Arousal', 'Move')
+    KNOWN_REJECT_TYPES = ('Artefact', 'Arousal', 'Resp', 'Move', 'Snore')
 
 try:
     from frontend.db_connect import connect_events_db
@@ -75,6 +84,128 @@ LINKED_EVENT_TOOLTIP = (
     "event list, so ticking either one imports both\n(along with any "
     "respiratory, movement and snore events found)."
 )
+
+#: Fallback min/max spindle duration, in seconds, for the spindle tab's shared
+#: duration spinboxes. Used only when the selected method's detector leaves a
+#: bound unset -- Ray2015 has no upper limit -- so the spinbox still shows a
+#: deterministic value instead of whatever the previously selected method left
+#: behind. Every other method's bounds come from the detector itself.
+SPINDLE_FALLBACK_DURATION = (0.5, 3.0)
+
+#: Canonical order for every reject set this GUI builds, logs or displays.
+#:
+#: FIXED, not sorted: it is ``DEFAULT_REJECT_TYPES`` followed by the two opt-in
+#: types, so a set reads the same in the log, in the panel and in the four tab
+#: echoes no matter what order the boxes were ticked in. It is deliberately NOT
+#: the database key order -- the library sorts the key alphabetically, where
+#: 'Arousal' precedes 'Artefact'. The rule, and the reason this GUI offers no
+#: token accessor of its own: every HUMAN-facing string comes from
+#: :func:`reject_types_display` over this order, every STORED or COMPARED value
+#: comes from :func:`turtlewave_hdEEG.utils.reject_key`, and nothing here
+#: reimplements the key. Two comma-joined spellings of one set is the class of
+#: bug this release exists to remove.
+REJECT_TYPE_ORDER = tuple(DEFAULT_REJECT_TYPES) + tuple(
+    t for t in ('Resp', 'Snore') if t not in DEFAULT_REJECT_TYPES)
+
+#: Any known type the library gained that this GUI's order does not name yet,
+#: appended so a new reject type is still offered rather than silently dropped.
+REJECT_TYPE_ORDER = REJECT_TYPE_ORDER + tuple(
+    t for t in KNOWN_REJECT_TYPES if t not in REJECT_TYPE_ORDER)
+
+#: Stored token -> the word a sleep researcher uses. The token is what goes into
+#: the detector call, the log and the database; the label is only ever shown.
+REJECT_TYPE_LABELS = {
+    'Artefact': 'Artefact',
+    'Arousal': 'Arousal',
+    'Move': 'Movement',
+    'Resp': 'Respiratory',
+    'Snore': 'Snoring',
+}
+
+#: One line each, on the Setup checkboxes. Says what the type is and WHY it is
+#: or is not excluded by default, because that is the part a researcher cannot
+#: work out from the label.
+REJECT_TYPE_TOOLTIPS = {
+    'Artefact': (
+        "Segments the scorer flagged as bad signal, plus EEGLAB reject flags "
+        "and splice (boundary) markers - never searched for events."),
+    'Arousal': (
+        "Cortical arousals scored on the EEG - excluded because the fast, "
+        "high-amplitude activity in an arousal is not a spindle or a slow "
+        "oscillation."),
+    'Move': (
+        "Body and limb movement marked in the recording (move / leg / "
+        "biocalibration) - excluded by default because the electrode movement "
+        "it causes produces large low-frequency deflections that "
+        "amplitude-threshold slow-wave and K-complex detectors mistake for "
+        "real events."),
+    'Resp': (
+        "Apnoeas, hypopnoeas and desaturations, scored on airflow and "
+        "oximetry, not on the EEG - left in by default because the arousal "
+        "that ends a respiratory event is already excluded above, and "
+        "removing all respiratory time would delete sleep in proportion to "
+        "how severe a patient's apnoea is."),
+    'Snore': (
+        "Snoring and jaw-clench events from the acoustic/vibration channel - "
+        "left in by default because snoring artefact sits around 30 Hz, above "
+        "the spindle and slow-oscillation bands the detectors filter to, and "
+        "in habitual snorers this mask can cover most of the night."),
+}
+
+#: The exclusion set every run before 4.4.0 used. Those runs had exactly two
+#: booleans and no way to say anything else, so this is what an unrecorded set
+#: WAS - not a guess at today's default.
+PRE_4_4_REJECT_TYPES = ('Artefact', 'Arousal')
+
+
+def reject_types_display(reject_types):
+    """Render a reject set in canonical order using the researcher-facing words.
+
+    Parameters
+    ----------
+    reject_types : iterable of str or None
+        Stored tokens, in any order.
+
+    Returns
+    -------
+    str
+        e.g. ``'Artefact, Arousal, Movement'``. ``'nothing'`` for an empty set,
+        because "excluding " followed by nothing reads as a truncated sentence.
+    """
+    tokens = order_reject_types(reject_types)
+    if not tokens:
+        return "nothing"
+    return ", ".join(REJECT_TYPE_LABELS.get(t, t) for t in tokens)
+
+
+def order_reject_types(reject_types):
+    """Put a reject set into :data:`REJECT_TYPE_ORDER`, de-duplicated.
+
+    Unknown types keep their relative order and follow the known ones, so a
+    scoring vocabulary the GUI does not model is passed through rather than
+    dropped.
+
+    Parameters
+    ----------
+    reject_types : iterable of str or None
+        Stored tokens, in any order.
+
+    Returns
+    -------
+    list of str
+        The same set, canonically ordered.
+    """
+    if not reject_types:
+        return []
+    if isinstance(reject_types, str):
+        reject_types = [reject_types]
+    seen = []
+    for t in reject_types:
+        t = str(t).strip()
+        if t and t not in seen:
+            seen.append(t)
+    known = [t for t in REJECT_TYPE_ORDER if t in seen]
+    return known + [t for t in seen if t not in known]
 
 
 def plan_annotation_actions(process_artifacts, process_arousals, process_stages):
@@ -267,6 +398,13 @@ class TurtleWaveGUI(QMainWindow):
         self.setup_pac_tab()  # Add setup for PAC tab
         self.setup_log_tab()
         
+        # Paint the excluded-event-type echoes now that all four detection
+        # tabs exist. The Setup group is built first and cannot reach labels
+        # that do not exist yet, so without this every echo stays blank until
+        # the user happens to toggle a Setup checkbox - which is exactly the
+        # state the echo exists to prevent.
+        self.refresh_reject_echoes()
+
         # Add the tabs to the main layout
         self.main_layout.addWidget(self.tabs)
         
@@ -400,7 +538,17 @@ class TurtleWaveGUI(QMainWindow):
 
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
-        
+
+        # Excluded event types - ONE set for the whole session.
+        #
+        # Session scope, not per-tab, on purpose: the reject set is part of a
+        # run's identity (it is recorded on every analysed_time and
+        # detection_runs row) and SO-spindle coupling pairs slow waves and
+        # spindles that came from separate runs, so two tabs that can disagree
+        # make an undefined coupling denominator the DEFAULT outcome of normal
+        # use. Four detection tabs echo this group read-only.
+        layout.addWidget(self.build_reject_types_group())
+
         # Dataset information group
         info_group = QGroupBox("Dataset Information")
         info_layout = QVBoxLayout()
@@ -411,6 +559,339 @@ class TurtleWaveGUI(QMainWindow):
         info_group.setLayout(info_layout)
         layout.addWidget(info_group, 1)  # 1 means this will stretch
     
+    # ------------------------------------------------------------------
+    # Excluded event types: one widget set, four read-only echoes
+    #
+    # Everything else in this file reads the state through
+    # selected_reject_types() (GUI thread) or ticked_reject_types() (worker
+    # threads, from a snapshot). Nothing reads
+    # self.reject_type_checks directly, and there is deliberately no per-tab
+    # copy of the control: the previous design had one pair of checkboxes per
+    # detector, two of those pairs once shared attribute names, and one tab
+    # silently drove the other for an entire release.
+    # ------------------------------------------------------------------
+
+    def build_reject_types_group(self):
+        """Build the Setup tab's "Excluded event types" group.
+
+        Returns
+        -------
+        QGroupBox
+            The group, with :attr:`reject_type_checks`,
+            :attr:`reject_type_counts`, :attr:`reject_summary_label` and
+            :attr:`restore_reject_defaults_btn` populated.
+        """
+        group = QGroupBox("Excluded event types")
+        outer = QVBoxLayout()
+
+        blurb = QLabel(
+            "Time marked with these events is not searched for sleep events, "
+            "and is subtracted from the density denominator. Applies to every "
+            "detection run in this session.")
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet("color: #555555;")
+        outer.addWidget(blurb)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+
+        #: token -> QCheckBox. The single source of truth for the reject set.
+        self.reject_type_checks = {}
+        #: token -> QLabel showing how many such events the annotation holds.
+        self.reject_type_counts = {}
+
+        for row, token in enumerate(REJECT_TYPE_ORDER):
+            check = QCheckBox(REJECT_TYPE_LABELS.get(token, token))
+            check.setChecked(token in DEFAULT_REJECT_TYPES)
+            check.setToolTip(REJECT_TYPE_TOOLTIPS.get(token, ""))
+            # One handler for all five, so the four tab echoes and the summary
+            # can never be refreshed by some but not others.
+            check.stateChanged.connect(self.on_reject_types_changed)
+            grid.addWidget(check, row, 0)
+
+            count = QLabel("\u2014")
+            count.setStyleSheet("color: #888888;")
+            count.setToolTip(
+                "How many events of this type the loaded annotation file "
+                "holds. Excluding a type that never occurs costs nothing and "
+                "keeps this recording on the same exclusion set as the rest "
+                "of the cohort.")
+            grid.addWidget(count, row, 1)
+
+            self.reject_type_checks[token] = check
+            self.reject_type_counts[token] = count
+
+        outer.addLayout(grid)
+
+        summary_row = QHBoxLayout()
+        self.reject_summary_label = QLabel("")
+        self.reject_summary_label.setStyleSheet("font-weight: bold;")
+        summary_row.addWidget(self.reject_summary_label, 1)
+
+        self.restore_reject_defaults_btn = QPushButton("Restore defaults")
+        self.restore_reject_defaults_btn.setToolTip(
+            "Back to "
+            + reject_types_display(DEFAULT_REJECT_TYPES)
+            + " - the set every detector applies when nothing is passed.")
+        self.restore_reject_defaults_btn.clicked.connect(
+            self.restore_reject_defaults)
+        summary_row.addWidget(self.restore_reject_defaults_btn)
+        outer.addLayout(summary_row)
+
+        group.setLayout(outer)
+        self.reject_types_group = group
+        # setChecked above fired stateChanged before the summary label existed,
+        # so paint the text once now that the whole group is built.
+        self.refresh_reject_echoes()
+        return group
+
+    def selected_reject_types(self):
+        """The excluded event types, as stored tokens in canonical order.
+
+        Returns
+        -------
+        list of str
+            e.g. ``['Artefact', 'Arousal', 'Move']``. Order is fixed
+            (:data:`REJECT_TYPE_ORDER`), so it does not depend on the order the
+            boxes were ticked in. Pass this straight to a detector's
+            ``reject_types=``.
+        """
+        checks = getattr(self, 'reject_type_checks', None) or {}
+        return order_reject_types(
+            [t for t, c in checks.items() if c.isChecked()])
+
+    def ticked_reject_types(self):
+        """The ticked set as the GUI thread last saw it, safe off-thread.
+
+        :meth:`selected_reject_types` reads live ``QCheckBox`` state and must
+        only be called on the GUI thread. Detection runs in a worker, and its
+        closing report compares the run's set against what is ticked now, so
+        that comparison reads this snapshot instead - kept up to date by
+        :meth:`refresh_reject_echoes`, which only ever runs on the GUI thread.
+
+        Returns
+        -------
+        list of str
+            The excluded event types, canonically ordered.
+        """
+        cached = getattr(self, '_ticked_reject_types', None)
+        if cached is None:
+            return self.selected_reject_types()
+        return list(cached)
+
+    def reject_types_label(self):
+        """The ticked set in researcher-facing words, e.g.
+        ``'Artefact, Arousal, Movement'``."""
+        return reject_types_display(self.selected_reject_types())
+
+    def on_reject_types_changed(self, _state=None):
+        """Slot for every checkbox in the group: refresh all the echoes."""
+        self.refresh_reject_echoes()
+
+    def refresh_reject_echoes(self):
+        """Repaint the Setup summary and all four tab echoes from one reading.
+
+        Called on every checkbox change. Computing the text once here, rather
+        than per tab, is what makes it impossible for one tab to show a set the
+        run will not use.
+        """
+        label = self.reject_types_label()
+        # Snapshot for the worker threads (see ticked_reject_types). This is
+        # the one place the live widgets are read on a state change, and it is
+        # always on the GUI thread.
+        self._ticked_reject_types = self.selected_reject_types()
+        summary = getattr(self, 'reject_summary_label', None)
+        if summary is not None:
+            summary.setText(f"Excluding: {label}")
+
+        tooltip = "\n".join(
+            f"{REJECT_TYPE_LABELS.get(t, t)}: {REJECT_TYPE_TOOLTIPS.get(t, '')}"
+            for t in REJECT_TYPE_ORDER)
+        for attr in ('spindle_reject_echo', 'sw_reject_echo',
+                     'kc_reject_echo', 'pac_reject_echo'):
+            echo = getattr(self, attr, None)
+            if echo is not None:
+                echo.setText(f"Excluded event types:  {label}")
+                echo.setToolTip(tooltip)
+
+        pairing = getattr(self, 'pac_pairing_label', None)
+        if pairing is not None:
+            self.refresh_pac_pairing_check()
+
+    def restore_reject_defaults(self):
+        """Reset the group to the detector defaults and log the set restored."""
+        checks = getattr(self, 'reject_type_checks', None) or {}
+        for token, check in checks.items():
+            check.setChecked(token in DEFAULT_REJECT_TYPES)
+        self.refresh_reject_echoes()
+        self.write_log(
+            "Restored the default excluded event types: "
+            + reject_types_display(DEFAULT_REJECT_TYPES))
+
+    def show_reject_types_group(self):
+        """Switch to the Setup tab and focus the excluded-event-types group.
+
+        The target of every tab echo's "Change..." button, so the control is one
+        click away from the tab that shows its consequence.
+        """
+        self.tabs.setCurrentWidget(self.setup_tab)
+        group = getattr(self, 'reject_types_group', None)
+        if group is not None:
+            checks = getattr(self, 'reject_type_checks', None) or {}
+            first = next(iter(checks.values()), None)
+            if first is not None:
+                first.setFocus(QtCore.Qt.OtherFocusReason)
+
+    def build_reject_echo_row(self, attr_name):
+        """Build one tab's read-only echo of the Setup group.
+
+        Parameters
+        ----------
+        attr_name : str
+            Attribute to store the label under, one of ``spindle_reject_echo``,
+            ``sw_reject_echo``, ``kc_reject_echo``, ``pac_reject_echo``. The
+            names are distinct on purpose: an alias is how the last collision
+            between two tabs' reject widgets survived review.
+
+        Returns
+        -------
+        QHBoxLayout
+            Row holding the label and a flat "Change..." button.
+        """
+        row = QHBoxLayout()
+        echo = QLabel("")
+        echo.setWordWrap(True)
+        echo.setStyleSheet("color: #444444;")
+        setattr(self, attr_name, echo)
+        row.addWidget(echo, 1)
+
+        btn = QPushButton("Change\u2026")
+        btn.setFlat(True)
+        btn.setStyleSheet(
+            "QPushButton { color: #2196F3; text-decoration: underline; "
+            "border: none; background: none; }")
+        btn.setToolTip(
+            "Excluded event types are set once for the whole session, on the "
+            "Setup tab, so every detection run in a session shares one "
+            "exclusion set.")
+        btn.clicked.connect(self.show_reject_types_group)
+        setattr(self, attr_name + '_change_btn', btn)
+        row.addWidget(btn)
+        return row
+
+    def annotations_for_counts(self):
+        """The annotation object the count labels read, loaded lazily.
+
+        Returns
+        -------
+        object or None
+            A :class:`CustomAnnotations` for the annotation file currently
+            selected, cached on (path, mtime) so switching tabs does not
+            re-parse the XML, or ``None`` when there is no readable file. A
+            failure here is silent: the panel falls back to em dashes and stays
+            usable, because counts are an aid, not a precondition.
+        """
+        path = getattr(self, 'annot_file_path', None)
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            stamp = (path, os.path.getmtime(path))
+        except OSError:
+            return None
+        cached = getattr(self, '_reject_count_annot', None)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            annot = CustomAnnotations(path)
+        except Exception:
+            self._reject_count_annot = (stamp, None)
+            return None
+        self._reject_count_annot = (stamp, annot)
+        return annot
+
+    def refresh_reject_counts(self, annot=None):
+        """Show how many events of each type the loaded annotation file holds.
+
+        Parameters
+        ----------
+        annot : object or None, optional
+            Anything with ``get_events(name=...)``. Default ``None`` uses
+            ``self.annotations``; with no annotation loaded every count reads
+            an em dash and the group stays fully usable.
+
+        Notes
+        -----
+        A count of zero never unticks or disables its checkbox. The ticked set
+        is provenance recorded on every run, so auto-unticking Movement for a
+        subject whose file has no movement events would key that subject's rows
+        differently from their cohort-mates' and split the cohort's density
+        into two buckets for no scientific reason.
+        """
+        counts_widgets = getattr(self, 'reject_type_counts', None) or {}
+        if not counts_widgets:
+            return {}
+        if annot is None:
+            # Only reuse the loaded annotations when they describe the file
+            # currently selected: a detection run leaves self.annotations
+            # pointing at whatever it loaded, so after browsing to a different
+            # file the counts would otherwise describe the previous one.
+            loaded = getattr(self, 'annotations', None)
+            if loaded is not None:
+                loaded_path = (getattr(loaded, 'annot_file', None)
+                               or getattr(loaded, 'xml_file', None))
+                if (loaded_path is None
+                        or os.path.abspath(str(loaded_path))
+                        == os.path.abspath(str(
+                            getattr(self, 'annot_file_path', '') or ''))):
+                    annot = loaded
+        if annot is None:
+            annot = self.annotations_for_counts()
+        # XLAnnotations wraps its Wonambi object without delegating, so reach
+        # for the wrapped one when the wrapper cannot answer.
+        if annot is not None and not hasattr(annot, 'get_events'):
+            annot = getattr(annot, 'annotations', None) \
+                or getattr(annot, 'wonb_annot', None)
+        if annot is None:
+            for label in counts_widgets.values():
+                label.setText("\u2014")
+                label.setStyleSheet("color: #888888;")
+            return {}
+
+        counts = {}
+        for token, label in counts_widgets.items():
+            try:
+                events = annot.get_events(name=token)
+                n = len(events) if events is not None else 0
+            except Exception:
+                # An annotation object that cannot answer is not a reason to
+                # break the panel; say nothing rather than claim zero.
+                label.setText("\u2014")
+                label.setStyleSheet("color: #888888;")
+                continue
+            counts[token] = n
+            if n:
+                label.setText(f"{n} in this file")
+                label.setStyleSheet("color: #555555;")
+            else:
+                label.setText("none in this file")
+                label.setStyleSheet("color: #888888;")
+
+        empty_ticked = [REJECT_TYPE_LABELS.get(t, t)
+                        for t in self.selected_reject_types()
+                        if counts.get(t, 0) == 0 and t in counts]
+        if empty_ticked:
+            self.write_log_once(
+                'reject_types_empty',
+                "Excluded event types with nothing to exclude in this "
+                "recording: " + ", ".join(empty_ticked) + ". Note that "
+                "they stay ticked so this run is recorded with the same "
+                "exclusion set as the rest of your cohort; leaving them "
+                "ticked changes no result here.")
+        else:
+            self.write_log_once('reject_types_empty', None)
+        return counts
+
     def setup_annotation_tab(self):
         # Main layout
         layout = QVBoxLayout(self.annotation_tab)
@@ -516,19 +997,12 @@ class TurtleWaveGUI(QMainWindow):
         self.sw_method_combo.currentTextChanged.connect(self.update_sw_params_for_method)
         
         
-        # Options
-        # Tab-specific names. These were once called reject_artifacts_check /
-        # reject_arousals_check here AND on the Spindle tab; setup_ui builds
-        # the spindle tab first, so the slow wave widgets silently replaced the
-        # spindle ones and a spindle run read whatever this tab said.
-        self.sw_reject_artifacts_check = QCheckBox("Reject Artifacts")
-        self.sw_reject_artifacts_check.setChecked(True)
-        params_form.addWidget(self.sw_reject_artifacts_check)
+        # Excluded event types: read-only echo of the Setup tab's one group.
+        # This tab once owned two checkboxes of its own, named the same as the
+        # spindle tab's pair, and silently drove that tab's runs. There is now
+        # no per-tab state to collide - only a label.
+        params_form.addLayout(self.build_reject_echo_row('sw_reject_echo'))
 
-        self.sw_reject_arousals_check = QCheckBox("Reject Arousals")
-        self.sw_reject_arousals_check.setChecked(True)
-        params_form.addWidget(self.sw_reject_arousals_check)
-        
         params_group.setLayout(params_form)
         params_layout.addWidget(params_group)
         
@@ -1178,8 +1652,11 @@ class TurtleWaveGUI(QMainWindow):
             'neg_peak_thresh': neg_peak_thresh,
             'p2p_thresh': p2p_thresh,
             'polar': polar,
-            'reject_artifacts': self.sw_reject_artifacts_check.isChecked(),
-            'reject_arousals': self.sw_reject_arousals_check.isChecked(),
+            # Read ONCE, here, into the params the thread copies: the same
+            # reading drives detection, the density denominator, the stored
+            # scope and the summary, so a checkbox toggled mid-run cannot
+            # change the meaning of a run already in flight.
+            'reject_types': self.selected_reject_types(),
             'stage': self.selected_stages
         }
         
@@ -1205,6 +1682,9 @@ class TurtleWaveGUI(QMainWindow):
         
         # Log
         self.write_log("Starting slow wave detection...")
+        self.write_log(
+            "Excluding: "
+            + reject_types_display(self.sw_detection_params['reject_types']))
         
         # Start thread
         self.sw_thread = threading.Thread(target=self.detect_sw)
@@ -1313,19 +1793,18 @@ class TurtleWaveGUI(QMainWindow):
                 params['chan'], params['frequency'], params['stage'])
 
             # Density from the database, not from JSON. The denominator is the
-            # artefact-free time this run stored in analysed_time, selected by
-            # the run's own rejection settings.
+            # searched time this run stored in analysed_time, selected by the
+            # run's own exclusion set.
             self.report_db_density(
                 "Slow wave", db_path, 'slow_wave', params['method'],
                 params['frequency'], params['stage'], subject,
-                params['reject_artifacts'], params['reject_arousals'])
+                params['reject_types'])
 
             self.remember_run_scope(
                 "Slow wave", db_path=db_path, event_type='slow_wave',
                 method=params['method'], frequency=params['frequency'],
                 stage=list(params['stage']), subject=subject,
-                reject_artifacts=params['reject_artifacts'],
-                reject_arousals=params['reject_arousals'],
+                reject_types=list(params['reject_types']),
                 out_dir=json_dir)
 
             self.log_run_outcome("Slow wave", db_path, sw_count, sw_rows,
@@ -1339,8 +1818,7 @@ class TurtleWaveGUI(QMainWindow):
                     'channels': params['chan'],
                     'stages': params['stage'],
                     'polar': params['polar'],
-                    'reject_artifacts': params['reject_artifacts'],
-                    'reject_arousals': params['reject_arousals']
+                    'reject_types': list(params['reject_types']),
                 }
                 
                 # Add method-specific duration parameters
@@ -1497,14 +1975,8 @@ class TurtleWaveGUI(QMainWindow):
         iso_group.setLayout(iso_layout)
         params_form.addWidget(iso_group)
 
-        # Reject options
-        self.kc_reject_artifacts_check = QCheckBox("Reject Artifacts")
-        self.kc_reject_artifacts_check.setChecked(True)
-        params_form.addWidget(self.kc_reject_artifacts_check)
-
-        self.kc_reject_arousals_check = QCheckBox("Reject Arousals")
-        self.kc_reject_arousals_check.setChecked(True)
-        params_form.addWidget(self.kc_reject_arousals_check)
+        # Excluded event types: read-only echo of the Setup tab's one group.
+        params_form.addLayout(self.build_reject_echo_row('kc_reject_echo'))
 
         params_group.setLayout(params_form)
         params_layout.addWidget(params_group)
@@ -1835,8 +2307,8 @@ class TurtleWaveGUI(QMainWindow):
             'p2p_thresh': p2p_thresh,
             'min_isolation': min_isolation,
             'polar': polar,
-            'reject_artifacts': self.kc_reject_artifacts_check.isChecked(),
-            'reject_arousals': self.kc_reject_arousals_check.isChecked(),
+            # Read once; see the slow wave path for why.
+            'reject_types': self.selected_reject_types(),
             'stage': self.kc_selected_stages,
         }
 
@@ -1845,6 +2317,9 @@ class TurtleWaveGUI(QMainWindow):
         self.progress.setRange(0, 0)
         self.detect_kc_btn.setEnabled(False)
         self.write_log("Starting K-complex detection...")
+        self.write_log(
+            "Excluding: "
+            + reject_types_display(self.kc_detection_params['reject_types']))
 
         self.kc_thread = threading.Thread(target=self.detect_kc)
         self.kc_thread.daemon = True
@@ -1918,14 +2393,13 @@ class TurtleWaveGUI(QMainWindow):
             self.report_db_density(
                 "K-complex", db_path, 'k_complex', params['method'],
                 params['frequency'], params['stage'], subject,
-                params['reject_artifacts'], params['reject_arousals'])
+                params['reject_types'])
 
             self.remember_run_scope(
                 "K-complex", db_path=db_path, event_type='k_complex',
                 method=params['method'], frequency=params['frequency'],
                 stage=list(params['stage']), subject=subject,
-                reject_artifacts=params['reject_artifacts'],
-                reject_arousals=params['reject_arousals'],
+                reject_types=list(params['reject_types']),
                 out_dir=json_dir)
 
             self.log_run_outcome("K-complex", db_path, kc_count, kc_rows,
@@ -1938,8 +2412,7 @@ class TurtleWaveGUI(QMainWindow):
                     'channels': params['chan'],
                     'stages': params['stage'],
                     'polar': params['polar'],
-                    'reject_artifacts': params['reject_artifacts'],
-                    'reject_arousals': params['reject_arousals'],
+                    'reject_types': list(params['reject_types']),
                     'trough_duration': params.get('trough_duration'),
                     'min_isolation': params.get('min_isolation'),
                 }
@@ -2124,27 +2597,21 @@ class TurtleWaveGUI(QMainWindow):
         self.min_dur_spin = QDoubleSpinBox()
         self.min_dur_spin.setRange(0.1, 5)
         self.min_dur_spin.setSingleStep(0.1)
-        self.min_dur_spin.setValue(0.5)
+        self.min_dur_spin.setValue(SPINDLE_FALLBACK_DURATION[0])
         dur_layout.addWidget(self.min_dur_spin)
-        
+
         dur_layout.addWidget(QLabel("Max:"))
         self.max_dur_spin = QDoubleSpinBox()
         self.max_dur_spin.setRange(0.5, 10)
         self.max_dur_spin.setSingleStep(0.1)
-        self.max_dur_spin.setValue(3.0)
+        self.max_dur_spin.setValue(SPINDLE_FALLBACK_DURATION[1])
         dur_layout.addWidget(self.max_dur_spin)
         self.spindle_params_form.addLayout(dur_layout)
         
-        # Options
-        # Tab-specific names: see the note on the slow wave tab's pair.
-        self.spindle_reject_artifacts_check = QCheckBox("Reject Artifacts")
-        self.spindle_reject_artifacts_check.setChecked(True)
-        self.spindle_params_form.addWidget(self.spindle_reject_artifacts_check)
+        # Excluded event types: read-only echo of the Setup tab's one group.
+        self.spindle_params_form.addLayout(
+            self.build_reject_echo_row('spindle_reject_echo'))
 
-        self.spindle_reject_arousals_check = QCheckBox("Reject Arousals")
-        self.spindle_reject_arousals_check.setChecked(True)
-        self.spindle_params_form.addWidget(self.spindle_reject_arousals_check)
-        
        # Signal Processing Options
         options_group = QGroupBox("Signal Processing Options")
         options_layout = QHBoxLayout()
@@ -2264,20 +2731,69 @@ class TurtleWaveGUI(QMainWindow):
         self.update_spindle_params_for_method(self.method_combo.currentText())
        
 
+    def _apply_method_duration_defaults(self, detector):
+        """Show the selected spindle method's own duration window.
+
+        Sets the spindle tab's shared min/max duration spinboxes from
+        ``detector.duration``. A bound the method leaves unset (Ray2015 has no
+        upper limit) falls back to :data:`SPINDLE_FALLBACK_DURATION` rather
+        than to the previously selected method's value, so the tab is
+        deterministic. ``setValue`` clamps silently, which would quietly
+        discard a default that sits outside the spinbox range, so the range is
+        widened first when needed.
+
+        Parameters
+        ----------
+        detector : ImprovedDetectSpindle
+            Detector built with the currently selected method.
+        """
+        # update_spindle_params_for_method can fire from the combo box before
+        # the duration widgets exist; nothing to prefill in that case.
+        if not hasattr(self, 'min_dur_spin') or not hasattr(self, 'max_dur_spin'):
+            return
+
+        duration = getattr(detector, 'duration', None)
+        if not isinstance(duration, (tuple, list)) or len(duration) != 2:
+            duration = SPINDLE_FALLBACK_DURATION
+
+        for spin, value, fallback in (
+                (self.min_dur_spin, duration[0], SPINDLE_FALLBACK_DURATION[0]),
+                (self.max_dur_spin, duration[1], SPINDLE_FALLBACK_DURATION[1])):
+            value = float(fallback if value is None else value)
+            if value < spin.minimum():
+                spin.setMinimum(value)
+            if value > spin.maximum():
+                spin.setMaximum(value)
+            spin.setValue(value)
+
     # update spindle parameters based on selected method
     def update_spindle_params_for_method(self, method_name):
         """Update spindle detection parameters based on selected method"""
-        # Clear previous parameter widgets
+        # Clear previous parameter widgets. The registry is emptied here, not
+        # after the detector is built: if construction raises, the old method's
+        # widgets would otherwise stay registered and leak that method's
+        # parameters (e.g. Lacourse's abs_pow_thresh) into the next run.
         self.clear_layout(self.spindle_params_layout)
+        self.spindle_param_widgets = {}
 
-        
         # Import the detector class to access parameters
         try:
             from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
             
             # Create a temporary detector with the selected method to access its parameters
             detector = ImprovedDetectSpindle(method=method_name)
-            
+
+            # The duration spinboxes live outside this method-specific panel
+            # (they are built once with the rest of the tab), so unlike every
+            # threshold widget below they used to keep a hardcoded 0.5-3 s no
+            # matter which method was selected. That silently overrode each
+            # method's published duration window -- Lacourse2018 is 0.3-2.5 s,
+            # Ferrarelli2007 and Wamsley2012 0.3-3 s, Nir2011 0.5-2 s -- and a
+            # GUI run always passes the spinbox values through to the detector.
+            # Prefill them from the detector instance instead, the same way the
+            # threshold widgets do.
+            self._apply_method_duration_defaults(detector)
+
             # Display info about the method
             method_descriptions = {
                 "Moelle2011": "Detects spindles using bandpass filtering (12-15 Hz) with RMS and thresholding.",
@@ -2305,9 +2821,6 @@ class TurtleWaveGUI(QMainWindow):
             info_label = QLabel("<b>Detection Parameters:</b>")
             info_label.setAlignment(QtCore.Qt.AlignCenter)
             self.spindle_params_layout.addWidget(info_label)
-            
-            # Initialize dict to store UI elements
-            self.spindle_param_widgets = {}
             
             # Create different parameter groups based on method
             if method_name == "Moelle2011":
@@ -2519,12 +3032,27 @@ class TurtleWaveGUI(QMainWindow):
                 thresh_group = QGroupBox("Detection Thresholds")
                 thresh_layout = QVBoxLayout()
                 
+                abs_tip = (
+                    "Absolute sigma power floor, log10(uV^2). "
+                    "Default 1.25 (published A7). "
+                    "Negative values switch to an adaptive threshold: "
+                    "mean + |value| x SD of the power signal. "
+                    "Adaptive mode is not part of the published A7 "
+                    "configuration; validate the value against scored data "
+                    "before using it in a study.")
                 abs_layout = QHBoxLayout()
-                abs_layout.addWidget(QLabel("Absolute Power:"))
+                abs_label = QLabel("Absolute Power:")
+                abs_label.setToolTip(abs_tip)
+                abs_layout.addWidget(abs_label)
                 abs_thresh_spin = QDoubleSpinBox()
-                abs_thresh_spin.setRange(0.5, 5.0)
+                # Negatives are meaningful here, not an input error: wonambi
+                # reads a negative abs_pow_thresh as "use mean + |value| * SD
+                # of the absolute-power signal" instead of a fixed floor, which
+                # is the only way low-amplitude recordings yield detections.
+                abs_thresh_spin.setRange(-5.0, 5.0)
                 abs_thresh_spin.setSingleStep(0.05)
                 abs_thresh_spin.setValue(detector.abs_pow_thresh)
+                abs_thresh_spin.setToolTip(abs_tip)
                 abs_layout.addWidget(abs_thresh_spin)
                 thresh_layout.addLayout(abs_layout)
                 
@@ -2734,7 +3262,31 @@ class TurtleWaveGUI(QMainWindow):
         self.time_window_spin.setValue(1.0)  # Default
         window_layout.addWidget(self.time_window_spin)
         event_layout.addLayout(window_layout)
-        
+
+        # Excluded event types: the same read-only echo the three detection
+        # tabs carry. PAC has no density, but analyze_pac fetches signal with
+        # this mask - and 4.4.0 is the release where it started applying it at
+        # all - so the control has to be visible here or the fix is invisible.
+        event_layout.addLayout(self.build_reject_echo_row('pac_reject_echo'))
+        pac_reject_note = QLabel(
+            "Signal inside these events is not used for coupling. Each extra "
+            "excluded type cuts the recording into more pieces; pieces shorter "
+            "than 1 s are dropped and each new join adds a filter edge, so "
+            "exclude only what you excluded when you detected the events.")
+        pac_reject_note.setWordWrap(True)
+        pac_reject_note.setStyleSheet("color: #777777; font-size: 11px;")
+        event_layout.addWidget(pac_reject_note)
+
+        # Pairing check: slow waves and spindles detected under different
+        # exclusion sets cover different amounts of sleep, so their coupling
+        # denominator is undefined. A label, never a block - the ruling makes
+        # this a judgement the researcher records, not an error.
+        self.pac_pairing_label = QLabel("")
+        self.pac_pairing_label.setWordWrap(True)
+        self.pac_pairing_label.setStyleSheet("color: #b8860b;")
+        self.pac_pairing_label.setVisible(False)
+        event_layout.addWidget(self.pac_pairing_label)
+
         event_group.setLayout(event_layout)
         params_layout.addWidget(event_group)
         
@@ -2986,6 +3538,9 @@ class TurtleWaveGUI(QMainWindow):
         if file_path:
             self.annot_file_path = file_path
             self.annot_file_edit.setText(file_path)
+            # Different file, different counts, and the cached parse is stale.
+            self._reject_count_annot = None
+            self.refresh_reject_counts()
     
     def load_data_thread(self):
         """Start data loading in a separate thread"""
@@ -3098,6 +3653,11 @@ class TurtleWaveGUI(QMainWindow):
         """Clean up after loading finishes"""
         self.load_btn.setEnabled(True)
         self.progress.setVisible(False)
+
+        # How many of each excluded type this recording actually holds. Cheap,
+        # and it is the difference between "Movement is ticked" and "Movement
+        # is ticked and there are 31 of them in this file".
+        self.refresh_reject_counts()
 
         # Check for existing database
         db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
@@ -3818,6 +4378,10 @@ class TurtleWaveGUI(QMainWindow):
             if not getattr(self, '_pac_combo_signals_connected', False):
                 self.sw_method_pac_combo.currentIndexChanged.connect(self.update_pac_available_channels)
                 self.spindle_method_pac_combo.currentIndexChanged.connect(self.update_pac_available_channels)
+                self.sw_method_pac_combo.currentIndexChanged.connect(
+                    self.refresh_pac_pairing_check)
+                self.spindle_method_pac_combo.currentIndexChanged.connect(
+                    self.refresh_pac_pairing_check)
                 self._pac_combo_signals_connected = True
 
             # Update frequency labels if methods are available
@@ -3827,6 +4391,8 @@ class TurtleWaveGUI(QMainWindow):
             if self.spindle_method_pac_combo.count() > 0:
                 self.update_spindle_freq_from_db(self.spindle_method_pac_combo.currentText())
             
+            self.refresh_pac_pairing_check()
+
             self.write_log_once(
                 'pac_methods_loaded',
                 f"Loaded {len(sw_results)} slow wave methods and "
@@ -3838,6 +4404,67 @@ class TurtleWaveGUI(QMainWindow):
                 f"Error loading detection methods: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def refresh_pac_pairing_check(self, _index=None):
+        """Warn when the two PAC inputs were detected under different masks.
+
+        SO-spindle coupling pairs slow waves and spindles that came from
+        SEPARATE detection runs. If one run masked a type the other did not,
+        the two event sets sit on different time bases: there are slow waves in
+        time the spindle run never searched, so they could not have had a
+        spindle partner, and the coupling is computed over a denominator that
+        is not defined.
+
+        A label in the warning colour, not a modal and not a block: the ruling
+        makes this a judgement the researcher records, and the user may be
+        mid-selection.
+        """
+        pairing = getattr(self, 'pac_pairing_label', None)
+        if pairing is None:
+            return
+        sw_info = (getattr(self, 'sw_methods_info', None) or {}).get(
+            self.sw_method_pac_combo.currentText())
+        sp_info = (getattr(self, 'spindle_methods_info', None) or {}).get(
+            self.spindle_method_pac_combo.currentText())
+        if not sw_info or not sp_info:
+            pairing.setText("")
+            pairing.setVisible(False)
+            return
+
+        db_path = os.path.join(self.output_dir or "", "wonambi",
+                               self.DB_FILENAME)
+        sw_sets = self.db_run_reject_sets(
+            db_path, 'slow_wave', method=sw_info.get('method'),
+            frequency=sw_info.get('freq_range'))
+        sp_sets = self.db_run_reject_sets(
+            db_path, 'spindle', method=sp_info.get('method'),
+            frequency=sp_info.get('freq_range'))
+        if not sw_sets or not sp_sets:
+            # Nothing recorded for one of them: saying "they differ" would be
+            # a guess, and saying "they match" would be worse.
+            pairing.setText("")
+            pairing.setVisible(False)
+            return
+
+        sw_types, sp_types = sw_sets[0], sp_sets[0]
+        lines = []
+        if set(sw_types) != set(sp_types):
+            lines.append(
+                "These two event sets were detected with different exclusion "
+                "sets (slow waves: " + reject_types_display(sw_types)
+                + "; spindles: " + reject_types_display(sp_types)
+                + "). They cover different amounts of sleep, so the coupling "
+                  "is computed over slow waves that could not have had a "
+                  "spindle partner in the time the spindle run skipped. "
+                  "Re-run one of them with the other's exclusion set before "
+                  "interpreting these results.")
+        ticked = self.selected_reject_types()
+        if set(sw_types) != set(ticked) or set(sp_types) != set(ticked):
+            lines.append(
+                "The PAC run itself will exclude: "
+                + reject_types_display(ticked) + " (Setup tab).")
+        pairing.setText("\n".join(lines))
+        pairing.setVisible(bool(lines))
 
     def run_pac_analysis_thread(self):
         """Start PAC analysis in a separate thread"""
@@ -3936,7 +4563,10 @@ class TurtleWaveGUI(QMainWindow):
             'stages': selected_stages,
             'idpac': (idpac_method, surrogate_method, correction_method),
             'time_window': time_window,
-            'db_path': db_path
+            'db_path': db_path,
+            # Read once, on the GUI thread. analyze_pac fetches signal with
+            # this mask; before 4.4 it fetched with none at all.
+            'reject_types': self.selected_reject_types(),
         }
         
         # Disable button and show progress
@@ -3959,6 +4589,9 @@ class TurtleWaveGUI(QMainWindow):
         self.write_log(f"Amplitude Frequency: {amp_freq[0]}-{amp_freq[1]} Hz")
         self.write_log(f"Channels: {len(selected_channels)} channels")
         self.write_log(f"IDPAC: {self.pac_analysis_params['idpac']}")
+        self.write_log(
+            "Excluding: "
+            + reject_types_display(self.pac_analysis_params['reject_types']))
         
         # Start thread
         self.pac_thread = threading.Thread(target=self.run_pac_analysis)
@@ -4047,6 +4680,8 @@ class TurtleWaveGUI(QMainWindow):
                     phase_freq=params['phase_freq'],
                     amp_freq=params['amp_freq'],
                     idpac=params['idpac'],
+                    # reject_types= ONLY; never also the deprecated booleans.
+                    reject_types=params['reject_types'],
                     use_detected_events=True,
                     event_type='slow_wave',
                     pair_with_spindles=True,
@@ -4069,6 +4704,7 @@ class TurtleWaveGUI(QMainWindow):
                     phase_freq=params['phase_freq'],
                     amp_freq=params['amp_freq'],
                     idpac=params['idpac'],
+                    reject_types=params['reject_types'],
                     use_detected_events=False,  # Use continuous data
                     time_window=params['time_window'],
                     db_path=params['db_path'],
@@ -4334,6 +4970,12 @@ class TurtleWaveGUI(QMainWindow):
 
             self.write_log(f"Annotations saved to {self.annot_file_path}")
 
+            # Handed to finish_annotations for the excluded-type counts.
+            # Deliberately NOT assigned to self.annotations: the detectors
+            # treat that as "already loaded" and this object was built for
+            # writing, not for a detection run.
+            self._annot_for_counts = annotations
+
             # Update UI in main thread
             QtCore.QMetaObject.invokeMethod(
                 self, "finish_annotations",
@@ -4380,6 +5022,9 @@ class TurtleWaveGUI(QMainWindow):
         self.generate_annot_btn.setEnabled(True)
         self.view_annot_btn.setEnabled(True)
         self.progress.setVisible(False)
+        # The file just changed, so the counts did too.
+        self._reject_count_annot = None
+        self.refresh_reject_counts(getattr(self, '_annot_for_counts', None))
 
         if warning:
             self.statusBar().showMessage("Annotations generated with warnings")
@@ -4495,14 +5140,39 @@ class TurtleWaveGUI(QMainWindow):
         self.write_log(f"Signal inversion: {'Enabled' if invert_signal else 'Disabled'}")
     
 
+        # Read the exclusion set here, on the GUI thread, and hand it to the
+        # worker: the same reading then drives detection, the density
+        # denominator, the stored scope and the summary.
+        spindle_reject_types = self.selected_reject_types()
+        self.write_log(
+            "Excluding: " + reject_types_display(spindle_reject_types))
+
         # Start thread
         self.spindle_thread = threading.Thread(target=self.detect_spindles, 
-                                          args=(selected_stages, method_params,invert_signal))
+                                          args=(selected_stages, method_params,
+                                                invert_signal,
+                                                spindle_reject_types))
         self.spindle_thread.daemon = True
         self.spindle_thread.start()
     
-    def detect_spindles(self, selected_stages,method_params=None,invert_signal=False):
-        """Detect spindles (runs in a thread)"""
+    def detect_spindles(self, selected_stages, method_params=None,
+                        invert_signal=False, reject_types=None):
+        """Detect spindles (runs in a thread).
+
+        Parameters
+        ----------
+        selected_stages : list of str
+            Sleep stages to search.
+        method_params : dict or None, optional
+            Method-specific detector parameters read off the tab.
+        invert_signal : bool, optional
+            Whether to detect on inverted polarity. Default ``False``.
+        reject_types : list of str or None, optional
+            The excluded event types, read on the GUI thread by the caller.
+            Default ``None`` falls back to :meth:`ticked_reject_types`, the
+            GUI-thread snapshot, so even an unused entry point cannot read a
+            widget from this thread.
+        """
         try:
             self.ensure_gui_log_handler()
             # Load dataset and annotation for spindle detection
@@ -4598,8 +5268,12 @@ class TurtleWaveGUI(QMainWindow):
             # denominator and the summary alike, so the three cannot disagree
             # (and a checkbox toggled mid-run cannot change the meaning of a
             # run that is already going).
-            reject_artifacts = self.spindle_reject_artifacts_check.isChecked()
-            reject_arousals = self.spindle_reject_arousals_check.isChecked()
+            # ticked_reject_types(), never selected_reject_types(): this runs
+            # on the worker thread, and the fallback must not read live
+            # QCheckBox state off the GUI thread even though no caller uses it
+            # today.
+            reject_types = (list(reject_types) if reject_types is not None
+                            else self.ticked_reject_types())
 
             # See the slow wave path for why the database is resolved before
             # detection rather than after it.
@@ -4619,8 +5293,10 @@ class TurtleWaveGUI(QMainWindow):
                 frequency=freq_range,
                 duration=duration_range,
                 stage=selected_stages,
-                reject_artifacts=reject_artifacts,
-                reject_arousals=reject_arousals,
+                # reject_types= ONLY. The two deprecated booleans are still
+                # accepted by the library; passing both is how they silently
+                # disagree.
+                reject_types=reject_types,
                 cat=(1, 1, 1, 0),  # concatenate within and between stages, cycles separate
                 polar=polar,
                 save_to_annotations=False,
@@ -4652,14 +5328,13 @@ class TurtleWaveGUI(QMainWindow):
 
             self.report_db_density(
                 "Spindle", db_path, 'spindle', self.spindle_method, freq_range,
-                selected_stages, subject, reject_artifacts, reject_arousals)
+                selected_stages, subject, reject_types)
 
             self.remember_run_scope(
                 "Spindle", db_path=db_path, event_type='spindle',
                 method=self.spindle_method, frequency=freq_range,
                 stage=list(selected_stages), subject=subject,
-                reject_artifacts=reject_artifacts,
-                reject_arousals=reject_arousals,
+                reject_types=list(reject_types),
                 out_dir=json_dir)
 
             self.log_run_outcome("Spindle", db_path, spindle_count,
@@ -4676,8 +5351,7 @@ class TurtleWaveGUI(QMainWindow):
                     'channels': self.selected_channels,
                     'stages': selected_stages,
                     'polar': polar,
-                    'reject_artifacts': reject_artifacts,
-                    'reject_arousals': reject_arousals,
+                    'reject_types': list(reject_types),
                     'method_specific_parameters': method_params if 'method_params' in locals() else {}
                 }
                 
@@ -5172,16 +5846,15 @@ class TurtleWaveGUI(QMainWindow):
         return ", ".join(names[:limit]) + f", ... (+{len(names) - limit} more)"
 
     def report_db_density(self, label, db_path, event_type, method, frequency,
-                          stage_list, subject, reject_artifacts,
-                          reject_arousals):
+                          stage_list, subject, reject_types):
         """Log per-stage density read back from the database.
 
         Replaces the JSON-reading ``export_*_density_to_csv`` exporters, which
         can no longer work: their input was the per-channel JSON detection no
         longer writes. :func:`turtlewave_hdEEG.density.event_density` is the
         single definition of density now - its denominator is the
-        ``analysed_time`` row the run itself stored, i.e. the artefact-free time
-        the detector actually searched, not raw hypnogram time.
+        ``analysed_time`` row the run itself stored, i.e. the time the detector
+        actually searched, not raw hypnogram time.
 
         ``missing='nan'`` is deliberate: a denominator that could not be stored
         is a reporting problem, and taking down the closing report of a
@@ -5203,24 +5876,39 @@ class TurtleWaveGUI(QMainWindow):
             Stages of the run.
         subject : str
             Subject the ``analysed_time`` denominator is keyed under.
-        reject_artifacts, reject_arousals : bool
-            The run's rejection settings. They select the denominator row, so
-            passing the run's own values is what keeps numerator and
-            denominator on the same time base.
+        reject_types : list of str
+            The exclusion set of the run whose density this is. It selects the
+            denominator row, so passing the run's own set is what keeps
+            numerator and denominator on the same time base. A density is
+            meaningless without it, so it is named in the header line.
 
         Returns
         -------
         pandas.DataFrame or None
             The density table, or ``None`` when it could not be computed.
         """
+        reject_types = order_reject_types(reject_types)
+        mask_text = reject_types_display(reject_types)
+
+        # One note, above the block, when the number being reported was
+        # computed over a different amount of sleep than a new run would be.
+        # The number itself is correct for what it describes; the risk is only
+        # in comparing it with something else - so this is never a block.
+        ticked = self.ticked_reject_types()
+        if set(reject_types) != set(ticked):
+            self.write_log(
+                f"Note: this density uses the exclusion set recorded for the "
+                f"stored run ({mask_text}), not the set currently ticked on "
+                f"the Setup tab ({reject_types_display(ticked)}). To compare "
+                f"it with a new run, match the two sets.")
+
         try:
             df = event_density(
                 db_path, event_type=event_type, method=method,
                 stage=list(stage_list) if stage_list else None,
                 freq_lower=frequency[0], freq_upper=frequency[1],
                 subject=subject,
-                reject_artifacts=reject_artifacts,
-                reject_arousals=reject_arousals,
+                reject_types=list(reject_types),
                 missing='nan')
         except Exception as e:
             self.write_log(
@@ -5235,21 +5923,24 @@ class TurtleWaveGUI(QMainWindow):
             return df
 
         self.write_log(
-            f"{label} density (events per artefact-free minute, from "
-            f"{db_path}):")
+            f"{label} density (events per minute of searched time, excluding "
+            f"{mask_text}, from {db_path}):")
         for stage_name, grp in df.groupby('stage', dropna=False):
             dens = grp['density_per_min'].dropna()
             minutes = grp['analysed_minutes'].dropna()
             if not len(dens):
                 self.write_log(
                     f"    {stage_name}: {len(grp)} channel(s), "
-                    f"{int(grp['n_events'].sum())} events, but no stored "
-                    f"denominator, so density is undefined for this stage.")
+                    f"{int(grp['n_events'].sum())} events, but no "
+                    f"searched-time record for the exclusion set {mask_text}, "
+                    f"so density is undefined for this stage. A run stored "
+                    f"under a different exclusion set will not match; see the "
+                    f"Log for the sets recorded in this database.")
                 continue
             self.write_log(
                 f"    {stage_name}: {len(grp)} channel(s), "
                 f"{int(grp['n_events'].sum())} events over "
-                f"{minutes.iloc[0]:.1f} analysed min, "
+                f"{minutes.iloc[0]:.1f} searched min, "
                 f"median {dens.median():.2f}/min "
                 f"(range {dens.min():.2f}-{dens.max():.2f})")
         return df
@@ -5336,8 +6027,108 @@ class TurtleWaveGUI(QMainWindow):
                 'frequency': (float(lo), float(hi)),
                 'stage': stage_list,
                 'n_events': int(count or 0),
+                # The exclusion set(s) detection_runs recorded for this scope.
+                # Empty list = nothing recorded (a pre-4.4.0 database).
+                'reject_sets': self.db_run_reject_sets(
+                    db_path, event_type, method=str(method),
+                    frequency=(float(lo), float(hi))),
             })
         return scopes
+
+    def db_run_reject_sets(self, db_path, event_type, method=None,
+                           frequency=None):
+        """The exclusion set(s) ``detection_runs`` recorded for a scope.
+
+        The reject set is part of a run's identity: a density computed under
+        one set cannot be compared with a density computed under another,
+        because the two cover different amounts of sleep. Reading it back is
+        what lets the GUI stop assuming.
+
+        Parameters
+        ----------
+        db_path : str
+            Database to read.
+        event_type : str
+            Event type as stored.
+        method : str or None, optional
+            Method as stored, UNESCAPED. Default ``None`` (any).
+        frequency : tuple of float or None, optional
+            Band ``(lo, hi)`` to disambiguate a method run at two bands,
+            matched against the band in ``params_json``. Runs whose params do
+            not record a band are kept, since excluding them would lose the
+            only record there is. Default ``None`` (no band filter).
+
+        Returns
+        -------
+        list of list of str
+            Distinct sets, each canonically ordered, ordered most-recent-run
+            first. Empty when nothing is recorded, ``detection_runs`` is absent,
+            or the database is unreadable - which the caller must treat as "not
+            recorded", never as "rejected nothing".
+        """
+        if not db_path or not os.path.exists(db_path):
+            return []
+        conn = None
+        try:
+            conn = connect_events_db(db_path)
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(detection_runs)")
+            columns = {r[1] for r in cur.fetchall()}
+            if not columns:
+                return []
+            rt_col = ('reject_types' if 'reject_types' in columns else 'NULL')
+            where = ["event_type = ?"]
+            params = [str(event_type)]
+            if method is not None:
+                where.append("method = ?")
+                params.append(str(method))
+            cur.execute(
+                f"SELECT {rt_col}, reject_artifacts, reject_arousals, "
+                f"       params_json "
+                f"FROM detection_runs WHERE {' AND '.join(where)} "
+                f"ORDER BY timestamp DESC", params)
+            rows = cur.fetchall()
+        except Exception as e:
+            self.write_log(
+                f"Could not read the recorded exclusion sets from {db_path}: "
+                f"{type(e).__name__}: {e}")
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+
+        found = []
+        for rj_types, rj_a, rj_r, params_json in rows:
+            params = {}
+            if params_json:
+                try:
+                    params = json.loads(params_json)
+                except Exception:
+                    params = {}
+            if frequency is not None:
+                band = params.get('frequency')
+                if band is not None and len(band) == 2:
+                    try:
+                        if (abs(float(band[0]) - float(frequency[0])) > 1e-6 or
+                                abs(float(band[1]) - float(frequency[1])) > 1e-6):
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+            if rj_types:
+                types = [t for t in str(rj_types).split(',') if t]
+            elif isinstance(params.get('reject_types'), (list, tuple)):
+                types = [str(t) for t in params['reject_types']]
+            elif rj_a is not None or rj_r is not None:
+                # Exact for a pre-4.4 run: those runs had two booleans and no
+                # way to exclude anything else.
+                types = ((['Artefact'] if rj_a else [])
+                         + (['Arousal'] if rj_r else []))
+            else:
+                continue
+            types = order_reject_types(types)
+            if types not in found:
+                found.append(types)
+        return found
 
     def export_scope_csv(self, label, event_type):
         """Write the events and density of one stored scope out as CSV.
@@ -5398,12 +6189,33 @@ class TurtleWaveGUI(QMainWindow):
         events_csv = os.path.join(out_dir, f"{base}_events.csv")
         density_csv = os.path.join(out_dir, f"{base}_density.csv")
 
+        # The exclusion set of the run being exported, NOT the ticked one: the
+        # density in this file is that run's, and it is only comparable with
+        # another run that excluded the same types.
+        scope_reject_types = order_reject_types(
+            scope.get('reject_types')
+            if scope.get('reject_types') is not None
+            else PRE_4_4_REJECT_TYPES)
+        ticked = self.selected_reject_types()
+        mismatch_note = ""
+        if set(scope_reject_types) != set(ticked):
+            mismatch_note = (
+                f"Note: this density uses the exclusion set recorded for the "
+                f"stored run ({reject_types_display(scope_reject_types)}), not "
+                f"the set currently ticked on the Setup tab "
+                f"({reject_types_display(ticked)}). To compare it with a new "
+                f"run, match the two sets.")
+
         written = []
         QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             self.write_log(
                 f"Exporting {label} scope method={scope['method']!r}, "
-                f"{freq_str}, stages={stages_str} from {db_path} to CSV")
+                f"{freq_str}, stages={stages_str}, excluding "
+                f"{reject_types_display(scope_reject_types)} from {db_path} "
+                f"to CSV")
+            if mismatch_note:
+                self.write_log(mismatch_note)
             path = export_events_to_csv(
                 db_path, event_type, scope['method'], scope['frequency'],
                 scope['stage'] or None, csv_file=events_csv)
@@ -5421,8 +6233,7 @@ class TurtleWaveGUI(QMainWindow):
                 freq_lower=scope['frequency'][0],
                 freq_upper=scope['frequency'][1],
                 subject=scope.get('subject'),
-                reject_artifacts=scope.get('reject_artifacts', True),
-                reject_arousals=scope.get('reject_arousals', True),
+                reject_types=list(scope_reject_types),
                 missing='nan')
             if df is not None and len(df):
                 df.to_csv(density_csv, index=False)
@@ -5454,7 +6265,8 @@ class TurtleWaveGUI(QMainWindow):
                 f"{label} results exported from the database:\n\n"
                 + "\n".join(written)
                 + "\n\nThe database remains the store of record; these files "
-                  "are a snapshot of it.")
+                  "are a snapshot of it."
+                + (f"\n\n{mismatch_note}" if mismatch_note else ""))
         else:
             QMessageBox.warning(
                 self, "Nothing exported",
@@ -5464,11 +6276,17 @@ class TurtleWaveGUI(QMainWindow):
     def _choose_db_scope(self, label, db_path, event_type):
         """Ask which stored scope to export when this session has no run.
 
+        The exclusion set is read back from ``detection_runs`` rather than
+        assumed. One entry is offered per (scope, recorded exclusion set) pair,
+        so a scope whose rows came from runs with different sets cannot be
+        exported as though it were one run's worth of data.
+
         Returns
         -------
         dict or None
-            A scope dict in the shape `remember_run_scope` stores, or ``None``
-            when the user cancelled or there is nothing to export.
+            A scope dict in the shape `remember_run_scope` stores, carrying a
+            ``reject_types`` list, or ``None`` when the user cancelled or there
+            is nothing to export.
         """
         scopes = self.db_scopes_for(db_path, event_type)
         if not scopes:
@@ -5478,30 +6296,61 @@ class TurtleWaveGUI(QMainWindow):
                 f"Run detection first.")
             return None
 
-        entries = [
-            f"{s['method']}  ·  "
-            f"{fmt_freq_token(s['frequency'][0], s['frequency'][1])}  ·  "
-            f"{'+'.join(s['stage']) if s['stage'] else 'all stages'}  ·  "
-            f"{s['n_events']} events"
-            for s in scopes]
+        # One choice per (scope, recorded set). A scope with nothing recorded
+        # contributes one choice carrying the pre-4.4.0 set, flagged so the
+        # disclosure below fires only for that case.
+        choices = []
+        for scope in scopes:
+            sets = scope.get('reject_sets') or []
+            if len(sets) > 1:
+                self.write_log(
+                    f"This database holds {label.lower()} runs stored under "
+                    f"different exclusion sets ("
+                    + " and ".join(reject_types_display(t) for t in sets)
+                    + "). Densities from different sets are computed over "
+                      "different amounts of sleep and must not be pooled.")
+            if sets:
+                for types in sets:
+                    choices.append((scope, list(types), True))
+            else:
+                choices.append((scope, list(PRE_4_4_REJECT_TYPES), False))
+
+        entries = []
+        for scope, types, recorded in choices:
+            entries.append(
+                f"{scope['method']}  ·  "
+                f"{fmt_freq_token(scope['frequency'][0], scope['frequency'][1])}"
+                f"  ·  "
+                f"{'+'.join(scope['stage']) if scope['stage'] else 'all stages'}"
+                f"  ·  excl. {reject_types_display(types)}"
+                f"{'' if recorded else ' (not recorded)'}"
+                f"  ·  {scope['n_events']} events")
         choice, ok = QtWidgets.QInputDialog.getItem(
             self, f"Export {label} results",
             "This session has not run a detection, so choose which stored "
             "result to export:", entries, 0, False)
         if not ok:
             return None
-        selected = scopes[entries.index(choice)]
-        # The rejection settings of the original run are not recoverable from
-        # the events rows, and they select the density denominator. The
-        # detector defaults are assumed and said so, rather than quietly
-        # picking one: a wrong guess makes event_density report a missing
-        # denominator, which is visible, not a silently biased number.
-        self.write_log(
-            f"Exporting a stored {label.lower()} scope from an earlier "
-            f"session. The density denominator is looked up assuming the run "
-            f"used reject_artifacts=True and reject_arousals=True (the "
-            f"detector defaults). If it did not, the density columns will "
-            f"report no stored denominator rather than a wrong number.")
+        selected, reject_types, recorded = choices[entries.index(choice)]
+
+        if recorded:
+            self.write_log(
+                f"Using the exclusion set recorded for this run: "
+                f"{reject_types_display(reject_types)}. Density is computed on "
+                f"the time that run actually searched.")
+        else:
+            # Not a guess at today's default: every run before 4.4.0 had two
+            # booleans and no way to exclude anything else, so this IS what
+            # those runs did. A wrong assumption here makes event_density
+            # report no stored searched-time, which is visible, rather than a
+            # silently biased number.
+            self.write_log(
+                f"No exclusion set is recorded for this {label.lower()} "
+                f"scope, which is how every result stored before version "
+                f"4.4.0 looks. Density is looked up assuming it excluded "
+                f"Artefact and Arousal only, which is what every run before "
+                f"4.4.0 did. If that is wrong, the density columns will "
+                f"report no stored searched-time rather than a wrong number.")
         return {
             'db_path': db_path,
             'event_type': event_type,
@@ -5509,8 +6358,8 @@ class TurtleWaveGUI(QMainWindow):
             'frequency': selected['frequency'],
             'stage': selected['stage'],
             'subject': None,
-            'reject_artifacts': True,
-            'reject_arousals': True,
+            'reject_types': order_reject_types(reject_types),
+            'reject_types_recorded': recorded,
             'out_dir': os.path.dirname(db_path),
         }
 

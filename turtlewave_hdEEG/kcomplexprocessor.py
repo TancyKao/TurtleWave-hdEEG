@@ -10,7 +10,7 @@ from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
 from turtlewave_hdEEG import dbwrite
-from turtlewave_hdEEG.utils import derive_subject
+from turtlewave_hdEEG.utils import derive_subject, resolve_reject_types
 from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
                                              assert_scoring_covers_stages)
 
@@ -65,7 +65,8 @@ class ParalKC:
                           neg_peak_thresh=-40.0, p2p_thresh=75.0,
                           min_isolation=1.0,
                           detrend=False, polar='normal',
-                          reject_artifacts=True, reject_arousals=True,
+                          reject_artifacts=None, reject_arousals=None,
+                          reject_types=None,
                           stage=None, cat=None,
                           save_to_annotations=False, json_dir=None,
                           *, write_db=None, db_path=None, subject=None,
@@ -110,8 +111,21 @@ class ParalKC:
         stage : list or str
             Sleep stages to analyze. KCs are typically scored in N2;
             override to include other stages if needed.
+        reject_types : str or iterable of str or None, optional
+            Annotation event types whose time is excluded from detection AND
+            from the density denominator. ``None`` (default) uses
+            :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES` --
+            ``('Artefact', 'Arousal', 'Move')`` from 4.4.
+
+            ``'Resp'`` is a legitimate opt-in here and nowhere else by default:
+            respiratory events evoke K-complexes at termination, so a study of
+            *spontaneous* KC density in sleep-disordered breathing has a real
+            reason to mask them. Note that an evoked KC is a genuine cortical
+            response, not an artefact, so masking it is a scientific choice to
+            state in the methods, not a clean-up step.
         cat, reject_artifacts, reject_arousals, save_to_annotations, json_dir
-            Same semantics as ParalSWA.detect_slow_waves.
+            Same semantics as ParalSWA.detect_slow_waves; the two booleans are
+            deprecated shims for ``reject_types``.
         write_db : bool or None, keyword-only, default None
             Database write mode.
 
@@ -210,11 +224,16 @@ class ParalKC:
                 "K-complexes will not be saved to annotations.")
             save_to_annotations = False
 
-        reject_types = []
-        if reject_artifacts:
-            reject_types.append('Artefact')
-        if reject_arousals:
-            reject_types.append('Arousal')
+        # One resolution for the whole run: the same tuple is handed to
+        # fetch(), recorded in detection_runs and used to key the analysed_time
+        # denominator, so numerator and denominator cannot describe different
+        # time.
+        reject_types = list(resolve_reject_types(
+            reject_types, reject_artifacts, reject_arousals,
+            logger_=self.logger))
+        self.logger.info(
+            "Excluding %s time from detection and from the density "
+            "denominator.", ", ".join(reject_types) or "no event types")
 
         # Two forms of the method, deliberately kept apart:
         #   method_db  - canonical, UNESCAPED ('AASM/Massimini2004'), for
@@ -352,8 +371,9 @@ class ParalKC:
                     'detrend': detrend, 'polar': polar,
                     'method': method_db,
                     'ref_chan': ref_chan, 'cat': cat,
-                    'reject_artifacts': reject_artifacts,
-                    'reject_arousals': reject_arousals,
+                    'reject_types': list(reject_types),
+                    'reject_artifacts': 'Artefact' in reject_types,
+                    'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': n_fft_sec,
                 }
                 if run_params:
@@ -380,13 +400,13 @@ class ParalKC:
                     db_conn, self.EVENT_TYPE, methods, frequency[0],
                     frequency[1], stage_token=stages_str, channels=chan,
                     replace_channels=replace_channels, db_path=db_path,
-                    logger=self.logger)
+                    logger=self.logger, reject_types=list(reject_types))
 
                 dbwrite.record_run(
                     db_conn, run_id, self.EVENT_TYPE, method_db,
                     dbwrite.method_citation(method_db),
                     json.dumps(params_dict, default=str),
-                    ref_chan, polar, stage, reject_artifacts, reject_arousals,
+                    ref_chan, polar, stage, reject_types=list(reject_types),
                     subject=db_subject)
 
                 # Density denominator: the artefact-free in-stage time this run
@@ -394,7 +414,7 @@ class ParalKC:
                 # alone (turtlewave_hdEEG.density.event_density).
                 dbwrite.store_analysed_time(
                     db_conn, db_subject, self.annotations, self.dataset, stage,
-                    reject_artifacts, reject_arousals,
+                    reject_types=list(reject_types),
                     annotation_file=annot_file, logger=self.logger)
 
                 # Sleep cycles + stage durations, on this run's connection and
@@ -727,7 +747,7 @@ class ParalKC:
 
     def export_kc_density_to_csv(self, json_input, csv_file, stage=None,
                                  file_pattern=None, reject_artifacts=None,
-                                 reject_arousals=None):
+                                 reject_arousals=None, reject_types=None):
         """Export K-complex statistics to CSV with whole-night and per-stage densities.
 
         .. deprecated:: 4.2.0
@@ -762,18 +782,13 @@ class ParalKC:
             Sleep stage(s) to include
         file_pattern : str or None
             Pattern to filter JSON files
-        reject_artifacts : bool or None, optional
-            Subtract time overlapped by 'Artefact' events from the density
-            denominator. Should match the detection run's setting. ``None``
-            (the default) assumes True and logs a warning saying so; pass the
-            value explicitly to confirm it matches the run and silence the
-            warning.
-        reject_arousals : bool or None, optional
-            Subtract time overlapped by 'Arousal' events from the density
-            denominator. Should match the detection run's setting. ``None``
-            (the default) assumes True and logs a warning saying so; pass the
-            value explicitly to confirm it matches the run and silence the
-            warning.
+        reject_types : str or iterable of str or None, optional
+            Event types whose time is subtracted from the density denominator.
+            Must match the detection run's set. ``None`` (the default) assumes
+            :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES` and logs a
+            warning saying so.
+        reject_artifacts, reject_arousals : bool or None, optional
+            Deprecated shims for ``reject_types``. Default ``None``.
 
         Returns
         -------
@@ -785,7 +800,7 @@ class ParalKC:
         return self._sw_proxy.export_slow_wave_density_to_csv(
             json_input=json_input, csv_file=csv_file, stage=stage,
             file_pattern=file_pattern, reject_artifacts=reject_artifacts,
-            reject_arousals=reject_arousals)
+            reject_arousals=reject_arousals, reject_types=reject_types)
 
     def initialize_sqlite_database(self, db_path='neural_events.db'):
         """Create the ``neural_events.db`` schema if it is not already there.

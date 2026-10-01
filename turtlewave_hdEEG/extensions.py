@@ -195,10 +195,23 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             'Lacourse2018'
         frequency : tuple of float
             Frequency range for spindle detection (low and high)
-        duration : tuple of float
-            Duration range for spindles in seconds (min and max)
+        duration : tuple of float or None
+            Duration range for spindles in seconds ``(min, max)``. ``None``
+            (the default) keeps the method's own published bound, which for
+            ``Lacourse2018`` is A7's (0.3, 2.5) s; ``Moelle2011`` and
+            ``Martin2013`` are (0.5, 3) s, ``Ferrarelli2007`` and
+            ``Wamsley2012`` (0.3, 3) s, ``Nir2011`` (0.5, 2) s, ``Ray2015``
+            (0.49, None) s and ``CIRUS`` (0.5, 3) s. A non-``None`` value is
+            applied LAST by Wonambi's constructor and therefore overrides the
+            method default -- passing a global (0.5, 3) s to ``Lacourse2018``
+            silently replaces its published bound and costs about a third of
+            its detections. For this reason
+            :meth:`~turtlewave_hdEEG.eventprocessor.ParalEvents.detect_spindles`
+            defaults to ``duration=None`` and resolves the bound per method
+            before constructing the detector.
         det_thresh : float or None
-            Detection threshold (method-specific units)
+            Detection threshold (method-specific units). **Ignored by
+            ``Lacourse2018``**, which has no single threshold -- see Notes.
         sel_thresh : float or None
             Selection threshold (method-specific units)
         moving_rms : dict or float or None
@@ -215,7 +228,49 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         polar : str
             Signal polarity - 'normal' or 'opposite'
         **kwargs : dict
-            Additional method-specific parameters
+            Additional method-specific parameters. For ``Lacourse2018`` these
+            are the four A7 thresholds -- ``abs_pow_thresh``,
+            ``rel_pow_thresh``, ``covar_thresh``, ``corr_thresh``.
+
+        Notes
+        -----
+        ``Lacourse2018`` (A7) takes FOUR thresholds, not one, and
+        ``det_thresh`` is silently unused. Its defaults reproduce the
+        reference MATLAB implementation exactly (``absSigPow_Th`` 1.25,
+        ``relSigPow_Th`` 1.6, ``sigCov_Th`` 1.3, ``sigCorr_Th`` 0.69, duration
+        0.3-2.5 s, 0.3 s windows stepped by 0.1 s, 30 s z-score baseline).
+
+        ``abs_pow_thresh`` is the one criterion on an ABSOLUTE scale:
+        ``log10`` of the mean square of the 11-16 Hz signal in a 0.3 s window,
+        in log10(uV^2). The default 1.25 therefore demands roughly 4.2 uV RMS
+        of sustained sigma, and A7 calibrated it on MASS-SS2 C3 in young
+        adults. On lower-amplitude recordings -- older adults, Parkinson's, or
+        any montage/reference that shrinks scalp amplitude -- it is the
+        binding criterion and the detector returns nothing while the other
+        three criteria pass freely. Measured on a 10 min synthetic at 256 Hz,
+        recall against injected 13 Hz bursts: 0.00 at 10 and 14 uV
+        peak-to-peak, 0.59 at 18, 0.80 at 22, 0.95 at 30, 1.00 at 40.
+
+        Wonambi supports A7's escape hatch: pass a NEGATIVE
+        ``abs_pow_thresh`` and the threshold becomes
+        ``mean(abs_sig_pow) + |abs_pow_thresh| * std(abs_sig_pow)``, i.e.
+        adaptive to the recording. Choosing that value is a calibration
+        decision and must be validated against scored data before it is used
+        for science -- it trades recall for precision and is not part of the
+        published A7 configuration.
+
+        ``tolerance`` should stay 0 for this method. A7's own code comments
+        its merge tolerance as "Should be kept to 0", and Wonambi's Lacourse
+        path compares downsampled (10 Hz) event indices against a time vector
+        at the full sampling rate, which makes any non-zero tolerance
+        sampling-rate dependent: 1.0 s is inert at 256 Hz but collapses a
+        10 min record to 2 events at 1000 Hz.
+
+        References
+        ----------
+        Lacourse, K., Delfrate, J., Beaudry, J., Peppard, P. & Warby, S. C.
+        A sleep spindle detection algorithm that emulates human expert
+        spindle scoring. J Neurosci Methods 316, 3-11 (2018).
         """
         if method == 'CIRUS':
             # Set the same base attributes as OriginalDetectSpindle.__init__
@@ -358,6 +413,11 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
             if not hasattr(self, 'frequency') or self.frequency is None:
                 self.frequency = (11, 16)
             if not hasattr(self, 'duration') or self.duration is None:
+                # A7's published minDurSpindleSec / maxDurSpindleSec. The
+                # parent constructor has normally already set this (to the
+                # same pair) or to a caller's explicit override, so this is a
+                # mirror that only fires if the attribute is missing -- it
+                # must never overwrite an explicit duration.
                 self.duration = (.3, 2.5)
                 
             self.det_butter = {'freq': self.frequency,
@@ -444,16 +504,29 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
                 if any(k in attr for k in ['dur', 'freq', 'order']):
                     if 'step' not in attr:
                         attr['step'] = None
-                # Ensure pcl_range exists for zscore dictionaries
-                if attr_name == 'zscore' or (isinstance(attr, dict) and 'dur' in attr and 'pcl_range' not in attr):
-                    attr['pcl_range'] = None
-                
+                # Ensure pcl_range EXISTS for zscore dictionaries -- but never
+                # overwrite one that is already set. Lacourse2018 ships
+                # pcl_range=(10, 90): A7 z-scores each window against a "clean"
+                # 30 s baseline, and the 10-90 percentile trim is Wonambi's
+                # stand-in for that cleaning. Forcing it to None here (which
+                # this did until 4.3.x) puts the untrimmed SD in the
+                # denominator, inflating it whenever the baseline window holds
+                # a spindle or a transient, so rel_sig_pow and sigma_covar
+                # rarely clear their 1.6 / 1.3 thresholds. Measured on a 10 min
+                # synthetic at 256 Hz: rel_pow window pass rate 0.0933 ->
+                # 0.0643 (-31%), covar 0.1107 -> 0.0818 (-26%).
+                if 'dur' in attr or attr_name == 'zscore':
+                    attr.setdefault('pcl_range', None)
+
                 # Handle other common missing parameters
                 if 'freq' in attr and isinstance(attr['freq'], tuple) and 'rolloff' not in attr and attr_name.startswith('det_'):
                     attr['rolloff'] = 0.5
 
-            # Handle moving_power_ratio parameters
-            if attr_name == 'moving_power_ratio' or (isinstance(attr, dict) and 'dur' in attr and ('freq_narrow' not in attr or 'freq_broad' not in attr)):
+            # Handle moving_power_ratio parameters. Only moving_power_ratio
+            # reads freq_narrow/freq_broad/fft_dur, so only it is refilled --
+            # scattering those keys over every dict with a 'dur' made the
+            # constructed config unreadable next to Wonambi's.
+            if attr_name == 'moving_power_ratio' and isinstance(attr, dict):
                 # Add default parameters for moving_power_ratio
                 if 'freq_narrow' not in attr:
                     attr['freq_narrow'] = self.frequency if hasattr(self, 'frequency') else (11, 16)
@@ -528,14 +601,15 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         
         # Method-specific parameters
         if self.method == 'Lacourse2018':
-            if 'abs_pow_thresh' in self._custom_params:
-                self.abs_pow_thresh = self._custom_params['abs_pow_thresh']
-            if 'rel_pow_thresh' in self._custom_params:
-                self.rel_pow_thresh = self._custom_params['rel_pow_thresh']
-            if 'covar_thresh' in self._custom_params:
-                self.covar_thresh = self._custom_params['covar_thresh']
-            if 'corr_thresh' in self._custom_params:
-                self.corr_thresh = self._custom_params['corr_thresh']
+            # `is not None` matters: a caller that always forwards the four
+            # A7 thresholds (a GUI, a CLI driver) passes None for the ones the
+            # user left alone. Assigning that None wipes the published default
+            # and the run dies mid-channel on
+            # `TypeError: '>=' not supported between 'float' and 'NoneType'`.
+            for _thresh in ('abs_pow_thresh', 'rel_pow_thresh',
+                            'covar_thresh', 'corr_thresh'):
+                if self._custom_params.get(_thresh) is not None:
+                    setattr(self, _thresh, self._custom_params[_thresh])
             if 'window_dur' in self._custom_params and self._custom_params['window_dur'] is not None:
                 # Update all window durations
                 win_dur = self._custom_params['window_dur']
@@ -575,9 +649,23 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
                 if 'step' not in self.det_wavelet:
                     self.det_wavelet['step'] = None
 
-        # Apply any additional custom parameters
+        # Apply any additional custom parameters.
+        #
+        # Dict-valued parameters are MERGED, not replaced. Callers (notably
+        # the GUI, which maps its "Window Duration" spinbox onto
+        # windowing/moving_ms/moving_power_ratio/moving_covar/moving_sd) send
+        # partial dicts like {'dur': 0.3}. Replacing the whole dict dropped
+        # 'step': 0.1, and a Lacourse2018 run with windowing['step'] = None
+        # skips Wonambi's 10 Hz downsampling entirely -- every moving window
+        # is then evaluated at every sample, so a 30 min channel at 256 Hz
+        # goes from ~18k to ~460k periodograms.
         for key, value in self._custom_params.items():
-            if hasattr(self, key) and value is not None:
+            if value is None or not hasattr(self, key):
+                continue
+            current = getattr(self, key)
+            if isinstance(current, dict) and isinstance(value, dict):
+                current.update(value)
+            else:
                 setattr(self, key, value)
 
         self._ensure_step_parameters()
@@ -655,18 +743,34 @@ class ImprovedDetectSpindle(OriginalDetectSpindle):
         # Add comprehensive check for step parameters right before detection
         self._ensure_step_parameters()
 
+        # Wonambi's detect_Lacourse2018 writes back into the options object it
+        # is handed (wonambi/detect/spindle.py:866 `opts.tolerance *= step`,
+        # :877 `opts.abs_pow_thresh = mean(...) - opts.abs_pow_thresh * std`).
+        # ParalEvents reuses one detector across every segment of a channel, so
+        # without a restore the settings drift per segment: tolerance decays by
+        # a factor of `step` each call (0.3 -> 0.03 -> 0.003, CONFIRMED by
+        # test_lacourse_state_survives_repeat_calls), and an adaptive
+        # abs_pow_thresh (a negative value, meaning mean + |t| SD) is resolved
+        # to an absolute number on segment 1 and then frozen, so segments 2..N
+        # are thresholded against segment 1's amplitude. Snapshot, restore.
+        _mutated = ('tolerance', 'abs_pow_thresh')
+        _saved = {k: getattr(self, k) for k in _mutated if hasattr(self, k)}
 
-        # Check if we need to invert the signal
-        if hasattr(self, 'invert') and self.invert:
-            # Make a copy to avoid modifying the original
-            data_copy = data._copy(data=True)
-            # Invert signal for all epochs
-            for i in range(len(data_copy.data)):
-                data_copy.data[i] = -data_copy.data[i]
-            return super().__call__(data_copy, parent)
-        else:
-            # No inversion needed, call parent method directly
-            return super().__call__(data, parent)
+        try:
+            # Check if we need to invert the signal
+            if hasattr(self, 'invert') and self.invert:
+                # Make a copy to avoid modifying the original
+                data_copy = data._copy(data=True)
+                # Invert signal for all epochs
+                for i in range(len(data_copy.data)):
+                    data_copy.data[i] = -data_copy.data[i]
+                return super().__call__(data_copy, parent)
+            else:
+                # No inversion needed, call parent method directly
+                return super().__call__(data, parent)
+        finally:
+            for k, v in _saved.items():
+                setattr(self, k, v)
             
 
 

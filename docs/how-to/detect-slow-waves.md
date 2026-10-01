@@ -179,8 +179,7 @@ slow_waves = event_processor.detect_slow_waves(
     # p2p_thresh=75.0 is a deliberately LOOSER floor than the paper (roughly
     # half its peak-to-peak criterion), not the published method.
     stage=['NREM2', 'NREM3'],
-    reject_artifacts=True,
-    reject_arousals=True,
+    reject_types=['Artefact', 'Arousal', 'Move'],  # the 4.4 default; pass explicitly to pin it
     json_dir='wonambi/sw_results',
     subject='sub-001',
 )
@@ -188,6 +187,18 @@ slow_waves = event_processor.detect_slow_waves(
 
 `method` also accepts `'AASM/Massimini2004'`, `'Ngo2015'`, or `'Staresina2015'`.
 `polar='opposite'` is available for inverted-reference recordings.
+
+!!! note "`reject_types` replaces `reject_artifacts`/`reject_arousals`"
+    Since 4.4, the annotation event types excluded from detection (and from
+    the density denominator) are a single `reject_types` list, not two
+    booleans. The default is `['Artefact', 'Arousal', 'Move']` — `Move` is new
+    in 4.4 and matters here specifically: a movement annotation marks
+    mechanical, non-neural signal, which is exactly the failure mode an
+    amplitude-threshold slow-wave detector is vulnerable to. `Resp` and
+    `Snore` remain opt-in. `reject_artifacts=True` / `reject_arousals=True`
+    still work as deprecated shims but cannot express `Move`; use
+    `reject_types` for anything beyond the default. See
+    [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default).
 
 ## Interpreting Results
 
@@ -221,7 +232,7 @@ from turtlewave_hdEEG.density import event_density, format_density_table
 density_df = event_density(
     'wonambi/neural_events.db', event_type='slow_wave', method='Massimini2004',
     stage=['NREM2', 'NREM3'], subject='sub-001',
-    reject_artifacts=True, reject_arousals=True,  # must match the detection call
+    reject_types=['Artefact', 'Arousal', 'Move'],  # must match the detection call
 )
 print(format_density_table(density_df))
 ```

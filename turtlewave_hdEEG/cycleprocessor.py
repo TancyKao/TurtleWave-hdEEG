@@ -4,8 +4,8 @@ cycleprocessor.py
 Sleep-cycle detection for TurtleWave-hdEEG.
 
 Ports the rule-based NREM-REM cycle detector from the MATLAB
-``SpectraDynamic_Analysis`` toolbox (``cal_SleepCycle_HdEEG.m`` and its
-Feinberg-1979 variant) to Python, and connects it to TurtleWave's existing
+``SpectraDynamic_Analysis`` toolbox (``cal_SleepCycle_HdEEG.m`` and a
+REM-closed variant) to Python, and connects it to TurtleWave's existing
 persistence layers:
 
 * the ``events.cycle`` column of ``neural_events.db`` (previously always empty),
@@ -22,10 +22,17 @@ data is required. Two cycle definitions are supported via ``method``:
     too-short NREM runs are dropped. Always yields cycles even when REM scoring
     is sparse.
 ``'1979'``
-    Feinberg/Floyd-Feinberg. As above, but a cycle only closes when a
-    qualifying REM period follows the NREM block (the first cycle needs REM of
-    at least one epoch, later cycles at least ``rem_min`` epochs). NREM periods
-    not followed by qualifying REM are merged into the next cycle.
+    REM-closed. Same NREM periods and segments as ``'2022'``, but a cycle only
+    closes when the segment after an NREM period contains a contiguous REM run
+    of at least ``rem_min`` epochs (the first cycle needs one epoch). The REM
+    run may sit anywhere in the segment; it need not be adjacent to the NREM
+    period. NREM periods that are not followed by a qualifying REM run are
+    merged forward into the next cycle, so that cycle's NREM span includes the
+    intervening wake and REM; a trailing unpaired NREM period becomes the final
+    cycle. The name is historical: this is *not* the Feinberg & Floyd (1979)
+    definition, which requires adjacent REM, counts only the REM run as the REM
+    period, and discards unpaired NREM periods. See the sleep-cycle how-to for
+    a rule-by-rule comparison.
 """
 
 import logging
@@ -149,12 +156,15 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
         Minimum length, in epochs, of an NREM run for it to count as an NREM
         period (default 30).
     method : {'2022', '1979'}, optional
-        Cycle definition. ``'2022'`` is NREM-based; ``'1979'`` additionally
-        requires a qualifying REM period to close each cycle.
+        Cycle definition. ``'2022'`` is NREM-based: every NREM period is a
+        cycle. ``'1979'`` closes a cycle only on a contiguous REM run of at
+        least ``rem_min`` epochs anywhere in the following segment, merging
+        unpaired NREM periods forward (not the Feinberg 1979 rule; see the
+        module docstring).
     rem_min : int, optional
-        Minimum REM run length, in epochs, required to close a cycle under the
-        ``'1979'`` method (the first cycle needs only one REM epoch). Ignored
-        for ``'2022'`` (default 10).
+        Minimum contiguous REM run length, in epochs, required to close a cycle
+        under the ``'1979'`` method (the first cycle needs only one REM epoch).
+        Ignored for ``'2022'`` (default 10).
     epoch_starts : sequence of float, optional
         Start time in seconds of each epoch, same length as ``hypnogram``. If
         omitted, epoch ``i`` is assumed to start at ``i * epoch_length``.
@@ -174,9 +184,11 @@ def detect_cycles(hypnogram, epoch_length=30, wake_thresh=10, nrem_min=30,
 
     Notes
     -----
-    Artefact/undefined epochs (-1) are treated as Wake for the absorb/break
-    logic, matching how the MATLAB detector handles gaps. An empty or all-Wake
-    hypnogram returns ``[]``.
+    Artefact/undefined epochs (-1) are recoded as Wake, so a run of them up to
+    ``wake_thresh`` epochs is absorbed into NREM like a short awakening. This
+    differs from the MATLAB ``cal_SleepCycle*.m`` functions, where unscored
+    epochs are neither wake nor sleep and always break an NREM period. An empty
+    or all-Wake hypnogram returns ``[]``.
     """
     hyp = np.asarray(list(hypnogram), dtype=float)
     n = hyp.size
@@ -507,6 +519,19 @@ class ParalCycles:
         previous run's markers would leave the annotation file describing
         cycles that no longer exist anywhere else.
 
+        Because the clear always runs, **every** call rewrites the annotation
+        XML, including a zero-cycle one: Wonambi's ``clear_cycles()`` saves the
+        file, and ``Annotations.save()`` stamps the rater's ``modified``
+        attribute with the current time. So a zero-cycle night legitimately
+        shows a fresh ``modified`` timestamp and a changed file on disk even
+        though the only content change is the *removal* of the previous run's
+        markers. That is the intended outcome, not a spurious write -- but it
+        does mean file timestamps and version-control diffs cannot be used to
+        tell "cycles were written" from "cycles were cleared"; read
+        ``get_cycles()`` or the ``sleep_cycles`` table for that. Pass
+        ``write_xml=False`` through :meth:`run` /
+        :func:`finalize_cycles_and_durations` to leave the XML untouched.
+
         Parameters
         ----------
         cycles : list of dict
@@ -619,10 +644,12 @@ class ParalCycles:
         subject : str, optional
             Subject identifier. Falls back to ``self.subject`` (then ``''``).
         method : str, optional
-            Cycle definition. Read from the cycles themselves when there are
-            any; when ``cycles`` is empty it is the only thing naming the rows
-            to delete, so passing ``None`` there deletes nothing and is warned
-            about.
+            Cycle definition naming the rows to replace. Read from the cycles
+            themselves whenever there are any, in which case this argument is
+            ignored; when ``cycles`` is empty it is the *only* thing naming
+            the rows to delete, so ``method=None`` together with an empty
+            ``cycles`` raises (see ``Raises``) rather than silently deleting
+            nothing.
         conn : sqlite3.Connection, optional
             An already-open connection **on ``db_path``** (not checked at
             runtime; it is a caller contract). When supplied, the caller owns
@@ -636,6 +663,25 @@ class ParalCycles:
         -------
         int
             Number of cycles written.
+
+        Raises
+        ------
+        ValueError
+            If nothing names the rows to replace: ``cycles`` is empty and
+            ``method`` is ``None``, or a supplied cycle dict carries
+            ``method=None``. The delete is keyed on ``(subject, method)`` and
+            ``method=NULL`` matches no row, so such a call would delete
+            nothing, insert nothing (or insert un-matchable NULL-method rows)
+            and still return, leaving the previous run's rows in place while
+            :meth:`tag_events_with_cycles` has cleared every ``events.cycle``
+            and :meth:`write_cycle_markers` the XML markers -- the three
+            stores disagreeing, which is the defect the 4.3.1 zero-cycle fix
+            closed. This used to warn and continue; the method is always known
+            at the call site (:meth:`run` passes its own), so it is a caller
+            bug. An empty ``cycles`` list with a real ``method`` is the valid
+            "this run found no cycles, clear the store" call and keeps
+            working. Raised before any connection is opened, so a mistaken
+            call cannot create ``db_path`` or alter its schema.
         """
         # One canonical spelling, matching analysed_time / pac_coupling and the
         # detectors. The cycle how-to tells users to pass the bare folder name,
@@ -644,23 +690,35 @@ class ParalCycles:
         # refuses the recording's own next run.
         subject = normalize_subject(
             subject if subject is not None else (self.subject or ''))
+
+        # Resolve which (subject, method) rows this call replaces BEFORE
+        # opening a connection or creating the table, so a call that cannot
+        # name them changes nothing at all -- open_write_connection would
+        # otherwise create a missing db_path and _ensure_sleep_cycles_table
+        # add tables to it, for a call that goes on to write no rows.
+        method_vals = {c['method'] for c in cycles} or {method}
+        if None in method_vals:
+            raise ValueError(
+                f"store_cycles_to_database cannot identify the sleep_cycles "
+                f"rows to replace for subject '{subject}': "
+                + ("the cycles list is empty and method=None, so the delete "
+                   "has no method to key on and would remove nothing, "
+                   "leaving a previous run's rows behind as the only record "
+                   "of cycles that events.cycle and the XML markers no "
+                   "longer describe."
+                   if not cycles else
+                   "at least one cycle dict carries method=None, so its row "
+                   "would be stored with a NULL method that no later "
+                   "replacement can match.")
+                + " Nothing was written. Pass method= (e.g. '2022' or "
+                  "'1979'); an empty cycles list with a real method is the "
+                  "valid 'this run found no cycles, clear the store' call.")
+
         own = conn is None
         if own:
             conn = dbwrite.open_write_connection(db_path)
         try:
             self._ensure_sleep_cycles_table(conn)
-            method_vals = {c['method'] for c in cycles} or {method}
-            if None in method_vals:
-                # Only reachable with an empty cycles list and method=None:
-                # nothing names the rows to replace, so DELETE ... method=NULL
-                # matches nothing and the previous run's rows would survive.
-                self.logger.warning(
-                    "store_cycles_to_database was called with no cycles and "
-                    "no method for subject '%s', so no existing sleep_cycles "
-                    "rows could be identified for replacement and any "
-                    "previous run's rows were left in place. Pass method= to "
-                    "make the replacement complete.", subject)
-                method_vals = {m for m in method_vals if m is not None}
             # Delete every stored spelling of this recording's id, not just the
             # canonical one, or a row written under the bare folder name
             # survives and the insert adds a duplicate cycle.
@@ -696,7 +754,7 @@ class ParalCycles:
                     "No cycles to store for subject '%s' in %s; removed %d "
                     "previously stored row(s) for method(s) %s so the table "
                     "describes this run.", subject, db_path, deleted,
-                    sorted(str(m) for m in method_vals) or 'none')
+                    sorted(str(m) for m in method_vals))
         finally:
             if own:
                 conn.close()
@@ -1086,7 +1144,12 @@ def finalize_cycles_and_durations(
         ``Raises``).
     write_xml : bool, optional
         Write cycle markers to the annotation XML for ``tag_method`` only
-        (default True).
+        (default True). The XML is rewritten on every such call, a zero-cycle
+        run included: the markers are *cleared* before the new ones (if any)
+        are written, and Wonambi saves the file on the clear, stamping a fresh
+        ``modified`` timestamp. A night that produced no cycles therefore still
+        shows a changed annotation file -- correctly, since its old markers
+        were removed. Set False to leave the XML alone entirely.
     plot : bool, optional
         If True, also write the hypnogram/cycle PNG (default False; plotting is
         normally a separate call).

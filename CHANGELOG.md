@@ -5,6 +5,65 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.0] — 2026-09-15
+
+Lacourse2018 output changes with this release: re-detect existing Lacourse2018 rows in `neural_events.db` rather than pooling them with new ones.
+
+Detection now excludes `Move` time by default, and the reject set is recorded as a first-class `reject_types` parameter on every run, denominator and density row instead of two booleans that could only ever name `Artefact` and `Arousal`.
+
+Annotation import also changes independently of that default: on an annotation file with integer-sample latencies, `add_artefacts_from_events` used to floor every event duration to whole seconds, so a 0.39 s arousal became zero-length (and rejected nothing) and a 3.7 s arousal was truncated to 3.0 s. Re-importing EEGLAB events under this release masks a different — generally larger — amount of time than 4.3 did, independent of the `Move` default change above.
+
+### Added
+
+- `reject_types` parameter on `detect_spindles`, `detect_slow_waves`, `detect_kcomplexes` and `analyze_pac`, naming the annotation event types excluded from detection and from the density denominator.
+- `DEFAULT_REJECT_TYPES`, `KNOWN_REJECT_TYPES`, `resolve_reject_types` and `reject_key` in `turtlewave_hdEEG`.
+- `analysed_time.reject_types` and `detection_runs.reject_types` columns; `v_event_density` and `event_density` expose and group on them.
+- `db_meta['turtlewave_version']`, recording which version last opened the database for writing.
+- `--reject-types` on `examples/rerun_detection.py` and both `_GADI.py` drivers.
+- `add_artefacts_from_events` writes an `Artefact` annotation +/-2 s around every EEGLAB `boundary` (splice) event, so no detected event or PAC phase estimate spans a signal discontinuity.
+
+### Changed
+
+- The default reject set is now `Artefact`, `Arousal`, `Move` for all four detectors; `Resp` and `Snore` remain opt-in.
+- GUI: the per-tab Artefact/Arousal reject checkboxes on the spindle, slow-wave and K-complex tabs are replaced by one shared "Excluded event types" group on the Setup tab, echoed read-only on every detection tab including PAC.
+- `analysed_time` is keyed on `(subject, stage, reject_types)`, so runs with different reject sets no longer overwrite each other's denominator.
+- `reject_artifacts`/`reject_arousals` are deprecated shims that add or remove their one type; they never define the whole set.
+- `--reject_artifacts`/`--reject_arousals` in both `_GADI.py` drivers are deprecated no-ops that warn; they could never disable rejection.
+- `--duration` in `hdEEG_spindle_detector_GADI.py` defaults to the method's published bound instead of 0.5-3 s.
+- Lacourse2018's default spindle `duration` is now 0.3-2.5 s, the published A7 bound (previously 0.5-3 s); overriding it logs a warning.
+- GUI: the Lacourse2018 absolute-power threshold accepts negative values, selecting the adaptive mean + |value| x SD threshold.
+- Densities on recordings with EEGLAB boundary events shift by roughly the newly masked fraction (about 1.6% of analysable time on one heavily spliced subject).
+- `store_cycles_to_database` now raises `ValueError`, instead of warning and continuing, when nothing names the `sleep_cycles` rows to replace (an empty cycles list with `method=None`, or a cycle dict carrying `method=None`).
+- `examples/backfill_cycles.py` treats a plot-only failure as a PASS with a `WARN: database written, plot skipped` line instead of counting it as a failure.
+- Re-detecting a scope under a different reject set is refused unless `replace_channels` is given, because the scope would otherwise become the union of two searches.
+- Docs: Lacourse2018 is no longer described as a permissive method.
+- Docs: new reference page for the detector extension classes.
+- Docs: the `'1979'` cycle method is now described as it behaves (REM-closed with forward merging of unpaired NREM periods, no adjacency test) rather than as the Feinberg & Floyd definition; the artefact-as-wake note and the "no cycles under '1979' only" troubleshooting bullet were corrected.
+- Docs: the sleep-cycle how-to documents that cycle-marker writing rewrites the annotation XML (and its `modified` timestamp) even on a zero-cycle night.
+
+### Fixed
+
+- `Lacourse2018` forced the 10-90 percentile z-score trim to `None` on every construction, so the relative-power and covariance criteria ran against an inflated SD.
+- `Lacourse2018` let Wonambi's in-place mutation of `tolerance` and `abs_pow_thresh` leak across calls, so every segment after the first ran at drifted thresholds.
+- `Lacourse2018` replaced whole dict parameters when given a partial one, dropping `step` and making Wonambi evaluate every sample.
+- `Lacourse2018` no longer crashes when `abs_pow_thresh=None` is passed.
+- GUI: switching spindle method after a failed detector construction leaked the previous method's parameter widgets into the next run.
+- GUI: the spindle duration boxes now follow the selected method's default instead of a fixed 0.5-3 s, so default GUI runs of Ferrarelli2007, Wamsley2012, Nir2011 and Ray2015 change accordingly.
+- `analyze_pac` never passed its reject set to `fetch`, so every PAC result on continuous data was computed over artefact and arousal time.
+- `add_artefacts_from_events` no longer floors event durations to whole seconds on an annotation file with integer-sample latencies (a 0.39 s event no longer becomes zero-length and rejects nothing; a 3.7 s event no longer truncates to 3.0 s).
+- `add_artefacts_from_events` now saves an annotation file holding only `Resp`/`Move`/`Snore` (or only boundary) events; the save gate previously counted only `Artefact`+`Arousal` additions and left such a file unsaved.
+- Opening a 4.3 database under this release aborted at connection time with a `v_event_density` view error.
+- `examples/rerun_detection.py` used the CLI default reject set instead of the original run's recorded set, so re-detected channels could be searched over different time than the untouched channels.
+- A mixed-method spindle run with `duration` unset recorded only the first method's duration bound; the scalar is now recorded only when every method agrees, and the per-method map is always recorded.
+- `pac_coupling.mi_raw` and the per-channel CSV reported the surrogate-normalised modulation index under both names; `mi_raw` now holds the unnormalised Tort MI.
+
+### Upgrading
+
+- PAC rows written before this release were computed without artefact or arousal rejection, and their `mi_raw` values are z-scores rather than raw modulation indices; re-run PAC rather than pooling them with new rows.
+- Spindle, slow-wave and K-complex densities written before this release used `Artefact,Arousal` only. Existing `analysed_time` rows are migrated to that key on first open, and a re-run under the new default adds a row instead of replacing them.
+- Densities computed from annotation files re-imported under this release will not match archived densities computed under 4.3, even at the same `reject_types` — the duration-flooring fix changes how much time each `Artefact`/`Arousal`/`Resp`/`Move`/`Snore` annotation actually masks. Re-import and re-run rather than comparing old and new numbers directly.
+- Re-detecting an existing scope after upgrading applies the new default reject set (`Artefact,Arousal,Move`) unless you pass `reject_types=` yourself; pass `replace_channels=<the channels you're re-detecting>` to clear the stale event rows first. That leaves the old reject set's `analysed_time` denominator row in place, so pass `reject_types=` when reading density back.
+
 ## [4.3.1] — 2026-08-31
 
 Re-running cycle detection at a different threshold used to leave events carrying

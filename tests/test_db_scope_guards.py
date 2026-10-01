@@ -29,6 +29,7 @@ misleading rather than loud:
 Run standalone: ``python tests/test_db_scope_guards.py``.
 """
 
+import json
 import os
 import shutil
 import sqlite3
@@ -37,6 +38,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import turtlewave_hdEEG  # noqa: E402
 from turtlewave_hdEEG import dbwrite  # noqa: E402
 
 
@@ -445,6 +447,95 @@ def test_method_spelling_cannot_silently_duplicate():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_reject_set_change_cannot_silently_union_a_scope():
+    """(4b) Re-detecting a scope under a DIFFERENT reject set is refused.
+
+    The reject set is not part of :func:`event_uuid5`, so this failure is not
+    a duplication and none of the other three checks can see it: both runs
+    write the same uuids for the events they both find. What survives is every
+    event only the FIRST run could find, because its reject set left that
+    window in the search space -- the scope silently becomes the union of two
+    different searches. ``analysed_time`` IS keyed on the reject set, so a
+    density over that union is one search's count over the other's time.
+
+    4.4 makes this the ordinary case: the default set gained ``Move``, so
+    re-detecting any 4.3 scope changes it.
+    """
+    print("\n4b. A changed reject set cannot silently union a scope:")
+
+    tmp = tempfile.mkdtemp(prefix='tw_reject_guard_')
+    try:
+        db = os.path.join(tmp, 'neural_events.db')
+        conn = _fresh_db(db)
+        # A 4.3-style run: same method, same band, same stage token, and the
+        # 'joint' marker -- so checks 1, 2 and 3 all pass and only check 4 can
+        # fire.
+        dbwrite.set_db_meta(conn, dbwrite.STAGE_FORMAT_KEY,
+                            dbwrite.STAGE_FORMAT_JOINT)
+        conn.execute(
+            "INSERT INTO events (uuid, event_type, channel, start_time, "
+            "end_time, duration, stage, method, freq_lower, freq_upper, "
+            "run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (dbwrite.event_uuid5('spindle', 'Cz', 10.0, 'Moelle2011', 11.0,
+                                 16.0, 'NREM2'),
+             'spindle', 'Cz', 10.0, 11.0, 1.0, 'NREM2', 'Moelle2011', 11.0,
+             16.0, 'run-4.3'))
+        dbwrite.record_run(
+            conn, 'run-4.3', 'spindle', 'Moelle2011', 'Moelle et al. 2011',
+            json.dumps({'frequency': [11.0, 16.0]}), '[]', 'normal',
+            "['NREM2']", reject_types=['Artefact', 'Arousal'],
+            subject='sub-G')
+        conn.commit()
+
+        # Same set: allowed, this is an ordinary idempotent re-run.
+        assert dbwrite.assert_stage_format_compatible(
+            conn, 'spindle', ['Moelle2011'], 11.0, 16.0, stage_token='NREM2',
+            channels=['Cz'], db_path=db,
+            reject_types=['Arousal', 'Artefact']) == 0
+        print("   [ok] the SAME reject set (in any order) is allowed")
+
+        # The 4.4 default adds Move: refused.
+        raised = None
+        try:
+            dbwrite.assert_stage_format_compatible(
+                conn, 'spindle', ['Moelle2011'], 11.0, 16.0,
+                stage_token='NREM2', channels=['Cz'], db_path=db,
+                reject_types=turtlewave_hdEEG.DEFAULT_REJECT_TYPES)
+        except ValueError as e:
+            raised = str(e)
+        assert raised is not None, (
+            "the guard allowed a re-detection under a different reject set, "
+            "which leaves the scope as the union of two searches")
+        assert 'Arousal,Artefact' in raised and 'Move' in raised, raised
+        assert 'replace_channels' in raised, raised
+        print(f"   [ok] guard REFUSES: {raised.split('. ')[0][:96]}...")
+
+        # replace_channels is the advertised remedy: those rows are deleted in
+        # the same transaction, so they cannot survive as a union.
+        assert dbwrite.assert_stage_format_compatible(
+            conn, 'spindle', ['Moelle2011'], 11.0, 16.0, stage_token='NREM2',
+            channels=['Cz'], replace_channels=['Cz'], db_path=db,
+            reject_types=turtlewave_hdEEG.DEFAULT_REJECT_TYPES) == 0
+        print("   [ok] replace_channels= makes the same run legal")
+
+        # A run at a DIFFERENT band is a different scope, not this one.
+        assert dbwrite.assert_stage_format_compatible(
+            conn, 'spindle', ['Moelle2011'], 9.0, 12.0, stage_token='NREM2',
+            channels=['Cz'], db_path=db,
+            reject_types=turtlewave_hdEEG.DEFAULT_REJECT_TYPES) == 0
+        print("   [ok] a different band is a different scope, not a conflict")
+
+        # reject_types=None is the documented opt-out (callers with no set to
+        # compare), and must not start refusing existing work.
+        assert dbwrite.assert_stage_format_compatible(
+            conn, 'spindle', ['Moelle2011'], 11.0, 16.0, stage_token='NREM2',
+            channels=['Cz'], db_path=db) == 0
+        print("   [ok] reject_types=None keeps checks 1-3 and skips check 4")
+        conn.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_open_write_connection_reports_a_non_database():
     """(4) 'file is not a database' is caught, closed and reported.
 
@@ -512,6 +603,7 @@ if __name__ == "__main__":
     test_zero_event_channel_is_covered_on_the_csv_path()
     test_failed_channel_still_fails_on_the_csv_path()
     test_method_spelling_cannot_silently_duplicate()
+    test_reject_set_change_cannot_silently_union_a_scope()
     test_open_write_connection_reports_a_non_database()
     test_stage_token_helpers()
 

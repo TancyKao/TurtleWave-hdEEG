@@ -138,6 +138,13 @@ if _cli.channels:
     print(f"Channels from --channels: {len(test_channels)}")
 test_stages = ['NREM2','NREM3'] # ['NREM2', 'NREM3']
 test_frequency = (11, 13)  # Frequency range for spindles
+# Annotation event types excluded from detection AND from the density
+# denominator. This exact list is stored in detection_runs.reject_types and
+# keys the analysed_time denominator, so it must be the same object every call
+# below uses. 'Resp' and 'Snore' are opt-in: add them only for a deliberate
+# sensitivity analysis, and note that in a sleep-disordered-breathing cohort
+# their masked time scales with severity.
+reject_types = ['Artefact', 'Arousal', 'Move']
 
 # 5. Test detect_spindles with minimal parameters
 print("Running detect_spindles...")
@@ -148,8 +155,7 @@ spindles = event_processor.detect_spindles(
     frequency            = test_frequency,
     duration             = (0.5, 3),
     stage                = test_stages,
-    reject_artifacts     = True,
-    reject_arousals      = False,
+    reject_types         = reject_types,
     cat                  = (1, 1, 1, 0),# concatenate across cycles, stages, and discontinuities (event types separate)
     save_to_annotations  = False, # save to annotations
     json_dir             = out_dir,
@@ -187,13 +193,13 @@ if not _cli.legacy_json:
     print("~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^")
     print(f"Spindle events written to: {db_path}")
     try:
-        # Rejection settings must match the detection call above: they are part
-        # of the analysed_time key, so a mismatch divides by a different amount
-        # of recording time.
+        # The reject set must match the detection call above: it is part of
+        # the analysed_time key, so a mismatch divides by a different amount of
+        # recording time.
         density_df = event_density(
             db_path, event_type='spindle', method=test_method,
             stage=test_stages, subject=_cli.subject,
-            reject_artifacts=True, reject_arousals=False)
+            reject_types=reject_types)
         print("Spindle density (events per minute of artefact-free in-stage time):")
         print(format_density_table(density_df))
     except (ValueError, FileNotFoundError) as e:
@@ -211,17 +217,16 @@ else:
         file_pattern = file_pattern  # Pattern to match JSON files
     )
 
-    # Pass the same rejection settings the detection call used. The density
+    # Pass the same reject set the detection call used. The density
     # denominator is the recording time the detector actually analysed, so a
-    # mismatch here (detection kept arousal epochs, the denominator subtracts
-    # them) biases every density. Detection above used reject_arousals=False.
+    # mismatch here (detection kept a type, the denominator subtracts it)
+    # biases every density.
     density2CSV = event_processor.export_spindle_density_to_csv(
         json_input       = out_dir,
         csv_file         = os.path.join(out_dir, f'spindle_density_{test_method}_{freq_range}_{stages_str}.csv'),
         stage            = test_stages,
         file_pattern     = file_pattern,
-        reject_artifacts = True,
-        reject_arousals  = False
+        reject_types     = reject_types
     )
 
     csv2db = event_processor.import_parameters_csv_to_database(

@@ -25,7 +25,7 @@ from matplotlib.figure import Figure
 import pandas as pd
 from datetime import datetime
 
-from .utils import derive_subject, normalize_subject
+from .utils import derive_subject, normalize_subject, resolve_reject_types
 from . import dbwrite
 
 
@@ -168,7 +168,7 @@ class ParalPAC:
             return (method, surrogate, correction)
 
     def analyze_pac(self, chan=None, ref_chan=None, grp_name='eeg',
-                stage=None, rater=None, reject_artf=['Artefact', 'Arousal'],
+                stage=None, rater=None, reject_types=None, reject_artf=None,
                 cycle_idx=None, cat=(1,1,1,0), nbins=18,
                 phase_freq=(0.5, 1.25), amp_freq=(11, 16),
                 idpac=(2, 3, 4), min_dur=1,
@@ -194,8 +194,23 @@ class ParalPAC:
             Sleep stage(s) to analyze
         rater : str
             Rater name for annotations
-        reject_artf : list
-            Event types to reject
+        reject_types : str or iterable of str or None, optional
+            Annotation event types whose time is excluded from the segments PAC
+            is computed over. ``None`` (default) uses
+            :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES`.
+
+            Before 4.4 this argument existed but was never used: the continuous
+            fetch passed no rejection at all, so every PAC result computed on
+            continuous data included artefact and arousal windows. It is now
+            applied. Note the cost of each ADDED type, and see Notes: with
+            ``cat=(1, 1, 1, 0)`` the fetched pieces are concatenated into one
+            signal, so every mask becomes an internal SPLICE -- a step
+            discontinuity that the phase filter smears across a
+            neighbourhood of the join -- rather than a boundary the analysis
+            respects. More masked windows means more splices, which is a second
+            reason ``Resp``/``Snore`` are not in the default set.
+        reject_artf : list or None, optional
+            Deprecated alias for ``reject_types``; mapped onto it when given.
         cycle_idx : list or None
             Sleep cycle indices to include
         cat : tuple
@@ -209,7 +224,11 @@ class ParalPAC:
         idpac : tuple
             PAC method settings (method, surrogate, correction)
         min_dur : float
-            Minimum event duration in seconds
+            Minimum length, in seconds, that a concatenated segment must have
+            (on top of twice the buffer) before the buffer is trimmed off it;
+            a shorter segment keeps its buffer rather than being dropped. It is
+            NOT passed to ``fetch`` and therefore does not filter events or
+            fragments -- see Notes. Default ``1``.
         adap_bands_phase : str
             Type of frequency band adaptation for phase
         adap_bands_amplitude : str
@@ -287,7 +306,33 @@ class ParalPAC:
         Returns
         -------
         dict
-            Dictionary containing PAC results
+            Dictionary containing PAC results, keyed by channel and then by
+            the ``'<pha_lo>-<pha_hi>Hz_<amp_lo>-<amp_hi>Hz'`` band pair. The
+            same values are written to ``pac_coupling`` and to the
+            per-channel ``*_pac_parameters.csv``. The two coupling-strength
+            columns are different quantities on different scales:
+
+            ``mi_raw``
+                The UNNORMALISED coupling estimate, averaged over the
+                surrogate blocks. With the default ``idpac[0] = 2`` this is
+                the Tort (2010) modulation index: the Kullback-Leibler
+                divergence of the phase-binned mean amplitude from a uniform
+                distribution, divided by ``log(nbins)``. It is dimensionless,
+                non-negative, and in practice far below its theoretical
+                maximum of 1 (order 1e-3 to 1e-1 on real sleep data), so it
+                is comparable across channels and subjects only when the
+                number and length of the segments are comparable.
+            ``mi_norm``
+                The SAME estimate normalised against the surrogate
+                distribution, as selected by ``idpac[2]`` -- a z-score under
+                the default ``idpac[2] = 4``. It is in units of surrogate
+                standard deviations, is signed (a value at or below the
+                surrogate mean is zero or negative), and is the column to use
+                for comparisons across channels or subjects. When
+                ``idpac[2] == 0`` no normalisation is applied and ``mi_norm``
+                is legitimately equal to ``mi_raw``.
+
+            Before 4.4 both columns held ``mi_norm``.
 
         Raises
         ------
@@ -298,6 +343,28 @@ class ParalPAC:
             derived defaults would store it as ``event_type='slow_wave',
             method='unknown'``, i.e. a theta-gamma result indistinguishable
             from slow-wave coupling, so it is refused rather than mislabelled.
+
+        Notes
+        -----
+        **What rejection actually does to the signal here.** ``fetch`` is
+        called with ``cat=(1, 1, 1, 0)``, which concatenates across cycles,
+        stages and discontinuities, so the rejected windows are not analysed
+        as separate pieces: they are cut out and the surviving signal is
+        joined end to end. Each join is a step discontinuity in a signal that
+        is then band-pass filtered for phase, so a short neighbourhood either
+        side of every mask carries filter ringing and a phase estimate that
+        belongs to no real oscillation. The ``buffer`` trims only the OUTER
+        ends of the concatenated signal, not the internal joins, and
+        ``min_dur`` gates only whether that trim happens at all -- nothing
+        drops a short fragment or excludes a seam.
+
+        The rigorous alternative is to compute PAC per artefact-free fragment
+        with a real minimum-length floor and pool the per-fragment estimates
+        (the OCTOPUS/seapipe approach), which never filters across a splice.
+        That changes every stored PAC value, so it is deliberately NOT done in
+        this release; it is a tracked follow-up. Until then, prefer the
+        smallest defensible reject set for PAC and report it alongside the
+        result.
         """
         from tensorpac import Pac
         import sys
@@ -305,6 +372,21 @@ class ParalPAC:
 
         # Set up logger
         logger = self.logger
+
+        # The reject set, resolved once. `reject_artf` is the pre-4.4 spelling;
+        # it was declared and then never passed to fetch(), so every PAC result
+        # on continuous data was computed over artefact and arousal time. It is
+        # honoured as an alias and applied for real below.
+        if reject_artf is not None and reject_types is None:
+            logger.info(
+                "reject_artf= is deprecated; use reject_types=. Treating %s as "
+                "the reject set.", reject_artf)
+            reject_types = reject_artf
+        reject_types = list(resolve_reject_types(reject_types,
+                                                 logger_=logger))
+        logger.info(
+            "Excluding %s time from the segments PAC is computed over.",
+            ", ".join(reject_types) or "no event types")
 
         # write_db=None means AUTO: the database is the store of record.
         auto_db = write_db is None
@@ -813,9 +895,11 @@ class ParalPAC:
                 else:
                     # Use standard fetch for continuous data
                     # NEED TO FIX STAGE ISN NREM2NREM3 <===============================
-                    segments = fetch(self.dataset, self.annotations, cat=cat, 
+                    segments = fetch(self.dataset, self.annotations, cat=cat,
                                 evt_type=None, stage=stage, cycle=cycle_idx,
-                                buffer=event_opts['buffer'])
+                                buffer=event_opts['buffer'],
+                                reject_epoch=True,
+                                reject_artf=list(reject_types))
                     
                     # Read data for the channel
                     segments.read_data(ch, ref_chan, grp_name=grp_name)
@@ -897,7 +981,13 @@ class ParalPAC:
                         longamp[-1, rem+pad] = longamp[-1, ran]
                 
                 # 9. Calculate Coupling Strength
+                # `mi` holds what pac.fit RETURNS -- the surrogate-normalised
+                # estimate when idpac[2] != 0 -- and `mi_raw_blocks` the
+                # unnormalised estimate of the same block. They are two
+                # different quantities on two different scales; see the
+                # comment at the fit call below.
                 mi = np.zeros((longamp.shape[0], 1))
+                mi_raw_blocks = np.zeros((longamp.shape[0], 1))
                 mi_pv = np.zeros((longamp.shape[0], 1))
                 
                 for row in range(longamp.shape[0]):
@@ -912,6 +1002,18 @@ class ParalPAC:
                     amp_data = np.reshape(amp_data, (1, 1, len(amp_data)))
                     
                     mi[row] = pac.fit(pha_data, amp_data, n_perm=400, random_state=5, verbose=False)[0][0]
+
+                    # tensorpac's `fit` stores the UNNORMALISED estimate in
+                    # `pac.pac` (a copy, taken before the surrogates are
+                    # computed) and then normalises the array it returns in
+                    # place. So `pac.pac` read here, right after the call, is
+                    # this block's raw modulation index; read after the loop
+                    # it would hold only the last block. Shape is
+                    # (n_amp, n_pha, n_epochs) -- 1 x 1 x 1 in this
+                    # configuration -- so flatten and take the single value.
+                    raw_block = np.ravel(np.asarray(pac.pac, dtype=float))
+                    mi_raw_blocks[row] = (float(raw_block[0]) if raw_block.size
+                                          else np.nan)
                     mi_pv[row] = pac.infer_pvalues(p=0.95, mcp='fdr')[0][0]
                 
                 # 10. Calculate preferred phase
@@ -974,12 +1076,13 @@ class ParalPAC:
                 np.save(amp_file, ab)
                 
                 # Save CFC metrics to dataframe.
-                # NOTE: `pac.pac` only holds the LAST block from the loop above,
-                # so average the per-block values in `mi` instead (mi_raw used to
-                # report just the final block). With idpac normalization enabled,
-                # mi_raw and mi_norm are now the same quantity.
+                # Both columns are the mean over the surrogate blocks:
+                # `mi_raw` averages the unnormalised per-block estimates
+                # (Tort MI when idpac[0] == 2), `mi_norm` the normalised ones
+                # that pac.fit returned. With idpac[2] == 0 no normalisation
+                # is applied and the two are legitimately identical.
                 d = pd.DataFrame([
-                    np.mean(mi),
+                    np.mean(mi_raw_blocks),
                     np.mean(mi),
                     np.median(mi_pv), 
                     theta, 
@@ -1015,7 +1118,7 @@ class ParalPAC:
                 # below uses if the database write fails, and `csv_written`
                 # says whether it exists yet.
                 chan_results = {
-                    'mi_raw': float(np.mean(mi)),
+                    'mi_raw': float(np.mean(mi_raw_blocks)),
                     'mi_norm': float(np.mean(mi)),
                     'pval': float(np.median(mi_pv)),
                     'preferred_phase_rad': float(theta),
@@ -1299,10 +1402,11 @@ class ParalPAC:
         
         return mean_amp_bins
     
-    def generate_comodulogram(self, chan=None, stage=None, 
+    def generate_comodulogram(self, chan=None, stage=None,
                             phase_freqs=None, amp_freqs=None,
                             idpac=(2, 3, 4), buffer=1.0,
-                            out_dir=None, reject_artf=['Artefact', 'Arousal']):
+                            out_dir=None, reject_types=None,
+                            reject_artf=None):
         """
         Generate a comodulogram for the given channel and parameters.
         
@@ -1322,8 +1426,12 @@ class ParalPAC:
             Buffer in seconds
         out_dir : str
             Output directory for results
-        reject_artf : list
-            Event types to reject
+        reject_types : str or iterable of str or None, optional
+            Annotation event types whose time is excluded from the segments the
+            comodulogram is computed over. ``None`` (default) uses
+            :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES`.
+        reject_artf : list or None, optional
+            Deprecated alias for ``reject_types``.
             
         Returns
         -------
@@ -1331,9 +1439,16 @@ class ParalPAC:
             Dictionary containing comodulogram results
         """
         from tensorpac import Pac
-        
+
         logger = self.logger
-        
+
+        if reject_artf is not None and reject_types is None:
+            logger.info(
+                "reject_artf= is deprecated; use reject_types=. Treating %s as "
+                "the reject set.", reject_artf)
+            reject_types = reject_artf
+        reject_types = list(resolve_reject_types(reject_types, logger_=logger))
+
         # Process stage input - handle combined stages like "NREM2NREM3"
         if isinstance(stage, str):
             # Handle combined stages like "NREM2NREM3"
@@ -1381,9 +1496,10 @@ class ParalPAC:
             logger.info(f"Fetching data segments for channel {chan}")
             
             # Fetch segments based on sleep stage
-            segments = fetch(self.dataset, self.annotations, cat=(1, 1,1,0), 
+            segments = fetch(self.dataset, self.annotations, cat=(1, 1, 1, 0),
                           evt_type=None, stage=stage, cycle=None,
-                          buffer=buffer, reject_artf=reject_artf)
+                          buffer=buffer, reject_epoch=True,
+                          reject_artf=list(reject_types))
             
             # Read data for the channel
             segments.read_data(chan)

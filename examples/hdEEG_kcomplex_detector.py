@@ -101,6 +101,13 @@ test_trough_duration = (0.25, 1.0)
 test_neg_peak_thresh = -40.0              # µV trough depth (AASM/Massimini2004)
 test_p2p_thresh = 75.0                    # µV peak-to-peak (AASM/Massimini2004)
 test_min_isolation = 1.0                  # seconds between successive KC troughs
+# Excluded from detection AND from the density denominator; stored in
+# detection_runs.reject_types and keys the analysed_time denominator, so every
+# call below uses this one list. 'Resp' is a defensible opt-in HERE: respiratory
+# events evoke K-complexes at termination, so a study of SPONTANEOUS KC density
+# in sleep-disordered breathing has reason to mask them -- but an evoked KC is a
+# real cortical response, not an artefact, so state the choice in the methods.
+reject_types = ['Artefact', 'Arousal', 'Move']
 
 
 # 5. Run detection -----------------------------------------------------
@@ -115,8 +122,7 @@ kcomplexes = event_processor.detect_kcomplexes(
     min_isolation=test_min_isolation,
     polar='normal',
     stage=test_stages,
-    reject_artifacts=True,
-    reject_arousals=True,
+    reject_types=reject_types,
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
     json_dir=out_dir,
@@ -154,7 +160,7 @@ if not _cli.legacy_json:
         density_df = event_density(
             db_path, event_type='k_complex', method=test_method,
             stage=test_stages, subject=_cli.subject,
-            reject_artifacts=True, reject_arousals=True)
+            reject_types=reject_types)
         print("K-complex density (events per minute of artefact-free in-stage time):")
         print(format_density_table(density_df))
     except (ValueError, FileNotFoundError) as e:
@@ -174,12 +180,11 @@ else:
         json_input=out_dir, csv_file=param_csv, file_pattern=file_pattern,
         frequency=test_frequency,
     )
-    # Same rejection settings as the detection call above, so the density
+    # Same reject set as the detection call above, so the density
     # denominator matches the recording time actually analysed.
     event_processor.export_kc_density_to_csv(
         json_input=out_dir, csv_file=density_csv, stage=test_stages,
-        file_pattern=file_pattern,
-        reject_artifacts=True, reject_arousals=True,
+        file_pattern=file_pattern, reject_types=reject_types,
     )
     event_processor.initialize_sqlite_database(db_path)
     event_processor.import_parameters_csv_to_database(

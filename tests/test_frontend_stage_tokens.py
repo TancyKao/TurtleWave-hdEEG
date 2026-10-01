@@ -392,8 +392,9 @@ def test_qc_denominator_end_to_end():
             db = _handle
 
         f = _Fake()
-        assert f._qc_stored_density_minutes(scope, True, True) == 50.0
-        assert f._qc_stored_density_minutes(['NREM2NREM3'], True, True) is None
+        reject_types = ['Artefact', 'Arousal', 'Move']
+        assert f._qc_stored_density_minutes(scope, reject_types) == 50.0
+        assert f._qc_stored_density_minutes(['NREM2NREM3'], reject_types) is None
         print("[ok] the stored denominator pools to 50.0 min over the same "
               "components, so _qc_stored_density_minutes is left untouched")
     finally:

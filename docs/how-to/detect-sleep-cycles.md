@@ -49,10 +49,36 @@ Two NREM-REM cycle definitions are supported via `method`:
   NREM period plus the inter-NREM (REM) segment that follows it. Short
   awakenings are absorbed into NREM and too-short NREM runs are dropped.
   Always yields cycles even when REM scoring is sparse.
-- **`'1979'`** — Feinberg/Floyd-Feinberg. As above, but a cycle only closes
-  when a qualifying REM period follows the NREM block (the first cycle needs
-  REM of at least one epoch, later cycles at least `rem_min` epochs). NREM
-  periods not followed by qualifying REM are merged into the next cycle.
+- **`'1979'`** — REM-closed. Same NREM periods and segments as `'2022'`, but
+  a cycle only closes when the segment after an NREM period contains a
+  contiguous REM run of at least `rem_min` epochs (the first cycle needs one
+  epoch). The REM run may sit anywhere in the segment; it need not be adjacent
+  to the NREM period. NREM periods that are not followed by a qualifying REM
+  run are merged forward into the next cycle, so that cycle's NREM span
+  includes the intervening wake and REM; a trailing unpaired NREM period
+  becomes the final cycle. The name is historical: this is **not** the
+  Feinberg & Floyd (1979) definition — see the comparison below.
+
+### How `'1979'` differs from Feinberg & Floyd
+
+The Feinberg-style column is the rule set used by the MATLAB
+`cal_SleepCycle_Feinberg_method3.m` in the PRJ-10 sleep-cycle project
+(wake runs of up to 5 min absorbed, NREM period longer than 15 min, REM
+period of at least 5 min).
+
+| Rule | `'1979'` | Feinberg-style (PRJ-10 Trad Method 3) |
+|---|---|---|
+| Unscored / artefact epochs | recoded as Wake, absorbable | neither wake nor sleep, always break NREM |
+| REM must start right after the NREM period | not required | required |
+| REM period | whole inter-NREM segment | the contiguous REM run only |
+| Absorbed wake trimmed from NREM period edges | yes | no |
+| NREM period with no qualifying REM | merged forward into the next cycle | dropped |
+| Trailing NREM period with no REM | becomes the final cycle | dropped |
+
+Only the `rem_min` threshold and the first-cycle exemption come from Feinberg.
+`'2022'` is the same as the PRJ-10 "Mod method" apart from the unscored-epoch
+handling, and apart from an NREM period that ends on the last epoch of the
+recording, which `'2022'` keeps as a cycle with zero REM duration.
 
 By default `finalize_cycles_and_durations` detects and stores **both**
 definitions side by side in `sleep_cycles` (keyed by `(subject, method)`), but
@@ -159,7 +185,14 @@ more than one subject spelling.
 
 `examples/backfill_cycles.py` is a hardened, ready-to-run version of this loop
 (subject-id derivation, per-subject try/except so one bad folder doesn't abort
-the batch, and a PASS/FAIL summary):
+the batch, and a PASS/FAIL summary). A subject whose database write succeeds
+but whose PNG cannot be drawn (missing matplotlib, an unwritable output
+directory, a headless-backend problem) still counts as a **PASS**, with an
+extra `WARN: database written, plot skipped` line naming the error — the
+derived tables (`sleep_cycles`, `stage_durations`, `events.cycle`) are the
+deliverable, and the plot is a convenience the script can redraw on a later
+run. Only a failure at or before the database write counts as FAIL. The
+final tally names how many passing subjects had their plot skipped:
 
 ```bash
 python examples/backfill_cycles.py
@@ -216,7 +249,16 @@ block and always runs at the library default — the script has no equivalent
 - **`sleep_cycles`** — one row per `(subject, method, cycle_number)`: NREM/REM
   start/end times and `nrem_dur_min`, `nrem_n23_dur_min`, `rem_dur_min`,
   `cycle_dur_min`. Re-running replaces the existing rows for that
-  `(subject, method)` pair, so it stays idempotent.
+  `(subject, method)` pair, so it stays idempotent. `store_cycles_to_database`
+  (called by `run`/`finalize_cycles_and_durations`, always with `method` set)
+  needs `method` to know which rows to replace: since this release it
+  **raises `ValueError`** rather than silently doing nothing if it's called
+  directly with an empty `cycles` list and `method=None` — deleting nothing
+  and leaving a stale run's rows in place while `events.cycle` and the XML
+  markers had already moved on used to be a warning, which is easy to miss in
+  a batch log. This only matters if you call `store_cycles_to_database`
+  yourself rather than going through `run`/`finalize_cycles_and_durations`,
+  which always pass their own `method`.
 - **`stage_durations`** — one row per subject: minutes in Wake / N1 / N2 / N3
   / REM / artefact, reconciled to the full hypnogram span. Written even when
   no cycles are detected (an all-Wake or unscorable night still has stage
@@ -228,7 +270,17 @@ block and always runs at the library default — the script has no equivalent
   `methods` so its numbering is the one that survives.
 - **Annotation XML** — cycle markers for `tag_method` only, so
   `Annotations.get_cycles()` and the review GUI show cycle bands without a
-  numbering conflict between the two definitions.
+  numbering conflict between the two definitions. `write_cycle_markers`
+  always clears the previous run's markers before writing the new ones —
+  including on a run that finds **zero** cycles — so a re-run under a raised
+  `nrem_min` or a rescored hypnogram never leaves stale markers behind. That
+  clear-then-write is a real write either way: Wonambi's `clear_cycles()`
+  saves the file and stamps the rater's `modified` attribute with the current
+  time, so a zero-cycle night still shows a fresh `modified` timestamp and a
+  changed file on disk, even though the only content change is the *removal*
+  of the previous run's markers. File timestamps and version-control diffs
+  therefore cannot tell "cycles were written" from "cycles were cleared" —
+  read `Annotations.get_cycles()` or the `sleep_cycles` table for that.
 
 ## Plot the hypnogram with cycle bands
 
@@ -276,10 +328,10 @@ If `cycles_by_method[method]` comes back empty:
 - **Check `nrem_min`**: NREM runs shorter than `nrem_min` epochs (default 30,
   i.e. 15 minutes at 30 s epochs) are dropped as too short to count as an
   NREM period.
-- **Under `'1979'` only**: A trailing NREM period with no qualifying REM after
-  it still becomes a final cycle, so an empty result under `'1979'` but not
-  `'2022'` usually means the NREM/REM structure itself doesn't meet the
-  stricter 1979 rule — inspect the hypnogram directly.
+- **Under `'1979'`**: an empty result here always coincides with an empty
+  `'2022'` result, because a trailing NREM period with no qualifying REM still
+  becomes the final cycle. `'1979'` can only return *fewer* cycles than
+  `'2022'` (by merging), never zero when `'2022'` found some.
 
 ### `ValueError: tag_method` is not one of `methods`
 

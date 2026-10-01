@@ -6,7 +6,8 @@ channels and replaces their rows in ``neural_events.db`` (see
 :func:`turtlewave_hdEEG.dbwrite.write_channel_events` with ``replace=True``).
 
 Artefact-epoch rejection itself needs no new code: detection calls
-``fetch(..., reject_epoch=True, reject_artf=['Artefact', 'Arousal'])`` and
+``fetch(..., reject_epoch=True, reject_artf=reject_types)`` (from 4.4 the
+default reject set is ``('Artefact', 'Arousal', 'Move')``) and
 Wonambi excises the marked spans from the signal BEFORE the detector's threshold
 pooling, so exclusion is correct at ESTIMATION time (re-fetch, not
 detect-then-delete). What this module adds are the guards that make a re-run
@@ -45,7 +46,7 @@ per-channel fetch, tracked as a follow-up.
 
 import logging
 
-from .utils import compute_analysed_seconds
+from .utils import compute_analysed_seconds, DEFAULT_REJECT_TYPES
 from . import dbwrite
 
 
@@ -74,7 +75,9 @@ def verify_rater_match(annotations, reject_types, logger=None):
         The annotation object handed to the detector. Its currently selected
         rater is the one the detector will read.
     reject_types : sequence of str
-        Event types the run will reject (e.g. ``['Artefact', 'Arousal']``).
+        Event types the run will reject, as resolved by
+        :func:`turtlewave_hdEEG.utils.resolve_reject_types` (the 4.4 default is
+        :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES`).
         Empty/``None`` means the run rejects nothing, so only the staging
         presence is checked.
     logger : logging.Logger or None, optional
@@ -178,7 +181,8 @@ def verify_rater_match(annotations, reject_types, logger=None):
 
 
 def channel_clean_gate(annotations, stages, s_freq=None, n_min_sec=300.0,
-                       max_excluded_frac=0.5, reject_types=('Artefact', 'Arousal'),
+                       max_excluded_frac=0.5,
+                       reject_types=DEFAULT_REJECT_TYPES,
                        extra_artefact_intervals=None):
     """Decide whether a channel has enough clean data to re-detect.
 
@@ -205,7 +209,7 @@ def channel_clean_gate(annotations, stages, s_freq=None, n_min_sec=300.0,
         met. Default ``0.5``.
     reject_types : sequence of str, optional
         Artefact event types subtracted (must match the run). Default
-        ``('Artefact', 'Arousal')``.
+        :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES`.
     extra_artefact_intervals : iterable of (float, float) or None, optional
         Extra artefact spans (seconds) to subtract on top of the annotation's
         reject events, forwarded to :func:`compute_analysed_seconds`. Reserved

@@ -105,10 +105,17 @@ The process will start, and you'll see progress updates in the status panel.
 
 !!! note "What's happening behind the scenes"
     TurtleWave is analyzing your data to identify:
-    
-    - **Artifacts** - Signal issues that could interfere with detection
+
+    - **Artifacts** - Signal issues that could interfere with detection,
+      including a short window around every EEGLAB "boundary" marker (where a
+      segment of data was cut and spliced back together)
     - **Arousals** - Brief awakenings that fragment sleep
     - **Sleep stages** - Wake, N1, N2, N3, and REM periods
+
+    By default, detection skips time marked Artifact, Arousal, or Movement.
+    See
+    [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default)
+    if you want to change that.
 
 This typically takes 2-5 minutes depending on your recording length.
 

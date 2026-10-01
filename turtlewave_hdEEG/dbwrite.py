@@ -1417,8 +1417,8 @@ def ensure_pac_schema(conn):
     conn.commit()
 
 
-def ensure_analysed_time_schema(conn):
-    """Create the ``analysed_time`` table if absent.
+def ensure_analysed_time_schema(conn, logger=None):
+    """Create the ``analysed_time`` table if absent, and migrate a pre-4.4 one.
 
     ``analysed_time`` holds the **density denominator**: the artefact-free
     in-stage seconds actually fed to the detector, per sleep stage. It is the
@@ -1426,20 +1426,34 @@ def ensure_analysed_time_schema(conn):
     stored once at detection time and every density is computed on read from
     it (see :mod:`turtlewave_hdEEG.density`).
 
-    It is keyed on ``(subject, stage, reject_artifacts, reject_arousals)``
-    because the rejection settings *define* the denominator: a run that kept
-    arousal epochs analysed more seconds than one that dropped them, and the
-    two must never be mixed. ``stage_durations`` is deliberately NOT a
-    fallback -- that table holds raw hypnogram time with no artefact
-    subtraction, and dividing an artefact-free numerator by it re-introduces
-    the artefact-scaled under-estimation of density that 4.0 removed.
+    It is keyed on ``(subject, stage, reject_types)`` because the reject set
+    *defines* the denominator: a run that kept arousal epochs analysed more
+    seconds than one that dropped them, and the two must never be mixed.
+    ``stage_durations`` is deliberately NOT a fallback -- that table holds raw
+    hypnogram time with no artefact subtraction, and dividing an artefact-free
+    numerator by it re-introduces the artefact-scaled under-estimation of
+    density that 4.0 removed.
 
-    Purely additive; it touches no existing table.
+    Before 4.4 the key carried only ``(reject_artifacts, reject_arousals)``, so
+    a run that also excluded ``Move`` (the 4.4 default) or ``Resp``/``Snore``
+    wrote a row with the SAME key as a run that did not, silently replacing a
+    denominator computed over different time. This function migrates such a
+    table in place: the ``reject_types`` column is added, back-filled from the
+    two booleans (which is what those rows actually used -- no pre-4.4 run
+    could reject anything else), and the primary key is rebuilt. SQLite cannot
+    alter a primary key, so the migration is a create/copy/drop/rename inside
+    one transaction; it is idempotent and a no-op on a current database.
+
+    The ``reject_artifacts``/``reject_arousals`` integer columns are KEPT and
+    populated as membership of ``reject_types``, so a reader written against
+    the old schema keeps working (it just cannot see the other types).
 
     Parameters
     ----------
     conn : sqlite3.Connection
         Open write connection. Commits, does not close.
+    logger : logging.Logger or None, optional
+        Logger for the one-line migration notice. Default ``None``.
 
     Returns
     -------
@@ -1449,8 +1463,9 @@ def ensure_analysed_time_schema(conn):
     CREATE TABLE IF NOT EXISTS analysed_time (
         subject TEXT NOT NULL,
         stage TEXT NOT NULL,              -- single scored stage, e.g. 'NREM2'
-        reject_artifacts INTEGER NOT NULL,
-        reject_arousals INTEGER NOT NULL,
+        reject_types TEXT NOT NULL,       -- sorted key, e.g. 'Arousal,Artefact,Move'
+        reject_artifacts INTEGER NOT NULL, -- kept: membership, for old readers
+        reject_arousals INTEGER NOT NULL,  -- kept: membership, for old readers
 
         analysed_seconds REAL NOT NULL,   -- artefact-free in-stage seconds
         artefact_seconds_excluded REAL,   -- in-stage seconds removed
@@ -1460,17 +1475,105 @@ def ensure_analysed_time_schema(conn):
         turtlewave_version TEXT,
         processing_timestamp TEXT,
 
-        PRIMARY KEY (subject, stage, reject_artifacts, reject_arousals)
+        PRIMARY KEY (subject, stage, reject_types)
     )''')
+
+    # Pre-4.4 table: add the column and rebuild the primary key around it.
+    cols = _table_columns(conn, 'analysed_time')
+    if cols and 'reject_types' not in cols:
+        if logger is not None:
+            logger.info(
+                "Migrating analysed_time to the reject_types key: the stored "
+                "denominators are re-keyed from (reject_artifacts, "
+                "reject_arousals) to the explicit reject set those two "
+                "booleans imply.")
+        # Python's sqlite3 runs DDL in autocommit mode, so a CREATE TABLE is
+        # NOT undone by the rollback that follows a failure here. Without this
+        # drop, one failed migration would leave analysed_time_new behind and
+        # every retry would fail on "table already exists" -- locking the
+        # database out of the migration permanently. The stored denominators
+        # themselves are safe either way: they live in rows, which the rollback
+        # does undo.
+        conn.execute('DROP TABLE IF EXISTS analysed_time_new')
+
+        # v_event_density SELECTs from analysed_time, and SQLite >= 3.25
+        # reparses every view when a table is renamed: with the view in place
+        # the ALTER below fails with "error in view v_event_density: no such
+        # table: main.analysed_time" -- which would be EVERY database written
+        # since 4.2, aborting the detector at connection time. Drop it for the
+        # duration and rebuild it from this release's definition afterwards
+        # (the view is derived, so nothing is lost; ensure_direct_write_schema
+        # recreates it unconditionally too, but this function is also called
+        # on its own by store_analysed_time).
+        had_view = bool(conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='view' "
+            "AND name='v_event_density'").fetchall())
+        if had_view:
+            conn.execute('DROP VIEW IF EXISTS v_event_density')
+        conn.execute('''
+        CREATE TABLE analysed_time_new (
+            subject TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            reject_types TEXT NOT NULL,
+            reject_artifacts INTEGER NOT NULL,
+            reject_arousals INTEGER NOT NULL,
+            analysed_seconds REAL NOT NULL,
+            artefact_seconds_excluded REAL,
+            epoch_length REAL,
+            source TEXT,
+            annotation_file TEXT,
+            turtlewave_version TEXT,
+            processing_timestamp TEXT,
+            PRIMARY KEY (subject, stage, reject_types)
+        )''')
+        # The derivation is the only one that can be true of a pre-4.4 row:
+        # those runs could reject Artefact and/or Arousal and nothing else, and
+        # the key is sorted, so 'Arousal' precedes 'Artefact'.
+        conn.execute('''
+        INSERT OR REPLACE INTO analysed_time_new
+            (subject, stage, reject_types, reject_artifacts, reject_arousals,
+             analysed_seconds, artefact_seconds_excluded, epoch_length,
+             source, annotation_file, turtlewave_version, processing_timestamp)
+        SELECT subject, stage,
+               CASE
+                 WHEN reject_artifacts AND reject_arousals THEN 'Arousal,Artefact'
+                 WHEN reject_artifacts THEN 'Artefact'
+                 WHEN reject_arousals THEN 'Arousal'
+                 ELSE ''
+               END,
+               reject_artifacts, reject_arousals,
+               analysed_seconds, artefact_seconds_excluded, epoch_length,
+               source, annotation_file, turtlewave_version, processing_timestamp
+        FROM analysed_time''')
+        try:
+            conn.execute('DROP TABLE analysed_time')
+            conn.execute('ALTER TABLE analysed_time_new RENAME TO analysed_time')
+        except Exception:
+            # Undo the copied rows and remove the half-built table, so the
+            # database is exactly as it was and the next call can retry. The
+            # view is derived from the tables, so putting it back restores the
+            # database completely.
+            for stmt in ('ROLLBACK', 'DROP TABLE IF EXISTS analysed_time_new'):
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
+            if had_view:
+                ensure_density_view(conn)
+            raise
+        if had_view:
+            ensure_density_view(conn)
+
     conn.execute('CREATE INDEX IF NOT EXISTS idx_analysed_time_subject '
                  'ON analysed_time(subject)')
     conn.commit()
 
 
 def record_analysed_time(conn, subject, stage, analysed_seconds,
-                         artefact_seconds_excluded=None, reject_artifacts=True,
-                         reject_arousals=True, epoch_length=30,
-                         source='detection', annotation_file=None):
+                         artefact_seconds_excluded=None, reject_artifacts=None,
+                         reject_arousals=None, epoch_length=30,
+                         source='detection', annotation_file=None,
+                         reject_types=None):
     """Insert-or-replace one ``analysed_time`` row (one stage).
 
     Parameters
@@ -1488,9 +1591,9 @@ def record_analysed_time(conn, subject, stage, analysed_seconds,
     artefact_seconds_excluded : float or None, optional
         In-stage seconds removed by artefact/arousal rejection. Default
         ``None``.
-    reject_artifacts, reject_arousals : bool, optional
-        The rejection settings this denominator was computed under. Part of
-        the primary key. Default ``True``.
+    reject_artifacts, reject_arousals : bool or None, optional
+        Deprecated shims resolved through
+        :func:`turtlewave_hdEEG.utils.resolve_reject_types`. Default ``None``.
     epoch_length : float, optional
         Nominal scoring epoch length in seconds. Default ``30``.
     source : str, optional
@@ -1498,6 +1601,11 @@ def record_analysed_time(conn, subject, stage, analysed_seconds,
         Default ``'detection'``.
     annotation_file : str or None, optional
         Scoring file the denominator was computed from. Default ``None``.
+    reject_types : str or iterable of str or None, optional
+        The reject set this denominator was computed under. Part of the primary
+        key, stored as :func:`turtlewave_hdEEG.utils.reject_key`. ``None`` with
+        both booleans ``None`` resolves to
+        :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES`. Default ``None``.
 
     Returns
     -------
@@ -1510,16 +1618,18 @@ def record_analysed_time(conn, subject, stage, analysed_seconds,
     resolution time, so a caller reaching this function directly cannot key
     one recording under two spellings.
     """
-    from .utils import normalize_subject
+    from .utils import normalize_subject, reject_key, resolve_reject_types
+    resolved = resolve_reject_types(reject_types, reject_artifacts,
+                                    reject_arousals)
     conn.execute('''
     INSERT OR REPLACE INTO analysed_time
-        (subject, stage, reject_artifacts, reject_arousals, analysed_seconds,
-         artefact_seconds_excluded, epoch_length, source, annotation_file,
-         turtlewave_version, processing_timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (subject, stage, reject_types, reject_artifacts, reject_arousals,
+         analysed_seconds, artefact_seconds_excluded, epoch_length, source,
+         annotation_file, turtlewave_version, processing_timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
-        str(normalize_subject(subject)), str(stage),
-        1 if reject_artifacts else 0, 1 if reject_arousals else 0,
+        str(normalize_subject(subject)), str(stage), reject_key(resolved),
+        1 if 'Artefact' in resolved else 0, 1 if 'Arousal' in resolved else 0,
         float(analysed_seconds),
         None if artefact_seconds_excluded is None else float(artefact_seconds_excluded),
         None if epoch_length is None else float(epoch_length),
@@ -1530,9 +1640,10 @@ def record_analysed_time(conn, subject, stage, analysed_seconds,
 
 
 def store_analysed_time(conn, subject, annotations, dataset, stages,
-                        reject_artifacts, reject_arousals, epoch_length=30,
+                        reject_artifacts=None, reject_arousals=None,
+                        epoch_length=30,
                         source='detection', annotation_file=None, logger=None,
-                        strict=False):
+                        strict=False, reject_types=None):
     """Compute and store the density denominators for a detection run.
 
     Wraps :func:`turtlewave_hdEEG.utils.build_density_denominators` -- the same
@@ -1565,8 +1676,8 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
     stages : list of str or None
         The stages the run detected on. ``None`` or empty stores nothing (an
         all-stage run has no defined per-stage denominator here).
-    reject_artifacts, reject_arousals : bool
-        The run's rejection settings. Stored as part of the key.
+    reject_artifacts, reject_arousals : bool or None, optional
+        Deprecated shims for ``reject_types``. Default ``None``.
     epoch_length : float, optional
         Nominal scoring epoch length in seconds. Default ``30``.
     source : str, optional
@@ -1581,6 +1692,10 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
         as errors rather than as a warning and a stored row. For callers whose
         only purpose is this write (the migration back-fill). Default
         ``False``.
+    reject_types : str or iterable of str or None, optional
+        The run's reject set; stored as the key of every row written. ``None``
+        with both booleans ``None`` resolves to
+        :data:`turtlewave_hdEEG.utils.DEFAULT_REJECT_TYPES`. Default ``None``.
 
     Returns
     -------
@@ -1605,10 +1720,15 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
             logger.warning(msg)
         return {}
 
-    from .utils import build_density_denominators
+    from .utils import build_density_denominators, resolve_reject_types
+
+    # Resolve ONCE, so the set the denominator is computed with and the set it
+    # is keyed under cannot differ.
+    resolved = resolve_reject_types(reject_types, reject_artifacts,
+                                    reject_arousals, logger_=logger)
 
     written = {}
-    ensure_analysed_time_schema(conn)
+    ensure_analysed_time_schema(conn, logger=logger)
     # All-or-nothing: a partial denominator is worse than none, because a
     # stage whose row was written before the failure looks complete on read.
     # A plain `return {}` would leave those rows pending in the connection's
@@ -1617,16 +1737,14 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
     conn.execute("SAVEPOINT tw_analysed_time")
     try:
         dd = build_density_denominators(
-            annotations, dataset,
-            reject_artifacts=reject_artifacts, reject_arousals=reject_arousals,
+            annotations, dataset, reject_types=list(resolved),
             stage_list=list(stages), stages_present=(), logger=logger)
         for stg in sorted({str(s) for s in stages}):
             clean_sec, artefact_sec = dd.analysed_seconds(stg)
             record_analysed_time(
                 conn, subject, stg, clean_sec,
                 artefact_seconds_excluded=artefact_sec,
-                reject_artifacts=reject_artifacts,
-                reject_arousals=reject_arousals,
+                reject_types=list(resolved),
                 epoch_length=epoch_length, source=source,
                 annotation_file=annotation_file)
             written[stg] = clean_sec
@@ -1675,7 +1793,8 @@ def store_analysed_time(conn, subject, annotations, dataset, stages,
                             for k, v in sorted(written.items()))
         logger.info(
             f"Stored density denominators for subject '{subject}' "
-            f"(artefact-free analysed time): {summary}")
+            f"(analysed time free of {', '.join(resolved) or 'nothing'}): "
+            f"{summary}")
     return written
 
 
@@ -1950,8 +2069,144 @@ def tag_run_cycles(conn, subject, run_id=None, method='2022', logger=None):
         return 0
 
 
-def read_analysed_time(db_path, subject=None, reject_artifacts=True,
-                       reject_arousals=True):
+def stored_reject_keys(conn, subject=None):
+    """List the reject sets ``analysed_time`` holds denominators for.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection (read is enough).
+    subject : str or None, optional
+        Restrict to one already-normalised subject. Default ``None`` (all).
+
+    Returns
+    -------
+    list of str
+        Sorted, distinct :func:`turtlewave_hdEEG.utils.reject_key` values.
+        Empty when the table is absent, empty, or pre-4.4 (no column).
+    """
+    if 'reject_types' not in (_table_columns(conn, 'analysed_time') or ()):
+        return []
+    sql = "SELECT DISTINCT reject_types FROM analysed_time"
+    params = []
+    if subject is not None:
+        sql += " WHERE subject = ?"
+        params.append(str(subject))
+    try:
+        return sorted(str(r[0]) for r in conn.execute(sql, params))
+    except sqlite3.Error:
+        return []
+
+
+def resolve_stored_reject_key(conn, subject=None, reject_types=None,
+                              reject_artifacts=None, reject_arousals=None,
+                              logger=None):
+    """Pick which stored reject set a density/denominator read should use.
+
+    A reader that silently assumes the library default would answer "no
+    denominator" for every database written before that default changed, and a
+    reader that ignores the key would divide one run's count by another run's
+    time. Neither is acceptable, so:
+
+    * ``reject_types`` given -> that set, exactly. It is the only argument that
+      can name a whole set, so it is taken as an assertion.
+    * nothing given and the database holds exactly ONE reject set -> that set
+      (logged at INFO: it is unambiguous, whatever the library default happens
+      to be today);
+    * nothing given and the database holds SEVERAL -> the library default, with
+      a warning listing every set found, because pooling them would mix
+      denominators computed over different time.
+    * only the deprecated booleans given -> they constrain ``Artefact`` and
+      ``Arousal`` membership and say NOTHING about any other type, so the
+      stored sets are filtered by that membership; a unique match wins,
+      otherwise the library default is used. Reading ``reject_artifacts=True``
+      as "and also Move, because that is today's default" would make every
+      pre-4.4 denominator unreadable through the shim.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    subject : str or None, optional
+        Already-normalised subject to scope the lookup to. Default ``None``.
+    reject_types : str or iterable of str or None, optional
+        Explicit reject set. Default ``None`` (unspecified).
+    reject_artifacts, reject_arousals : bool or None, optional
+        Deprecated shims. Default ``None`` (unspecified).
+    logger : logging.Logger or None, optional
+        Logger for the notices. Default ``None`` (module logger).
+
+    Returns
+    -------
+    key : str
+        The :func:`turtlewave_hdEEG.utils.reject_key` to filter on.
+    resolved : tuple of str
+        The same set as a tuple, for messages and provenance.
+    """
+    from .utils import reject_key, resolve_reject_types
+    log = logger or logging.getLogger('turtlewave_hdEEG.dbwrite')
+
+    if reject_types is not None:
+        resolved = resolve_reject_types(reject_types, reject_artifacts,
+                                        reject_arousals, logger_=log)
+        return reject_key(resolved), resolved
+
+    present = [k for k in stored_reject_keys(conn, subject) if k is not None]
+
+    if reject_artifacts is not None or reject_arousals is not None:
+        # A partial constraint, not a full set (see the docstring).
+        def _matches(key):
+            types = [t for t in key.split(',') if t]
+            if (reject_artifacts is not None
+                    and bool(reject_artifacts) != ('Artefact' in types)):
+                return False
+            if (reject_arousals is not None
+                    and bool(reject_arousals) != ('Arousal' in types)):
+                return False
+            return True
+
+        candidates = [k for k in present if _matches(k)]
+        if len(candidates) == 1:
+            only = candidates[0]
+            return only, tuple(t for t in only.split(',') if t)
+        if len(candidates) > 1:
+            log.warning(
+                "reject_artifacts/reject_arousals cannot name a whole reject "
+                "set, and this database holds %d sets consistent with them "
+                "(%s). The library default (%s) is used. Pass reject_types= to "
+                "choose.", len(candidates),
+                "; ".join(repr(k or '<nothing rejected>') for k in candidates),
+                ", ".join(resolve_reject_types(None, None, None)))
+        resolved = resolve_reject_types(reject_types, reject_artifacts,
+                                        reject_arousals, logger_=log)
+        return reject_key(resolved), resolved
+
+    if len(present) == 1:
+        only = present[0]
+        resolved = tuple(t for t in only.split(',') if t)
+        log.info(
+            "No reject_types requested; this database holds denominators for "
+            "exactly one reject set (%r), so that one is used.",
+            only or '<nothing rejected>')
+        return only, resolved
+
+    resolved = resolve_reject_types(None, None, None, logger_=log)
+    if len(present) > 1:
+        log.warning(
+            "This database holds density denominators for %d different reject "
+            "sets (%s) and none was requested, so the library default (%s) is "
+            "used. Rows stored under the other set(s) are NOT included -- "
+            "their analysed time covers different seconds and pooling them "
+            "would divide one run's event count by another run's time. Pass "
+            "reject_types= to choose explicitly.",
+            len(present),
+            "; ".join(repr(k or '<nothing rejected>') for k in present),
+            ", ".join(resolved))
+    return reject_key(resolved), resolved
+
+
+def read_analysed_time(db_path, subject=None, reject_artifacts=None,
+                       reject_arousals=None, reject_types=None):
     """Read stored density denominators.
 
     Parameters
@@ -1963,16 +2218,20 @@ def read_analysed_time(db_path, subject=None, reject_artifacts=True,
         :func:`turtlewave_hdEEG.utils.normalize_subject`, so a bare ``'10sd'``
         finds the rows detection stored as ``'sub-10sd'``. ``None`` (default)
         returns every subject.
-    reject_artifacts, reject_arousals : bool, optional
-        The rejection settings whose denominator is wanted; these are part of
-        the key, so asking for the wrong pair returns nothing rather than a
-        mismatched number. Default ``True``.
+    reject_artifacts, reject_arousals : bool or None, optional
+        Deprecated shims for ``reject_types``. Default ``None``.
+    reject_types : str or iterable of str or None, optional
+        The reject set whose denominator is wanted; it is part of the key, so
+        asking for a set the run did not use returns nothing rather than a
+        mismatched number. ``None`` with both booleans ``None`` (the default)
+        defers to :func:`resolve_stored_reject_key`.
 
     Returns
     -------
     dict
         ``{(subject, stage): {'analysed_seconds': float,
-        'artefact_seconds_excluded': float or None, 'source': str}}``.
+        'artefact_seconds_excluded': float or None, 'source': str,
+        'reject_types': str}}``.
         Empty when the table is absent or holds no matching row.
     """
     out = {}
@@ -1983,19 +2242,40 @@ def read_analysed_time(db_path, subject=None, reject_artifacts=True,
             "AND name='analysed_time'")
         if cur.fetchone() is None:
             return out
-        sql = ("SELECT subject, stage, analysed_seconds, "
-               "artefact_seconds_excluded, source FROM analysed_time "
-               "WHERE reject_artifacts = ? AND reject_arousals = ?")
-        params = [1 if reject_artifacts else 0, 1 if reject_arousals else 0]
+        norm_subject = None
         if subject is not None:
             from .utils import normalize_subject
+            norm_subject = str(normalize_subject(subject))
+        key, resolved = resolve_stored_reject_key(
+            conn, norm_subject, reject_types, reject_artifacts,
+            reject_arousals)
+        if 'reject_types' in (_table_columns(conn, 'analysed_time') or ()):
+            sql = ("SELECT subject, stage, analysed_seconds, "
+                   "artefact_seconds_excluded, source, reject_types "
+                   "FROM analysed_time WHERE reject_types = ?")
+            params = [key]
+        else:
+            # Pre-4.4 table, opened read-only by a reader that never migrates
+            # it: fall back to the two booleans, which is all those rows have.
+            sql = ("SELECT subject, stage, analysed_seconds, "
+                   "artefact_seconds_excluded, source, "
+                   "CASE WHEN reject_artifacts AND reject_arousals "
+                   "THEN 'Arousal,Artefact' WHEN reject_artifacts "
+                   "THEN 'Artefact' WHEN reject_arousals THEN 'Arousal' "
+                   "ELSE '' END "
+                   "FROM analysed_time "
+                   "WHERE reject_artifacts = ? AND reject_arousals = ?")
+            params = [1 if 'Artefact' in resolved else 0,
+                      1 if 'Arousal' in resolved else 0]
+        if norm_subject is not None:
             sql += " AND subject = ?"
-            params.append(str(normalize_subject(subject)))
+            params.append(norm_subject)
         for row in conn.execute(sql, params):
             out[(row[0], row[1])] = {
                 'analysed_seconds': row[2],
                 'artefact_seconds_excluded': row[3],
                 'source': row[4],
+                'reject_types': row[5],
             }
     finally:
         conn.close()
@@ -2074,8 +2354,9 @@ def ensure_direct_write_schema(conn, logger=None):
         ref_chan TEXT,
         polar TEXT,
         stages TEXT,
-        reject_artifacts INTEGER,
-        reject_arousals INTEGER,
+        reject_types TEXT,         -- sorted key, e.g. 'Arousal,Artefact,Move'
+        reject_artifacts INTEGER,  -- kept: membership, for old readers
+        reject_arousals INTEGER,   -- kept: membership, for old readers
         turtlewave_version TEXT,
         wonambi_version TEXT,
         numpy_version TEXT,
@@ -2091,6 +2372,24 @@ def ensure_direct_write_schema(conn, logger=None):
         cur.execute("ALTER TABLE detection_runs ADD COLUMN subject TEXT")
         if logger is not None:
             logger.info("Migrated detection_runs table: added column subject")
+
+    # (2a2) detection_runs.reject_types: the actual reject set. The two
+    # booleans could only ever describe Artefact/Arousal, so a pre-4.4 run's
+    # set IS what they imply and the back-fill below is exact.
+    if dr_cols and 'reject_types' not in dr_cols:
+        cur.execute("ALTER TABLE detection_runs ADD COLUMN reject_types TEXT")
+        if logger is not None:
+            logger.info("Migrated detection_runs table: added column "
+                        "reject_types")
+    if dr_cols:
+        conn.execute('''
+        UPDATE detection_runs SET reject_types = CASE
+            WHEN reject_artifacts AND reject_arousals THEN 'Arousal,Artefact'
+            WHEN reject_artifacts THEN 'Artefact'
+            WHEN reject_arousals THEN 'Arousal'
+            ELSE '' END
+        WHERE reject_types IS NULL
+          AND reject_artifacts IS NOT NULL AND reject_arousals IS NOT NULL''')
 
     # (2b) rerun_log: one row per scoped channel re-detection (P3) ---------
     conn.execute('''
@@ -2150,8 +2449,9 @@ def ensure_direct_write_schema(conn, logger=None):
 
     # (5) analysed_time: the density denominator. Created eagerly for the same
     # reason -- density.event_density must be able to tell "no denominator
-    # stored" from "table does not exist".
-    ensure_analysed_time_schema(conn)
+    # stored" from "table does not exist". Also migrates a pre-4.4 table to the
+    # reject_types key.
+    ensure_analysed_time_schema(conn, logger=logger)
 
     # (6) db_meta + the stage_format marker -------------------------------
     # Seeded 'joint' ONLY for a database with no events yet. An existing
@@ -2204,6 +2504,16 @@ def ensure_direct_write_schema(conn, logger=None):
     # (8) v_event_density: density in plain SQL, for R and sqlite3 callers.
     ensure_density_view(conn, logger=logger)
 
+    # (9) Which library version last touched this database. Overwritten on
+    # every call by design: the question it answers is "what wrote the rows I
+    # am looking at now", and a database opened by several releases is
+    # described by the newest one that could have changed it. Per-row
+    # provenance (detection_runs.turtlewave_version,
+    # analysed_time.turtlewave_version) is where a single run's version lives.
+    version = provenance()['turtlewave_version']
+    if version:
+        set_db_meta(conn, TURTLEWAVE_VERSION_KEY, str(version))
+
     conn.commit()
 
 
@@ -2251,8 +2561,14 @@ def ensure_density_view(conn, logger=None):
     ``subject``, ``channel``, ``event_type``, ``method``, ``stage`` (the
     stored token), ``freq_lower``, ``freq_upper``, ``n_events``,
     ``analysed_minutes``, ``density_per_min``, ``artefact_minutes_excluded``,
-    ``mean_duration_sec``, ``reject_artifacts``, ``reject_arousals``,
-    ``denominator_complete``.
+    ``mean_duration_sec``, ``reject_types``, ``reject_artifacts``,
+    ``reject_arousals``, ``denominator_complete``.
+
+    One row per ``(scope, reject_types)``: a database holding denominators for
+    two reject sets shows the same events twice, once against each set's
+    analysed time. That is the honest answer -- the two denominators cover
+    different seconds -- so always filter on ``reject_types`` when reading this
+    view, exactly as :func:`turtlewave_hdEEG.density.event_density` does.
 
     Parameters
     ----------
@@ -2311,6 +2627,7 @@ def ensure_density_view(conn, logger=None):
                  THEN d.artefact_seconds / 60.0
                  ELSE NULL END                          AS artefact_minutes_excluded,
             AVG(e.duration)                             AS mean_duration_sec,
+            d.reject_types                              AS reject_types,
             d.reject_artifacts                          AS reject_artifacts,
             d.reject_arousals                           AS reject_arousals,
             CASE WHEN d.n_components = d.n_expected THEN 1 ELSE 0 END
@@ -2320,8 +2637,9 @@ def ensure_density_view(conn, logger=None):
             SELECT
                 t.stage       AS token,
                 a.subject     AS subject,
-                a.reject_artifacts AS reject_artifacts,
-                a.reject_arousals  AS reject_arousals,
+                a.reject_types AS reject_types,
+                MAX(a.reject_artifacts) AS reject_artifacts,
+                MAX(a.reject_arousals)  AS reject_arousals,
                 SUM(a.analysed_seconds) AS analysed_seconds,
                 SUM(COALESCE(a.artefact_seconds_excluded, 0)) AS artefact_seconds,
                 COUNT(*)      AS n_components,
@@ -2338,12 +2656,11 @@ def ensure_density_view(conn, logger=None):
                                 'NREM2', ''), 'NREM3', ''), 'REM')
                     ELSE instr(t.stage, a.stage)
                   END) > 0
-            GROUP BY t.stage, a.subject, a.reject_artifacts, a.reject_arousals
+            GROUP BY t.stage, a.subject, a.reject_types
         ) d ON d.token = e.stage
         WHERE e.stage IS NOT NULL
         GROUP BY d.subject, e.channel, e.event_type, e.method, e.stage,
-                 e.freq_lower, e.freq_upper, d.reject_artifacts,
-                 d.reject_arousals
+                 e.freq_lower, e.freq_upper, d.reject_types
         ''')
         conn.commit()
         return True
@@ -2358,8 +2675,8 @@ def ensure_density_view(conn, logger=None):
 
 
 def record_run(conn, run_id, event_type, method, citation, params_json,
-               ref_chan, polar, stages, reject_artifacts, reject_arousals,
-               subject=None):
+               ref_chan, polar, stages, reject_artifacts=None,
+               reject_arousals=None, subject=None, reject_types=None):
     """Write one ``detection_runs`` provenance row for an invocation.
 
     Parameters
@@ -2382,25 +2699,33 @@ def record_run(conn, run_id, event_type, method, citation, params_json,
         Polarity flag (``'normal'`` / ``'opposite'``).
     stages : str
         Requested stage set, serialized.
-    reject_artifacts, reject_arousals : bool
-        Artifact/arousal rejection settings.
+    reject_artifacts, reject_arousals : bool or None, optional
+        Deprecated shims for ``reject_types``. Default ``None``.
     subject : str or None, optional
         Recording this run belongs to. Stored so a run is attributable and so
         :func:`assert_single_subject` can see it even on a run that stored no
         ``analysed_time`` row. Default ``None``.
+    reject_types : str or iterable of str or None, optional
+        The run's reject set. Stored as
+        :func:`turtlewave_hdEEG.utils.reject_key`; the two boolean columns are
+        written as membership of it so a pre-4.4 reader still sees something
+        true. Default ``None`` (resolves to the library default).
     """
+    from .utils import reject_key, resolve_reject_types
+    resolved = resolve_reject_types(reject_types, reject_artifacts,
+                                    reject_arousals)
     prov = provenance()
     conn.execute('''
     INSERT OR REPLACE INTO detection_runs
         (run_id, subject, event_type, method, citation, params_json, ref_chan,
-         polar, stages, reject_artifacts, reject_arousals, turtlewave_version,
-         wonambi_version, numpy_version, git_sha, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         polar, stages, reject_types, reject_artifacts, reject_arousals,
+         turtlewave_version, wonambi_version, numpy_version, git_sha, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         run_id, (None if subject is None else str(subject)),
         event_type, method, citation, params_json,
-        str(ref_chan), str(polar), str(stages),
-        1 if reject_artifacts else 0, 1 if reject_arousals else 0,
+        str(ref_chan), str(polar), str(stages), reject_key(resolved),
+        1 if 'Artefact' in resolved else 0, 1 if 'Arousal' in resolved else 0,
         prov['turtlewave_version'], prov['wonambi_version'],
         prov['numpy_version'], git_sha(), datetime.datetime.now().isoformat(),
     ))
@@ -2492,13 +2817,19 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
     Returns
     -------
     dict or None
-        ``{'ref_chan', 'polar', 'cat', 'cat_recorded', 'reject_artifacts',
-        'reject_arousals', 'stages', 'run_id', 'params',
+        ``{'ref_chan', 'polar', 'cat', 'cat_recorded', 'reject_types',
+        'reject_artifacts', 'reject_arousals', 'stages', 'run_id', 'params',
         'turtlewave_version'}`` from the most recent matching
         ``detection_runs`` row, or ``None`` if no such row exists.
         ``params`` is the full recorded parameter dict (thresholds/band/
         durations) so a re-run can reuse the original detector thresholds, not
         just the invariants.
+
+        ``reject_types`` is a **list** of the run's actual reject set,
+        preferred from the ``reject_types`` column, falling back to
+        ``params_json`` and finally to what the two booleans imply (which is
+        exact for a pre-4.4 run, since those runs could reject nothing else).
+        The two booleans are still returned, derived as membership.
 
         ``ref_chan`` and ``polar`` are returned as real Python objects: preferred
         from the typed ``params_json`` when present (P3+ runs), otherwise parsed
@@ -2541,10 +2872,13 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
     # DELETE-mode database lets a writer block this read).
     conn = sqlite3.connect(db_path, timeout=60.0)
     try:
+        has_rt = 'reject_types' in (_table_columns(conn, 'detection_runs') or ())
+        rt_col = 'reject_types' if has_rt else 'NULL'
         try:
-            cur = conn.execute('''
+            cur = conn.execute(f'''
             SELECT run_id, params_json, ref_chan, polar, stages,
-                   reject_artifacts, reject_arousals, turtlewave_version
+                   reject_artifacts, reject_arousals, turtlewave_version,
+                   {rt_col}
             FROM detection_runs
             WHERE event_type = ? AND method = ?
             ORDER BY timestamp DESC
@@ -2553,7 +2887,7 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
             return None
         for row in cur.fetchall():
             (run_id, params_json, ref_chan, polar, stages, rj_a, rj_r,
-             tw_version) = row
+             tw_version, rj_types) = row
             params = {}
             if params_json:
                 try:
@@ -2566,6 +2900,17 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
                     if (abs(float(band[0]) - float(freq_lower)) > 1e-6 or
                             abs(float(band[1]) - float(freq_upper)) > 1e-6):
                         continue  # same method, different band -- keep looking
+            # The run's actual reject set: column first, then params_json, then
+            # the booleans (exact for a pre-4.4 run -- it could reject nothing
+            # else). NOT the library default: a re-run must repeat what the
+            # original run did, not what today's default would do.
+            if rj_types is not None:
+                rejects = [t for t in str(rj_types).split(',') if t]
+            elif isinstance(params.get('reject_types'), (list, tuple)):
+                rejects = [str(t) for t in params['reject_types']]
+            else:
+                rejects = (['Artefact'] if rj_a else []) + (['Arousal'] if rj_r
+                                                            else [])
             return {
                 'run_id': run_id,
                 # Prefer the typed params_json value; else parse the stringified
@@ -2576,8 +2921,9 @@ def recover_run_scope(db_path, event_type, method, freq_lower=None,
                           else _parse_polar_col(polar)),
                 'cat': params.get('cat'),
                 'cat_recorded': 'cat' in params,
-                'reject_artifacts': bool(rj_a),
-                'reject_arousals': bool(rj_r),
+                'reject_types': rejects,
+                'reject_artifacts': 'Artefact' in rejects,
+                'reject_arousals': 'Arousal' in rejects,
                 'stages': stages,
                 'params': params,
                 # The library version that WROTE the run. Needed to read a
@@ -3718,6 +4064,14 @@ PTP_UNITS_MICROVOLTS = 'microvolts'
 #: Value a reader infers for a pre-4.3 database (absent marker + rows).
 PTP_UNITS_SAMPLES = 'samples'
 
+#: ``db_meta`` key recording which ``turtlewave_hdEEG`` version last opened
+#: this database for writing. Stamped by
+#: :func:`ensure_direct_write_schema` on EVERY call, so it answers "what could
+#: have written or migrated the rows I am reading", not "what created the
+#: file". Per-run provenance lives in ``detection_runs.turtlewave_version`` and
+#: ``analysed_time.turtlewave_version`` and is never overwritten.
+TURTLEWAVE_VERSION_KEY = 'turtlewave_version'
+
 
 def ensure_db_meta_schema(conn):
     """Create the ``db_meta`` key/value table if absent.
@@ -3838,10 +4192,66 @@ def ptp_units(conn):
     return get_db_meta(conn, PTP_UNITS_KEY, None)
 
 
+def _recorded_reject_keys(conn, event_type, methods, freq_lower, freq_upper):
+    """Reject sets ``detection_runs`` records for one detection scope.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection.
+    event_type : str
+        Event type of the scope.
+    methods : sequence of str
+        Method spellings to match (every spelling, as
+        :func:`method_spellings` produces them).
+    freq_lower, freq_upper : float or None
+        Band of the scope. A recorded run whose ``params_json`` names a
+        DIFFERENT band is skipped; one that names no band is kept, because a
+        run that did not record its band cannot be proven to be another scope.
+
+    Returns
+    -------
+    set of str
+        Distinct :func:`turtlewave_hdEEG.utils.reject_key` values. Rows whose
+        ``reject_types`` is NULL are omitted: a run that recorded no reject set
+        cannot be shown to differ from anything, and guessing one would refuse
+        valid work.
+    """
+    import json as _json
+    if 'reject_types' not in (_table_columns(conn, 'detection_runs') or ()):
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT reject_types, params_json FROM detection_runs "
+            "WHERE event_type = ? AND method IN (%s) "
+            "AND reject_types IS NOT NULL" % ",".join("?" * len(methods)),
+            [str(event_type)] + list(methods)).fetchall()
+    except sqlite3.Error:
+        return set()
+
+    keys = set()
+    for rt, params_json in rows:
+        if freq_lower is not None and freq_upper is not None and params_json:
+            try:
+                band = (_json.loads(params_json) or {}).get('frequency')
+            except Exception:
+                band = None
+            if band is not None and len(band) == 2:
+                try:
+                    if (abs(float(band[0]) - float(freq_lower)) > 1e-6 or
+                            abs(float(band[1]) - float(freq_upper)) > 1e-6):
+                        continue  # a different band: a different scope
+                except (TypeError, ValueError):
+                    pass
+        keys.add(str(rt))
+    return keys
+
+
 def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
                                    freq_upper, *, stage_token,
                                    channels=None, replace_channels=None,
-                                   db_path=None, logger=None):
+                                   db_path=None, logger=None,
+                                   reject_types=None):
     """Refuse a run that would append a duplicate set instead of replacing.
 
     :func:`event_uuid5` hashes the stage, and the stage is also the last
@@ -3851,7 +4261,19 @@ def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
     run appends a complete duplicate set beside the old one. Every count and
     every density in that scope doubles, and nothing raises.
 
-    Two different situations produce that, and both are checked here:
+    A fourth situation duplicates nothing but corrupts the scope just as
+    quietly: **a re-detection under a different REJECT SET**. The reject set is
+    not part of ``event_uuid5``, so the events both runs find are replaced
+    normally -- but an event only the first run could find (its reject set left
+    that window in the search space) survives untouched beside the second run's
+    rows, and ``analysed_time`` now holds a denominator for each set. The
+    scope becomes the union of two searches with no column saying so. The 4.4
+    default change makes this the ordinary case: re-detecting a 4.3 scope adds
+    ``Move`` to the reject set. Checked as check 4 below, and only when the
+    caller passes ``reject_types``.
+
+    Two different situations produce the duplication, and both are checked
+    here:
 
     1. **A pre-4.3 (per-epoch) database.** Its rows carry ``'NREM2'`` and
        ``'NREM3'``; a 4.3 run over both writes ``'NREM2NREM3'``. Fixed by
@@ -3901,6 +4323,13 @@ def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
         Path named in the error message. Default ``None``.
     logger : logging.Logger or None, optional
         Logger for the one-line all-clear. Default ``None``.
+    reject_types : str or iterable of str or None, optional
+        The reject set this run resolved, enabling check 4. ``None`` (the
+        default) SKIPS that check: it is what a caller that has no reject set
+        to compare (a test, a CSV import) must pass, and it is not the same as
+        an empty set, which is a real set meaning "reject nothing". Every
+        detector passes its resolved tuple; a new detector that forgets to
+        loses check 4 only, and keeps checks 1-3.
 
     Returns
     -------
@@ -3913,8 +4342,10 @@ def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
         If ``stage_token`` is not passed at all.
     ValueError
         If ``stage_token`` is ``None``, or if the scope about to be written
-        already holds rows under a different stage token, or if the database
-        is unmarked / marked ``'per_epoch'`` and the scope already holds rows.
+        already holds rows under a different stage token, under a different
+        method spelling, or (when ``reject_types`` is given) under a different
+        reject set, or if the database is unmarked / marked ``'per_epoch'``
+        and the scope already holds rows.
     """
     if stage_token is None:
         raise ValueError(
@@ -4086,6 +4517,51 @@ def assert_stage_format_compatible(conn, event_type, methods, freq_lower,
             f"COMPLETE DUPLICATE SET beside them. Channels affected "
             f"(first 10): {chans_hit}. {how_to_proceed} "
             + " ".join(advice))
+
+    # --- check 4: the same scope under a DIFFERENT REJECT SET -------------
+    # Nothing duplicates here -- the reject set is not in event_uuid5, so the
+    # events both runs find ARE replaced. What survives is every event only
+    # the FIRST run could find, because its reject set left that window in the
+    # search space. The scope silently becomes the union of two different
+    # searches, and analysed_time (which IS keyed on the reject set) holds a
+    # denominator for each, so a density over the union divides one search's
+    # count by the other's time.
+    if reject_types is not None:
+        from .utils import reject_key
+        requested = reject_key(reject_types)
+        n_rows, n_chans = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT channel) FROM events WHERE "
+            + clause, params).fetchone()
+        n_rows = int(n_rows or 0)
+        recorded = _recorded_reject_keys(
+            conn, event_type, lookup_methods, freq_lower, freq_upper)
+        differing = sorted(k for k in recorded if k != requested)
+        if n_rows and differing:
+            chans_hit = [str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT channel FROM events WHERE " + clause
+                + " ORDER BY channel LIMIT 10", params)]
+            raise ValueError(
+                f"{db_path or 'This database'} already holds {n_rows} "
+                f"{scope} row(s) across {int(n_chans or 0)} channel(s) "
+                f"detected with reject set(s) "
+                f"{[k or '<nothing rejected>' for k in differing]}, and this "
+                f"run rejects '{requested or '<nothing>'}'. The reject set is "
+                f"NOT part of the event uuid5, so this run would replace only "
+                f"the events it finds again and LEAVE THE REST STANDING: the "
+                f"scope would become the union of two different searches, "
+                f"with no column recording which row came from which. The "
+                f"density denominator (analysed_time) IS keyed on the reject "
+                f"set, so that union would then be divided by one set's "
+                f"analysed time. Channels affected (first 10): {chans_hit}. "
+                f"{how_to_proceed} If you meant to change the reject set "
+                f"(4.4 added 'Move' to the default), re-detect the whole "
+                f"montage with replace_channels=<all channels> so the old "
+                f"rows are deleted in the same transaction.")
+        if logger is not None and n_rows:
+            logger.debug(
+                "Reject-set check passed: this scope's recorded run(s) used "
+                "%s, the same set this run resolved.",
+                sorted(recorded) or 'nothing on record')
 
     # --- check 1: a pre-4.3 database, even when the tokens agree ----------
     fmt = stage_format(conn)

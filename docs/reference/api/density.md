@@ -4,10 +4,15 @@
 read** from `neural_events.db` — there is no `density` table. The numerator
 (`GROUP BY` count over `events`) is cheap to recompute on every call; the
 denominator — the artefact-free in-stage time a detection run actually
-analysed — is stored once per subject/stage/rejection-setting in
+analysed — is stored once per `(subject, stage, reject_types)` in
 `analysed_time` (written by
 [`turtlewave_hdEEG.dbwrite.store_analysed_time`](dbwrite.md) as part of every
-direct-write detection run) and read back here.
+direct-write detection run) and read back here. `reject_types` is the sorted,
+comma-joined set of annotation event types that run excluded (see
+[`reject_key`](utils.md)) — since 4.4 the default is
+`Artefact,Arousal,Move`; a database with runs under more than one reject set
+holds one `analysed_time` row per set, and `event_density` never pools across
+them (see `reject_types=` below).
 
 `stage_durations` (see [Sleep Cycle Processor](cycleprocessor.md)) is
 deliberately **not** an accepted denominator, even as a fallback: it holds raw
@@ -30,9 +35,9 @@ database records no detection scope at all does it fall back to the set of
 stages that happen to appear in `events` instead — a `logger.warning` names
 this fallback explicitly, since it can't represent a searched-but-empty
 stage. `missing=` does not apply to the (recorded) implicit scope: a stage
-there with no stored denominator (typically a `reject_artifacts=`/
-`reject_arousals=` mismatch against `processing_status`, which isn't keyed
-by them) is left out of the stage *scope* — no zero-event filler row, no
+there with no stored denominator (typically a `reject_types=` mismatch
+against `processing_status`, which isn't keyed by it) is left out of the
+stage *scope* — no zero-event filler row, no
 share of a pooled denominator — with a logged warning, regardless of
 `missing=`. That stage's rows are **not** removed from the result wholesale,
 though: any events actually detected in it are still returned, with

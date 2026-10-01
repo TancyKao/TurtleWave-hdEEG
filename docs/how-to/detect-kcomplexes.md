@@ -65,14 +65,34 @@ kcomplexes = event_processor.detect_kcomplexes(
     min_isolation=1.0,
     polar='normal',
     stage=['NREM2'],
-    reject_artifacts=True,
-    reject_arousals=True,
+    reject_types=['Artefact', 'Arousal', 'Move'],  # the 4.4 default; pass explicitly to pin it
     cat=(1, 1, 1, 0),
     save_to_annotations=False,
     json_dir='wonambi/kc_results',
     subject='sub-001',
 )
 ```
+
+!!! note "`reject_types` replaces `reject_artifacts`/`reject_arousals`"
+    Since 4.4, the annotation event types excluded from detection (and from
+    the density denominator) are a single `reject_types` list, not two
+    booleans. The default is `['Artefact', 'Arousal', 'Move']`; `Resp` and
+    `Snore` remain opt-in. `reject_artifacts=True` / `reject_arousals=True`
+    still work as deprecated shims but cannot express `Move`; use
+    `reject_types` for anything beyond the default. See
+    [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default).
+
+!!! tip "K-complexes are the one case with a genuine `Resp` opt-in"
+    Respiratory events (hypopnea, obstructive apnea, SpO2 desaturation) can
+    evoke a K-complex at their termination — a real cortical response, not an
+    artefact. If your question is *spontaneous* K-complex density in a
+    sleep-disordered-breathing cohort, pass
+    `reject_types=['Artefact', 'Arousal', 'Move', 'Resp']` to mask those
+    respiratory-evoked K-complexes out. This is a scientific choice about what
+    counts as "spontaneous" that belongs in your methods section, not a
+    clean-up step, and it is why `Resp` is opt-in here and everywhere else in
+    the toolkit rather than in the default set — see
+    [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default).
 
 `method` accepts `'AASM/Massimini2004'` (default) or `'Massimini2004'`. No
 other Wonambi slow-wave methods are exposed here, since they target slow
@@ -118,7 +138,7 @@ from turtlewave_hdEEG.density import event_density, format_density_table
 density_df = event_density(
     'wonambi/neural_events.db', event_type='k_complex',
     method='AASM/Massimini2004', stage=['NREM2'], subject='sub-001',
-    reject_artifacts=True, reject_arousals=True,  # must match the detection call
+    reject_types=['Artefact', 'Arousal', 'Move'],  # must match the detection call
 )
 print(format_density_table(density_df))
 ```

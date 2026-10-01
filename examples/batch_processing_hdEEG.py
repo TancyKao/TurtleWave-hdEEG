@@ -104,8 +104,9 @@ def run_spindle_detection_test(data_file, annot_file=None, output_dir=None):
         channels=test_channels,
         frequency=(11, 16),       # Standard spindle frequency range
         duration=(0.5, 3),        # Standard spindle duration range (0.5-3 seconds)
-        reject_artifacts=True,
-        reject_arousals=True,
+        # Excluded from detection AND from the density denominator; recorded in
+        # detection_runs.reject_types. 'Resp'/'Snore' are opt-in.
+        reject_types=['Artefact', 'Arousal', 'Move'],
         n_workers=1,#min(4, os.cpu_count() - 1),  # Use at most 4 workers
         chunk_size=1)              # Process 3 channels per worker)
         

@@ -44,6 +44,96 @@ except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
 
 
 # ============================================================================
+# Excluded event types
+#
+# The detection run's exclusion set decides how much time the detector actually
+# searched, and therefore the density denominator this dashboard divides by. It
+# is read back from the run, never assumed, and it is always displayed next to
+# the number it defines.
+# ============================================================================
+
+#: The detector defaults, used only as the stated fallback when the database
+#: cannot say what a run excluded. Taken from the library when it is importable
+#: so this file cannot claim a default the detectors do not apply.
+try:
+    from turtlewave_hdEEG.utils import DEFAULT_REJECT_TYPES as _DEFAULT_REJECTS
+    DEFAULT_REJECT_TYPES = tuple(_DEFAULT_REJECTS)
+except ImportError:
+    DEFAULT_REJECT_TYPES = ('Artefact', 'Arousal', 'Move')
+
+#: Fixed order for every set this GUI shows or returns: the defaults, then the
+#: opt-in types. NOT alphabetical - a set must read the same here as it does in
+#: the detection GUI, and comparisons are made on sets, never on this order.
+REJECT_TYPE_ORDER = tuple(DEFAULT_REJECT_TYPES) + tuple(
+    t for t in ('Artefact', 'Arousal', 'Move', 'Resp', 'Snore')
+    if t not in DEFAULT_REJECT_TYPES)
+
+#: What every run before 4.4.0 excluded. Those runs had two booleans and no way
+#: to name anything else, so a file that records no set ANYWHERE is by
+#: definition pre-4.4.0 and this is what its runs did. Deliberately the same
+#: value ``turtlewave_gui._choose_db_scope`` assumes in the same condition: two
+#: different guesses for one condition would be indefensible.
+PRE_4_4_REJECT_TYPES = ('Artefact', 'Arousal')
+
+#: Stored token -> the word a sleep researcher uses. Duplicated from
+#: ``frontend.turtlewave_gui`` on purpose: importing the detection GUI here
+#: would pull a second QMainWindow into every review session for five strings.
+REJECT_TYPE_LABELS = {
+    'Artefact': 'Artefact',
+    'Arousal': 'Arousal',
+    'Move': 'Movement',
+    'Resp': 'Respiratory',
+    'Snore': 'Snoring',
+}
+
+def order_reject_types(reject_types):
+    """Put a reject set into :data:`REJECT_TYPE_ORDER`, de-duplicated.
+
+    Parameters
+    ----------
+    reject_types : iterable of str or None
+        Stored tokens in any order.
+
+    Returns
+    -------
+    list of str
+        The same set, canonically ordered; unknown types keep their relative
+        order and follow the known ones.
+    """
+    if not reject_types:
+        return []
+    if isinstance(reject_types, str):
+        reject_types = [reject_types]
+    seen = []
+    for t in reject_types:
+        t = str(t).strip()
+        if t and t not in seen:
+            seen.append(t)
+    known = [t for t in REJECT_TYPE_ORDER if t in seen]
+    return known + [t for t in seen if t not in known]
+
+
+def reject_types_display(reject_types):
+    """Render a reject set in researcher-facing words, canonically ordered.
+
+    Parameters
+    ----------
+    reject_types : iterable of str or None
+        Stored tokens.
+
+    Returns
+    -------
+    str
+        e.g. ``'Artefact, Arousal, Movement'``, or ``'nothing'`` for an empty
+        set.
+    """
+    tokens = order_reject_types(reject_types)
+    if not tokens:
+        return "nothing"
+    return ", ".join(REJECT_TYPE_LABELS.get(t, t) for t in tokens)
+
+
+# ============================================================================
 # Logging for the density helpers
 # ============================================================================
 
@@ -307,7 +397,7 @@ class EventDatabase:
         self.conn.commit()
 
     def get_run_rejections(self, event_type=None, methods=None):
-        """The artefact/arousal rejection settings the detection run used.
+        """The event types the detection run excluded from its search.
 
         These are not a display preference: they decide how much time the
         detector actually searched, and therefore the density denominator. The
@@ -342,13 +432,38 @@ class EventDatabase:
 
         Returns
         -------
-        tuple of (bool, bool) or None
-            ``(reject_artifacts, reject_arousals)`` of the most recent matching
-            run. ``None`` only when nothing matches, when neither column is
-            populated, or when ``detection_runs`` is absent (a database written
-            before the direct-write path existed).
+        list of str or None
+            The excluded event types of the most recent matching run, in
+            :data:`REJECT_TYPE_ORDER`, e.g. ``['Artefact', 'Arousal', 'Move']``.
+            An empty list is a real answer ("that run excluded nothing"), not a
+            missing one. ``None`` only when nothing matches, when nothing about
+            the exclusion set is recorded, or when ``detection_runs`` is absent
+            (a database written before the direct-write path existed).
+
+            Read from the ``reject_types`` column where it exists. When it is
+            absent or NULL but the two boolean columns are populated, the set is
+            reconstructed from them - exact, not a guess, because a run written
+            before 4.4.0 had those two booleans and no way to exclude anything
+            else.
         """
-        where = ["reject_artifacts IS NOT NULL", "reject_arousals IS NOT NULL"]
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA table_info(detection_runs)")
+            columns = {r[1] for r in cursor.fetchall()}
+        except sqlite3.OperationalError:
+            return None
+        if not columns:
+            return None
+        has_types = 'reject_types' in columns
+
+        where = []
+        if has_types:
+            # A row is informative if it carries the set OR the old booleans.
+            where.append("(reject_types IS NOT NULL OR (reject_artifacts IS "
+                         "NOT NULL AND reject_arousals IS NOT NULL))")
+        else:
+            where.append("reject_artifacts IS NOT NULL")
+            where.append("reject_arousals IS NOT NULL")
         params = []
         if event_type is not None:
             where.append("event_type = ?")
@@ -357,10 +472,12 @@ class EventDatabase:
             where.append("method IN (%s)" % ",".join("?" * len(methods)))
             params += [str(m) for m in methods]
         clause = " WHERE " + " AND ".join(where)
+        select = ("reject_types, reject_artifacts, reject_arousals"
+                  if has_types else
+                  "NULL, reject_artifacts, reject_arousals")
         try:
-            cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT reject_artifacts, reject_arousals "
+                f"SELECT {select} "
                 f"FROM detection_runs{clause} "
                 "ORDER BY timestamp DESC LIMIT 1", params)
             row = cursor.fetchone()
@@ -368,7 +485,14 @@ class EventDatabase:
             return None
         if row is None:
             return None
-        return (bool(row[0]), bool(row[1]))
+        rj_types, rj_a, rj_r = row
+        if rj_types is not None:
+            return order_reject_types(
+                [t for t in str(rj_types).split(',') if t])
+        if rj_a is None and rj_r is None:
+            return None
+        return order_reject_types(
+            (['Artefact'] if rj_a else []) + (['Arousal'] if rj_r else []))
 
     def get_events(self, event_type=None, channels=None, stages=None,
                    reviewed_only=False, unreviewed_only=False, confidence_threshold=0.0,
@@ -1420,6 +1544,21 @@ class ChannelDetailDock(QWidget):
         self.load_montage_btn.clicked.connect(self.loadMontageRequested.emit)
         topo_row.addWidget(self.load_montage_btn)
         lay.addLayout(topo_row)
+
+        # What the density in this dock is divided by. Always visible: a
+        # density is not interpretable without the definition of its
+        # denominator, and the two contributions to that denominator (the
+        # detection run's exclusion set, and any marks the reviewer has added
+        # this session) must never be conflated.
+        self.mask_caption = QLabel("")
+        self.mask_caption.setWordWrap(True)
+        self.mask_caption.setStyleSheet("color:#6b7585;font-size:11px;")
+        self.mask_caption.setToolTip(
+            "Time marked with these events was not searched for events and is "
+            "not counted in the denominator. Read from the detection run that "
+            "produced the events in view.")
+        lay.addWidget(self.mask_caption)
+
         self.topo = pg.PlotWidget(title="Topography")
         _theme_plot(self.topo)
         self.topo.setMaximumHeight(210)
@@ -1549,6 +1688,37 @@ class ChannelDetailDock(QWidget):
             rl.addWidget(lbl, 1)
             rl.addWidget(x)
             self._marked_layout.addWidget(row)
+
+    def set_denominator_mask(self, types, source='from the detection run',
+                             pending_marks=0):
+        """Say which exclusion set the density on screen was computed under.
+
+        Parameters
+        ----------
+        types : iterable of str
+            The excluded event types, as stored tokens.
+        source : str, optional
+            Where the set came from: ``'from the detection run'`` when it was
+            read back, ``'assumed (not recorded)'`` when it could not be. The
+            assumed case renders in the warning colour, because an assumed
+            denominator can be wrong in either direction. Default
+            ``'from the detection run'``.
+        pending_marks : int, optional
+            Artefact intervals the reviewer has marked this session. Appended
+            separately rather than folded into the set, so the reviewer's own
+            contribution to the denominator is never mistaken for the run's.
+            Default ``0``.
+        """
+        assumed = 'assumed' in str(source)
+        text = (f"density excludes {reject_types_display(types)} "
+                f"\u00b7 {source}")
+        if pending_marks:
+            text += (f" \u00b7 + {int(pending_marks)} mark"
+                     f"{'' if int(pending_marks) == 1 else 's'} you added")
+        self.mask_caption.setText(text)
+        self.mask_caption.setStyleSheet(
+            "color:#d29922;font-size:11px;" if assumed
+            else "color:#6b7585;font-size:11px;")
 
     def set_coords(self, coords):
         self._coords = coords or None
@@ -3852,14 +4022,15 @@ class EventReviewGUI(QMainWindow):
         scope — exactly what ``event_density(combine_stages=True)`` pools), and
         it is anchored to the library in two ways:
 
-        * **The run's own rejection settings are read from the database**
-          (``detection_runs``) instead of being assumed. Assuming both were on
-          is a real bias: a run with arousal rejection unticked searched the
-          arousal time, so subtracting it here shrinks the denominator and
-          inflates every density on the dashboard. The library never has this
-          problem, because the rejection settings are part of the stored row's
-          key — asking with the wrong pair returns nothing rather than a
-          mismatched number.
+        * **The run's own exclusion set is read from the database**
+          (``detection_runs.reject_types``) instead of being assumed. Assuming
+          is a real bias in both directions: a run that did not exclude arousals
+          searched the arousal time, so subtracting it here shrinks the
+          denominator and inflates every density on the dashboard, and a run
+          that excluded more than assumed is deflated the same way. The library
+          never has this problem, because the exclusion set is part of the
+          stored row's key — asking with the wrong set returns nothing rather
+          than a mismatched number.
         * **With no live marks, the result is checked against the stored row**
           and a disagreement is reported. Agreement is the expected case; a
           difference means the scoring loaded for review is not the scoring
@@ -3896,6 +4067,13 @@ class EventReviewGUI(QMainWindow):
             stored denominator: it predates the marks, so it would report a
             density that ignores them.
         """
+        # Forget the previous refresh's answer before anything can return
+        # early. _qc_reject_types_in_use paints the dock caption from these,
+        # and a set left over from another event type or filter would be
+        # displayed under the confident "from the detection run" wording.
+        self._qc_reject_types = None
+        self._qc_reject_source = 'assumed (not recorded)'
+
         if self.annotations is None:
             return None
         # Density time base = the stages the run actually detected on, inferred
@@ -3917,7 +4095,7 @@ class EventReviewGUI(QMainWindow):
         if not stage_list:
             return None
 
-        reject_artifacts, reject_arousals = self._qc_run_rejections()
+        reject_types = self._qc_run_rejections()
 
         # Lazy import keeps GUI imports headless-safe; utils is Qt-free and the
         # single source of truth for the artefact-free subtraction.
@@ -3934,8 +4112,10 @@ class EventReviewGUI(QMainWindow):
         try:
             dens = build_density_denominators(
                 self.annotations, self.eeg_data,
-                reject_artifacts=reject_artifacts,
-                reject_arousals=reject_arousals,
+                # reject_types= ONLY: the two deprecated booleans cannot name
+                # a set that includes Move, and passing both is how the two
+                # silently disagree.
+                reject_types=list(reject_types),
                 stage_list=stage_list, stages_present=stage_list,
                 logger=_density_logger,
                 extra_artefact_intervals=extra_intervals)
@@ -3968,51 +4148,145 @@ class EventReviewGUI(QMainWindow):
                     "ignores them. The density column stays blank until the "
                     "scoring loads cleanly.", len(extra_intervals))
                 return None
-            return self._qc_stored_density_minutes(
-                stage_list, reject_artifacts, reject_arousals)
+            return self._qc_stored_density_minutes(stage_list, reject_types)
 
         minutes = dens.whole_night_analysed_min or None
         if not extra_intervals:
-            self._qc_check_against_stored(minutes, stage_list,
-                                          reject_artifacts, reject_arousals)
+            self._qc_check_against_stored(minutes, stage_list, reject_types)
         return minutes
 
     def _qc_run_rejections(self):
-        """The rejection settings of the runs in view, or the detector defaults.
+        """The exclusion set of the runs in view, or the detector defaults.
+
+        Also records where the answer came from in
+        ``self._qc_reject_source`` (``'from the detection run'``,
+        ``'from another run in this file'`` or ``'assumed (not recorded)'``) so
+        the dashboard caption can say whether the mask it names was read from
+        the run on screen, read from a different run, or assumed.
 
         Returns
         -------
-        tuple of (bool, bool)
-            ``(reject_artifacts, reject_arousals)``. Falls back to
-            ``(True, True)`` - the detector defaults - when the database cannot
-            say, and says so once via the repeat-filtered logger rather than on
-            every dashboard refresh.
+        list of str
+            The excluded event types, canonically ordered. Falls back to
+            :data:`PRE_4_4_REJECT_TYPES` only when nothing in the file records
+            a set at all, and says so once via the repeat-filtered logger
+            rather than on every dashboard refresh.
+
+        Notes
+        -----
+        The lookup WIDENS before it guesses. A scoped miss is usually a method
+        filter narrower than the runs on record, and in that case the file
+        still holds the answer, so guessing would discard a recorded fact. The
+        order is: the current scope, then this event type, then any run in the
+        file. Only when nothing anywhere records a set does the fallback apply,
+        and it is then :data:`PRE_4_4_REJECT_TYPES` - the same value
+        ``turtlewave_gui._choose_db_scope`` assumes, because a file that
+        records no set anywhere is by definition pre-4.4.0. Two different
+        guesses for one condition would be indefensible.
         """
+        fallback = list(PRE_4_4_REJECT_TYPES)
         if self.db is None:
-            return (True, True)
+            self._set_qc_rejections(fallback, 'assumed (not recorded)')
+            return list(fallback)
         evt = None
         try:
             evt = self.qc_widget.current_event_type()
         except Exception:
             pass
         methods, _ = self._current_method_freq()
-        try:
-            found = self.db.get_run_rejections(event_type=evt, methods=methods)
-        except Exception:
-            found = None
-        if found is not None:
-            return found
-        _density_repeat_filter.context = getattr(self, 'annot_file_path', None)
-        _density_logger.warning(
-            "The detection run's artefact/arousal rejection settings could not "
-            "be read from the database for this scope, so the density "
-            "denominator assumes both were on (the detector defaults). If a "
-            "run had either unticked, the densities shown are biased high.")
-        return (True, True)
 
-    def _qc_stored_density_minutes(self, stage_list, reject_artifacts,
-                                   reject_arousals):
+        # Widen, then guess. Each query is one SELECT ... LIMIT 1 on a tiny
+        # table, so trying three costs nothing. Duplicates are skipped: with no
+        # method filter the first two queries are the same query.
+        attempts = []
+        for kwargs in ({'event_type': evt, 'methods': methods},
+                       {'event_type': evt},
+                       {}):
+            probe = {k: v for k, v in kwargs.items() if v}
+            if probe not in [a[0] for a in attempts]:
+                attempts.append((probe, kwargs))
+
+        for index, (_probe, kwargs) in enumerate(attempts):
+            try:
+                found = self.db.get_run_rejections(**kwargs)
+            except Exception:
+                found = None
+            if found is None:
+                continue
+            types = order_reject_types(found)
+            if index == 0:
+                self._set_qc_rejections(types, 'from the detection run')
+                return list(types)
+            # A reading, not a guess, so NOT the warning colour - but say which
+            # run it was read from, because it may not be the run on screen.
+            self._set_qc_rejections(types, 'from another run in this file')
+            _density_repeat_filter.context = getattr(
+                self, 'annot_file_path', None)
+            _density_logger.warning(
+                "No exclusion set is recorded for the runs matching the "
+                "current method filter, so the denominator uses the set "
+                "recorded for the most recent run in this file (%s). If the "
+                "events on screen came from a run with a different set, the "
+                "densities shown are not that run's.",
+                reject_types_display(types))
+            return list(types)
+
+        # Nothing in the file records a set anywhere, which makes it pre-4.4.0.
+        self._set_qc_rejections(fallback, 'assumed (not recorded)')
+        _density_repeat_filter.context = getattr(self, 'annot_file_path', None)
+        # Direction of the bias, stated the way round it actually goes:
+        # excluding MORE time makes the denominator SMALLER, so a run that
+        # excluded more than this assumption has a higher density than shown.
+        _density_logger.warning(
+            "The detection run's exclusion set could not be read from the "
+            "database for this scope, so the searched-time denominator assumes "
+            "%s, which is what every run stored without a recorded set did. If "
+            "the run excluded more than that, the densities shown are lower "
+            "than the run's own; if it excluded less, they are higher.",
+            reject_types_display(fallback))
+        return list(fallback)
+
+    def _set_qc_rejections(self, types, source):
+        """Record the resolved set and where it came from, for the dock caption.
+
+        Parameters
+        ----------
+        types : list of str
+            The exclusion set the denominator will use.
+        source : str
+            ``'from the detection run'``, ``'from another run in this file'`` or
+            ``'assumed (not recorded)'``. Only the last renders in the warning
+            colour (see :meth:`ChannelDetailDock.set_denominator_mask`).
+        """
+        self._qc_reject_types = list(types)
+        self._qc_reject_source = source
+
+    def _qc_reject_types_in_use(self):
+        """The exclusion set the density currently on screen was computed under.
+
+        Returns
+        -------
+        list of str
+            The set :meth:`_qc_run_rejections` last resolved, resolving it now
+            if the density path has not run yet (which happens when there are
+            no annotations loaded to compute a denominator from).
+        """
+        types = getattr(self, '_qc_reject_types', None)
+        if types is None:
+            return self._qc_run_rejections()
+        return list(types)
+
+    def _qc_stored_density_minutes(self, stage_list, reject_types):
         """The library's own denominator: analysed_time summed over the scope.
+
+        Parameters
+        ----------
+        stage_list : list of str
+            Stages in scope.
+        reject_types : list of str
+            The run's exclusion set. It selects which stored rows are read, so
+            passing the run's own set is what keeps this denominator on the
+            same time base as the events counted against it.
 
         Returns
         -------
@@ -4026,8 +4300,7 @@ class EventReviewGUI(QMainWindow):
         try:
             from turtlewave_hdEEG.dbwrite import read_analysed_time
             stored = read_analysed_time(self.db.db_path,
-                                        reject_artifacts=reject_artifacts,
-                                        reject_arousals=reject_arousals)
+                                        reject_types=list(reject_types))
         except Exception:
             return None
         if not stored:
@@ -4047,8 +4320,7 @@ class EventReviewGUI(QMainWindow):
             total += float(values[0])
         return (total / 60.0) or None
 
-    def _qc_check_against_stored(self, minutes, stage_list, reject_artifacts,
-                                 reject_arousals):
+    def _qc_check_against_stored(self, minutes, stage_list, reject_types):
         """Warn when the recomputed denominator disagrees with the stored one.
 
         With no live artefact marks the two are the same quantity computed by
@@ -4057,8 +4329,7 @@ class EventReviewGUI(QMainWindow):
         detection ran on, and every density in the table is then computed
         against a different amount of time than the exported density is.
         """
-        stored = self._qc_stored_density_minutes(
-            stage_list, reject_artifacts, reject_arousals)
+        stored = self._qc_stored_density_minutes(stage_list, reject_types)
         if stored is None or minutes is None:
             return
         if abs(stored - minutes) <= max(0.05, 0.001 * stored):
@@ -4068,7 +4339,7 @@ class EventReviewGUI(QMainWindow):
             "Density denominator mismatch: this dashboard computes %.2f "
             "analysed minutes over %s from the scoring loaded for review, but "
             "the detection run stored %.2f minutes for the same stages and "
-            "rejection settings. The densities shown will not match the "
+            "exclusion set. The densities shown will not match the "
             "exported ones. The usual cause is a different or edited scoring "
             "file; the stored value is the one the detector actually used.",
             minutes, "+".join(stage_list), stored)
@@ -4160,6 +4431,14 @@ class EventReviewGUI(QMainWindow):
         self._qc_df = qc
         self.qc_widget.set_data(qc, df, verdicts, self._redetect_queue)
         self.detail_dock_w.set_event_type(evt)
+        # Name the denominator next to the number it defines. _qc_density_minutes
+        # has just resolved the set (and whether it was read or assumed), so
+        # this reports what was actually used, not a second lookup that could
+        # disagree with it.
+        self.detail_dock_w.set_denominator_mask(
+            self._qc_reject_types_in_use(),
+            getattr(self, '_qc_reject_source', 'assumed (not recorded)'),
+            pending_marks=len(ivs or []))
         self.detail_dock_w.update_topo(qc)
         self.detail_dock_w.set_global_worst(
             self._global_worst_rows(df, evt), event_type=evt)

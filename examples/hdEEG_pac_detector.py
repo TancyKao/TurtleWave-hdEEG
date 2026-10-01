@@ -566,6 +566,8 @@ def main():
     print(f"Subject: {subject}")
     print(f"Write PAC results to database: {write_db} ({db_path})")
 
+    reject_types = ['Artefact', 'Arousal', 'Move']
+
     # Create modified analyze_pac method to handle method selection in SQL queries
     def modified_analyze_pac(event_type, pair_with_spindles=False):
         """Wrapper for analyze_pac to handle method selection"""
@@ -582,6 +584,13 @@ def main():
             'db_path': db_path,
             'out_dir': args.output_dir,
             'event_opts': event_opts,
+            # Excluded from the segments PAC is computed over. Before 4.4 the
+            # continuous fetch applied NO rejection, so older PAC rows include
+            # artefact and arousal time. Every added type also fragments the
+            # concatenated record further (more dropped sub-min_dur pieces,
+            # more filter edge transients), which is why 'Resp'/'Snore' are
+            # opt-in rather than default.
+            'reject_types': reject_types,
             # analyze_pac defaults to writing the database (write_db=None
             # means auto since 4.2); passed explicitly so --no-write-db works
             # and the intent is visible here.

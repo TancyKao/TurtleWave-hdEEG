@@ -2256,6 +2256,174 @@ def test_pac_twin_delete_is_scoped():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _pac_coupled_recording(tmp, n_events=50, s_freq=128.0, seed=0):
+    """Write an EDF carrying phase-amplitude-coupled slow waves, plus its events.
+
+    Each event is one slow oscillation of jittered period (0.85-1.6 s, i.e.
+    0.6-1.2 Hz) with a 13.5 Hz burst whose envelope follows the cosine of the
+    slow-wave phase, so sigma amplitude peaks at the slow wave's positive
+    peak. The jitter matters: with every event the same length the
+    concatenated signal is strictly periodic and the time-lag surrogates
+    (``idpac[1] = 3``) reproduce the coupling, driving the z-score to zero.
+
+    Parameters
+    ----------
+    tmp : str
+        Directory to write the EDF and the events database into.
+    n_events : int, optional
+        Number of coupled slow waves. Default ``50`` -- exactly one surrogate
+        block, so no incomplete block is padded by resampling (that padding
+        draws from an unseeded RNG). Default ``50``.
+    s_freq : float, optional
+        Sampling frequency in Hz. Default ``128.0``.
+    seed : int, optional
+        Seed for the noise, the event periods and the inter-event gaps.
+        Default ``0``.
+
+    Returns
+    -------
+    tuple
+        ``(dataset, db_path)`` -- a ``wonambi.Dataset`` over the written EDF
+        and the path to a SQLite database whose ``events`` table holds one
+        ``slow_wave`` row per event on channel ``Cz``.
+    """
+    import uuid as _uuid
+    from wonambi import Dataset
+    from wonambi.ioeeg import write_edf
+    from wonambi.utils.simulate import create_data
+
+    rng = np.random.RandomState(seed)
+    events = []
+    onset = 5.0
+    for _ in range(n_events):
+        period = rng.uniform(0.85, 1.6)
+        events.append((onset, period))
+        onset += period + 2.0 + rng.uniform(0, 3.0)
+
+    duration = onset + 10.0
+    n_samples = int(duration * s_freq)
+    t = np.arange(n_samples) / s_freq
+    sig = rng.randn(n_samples) * 4.0
+    for start, period in events:
+        window = (t >= start - 0.5) & (t < start + period + 0.5)
+        tt = t[window] - start
+        sw_phase = 2 * np.pi * tt / period - np.pi / 2
+        slow = 60.0 * np.sin(sw_phase)
+        envelope = 12.0 * (1 + np.cos(sw_phase)) / 2
+        sigma = envelope * np.sin(2 * np.pi * 13.5 * tt)
+        sig[window] += (slow + sigma) * np.hanning(window.sum())
+
+    data = create_data(datatype='ChanTime', n_trial=1, s_freq=s_freq,
+                       chan_name=['Cz'], time=(0, duration))
+    n_time = len(data.axis['time'][0])
+    data.data[0] = np.asarray(sig[:n_time], dtype='f')[None, :]
+    edf = os.path.join(tmp, 'sub-PAC.edf')
+    write_edf(data, edf)
+
+    db_path = os.path.join(tmp, 'neural_events.db')
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+        CREATE TABLE events (
+            uuid TEXT PRIMARY KEY, event_type TEXT, channel TEXT,
+            start_time REAL, end_time REAL, duration REAL, stage TEXT,
+            method TEXT, freq_lower REAL, freq_upper REAL)""")
+        for start, period in events:
+            conn.execute(
+                "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (str(_uuid.uuid4()), 'slow_wave', 'Cz', start, start + period,
+                 period, 'NREM2', 'Massimini2004', 0.1, 4.0))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return Dataset(edf), db_path
+
+
+def test_pac_mi_raw_is_the_unnormalised_modulation_index():
+    """``mi_raw`` must hold the raw Tort MI, not a second copy of ``mi_norm``.
+
+    ``pac.fit`` RETURNS the surrogate-normalised estimate (a z-score under the
+    default ``idpac=(2, 3, 4)``) and keeps the unnormalised one in
+    ``pac.pac``. Both stored columns used to be the returned value, so every
+    ``pac_coupling.mi_raw`` written before 4.4 was a z-score filed under a
+    raw-MI name -- silently, since a z-score is a plausible-looking number.
+    The two scales are pinned here: the raw MI is a Kullback-Leibler
+    divergence over ``log(nbins)``, bounded by 1; the z-score is unbounded and
+    well above 2 on strongly coupled data.
+    """
+    print("\n13b. Testing that PAC mi_raw is the unnormalised modulation "
+          "index:")
+
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_pacmi_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dataset, db_path = _pac_coupled_recording(tmp)
+
+            pac = ParalPAC(dataset=dataset, rootpath=tmp,
+                           log_level=logging.CRITICAL)
+
+            def run(idpac):
+                pac.analyze_pac(
+                    chan=['Cz'], stage=['NREM2'], idpac=idpac,
+                    phase_freq=(0.5, 1.25), amp_freq=(11, 16),
+                    use_detected_events=True, event_type='slow_wave',
+                    event_opts={'buffer': 1.0, 'sw_method': 'Massimini2004'},
+                    db_path=db_path, out_dir=os.path.join(tmp, 'pac_out'),
+                    write_db=False, write_csv=True)
+                entry = pac.tracking['event_pac']['Cz']['0.5-1.25Hz_11-16Hz']
+                csv = pd.read_csv(entry['outputfile'])
+                return entry, csv
+
+            z_entry, z_csv = run((2, 3, 4))
+            raw, norm = z_entry['mi_raw'], z_entry['mi_norm']
+            print(f"[info] idpac=(2,3,4): mi_raw={raw:.6f}, mi_norm={norm:.4f} "
+                  f"over {z_entry['n_segments']} coupled slow waves")
+
+            assert raw > 0, f"mi_raw={raw} is not a positive modulation index"
+            assert raw < 1, (f"mi_raw={raw} exceeds the Tort MI bound of 1; it "
+                             f"is not on the raw scale")
+            assert norm > 2, (f"mi_norm={norm} is not a z-score above 2 on "
+                              f"strongly coupled data; the fixture is too weak "
+                              f"to tell the two columns apart")
+            assert raw != norm, ("mi_raw is still a copy of mi_norm")
+            print(f"[ok] mi_raw is on the Tort scale (0 < {raw:.6f} < 1) and "
+                  f"mi_norm is a z-score ({norm:.4f} > 2)")
+
+            assert np.isclose(z_csv['mi_raw'][0], raw), (
+                f"CSV mi_raw={z_csv['mi_raw'][0]} != tracking mi_raw={raw}")
+            assert np.isclose(z_csv['mi_norm'][0], norm), (
+                f"CSV mi_norm={z_csv['mi_norm'][0]} != tracking mi_norm={norm}")
+            print("[ok] the per-channel CSV carries the same two values as the "
+                  "in-memory result")
+
+            # idpac[2] = 0: no normalisation, so the two are legitimately
+            # equal -- and equal to the raw value of the z-scored run above,
+            # which is what pins mi_raw as the UNNORMALISED estimate rather
+            # than merely a different number.
+            plain_entry, plain_csv = run((2, 3, 0))
+            p_raw, p_norm = plain_entry['mi_raw'], plain_entry['mi_norm']
+            print(f"[info] idpac=(2,3,0): mi_raw={p_raw:.6f}, "
+                  f"mi_norm={p_norm:.6f}")
+            assert p_raw == p_norm, (
+                f"with idpac[2]=0 nothing is normalised, so mi_raw={p_raw} and "
+                f"mi_norm={p_norm} must be identical")
+            assert np.isclose(p_raw, raw, rtol=1e-9), (
+                f"the unnormalised run gives {p_raw} but the z-scored run "
+                f"reports mi_raw={raw}; mi_raw is not the unnormalised "
+                f"estimate of the same data")
+            assert np.isclose(plain_csv['mi_raw'][0], p_raw)
+            print(f"[ok] idpac=(2,3,0): mi_raw == mi_norm == {p_raw:.6f}, "
+                  f"the same value the z-scored run reports as mi_raw")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _synthetic_recording(tmp, stages, s_freq=128.0, seed=0):
     """Write a scored synthetic EDF and open it as a (Dataset, Annotations).
 
@@ -2680,14 +2848,16 @@ def test_density_pools_joint_stage_token():
     conn = sqlite3.connect(db)
     try:
         conn.execute("UPDATE events SET stage = 'NREM1REM'")
+        from turtlewave_hdEEG.utils import reject_key, DEFAULT_REJECT_TYPES
+        rk = reject_key(DEFAULT_REJECT_TYPES)
         conn.execute("INSERT OR REPLACE INTO analysed_time (subject, stage, "
-                     "reject_artifacts, reject_arousals, analysed_seconds, "
-                     "artefact_seconds_excluded) VALUES ('sub-P','NREM1',1,1,"
-                     "600.0,0.0)")
+                     "reject_types, reject_artifacts, reject_arousals, "
+                     "analysed_seconds, artefact_seconds_excluded) "
+                     "VALUES ('sub-P','NREM1',?,1,1,600.0,0.0)", (rk,))
         conn.execute("INSERT OR REPLACE INTO analysed_time (subject, stage, "
-                     "reject_artifacts, reject_arousals, analysed_seconds, "
-                     "artefact_seconds_excluded) VALUES ('sub-P','REM',1,1,"
-                     "600.0,0.0)")
+                     "reject_types, reject_artifacts, reject_arousals, "
+                     "analysed_seconds, artefact_seconds_excluded) "
+                     "VALUES ('sub-P','REM',?,1,1,600.0,0.0)", (rk,))
         conn.commit()
         trap = conn.execute("SELECT stage, analysed_minutes, density_per_min, "
                             "denominator_complete FROM v_event_density"
@@ -4031,6 +4201,307 @@ def test_migration_refuses_a_stage_token_outside_the_vocabulary():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _synthetic_spindle_train(s_freq=256.0, minutes=3.0, ptp_uv=30.0,
+                             bg_uv=25.0, every_s=10.0, seed=1):
+    """Build a 1/f background with Hann-windowed 13 Hz spindles injected.
+
+    Parameters
+    ----------
+    s_freq : float
+        Sampling frequency in Hz.
+    minutes : float
+        Length of the signal in minutes.
+    ptp_uv : float
+        Peak-to-peak amplitude of each injected burst, in microvolts.
+    bg_uv : float
+        Standard deviation of the 1/f background, in microvolts.
+    every_s : float
+        Mean interval between injected bursts, in seconds.
+    seed : int
+        Seed for the background noise, burst durations and jitter.
+
+    Returns
+    -------
+    sig : ndarray
+        Signal in microvolts, shape (n_samples,).
+    truth : list of tuple of float
+        ``(start_s, end_s)`` of every injected burst.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(minutes * 60 * s_freq)
+    white = rng.standard_normal(n)
+    spec = np.fft.rfft(white)
+    f = np.fft.rfftfreq(n, 1.0 / s_freq)
+    f[0] = f[1]
+    sig = np.fft.irfft(spec / f, n)
+    sig = sig / sig.std() * bg_uv
+
+    truth = []
+    t0 = 5.0
+    while t0 + 3.0 < n / s_freq:
+        dur = rng.uniform(0.5, 1.5)
+        ns = int(dur * s_freq)
+        t = np.arange(ns) / s_freq
+        beg = int(t0 * s_freq)
+        sig[beg:beg + ns] += (np.hanning(ns)
+                              * np.sin(2 * np.pi * 13.0 * t)
+                              * (ptp_uv / 2.0))
+        truth.append((t0, t0 + dur))
+        t0 += every_s + rng.uniform(-1.0, 1.0)
+    return sig, truth
+
+
+def _event_recall(detected, truth, min_overlap=0.2):
+    """Fraction of injected events overlapped by at least one detection.
+
+    Parameters
+    ----------
+    detected : list of tuple of float
+        ``(start_s, end_s)`` per detected event.
+    truth : list of tuple of float
+        ``(start_s, end_s)`` per injected event.
+    min_overlap : float
+        Overlap counting as a hit, as a fraction of the injected event's
+        duration.
+
+    Returns
+    -------
+    float
+        Event-wise recall in [0, 1].
+    """
+    hits = sum(any(min(te, de) - max(ts, ds) >= min_overlap * (te - ts)
+                   for ds, de in detected)
+               for ts, te in truth)
+    return hits / len(truth) if truth else float('nan')
+
+
+def test_lacourse_config_matches_the_published_a7():
+    """Lacourse2018 must reach the detector as A7 published it.
+
+    ``_ensure_step_parameters`` used to force ``zscore['pcl_range'] = None``
+    on every method, which for Lacourse2018 discarded Wonambi's ``(10, 90)``
+    -- A7's z-scores are taken against a *clean* 30 s baseline and the
+    percentile trim is what stands in for that cleaning. Untrimmed, the SD in
+    the denominator is inflated by any spindle or transient inside the
+    baseline window, so ``rel_sig_pow`` and ``sigma_covar`` stop clearing 1.6
+    and 1.3. Measured on a 10 min 256 Hz synthetic, the window-wise pass rate
+    fell from 0.0933 to 0.0643 for relative power and 0.1107 to 0.0818 for
+    covariance.
+
+    Also locks the two other silent config losses on this path: a partial dict
+    from a caller must MERGE (the GUI sends ``{'dur': 0.3}``, and losing
+    ``'step': 0.1`` turns off Wonambi's 10 Hz downsampling, evaluating every
+    moving window at every sample), and an explicitly-passed ``None``
+    threshold must not wipe a published default.
+    """
+    print("\n33. Testing Lacourse2018 (A7) parameter forwarding:")
+
+    from wonambi.detect import DetectSpindle as WonambiDetectSpindle
+    from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+
+    ours = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                 duration=(0.3, 2.5), polar='normal')
+    ours._ensure_step_parameters()          # what __call__ does before detecting
+    theirs = WonambiDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                  duration=(0.3, 2.5))
+
+    for key in ('frequency', 'duration', 'tolerance', 'min_interval',
+                'abs_pow_thresh', 'rel_pow_thresh', 'covar_thresh',
+                'corr_thresh'):
+        assert getattr(ours, key) == getattr(theirs, key), (
+            f"Lacourse2018 {key}: ours {getattr(ours, key)!r} != A7/wonambi "
+            f"{getattr(theirs, key)!r}")
+
+    for key in ('zscore', 'windowing', 'moving_ms', 'moving_power_ratio',
+                'moving_covar', 'moving_sd', 'smooth'):
+        want, got = getattr(theirs, key), getattr(ours, key)
+        for sub, value in want.items():
+            assert got.get(sub) == value, (
+                f"Lacourse2018 {key}['{sub}']: ours {got.get(sub)!r} != "
+                f"A7/wonambi {value!r}")
+    print(f"   zscore  ours={ours.zscore['pcl_range']}  "
+          f"a7/wonambi={theirs.zscore['pcl_range']}")
+
+    merged = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                   duration=(0.3, 2.5),
+                                   windowing={'dur': 0.3},
+                                   moving_power_ratio={'dur': 0.3})
+    assert merged.windowing['step'] == 0.1, (
+        f"a partial windowing dict replaced instead of merged: "
+        f"{merged.windowing!r} — step is gone, so downsampling is off")
+    assert merged.moving_power_ratio['freq_narrow'] == (11, 16), (
+        f"a partial moving_power_ratio dict lost freq_narrow: "
+        f"{merged.moving_power_ratio!r}")
+    print(f"   partial dict merge  windowing={merged.windowing['dur']}s "
+          f"step={merged.windowing['step']}s")
+
+    nones = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                  duration=(0.3, 2.5), abs_pow_thresh=None,
+                                  rel_pow_thresh=None, covar_thresh=None,
+                                  corr_thresh=None)
+    assert (nones.abs_pow_thresh, nones.rel_pow_thresh, nones.covar_thresh,
+            nones.corr_thresh) == (1.25, 1.6, 1.3, 0.69), (
+        "an explicitly-passed None threshold wiped an A7 default")
+
+    # The per-run advisory in ParalEvents is advisory: a malformed duration
+    # must be ignored, not raised on. `tuple(0.5)` is a TypeError, which would
+    # let a warning helper abort the whole detection run.
+    import logging
+
+    from turtlewave_hdEEG.eventprocessor import ParalEvents
+
+    advisor = ParalEvents.__new__(ParalEvents)
+    advisor.logger = logging.getLogger('turtlewave_hdEEG.eventprocessor.test')
+    for bad in (0.5, None, (0.3,), 'wrong'):
+        advisor._warn_lacourse_config(bad, {})          # must not raise
+    print("   advisory survives malformed duration: 0.5, None, (0.3,), 'wrong'")
+
+    # abs_pow_thresh=0.0 is the awkward one: it is NOT negative, so Wonambi
+    # keeps it as a fixed floor at log10(uV^2)=0 rather than switching to A7's
+    # adaptive mode, and the GUI spinbox reaches it. It must be advised on,
+    # and it must not raise.
+    for thresh in (0.0, -0.5, 1.25):
+        advisor._warn_lacourse_config((0.3, 2.5),
+                                      {'abs_pow_thresh': thresh})
+    print("   advisory survives abs_pow_thresh: 0.0, -0.5, 1.25")
+
+    print("[ok] Lacourse2018 is constructed exactly as A7/wonambi define it")
+
+
+def test_lacourse_state_survives_repeat_calls():
+    """Wonambi mutates the Lacourse options object; the subclass must undo it.
+
+    ``detect_Lacourse2018`` writes back into the detector it is handed:
+    ``opts.tolerance *= step`` and, in adaptive mode, replaces a negative
+    ``opts.abs_pow_thresh`` with the absolute value it resolved to. ParalEvents
+    reuses one detector for every segment of a channel, so unrestored state
+    means tolerance decays by 10x per segment (0.3 -> 0.03 -> 0.003) and
+    segments 2..N are thresholded against segment 1's amplitude. Detection has
+    no RNG, so identical input must give byte-identical events every time.
+    """
+    print("\n34. Testing Lacourse2018 state across repeated calls:")
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+
+    s_freq = 256.0
+    sig, _ = _synthetic_spindle_train(s_freq=s_freq, minutes=2.0)
+    data = _make_chantime(sig, s_freq)
+
+    det = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                duration=(0.3, 2.5), polar='normal',
+                                tolerance=0.3, abs_pow_thresh=-0.5)
+    runs = []
+    for call in range(3):
+        events = [round(float(e['start']), 6) for e in det(data)]
+        runs.append(events)
+        print(f"   call {call + 1}: tolerance={det.tolerance!r} "
+              f"abs_pow_thresh={det.abs_pow_thresh!r} n={len(events)}")
+        assert det.tolerance == 0.3, (
+            f"tolerance drifted to {det.tolerance!r} after call {call + 1}")
+        assert det.abs_pow_thresh == -0.5, (
+            f"abs_pow_thresh was frozen at {det.abs_pow_thresh!r} after call "
+            f"{call + 1}; segments 2..N would reuse segment 1's amplitude")
+
+    assert runs[0] == runs[1] == runs[2], (
+        "repeated detection on identical data returned different events")
+    assert runs[0], "no events detected, so the invariance check is vacuous"
+
+    print("[ok] tolerance and abs_pow_thresh are restored after every call")
+
+
+def test_lacourse_duration_bound_drives_yield():
+    """A7's (0.3, 2.5) s duration is not interchangeable with a global (0.5, 3).
+
+    The four A7 criteria are combined on a 0.1 s grid, so the minimum duration
+    is really "how many consecutive 0.1 s windows must pass": three at A7's
+    0.3 s, five at a typical global 0.5 s. Wonambi lets the caller's duration
+    override the method's own (``DetectSpindle.__init__`` applies
+    ``if duration is not None`` AFTER the per-method block), so a processor
+    default silently reconfigures A7. This pins the direction and rough size
+    of that effect so the trade-off cannot be changed unnoticed.
+
+    Also locks the 2026-09-14 decision that (0.3, 2.5) -- A7 as published --
+    is ``ImprovedDetectSpindle``'s own default for ``Lacourse2018``, not an
+    override a caller must supply. ``_warn_lacourse_config`` must therefore be
+    silent on that default and warn only when a caller explicitly asks for a
+    different bound, e.g. the old global (0.5, 3.0).
+    """
+    print("\n35. Testing the Lacourse2018 duration bound:")
+
+    import logging
+
+    from turtlewave_hdEEG.extensions import ImprovedDetectSpindle
+    from turtlewave_hdEEG.eventprocessor import ParalEvents
+
+    # A default construction -- no duration kwarg at all -- must land on A7's
+    # own published bound, not a global spindle default meant for the other
+    # six methods.
+    default_det = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                        polar='normal')
+    assert default_det.duration == (0.3, 2.5), (
+        f"ImprovedDetectSpindle('Lacourse2018') with no duration kwarg "
+        f"defaulted to {default_det.duration!r}, not A7's published "
+        f"(0.3, 2.5) s")
+    print(f"   default construction duration={default_det.duration}")
+
+    # The advisory must track that: silent when the run's duration already
+    # matches the default, and warn only on an explicit non-A7 override.
+    class _CollectingHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    advisor = ParalEvents.__new__(ParalEvents)
+    advisor.logger = logging.getLogger(
+        'turtlewave_hdEEG.eventprocessor.duration_warn_test')
+    advisor.logger.setLevel(logging.DEBUG)
+    handler = _CollectingHandler()
+    advisor.logger.addHandler(handler)
+    try:
+        advisor._warn_lacourse_config(default_det.duration, {})
+        assert not any(r.levelno == logging.WARNING and 'overrides' in
+                       r.getMessage() for r in handler.records), (
+            "the advisory warned about duration on a default (0.3, 2.5) "
+            "construction")
+        handler.records.clear()
+
+        advisor._warn_lacourse_config((0.5, 3.0), {})
+        assert any(r.levelno == logging.WARNING and 'overrides' in
+                   r.getMessage() for r in handler.records), (
+            "the advisory did not warn when duration was explicitly "
+            "overridden to the old global (0.5, 3.0)")
+        print("   advisory: silent at the (0.3, 2.5) default, "
+              "warns at an explicit (0.5, 3.0)")
+    finally:
+        advisor.logger.removeHandler(handler)
+
+    s_freq = 256.0
+    sig, truth = _synthetic_spindle_train(s_freq=s_freq, minutes=5.0)
+    data = _make_chantime(sig, s_freq)
+
+    yields = {}
+    for duration in ((0.3, 2.5), (0.5, 3.0)):
+        det = ImprovedDetectSpindle('Lacourse2018', frequency=(11, 16),
+                                    duration=duration, polar='normal')
+        events = [(float(e['start']), float(e['end'])) for e in det(data)]
+        yields[duration] = _event_recall(events, truth)
+        print(f"   duration={duration}  injected={len(truth)}  "
+              f"detected={len(events)}  recall={yields[duration]:.3f}")
+
+    assert yields[(0.3, 2.5)] >= 0.8, (
+        f"A7 as published recovered only {yields[(0.3, 2.5)]:.3f} of injected "
+        f"30 uV peak-to-peak spindles; the detector is broken, not tuned")
+    assert yields[(0.3, 2.5)] > yields[(0.5, 3.0)], (
+        "raising the minimum duration to 0.5 s did not reduce recall, so this "
+        "synthetic no longer exercises the 0.1 s grid it is meant to")
+
+    print("[ok] A7's own duration bound recovers "
+          f"{yields[(0.3, 2.5)]:.0%} vs {yields[(0.5, 3.0)]:.0%} at (0.5, 3.0)")
+
+
 def test_guard_refuses_an_empty_method_list():
     """``method IN ()`` is always-false, so an empty list must not be accepted.
 
@@ -4433,6 +4904,331 @@ def test_migrated_rows_are_replaced_not_duplicated():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_reject_types_is_first_class():
+    """36: the reject set is resolved once, keyed, migrated and read back.
+
+    Before 4.4 the only record of what a run excluded was two booleans, so a
+    run that also excluded ``Move`` wrote a row with the SAME primary key as
+    one that did not and silently replaced its denominator. Four things have
+    to hold for that to be fixed:
+
+    1. one resolver, whose default is ``('Artefact', 'Arousal', 'Move')`` and
+       whose key is order-insensitive;
+    2. a pre-4.4 ``analysed_time`` table migrates to the new key with the set
+       its booleans imply, and the new primary key actually enforces
+       uniqueness on it;
+    3. ``event_density`` picks the row matching the requested set, and warns
+       (rather than pooling) when a second set is present;
+    4. ``db_meta`` records which library version last touched the database.
+    """
+    print("\n36. Testing reject_types as a first-class parameter:")
+
+    import logging
+    from turtlewave_hdEEG import dbwrite
+    from turtlewave_hdEEG.density import event_density
+    from turtlewave_hdEEG.utils import (DEFAULT_REJECT_TYPES,
+                                        KNOWN_REJECT_TYPES,
+                                        resolve_reject_types, reject_key)
+
+    # --- (1) the resolver -------------------------------------------------
+    assert resolve_reject_types() == ('Artefact', 'Arousal', 'Move'), \
+        resolve_reject_types()
+    assert DEFAULT_REJECT_TYPES == ('Artefact', 'Arousal', 'Move')
+    assert 'Resp' in KNOWN_REJECT_TYPES and 'Snore' in KNOWN_REJECT_TYPES
+    assert 'Resp' not in DEFAULT_REJECT_TYPES, "Resp must stay opt-in"
+    assert 'Snore' not in DEFAULT_REJECT_TYPES, "Snore must stay opt-in"
+    print(f"   [ok] default reject set is {resolve_reject_types()}; "
+          f"Resp/Snore opt-in")
+
+    # The booleans subtract from / add to the set; they never define it.
+    assert resolve_reject_types(reject_arousals=False) == ('Artefact', 'Move')
+    assert resolve_reject_types(reject_artifacts=False) == ('Arousal', 'Move')
+    assert resolve_reject_types(['Artefact'], reject_arousals=True) == \
+        ('Artefact', 'Arousal')
+    assert resolve_reject_types([]) == ()
+    assert resolve_reject_types('Artefact') == ('Artefact',)
+    print("   [ok] boolean shims add/remove exactly their one type; "
+          "a bare string is one type, not five characters")
+
+    try:
+        resolve_reject_types(['Artefact', '  '])
+    except ValueError:
+        print("   [ok] an empty reject type raises instead of silently "
+              "matching nothing")
+    else:
+        _fail("an empty reject type was accepted")
+
+    # The key is what the database compares, so it must be order-insensitive.
+    assert reject_key(('Artefact', 'Arousal', 'Move')) == 'Arousal,Artefact,Move'
+    assert reject_key(['Move', 'Arousal', 'Artefact']) == 'Arousal,Artefact,Move'
+    assert reject_key([]) == '' and reject_key(None) == ''
+    print(f"   [ok] reject_key is sorted and order-insensitive: "
+          f"{reject_key(['Move', 'Arousal', 'Artefact'])!r}")
+
+    # --- (2) migrating a pre-4.4 analysed_time ---------------------------
+    from turtlewave_hdEEG import ParalSWA
+    tmp = tempfile.mkdtemp(prefix='tw_reject_')
+    try:
+        db = os.path.join(tmp, 'neural_events.db')
+        # events must exist BEFORE the fixture's view is created, or the view
+        # is unresolvable for a second reason and the RENAME fails on `events`
+        # instead of on `analysed_time` -- testing a different bug from the one
+        # every 4.3 database in the field hits.
+        ParalSWA(None, None,
+                 log_level=logging.CRITICAL).initialize_sqlite_database(db)
+        conn = dbwrite.open_write_connection(db)
+        try:
+            conn.execute("DROP VIEW IF EXISTS v_event_density")
+            conn.execute("DROP TABLE IF EXISTS analysed_time")
+            conn.execute('''
+            CREATE TABLE analysed_time (
+                subject TEXT NOT NULL, stage TEXT NOT NULL,
+                reject_artifacts INTEGER NOT NULL,
+                reject_arousals INTEGER NOT NULL,
+                analysed_seconds REAL NOT NULL,
+                artefact_seconds_excluded REAL, epoch_length REAL,
+                source TEXT, annotation_file TEXT, turtlewave_version TEXT,
+                processing_timestamp TEXT,
+                PRIMARY KEY (subject, stage, reject_artifacts, reject_arousals)
+            )''')
+            for stage, sec, r_a, r_r in (('NREM2', 1800.0, 1, 1),
+                                         ('NREM3', 1200.0, 1, 1),
+                                         ('NREM2', 1900.0, 1, 0)):
+                conn.execute(
+                    "INSERT INTO analysed_time (subject, stage, "
+                    "reject_artifacts, reject_arousals, analysed_seconds, "
+                    "artefact_seconds_excluded, source) "
+                    "VALUES ('sub-R', ?, ?, ?, ?, 0.0, 'detection')",
+                    (stage, r_a, r_r, sec))
+            # A 4.3 database carries v_event_density over analysed_time, and
+            # SQLite >= 3.25 reparses every view when a table is renamed.
+            # Without the fixture's view the migration is tested on a shape no
+            # database in the field has, and the ALTER that fails on all of
+            # them ("error in view v_event_density: no such table:
+            # main.analysed_time") passes here. This is the 4.3 view text.
+            conn.execute('''
+            CREATE VIEW v_event_density AS
+            SELECT e.channel AS channel, e.stage AS stage, COUNT(*) AS n_events,
+                   a.analysed_seconds / 60.0 AS analysed_minutes,
+                   a.reject_artifacts AS reject_artifacts,
+                   a.reject_arousals AS reject_arousals
+            FROM events e JOIN analysed_time a ON a.stage = e.stage
+            GROUP BY e.channel, e.stage, a.reject_artifacts, a.reject_arousals''')
+            conn.commit()
+
+            dbwrite.ensure_analysed_time_schema(conn)
+            assert conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND "
+                "name='v_event_density'").fetchall(), \
+                "the migration dropped v_event_density without rebuilding it"
+            print("   [ok] the migration survives v_event_density over "
+                  "analysed_time, and rebuilds the view")
+            migrated = dict(((r[0], r[1]), r[2]) for r in conn.execute(
+                "SELECT stage, reject_types, analysed_seconds "
+                "FROM analysed_time ORDER BY stage, reject_types"))
+            assert migrated == {('NREM2', 'Arousal,Artefact'): 1800.0,
+                                ('NREM3', 'Arousal,Artefact'): 1200.0,
+                                ('NREM2', 'Artefact'): 1900.0}, migrated
+            print(f"   [ok] pre-4.4 rows migrate to the key their booleans "
+                  f"imply: {sorted(migrated)}")
+
+            # Idempotent, and the new PK is real.
+            dbwrite.ensure_analysed_time_schema(conn)
+            assert conn.execute(
+                "SELECT COUNT(*) FROM analysed_time").fetchone()[0] == 3
+            pk = [r[1] for r in conn.execute("PRAGMA table_info(analysed_time)")
+                  if r[5]]
+            assert pk == ['subject', 'stage', 'reject_types'], pk
+            try:
+                conn.execute(
+                    "INSERT INTO analysed_time (subject, stage, reject_types, "
+                    "reject_artifacts, reject_arousals, analysed_seconds) "
+                    "VALUES ('sub-R','NREM2','Arousal,Artefact',1,1,99.0)")
+            except sqlite3.IntegrityError:
+                print(f"   [ok] re-running the migration is a no-op, and the "
+                      f"primary key is {tuple(pk)}")
+            else:
+                _fail("the new primary key does not enforce uniqueness")
+            conn.rollback()
+
+            # The 4.4 default set is a DIFFERENT row, not a replacement of the
+            # pre-4.4 one. This is the whole point of the key change.
+            dbwrite.record_analysed_time(conn, 'sub-R', 'NREM2', 1700.0,
+                                         artefact_seconds_excluded=100.0)
+            dbwrite.record_analysed_time(conn, 'sub-R', 'NREM3', 1150.0,
+                                         artefact_seconds_excluded=50.0)
+            assert conn.execute(
+                "SELECT analysed_seconds FROM analysed_time WHERE stage='NREM2'"
+                " AND reject_types='Arousal,Artefact'").fetchone()[0] == 1800.0
+            print("   [ok] a default (Move-excluding) run adds a row instead "
+                  "of overwriting the pre-4.4 denominator")
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Events + roster so density has something to divide.
+        conn = dbwrite.open_write_connection(db)
+        try:
+            dbwrite.ensure_direct_write_schema(conn)
+            for i in range(30):
+                t = 100.0 + i * 5.0
+                conn.execute(
+                    "INSERT OR REPLACE INTO events (uuid, event_type, channel, "
+                    "start_time, end_time, duration, stage, epoch_stage, "
+                    "method, freq_lower, freq_upper) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (dbwrite.event_uuid5('spindle', 'C3', t, 'Moelle2011',
+                                         11, 16, 'NREM2'),
+                     'spindle', 'C3', t, t + 1.0, 1.0, 'NREM2', 'NREM2',
+                     'Moelle2011', 11.0, 16.0))
+            dbwrite.upsert_processing_status(conn, 'spindle', 'C3',
+                                             'Moelle2011', 11.0, 16.0,
+                                             'NREM2', True)
+            conn.commit()
+
+            # --- (4) db_meta version stamp --------------------------------
+            stamped = dbwrite.get_db_meta(conn, dbwrite.TURTLEWAVE_VERSION_KEY)
+            assert stamped == turtlewave_hdEEG.__version__, (
+                f"db_meta[{dbwrite.TURTLEWAVE_VERSION_KEY}]={stamped!r}, "
+                f"expected {turtlewave_hdEEG.__version__!r}")
+            print(f"   [ok] db_meta['{dbwrite.TURTLEWAVE_VERSION_KEY}'] = "
+                  f"{stamped!r} after ensure_direct_write_schema")
+        finally:
+            conn.close()
+
+        # --- (3) density picks the matching row --------------------------
+        for types, expect_min in ((['Artefact', 'Arousal'], 30.0),
+                                  (['Artefact', 'Arousal', 'Move'], 1700 / 60.0),
+                                  (['Artefact'], 1900 / 60.0)):
+            df = event_density(db, event_type='spindle', method='Moelle2011',
+                               stage=['NREM2'], subject='sub-R',
+                               reject_types=types)
+            assert len(df) == 1, (types, df)
+            got = float(df.iloc[0]['analysed_minutes'])
+            assert abs(got - expect_min) < 1e-9, (types, got, expect_min)
+            assert df.iloc[0]['reject_types'] == reject_key(types), df.iloc[0]
+            print(f"   [ok] reject_types={types} -> {got:.2f} analysed min, "
+                  f"stamped {df.iloc[0]['reject_types']!r}")
+
+        # A request the database has no denominator for is an error, not a
+        # number borrowed from another reject set.
+        try:
+            event_density(db, event_type='spindle', method='Moelle2011',
+                          stage=['NREM2'], subject='sub-R',
+                          reject_types=['Artefact', 'Arousal', 'Snore'])
+        except ValueError as e:
+            assert 'reject_types' in str(e), str(e)
+            print("   [ok] a reject set with no stored denominator raises "
+                  "instead of dividing by another set's time")
+        else:
+            _fail("a missing reject set silently produced a density")
+
+        # With nothing requested and THREE sets on record, the library default
+        # is used and every set found is named.
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        log = logging.getLogger('tw_reject_test')
+        log.setLevel(logging.WARNING)
+        log.addHandler(_Capture())
+        df = event_density(db, event_type='spindle', method='Moelle2011',
+                           stage=['NREM2'], subject='sub-R', logger_=log)
+        warned = [m for m in records if 'different reject sets' in m]
+        assert warned, records
+        assert 'Arousal,Artefact' in warned[0] and 'Artefact' in warned[0]
+        assert df.iloc[0]['reject_types'] == 'Arousal,Artefact,Move', df.iloc[0]
+        print(f"   [ok] an unqualified call on a mixed database warns and "
+              f"uses the default: {warned[0][:96]}...")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # --- (5) the upgrade path a real user hits ---------------------------
+    # ensure_direct_write_schema is what EVERY detector run calls at
+    # connection time, and it calls the migration unguarded. Run it end to end
+    # on a database with the full 4.3 shape -- events, the pre-4.4
+    # analysed_time, detection_runs with only the two booleans, and
+    # v_event_density over analysed_time -- and require that it completes, that
+    # the view still selects, and that detection_runs.reject_types is
+    # back-filled from the booleans.
+    tmp = tempfile.mkdtemp(prefix='tw_reject_43_')
+    try:
+        db = os.path.join(tmp, 'neural_events.db')
+        ParalSWA(None, None,
+                 log_level=logging.CRITICAL).initialize_sqlite_database(db)
+        conn = dbwrite.open_write_connection(db)
+        try:
+            dbwrite.ensure_direct_write_schema(conn)   # 4.3 column set
+            conn.execute("DROP VIEW IF EXISTS v_event_density")
+            conn.execute("DROP TABLE IF EXISTS analysed_time")
+            conn.execute('''
+            CREATE TABLE analysed_time (
+                subject TEXT NOT NULL, stage TEXT NOT NULL,
+                reject_artifacts INTEGER NOT NULL,
+                reject_arousals INTEGER NOT NULL,
+                analysed_seconds REAL NOT NULL,
+                artefact_seconds_excluded REAL, epoch_length REAL,
+                source TEXT, annotation_file TEXT, turtlewave_version TEXT,
+                processing_timestamp TEXT,
+                PRIMARY KEY (subject, stage, reject_artifacts, reject_arousals)
+            )''')
+            conn.execute(
+                "INSERT INTO analysed_time (subject, stage, reject_artifacts, "
+                "reject_arousals, analysed_seconds, artefact_seconds_excluded) "
+                "VALUES ('sub-V', 'NREM2', 1, 1, 1800.0, 0.0)")
+            for i in range(9):
+                t = 10.0 + i * 5
+                conn.execute(
+                    "INSERT OR REPLACE INTO events (uuid, event_type, channel, "
+                    "start_time, end_time, duration, stage, epoch_stage, "
+                    "method, freq_lower, freq_upper) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (dbwrite.event_uuid5('spindle', 'C3', t, 'Moelle2011',
+                                         11, 16, 'NREM2'),
+                     'spindle', 'C3', t, t + 1.0, 1.0, 'NREM2', 'NREM2',
+                     'Moelle2011', 11.0, 16.0))
+            conn.execute(
+                "INSERT INTO detection_runs (run_id, subject, event_type, "
+                "method, stages, reject_artifacts, reject_arousals) VALUES "
+                "('run-43', 'sub-V', 'spindle', 'Moelle2011', 'NREM2', 1, 1)")
+            conn.execute('''
+            CREATE VIEW v_event_density AS
+            SELECT e.channel AS channel, e.stage AS stage, COUNT(*) AS n_events,
+                   a.analysed_seconds / 60.0 AS analysed_minutes,
+                   a.reject_artifacts AS reject_artifacts,
+                   a.reject_arousals AS reject_arousals
+            FROM events e JOIN analysed_time a ON a.stage = e.stage
+            GROUP BY e.channel, e.stage, a.reject_artifacts, a.reject_arousals''')
+            conn.commit()
+            before = conn.execute(
+                "SELECT channel, n_events, analysed_minutes "
+                "FROM v_event_density").fetchall()
+            assert before == [('C3', 9, 30.0)], before
+        finally:
+            conn.close()
+
+        # The whole point: this is the call every detection run makes first.
+        conn = dbwrite.open_write_connection(db)
+        try:
+            dbwrite.ensure_direct_write_schema(conn)
+            after = conn.execute(
+                "SELECT channel, n_events, analysed_minutes, reject_types "
+                "FROM v_event_density").fetchall()
+            assert after == [('C3', 9, 30.0, 'Arousal,Artefact')], after
+            runs = conn.execute(
+                "SELECT run_id, reject_types FROM detection_runs").fetchall()
+            assert runs == [('run-43', 'Arousal,Artefact')], runs
+            print(f"   [ok] ensure_direct_write_schema completes on a 4.3 "
+                  f"database (events + pre-4.4 analysed_time + detection_runs "
+                  f"+ view); the view still selects {after[0]} and "
+                  f"detection_runs.reject_types is back-filled")
+        finally:
+            conn.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("TESTING TURTLEWAVE-HDEEG PACKAGE UPDATES")
     print("=======================================")
@@ -4462,6 +5258,7 @@ if __name__ == "__main__":
     test_density_multi_method_run()
     test_cycle_subject_spelling_delete()
     test_pac_twin_delete_is_scoped()
+    test_pac_mi_raw_is_the_unnormalised_modulation_index()
     test_stage_token_vocabulary()
     test_detectors_write_joint_stage_token()
     test_mixed_stage_format_database_reads_back()
@@ -4483,6 +5280,10 @@ if __name__ == "__main__":
     test_migration_sees_a_collision_with_an_already_target_row()
     test_migration_refuses_a_stage_token_outside_the_vocabulary()
     test_guard_refuses_an_empty_method_list()
+    test_lacourse_config_matches_the_published_a7()
+    test_lacourse_state_survives_repeat_calls()
+    test_lacourse_duration_bound_drives_yield()
+    test_reject_types_is_first_class()
 
     print("\nAll tests completed!")
 
