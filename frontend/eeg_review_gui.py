@@ -47,10 +47,14 @@ except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
 try:
     from frontend.channel_types import (ChannelTypeSummary,
                                         default_review_channels,
-                                        load_failure_message)
+                                        load_failure_message,
+                                        INTERPOLATED_MARK,
+                                        INTERPOLATED_TOOLTIP,
+                                        REVIEW_GUI_ERROR_WHERE)
 except ImportError:  # run as a script
     from channel_types import (ChannelTypeSummary, default_review_channels,
-                               load_failure_message)
+                               load_failure_message, INTERPOLATED_MARK,
+                               INTERPOLATED_TOOLTIP, REVIEW_GUI_ERROR_WHERE)
 
 try:
     from turtlewave_hdEEG.utils import region_from_label
@@ -864,12 +868,221 @@ def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
 
 
 # ============================================================================
+# Scored-epoch table (variable-length epochs)
+# ============================================================================
+
+#: Epoch length of the synthetic grid used when no staging is loaded, and of
+#: the grid built from a bare stage list (the pre-4.5 ``hypno=`` argument).
+#: Never used when an annotation file supplies its own epochs.
+DEFAULT_EPOCH_S = 30.0
+
+
+class EpochTable:
+    """Scored epochs as parallel ``starts`` / ``ends`` / ``stages``.
+
+    Cut recordings carry epochs from 1 s to 30 s long, so no staging quantity
+    in the review GUI may be derived as ``index * 30``; everything goes
+    through :meth:`index_at` and :meth:`span`.
+
+    Parameters
+    ----------
+    intervals : iterable of (float, float, str)
+        ``(start_s, end_s, stage)`` per epoch; sorted by start here. Pieces
+        with ``end <= start`` are dropped.
+    """
+
+    def __init__(self, intervals):
+        rows = sorted(((float(a), float(b), '' if s is None else str(s))
+                       for a, b, s in intervals if float(b) > float(a)),
+                      key=lambda r: r[0])
+        self.starts = np.array([r[0] for r in rows], dtype=float)
+        self.ends = np.array([r[1] for r in rows], dtype=float)
+        self.stages = [r[2] for r in rows]
+
+    @classmethod
+    def grid(cls, trec, epoch_s=DEFAULT_EPOCH_S, stages=None):
+        """Fixed-length grid: one epoch per stage in ``stages`` when given,
+        else ``ceil(trec / epoch_s)`` unstaged epochs (at least one)."""
+        epoch_s = float(epoch_s)
+        if stages:
+            n = len(stages)
+        else:
+            n = max(1, int(np.ceil(float(trec or 0.0) / epoch_s)))
+            stages = [''] * n
+        return cls((i * epoch_s, (i + 1) * epoch_s, stages[i])
+                   for i in range(n))
+
+    @classmethod
+    def from_annotations(cls, annotations):
+        """Table from a loaded annotation object, ``None`` when it has no
+        epochs. Prefers ``get_stage_intervals()``; falls back to the Wonambi
+        epoch dicts (``'start'``, ``'end'``, ``'stage'``)."""
+        if annotations is None:
+            return None
+        intervals = None
+        getter = getattr(annotations, 'get_stage_intervals', None)
+        if callable(getter):
+            try:
+                intervals = list(getter())
+            except Exception as err:
+                logger.debug(f"get_stage_intervals failed ({err}); "
+                             f"reading the epochs directly")
+                intervals = None
+        if intervals is None:
+            try:
+                intervals = [(ep['start'], ep['end'], ep.get('stage'))
+                             for ep in (annotations.epochs or [])]
+            except Exception:
+                intervals = None
+        if intervals is None:
+            # An object that only lists stage codes carries no times; the
+            # only reading is the legacy fixed grid.
+            try:
+                stages = list(annotations.get_stages() or [])
+            except Exception:
+                return None
+            return cls.grid(None, stages=stages) if stages else None
+        table = cls(intervals)
+        return table if len(table) else None
+
+    def __len__(self):
+        return int(self.starts.size)
+
+    @property
+    def end(self):
+        return float(self.ends[-1]) if len(self) else 0.0
+
+    @property
+    def durations(self):
+        return self.ends - self.starts
+
+    def is_uniform(self, tol=1e-6):
+        d = self.durations
+        return bool(d.size == 0 or np.all(np.abs(d - d[0]) <= tol))
+
+    def index_at(self, t):
+        """Epoch whose start is the last one ``<= t``, clamped to the table
+        (before the first epoch -> 0, past the last -> the last)."""
+        n = len(self)
+        if n == 0:
+            return 0
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            return 0
+        if not np.isfinite(t):
+            return 0
+        i = int(np.searchsorted(self.starts, t, side='right')) - 1
+        return max(0, min(i, n - 1))
+
+    def indices_at(self, ts):
+        """Vectorised epoch id per time: ``-1`` where ``t`` lies outside every
+        ``[start, end)`` (before the first epoch, after the last, in a gap)."""
+        ts = np.asarray(ts, dtype=float)
+        if len(self) == 0:
+            return np.full(ts.shape, -1, dtype=int)
+        i = np.searchsorted(self.starts, ts, side='right') - 1
+        ok = (i >= 0)
+        ic = np.clip(i, 0, len(self) - 1)
+        ok &= ts < self.ends[ic]
+        return np.where(ok, ic, -1).astype(int)
+
+    def span(self, i):
+        """``(start_s, end_s)`` of epoch ``i`` (clamped to the table)."""
+        if len(self) == 0:
+            return 0.0, DEFAULT_EPOCH_S
+        i = max(0, min(int(i), len(self) - 1))
+        return float(self.starts[i]), float(self.ends[i])
+
+    def stage(self, i):
+        return self.stages[i] if 0 <= int(i) < len(self) else ''
+
+    def stage_at(self, t):
+        i = self.indices_at([t])[0]
+        return self.stages[i] if i >= 0 else ''
+
+    def snap(self, t0, t1):
+        """Widen ``[t0, t1]`` outward to epoch edges."""
+        a, b = sorted((float(t0), float(t1)))
+        return self.span(self.index_at(a))[0], self.span(self.index_at(b))[1]
+
+    def count_in(self, t0, t1, tol=1e-6):
+        """Number of whole epochs inside ``[t0, t1]``."""
+        a, b = sorted((float(t0), float(t1)))
+        return int(np.count_nonzero((self.starts >= a - tol)
+                                    & (self.ends <= b + tol)))
+
+
+def _epoch_len_text(seconds):
+    """Epoch length for the Epochs header: ``'1 s'``, ``'2.5 s'``,
+    ``'5 min 12 s'`` (60 s and over), ``'2 min'``."""
+    s = float(seconds)
+    if s < 60:
+        return f"{s:g} s"
+    m, r = divmod(int(round(s)), 60)
+    return f"{m} min {r} s" if r else f"{m} min"
+
+
+def interpolated_defaults_note(selected, interp):
+    """Status line when default channels include interpolated ones, else
+    ``None``: ``'Showing Cz, Fz, Pz. Cz is interpolated (...)'``."""
+    interp = set(interp or ())
+    hit = [ch for ch in selected if ch in interp]
+    if not hit:
+        return None
+    if len(hit) == 1:
+        who = f"{hit[0]} is"
+    else:
+        who = f"{', '.join(hit[:-1])} and {hit[-1]} are"
+    return (f"Showing {', '.join(selected)}. {who} interpolated "
+            f"(reconstructed from neighbours by the cleaning pipeline).")
+
+
+def annotation_recording_seconds(annotations):
+    """Recording length in seconds from an annotation object, ``None`` when it
+    cannot say. Uses ``recording_seconds()`` when the library provides it,
+    else Wonambi's ``last_second``, else the end of the last epoch."""
+    if annotations is None:
+        return None
+    fn = getattr(annotations, 'recording_seconds', None)
+    if callable(fn):
+        try:
+            v = fn()
+            if v:
+                return float(v)
+        except Exception:
+            pass
+    try:
+        v = getattr(annotations, 'last_second', None)
+        if v:
+            return float(v)
+    except Exception:
+        pass
+    table = EpochTable.from_annotations(annotations)
+    return table.end if table is not None else None
+
+
+def _as_epoch_table(epochs=None, hypno=None, trec=None):
+    """Normalise the ways callers describe epochs to one :class:`EpochTable`:
+    an ``EpochTable``, a list of ``(start, end, stage)``, a bare stage list
+    (``hypno``, one 30 s epoch each, the pre-4.5 contract) or nothing (a
+    synthetic 30 s grid over ``trec``)."""
+    if isinstance(epochs, EpochTable):
+        return epochs
+    if epochs:
+        return EpochTable(epochs)
+    if hypno:
+        return EpochTable.grid(None, stages=[str(s) for s in hypno])
+    return EpochTable.grid(trec)
+
+
+# ============================================================================
 # Timeline Overview Widget
 # ============================================================================
 
 class TimelineWidget(PlotWidget):
     """Slim hypnogram strip for the Spot-check Events tab. Color-codes each
-    30-s epoch by stage via STAGE_COLOR (gray/magenta/blue/teal/green for
+    scored epoch (its true [start, end] width) by stage via STAGE_COLOR (gray/magenta/blue/teal/green for
     Wake/REM/N1/N2/N3). Click anywhere to emit the row index of the event in
     current_events whose start_time is closest to the click. The currently-
     selected event is shown as a white vertical line with an accent-blue
@@ -904,9 +1117,10 @@ class TimelineWidget(PlotWidget):
         self._events_df = events_df
         hyp = None; trec = 0.0
         try:
-            if annotations is not None and hasattr(annotations, 'get_stages'):
-                hyp = annotations.get_stages()
-                if hyp: trec = len(hyp) * 30.0
+            hyp = EpochTable.from_annotations(annotations)
+            if hyp is not None:
+                trec = max(hyp.end,
+                           annotation_recording_seconds(annotations) or 0.0)
         except Exception:
             hyp = None
         if not trec and events_df is not None and len(events_df):
@@ -1659,8 +1873,21 @@ class ChannelDetailDock(QWidget):
         lay.addWidget(self._marked_box)
 
         self._qc_df = None
+        self._epochs = None   # EpochTable of the loaded annotations, or None
         self._render_topo_empty()
         lay.addStretch()
+
+    def set_epoch_table(self, epochs):
+        """Scored-epoch table used to turn marked times into epoch ids and
+        epoch counts; ``None`` falls back to a synthetic 30 s grid."""
+        self._epochs = epochs if isinstance(epochs, EpochTable) or not epochs \
+            else EpochTable(epochs)
+
+    def _table_for(self, t):
+        """The loaded epoch table, or a synthetic 30 s grid reaching ``t``."""
+        if self._epochs is not None and len(self._epochs):
+            return self._epochs
+        return EpochTable.grid(float(t) + DEFAULT_EPOCH_S)
 
     def set_marked(self, marked, channel=None, total=None):
         """Rebuild the compact channel-scoped marked-artefact rows.
@@ -1686,8 +1913,10 @@ class ChannelDetailDock(QWidget):
             rl.setContentsMargins(0, 0, 0, 0)
             rl.setSpacing(4)
             dur = t1 - t0
-            if dur >= 30:
-                dtxt = f"{int(round(dur / 30))} ep"
+            table = self._table_for(t1)
+            n_ep = table.count_in(t0, t1)
+            if n_ep >= 1:
+                dtxt = f"{n_ep} ep"
             elif dur >= 1:
                 dtxt = f"{dur:.1f}s sub"
             else:
@@ -1698,8 +1927,8 @@ class ChannelDetailDock(QWidget):
                 "text-align:left;color:#d6dee8;"
                 "font-family:'IBM Plex Mono',monospace;font-size:11px;")
             lbl.clicked.connect(
-                lambda _=False, t=t0: self.gotoEpochRequested.emit(
-                    int(t // 30)))
+                lambda _=False, i=table.index_at(t0):
+                    self.gotoEpochRequested.emit(int(i)))
             x = QPushButton("×")
             x.setMaximumWidth(24)
             x.setStyleSheet("color:#f85149;font-weight:600;")
@@ -1804,19 +2033,24 @@ class ChannelDetailDock(QWidget):
                 val.setText("—")
         if df_slice is None or len(df_slice) == 0:
             return
-        # qc_row optionally carries _hypno + _event_type so the worst-list
-        # can stage-tag rows and pick the right amplitude column without
-        # widening update_channel's signature.
+        # qc_row optionally carries _epochs (the scored-epoch table) +
+        # _event_type so the worst-list can key rows by epoch id, stage-tag
+        # them and pick the right amplitude column without widening
+        # update_channel's signature. A bare '_hypno' stage list (older
+        # callers) still works on the 30 s grid.
+        epochs = self._epochs
         hyp = None
         evt = None
         if qc_row is not None:
             try:
+                epochs = qc_row.get('_epochs', epochs)
                 hyp = qc_row.get('_hypno')
                 evt = qc_row.get('_event_type')
             except Exception:
                 pass
         amp_col = AMP_COL.get(str(evt), 'max_amp') if evt else 'max_amp'
-        agg = _compute_epoch_outliers(df_slice, hypno=hyp, amp_col=amp_col)
+        agg = _compute_epoch_outliers(df_slice, hypno=hyp, amp_col=amp_col,
+                                      epochs=epochs)
         agg = agg[agg['n_outliers'] > 0]
         agg = agg.sort_values(['n_outliers', 'max_amp'],
                               ascending=[False, False]).head(12)
@@ -2360,34 +2594,44 @@ AGREEMENT_THRESH = {'spindle': 0.5, 'slow_wave': 1.0,
                     'k_complex': 0.3, 'pac': 1.0}
 
 
-def _draw_hypnogram(pw, hypno, trec):
+HYPNO_RANK = {'Wake': 4, 'W': 4, 'REM': 3,
+              'N1': 2, 'NREM1': 2, 'Stage1': 2,
+              'N2': 1, 'NREM2': 1, 'Stage2': 1,
+              'N3': 0, 'NREM3': 0, 'Stage3': 0}
+
+
+def _draw_hypnogram(pw, hypno, trec=None):
     """Render a stage-rank-line hypnogram, color-coded by stage via
-    STAGE_COLOR. One short horizontal segment per 30-s epoch; segments from
-    the same stage are joined as a polyline with NaN gaps so they render as
-    one PlotDataItem per stage. Y: stage rank (Wake=4 top, N3=0 bottom).
-    X: recording time (seconds). Caller must clear() and re-add any
-    persistent overlays after this returns."""
-    if not hypno:
+    STAGE_COLOR. One horizontal segment per scored epoch spanning its true
+    ``[start, end]`` (1-30 s on cut recordings); segments from the same stage
+    are joined as a polyline with NaN gaps so they render as one
+    PlotDataItem per stage. Y: stage rank (Wake=4 top, N3=0 bottom).
+    X: recording time (seconds). ``hypno`` is an :class:`EpochTable`; a bare
+    stage list is still accepted and spread evenly over ``trec`` (the old
+    contract). Caller must clear() and re-add any persistent overlays after
+    this returns."""
+    if hypno is None or len(hypno) == 0:
         return
-    rank = {'Wake': 4, 'W': 4, 'REM': 3,
-            'N1': 2, 'NREM1': 2, 'Stage1': 2,
-            'N2': 1, 'NREM2': 1, 'Stage2': 1,
-            'N3': 0, 'NREM3': 0, 'Stage3': 0}
-    n = len(hypno)
-    ep = float(trec) / max(n, 1)
-    by_stage = {}
-    for i, s in enumerate(hypno):
-        by_stage.setdefault(str(s), []).append(i)
-    for stage_key, idxs in by_stage.items():
+    if isinstance(hypno, EpochTable):
+        table = hypno
+    else:
+        n = len(hypno)
+        ep = float(trec) / n if trec else DEFAULT_EPOCH_S
+        table = EpochTable.grid(None, epoch_s=ep, stages=[str(s) for s in hypno])
+    stages = np.asarray(table.stages, dtype=object)
+    for stage_key in dict.fromkeys(table.stages):
+        m = stages == stage_key
+        k = int(m.sum())
         col = STAGE_COLOR.get(stage_key, '#888888')
-        y = rank.get(stage_key, 2)
-        xs, ys = [], []
-        for i in idxs:
-            xs += [i * ep, (i + 1) * ep, float('nan')]
-            ys += [y, y, float('nan')]
+        y = HYPNO_RANK.get(stage_key, 2)
+        xs = np.column_stack([table.starts[m], table.ends[m],
+                              np.full(k, np.nan)]).ravel()
+        ys = np.column_stack([np.full(k, y, dtype=float),
+                              np.full(k, y, dtype=float),
+                              np.full(k, np.nan)]).ravel()
         pw.plot(xs, ys, pen=pg.mkPen(col, width=2), connect='finite')
     pw.setYRange(-0.5, 4.5, padding=0)
-    pw.setXRange(0, float(trec), padding=0)
+    pw.setXRange(0, float(max(trec or 0.0, table.end)), padding=0)
     pw.hideAxis('left')
 
 
@@ -2492,8 +2736,8 @@ def _mad_threshold(amp):
     return thr, n
 
 
-def _compute_epoch_outliers(df_slice, hypno=None, epoch_len=30.0,
-                            amp_col='max_amp'):
+def _compute_epoch_outliers(df_slice, hypno=None, epoch_len=DEFAULT_EPOCH_S,
+                            amp_col='max_amp', epochs=None):
     """Return DataFrame[idx, t0, n_events, n_outliers, max_amp, stage].
 
     Outlier rule: amp > median + 3.5*1.4826*MAD (see _mad_threshold),
@@ -2501,6 +2745,12 @@ def _compute_epoch_outliers(df_slice, hypno=None, epoch_len=30.0,
     in the returned frame is the chosen amp_col's max within the epoch —
     kept under that column name so callers don't need to know which metric
     was used. Cells with n_events==0 are omitted (strip handles as gaps).
+
+    ``idx`` is the epoch id in ``epochs`` (an :class:`EpochTable` or a list
+    of ``(start, end, stage)``), found by a sorted search on epoch starts, so
+    variable-length epochs are keyed correctly. An event whose start lies in
+    no epoch is left out. Without ``epochs`` the old fixed grid of
+    ``epoch_len`` seconds is used, staged from ``hypno`` when given.
     """
     cols = ['idx', 't0', 'n_events', 'n_outliers', 'max_amp', 'stage']
     if df_slice is None or len(df_slice) == 0:
@@ -2515,30 +2765,48 @@ def _compute_epoch_outliers(df_slice, hypno=None, epoch_len=30.0,
         return pd.DataFrame(columns=cols)
     thr, _ = _mad_threshold(df['_amp'])
     df['_is_out'] = df['_amp'] > thr
-    df['ep_idx'] = (df['_st'] // epoch_len).astype(int)
+    if isinstance(epochs, EpochTable) or epochs:
+        table = _as_epoch_table(epochs)
+    else:
+        # legacy fixed grid: wide enough for every event and every stage
+        n = max(int(np.floor(df['_st'].max() / float(epoch_len))) + 1,
+                len(hypno) if hypno else 0, 1)
+        stages = ([str(hypno[i]) if hypno and i < len(hypno) else ''
+                   for i in range(n)])
+        table = EpochTable.grid(None, epoch_s=epoch_len, stages=stages)
+    df['ep_idx'] = table.indices_at(df['_st'].to_numpy(dtype=float))
+    df = df[df['ep_idx'] >= 0]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
     g = df.groupby('ep_idx', sort=True).agg(
         n_events=('_st', 'size'),
         n_outliers=('_is_out', 'sum'),
         max_amp=('_amp', 'max'),
     ).reset_index().rename(columns={'ep_idx': 'idx'})
-    g['t0'] = g['idx'] * epoch_len
-    if hypno:
-        g['stage'] = g['idx'].map(
-            lambda i: str(hypno[i]) if 0 <= i < len(hypno) else '')
-    else:
-        g['stage'] = ''
+    g['t0'] = table.starts[g['idx'].to_numpy()]
+    g['stage'] = [table.stages[i] for i in g['idx']]
     return g[cols]
 
 
 class _EpochStripViewBox(pg.ViewBox):
     """ViewBox that captures Shift+drag and emits a snapped epoch range.
-    Plain click is left to scene().sigMouseClicked on the parent plot."""
+    Plain click is left to scene().sigMouseClicked on the parent plot.
+
+    ``snap(t0, t1) -> (e0, e1)`` widens the dragged range to epoch edges;
+    the owner passes its epoch table's snap so variable-length epochs snap
+    to their own edges. Without one a synthetic 30 s grid is used."""
 
     sigShiftDrag = pyqtSignal(float, float, bool)  # t0, t1, is_finished
 
-    def __init__(self, *a, epoch_len=30.0, **kw):
+    def __init__(self, *a, snap=None, **kw):
         super().__init__(*a, **kw)
-        self._epoch_len = float(epoch_len)
+        self._snap = snap
+
+    def _snapped(self, t0, t1):
+        if callable(self._snap):
+            return self._snap(t0, t1)
+        grid = EpochTable.grid(max(t0, t1) + DEFAULT_EPOCH_S)
+        return grid.snap(t0, t1)
 
     def mouseDragEvent(self, ev, axis=None):
         if ev.modifiers() & Qt.ShiftModifier:
@@ -2546,15 +2814,20 @@ class _EpochStripViewBox(pg.ViewBox):
             p0 = self.mapSceneToView(ev.buttonDownScenePos())
             p1 = self.mapSceneToView(ev.scenePos())
             t0, t1 = sorted([float(p0.x()), float(p1.x())])
-            e0 = (int(t0 // self._epoch_len)) * self._epoch_len
-            e1 = (int(t1 // self._epoch_len) + 1) * self._epoch_len
-            self.sigShiftDrag.emit(e0, e1, ev.isFinish())
+            e0, e1 = self._snapped(t0, t1)
+            self.sigShiftDrag.emit(float(e0), float(e1), ev.isFinish())
             return
         super().mouseDragEvent(ev, axis=axis)
 
 
 class EpochsPanel(QWidget):
-    """Tab 2 — paged 30-second epoch viewer with per-channel artefact triage.
+    """Tab 2 — paged scored-epoch viewer with per-channel artefact triage.
+
+    Epochs come from the annotation file's own epoch table (``epochs=`` in
+    :meth:`set_channel`), so a cut recording pages through its 1-30 s epochs
+    exactly as scored; :meth:`index_at` and :meth:`span` are the only way
+    times and epoch ids are converted. With no annotation file a synthetic
+    30 s grid over the recording is used.
 
     `self.plot` is the EPOCH STRIP (one bar per epoch: grey = regular events,
     red stacked on top = outliers under the rule amp > mean+3.5*sd over the
@@ -2562,7 +2835,7 @@ class EpochsPanel(QWidget):
     selects an epoch-aligned range that can be marked as artefact via the
     "Mark N epochs as artefact" button.
 
-    The main view is a fixed 30 s window: raw + band-filtered traces
+    The main view is the current epoch's window: raw + band-filtered traces
     (mouse pan/zoom disabled, X-locked to the epoch). A thin event ticker
     above the raw trace marks regular (grey) and outlier (red) events in
     the active epoch. Sub-epoch artefacts can also be marked by brushing
@@ -2586,7 +2859,9 @@ class EpochsPanel(QWidget):
     unmarkArtefactRequested = pyqtSignal(int)                # interval id
     requestChannel = pyqtSignal(str)                         # re-drill ch
 
-    EPOCH_LEN = 30.0  # seconds — fixed window
+    # Kept for callers that read it: the synthetic-grid length only. Staging
+    # quantities come from the epoch table (index_at / span), never from this.
+    EPOCH_LEN = DEFAULT_EPOCH_S
     AXIS_W = 58       # shared left-axis column width (px) for ticker/raw/filt
 
     def __init__(self, parent=None):
@@ -2597,6 +2872,7 @@ class EpochsPanel(QWidget):
         self._event_type = 'slow_wave'
         self._trec = 1.0
         self._hypno = None
+        self._epochs = EpochTable.grid(self._trec)   # replaced per drill
         self._epoch = 0          # current epoch index
         self._marked = []
         self._agg = None         # _compute_epoch_outliers result, per drill
@@ -2648,7 +2924,7 @@ class EpochsPanel(QWidget):
         lc.addWidget(self.hypno)
 
         # ---- EPOCH STRIP (self.plot, custom viewbox for Shift+drag) ---
-        self._strip_vb = _EpochStripViewBox(epoch_len=self.EPOCH_LEN)
+        self._strip_vb = _EpochStripViewBox(snap=self.snap)
         self.plot = pg.PlotWidget(viewBox=self._strip_vb)
         _theme_plot(self.plot)
         self.plot.setMaximumHeight(110)
@@ -2823,9 +3099,30 @@ class EpochsPanel(QWidget):
         # PageUp/PageDown also page (Left/Right covered by button shortcuts)
         self.setFocusPolicy(Qt.StrongFocus)
 
+    # ---- epoch table --------------------------------------------------
+    def index_at(self, t):
+        """Epoch id containing recording time ``t`` (clamped)."""
+        return self._epochs.index_at(t)
+
+    def span(self, i):
+        """``(start_s, end_s)`` of epoch ``i`` (clamped)."""
+        return self._epochs.span(i)
+
+    def snap(self, t0, t1):
+        """Widen ``[t0, t1]`` outward to epoch edges."""
+        return self._epochs.snap(t0, t1)
+
     # ---- population ---------------------------------------------------
     def set_channel(self, channel, df_slice, all_events, event_type=None,
-                     hypno=None, trec=None, marked=None):
+                     hypno=None, trec=None, marked=None, epochs=None):
+        """Drill into ``channel``.
+
+        ``epochs`` is the scored-epoch table (an :class:`EpochTable` or a
+        list of ``(start_s, end_s, stage)``); pass it for any annotation
+        file. ``hypno`` (a bare stage list, one 30 s epoch each) is kept for
+        older callers; with neither, a synthetic 30 s grid over ``trec`` is
+        used.
+        """
         self._channel = channel
         self._all_events = all_events
         self._df = df_slice
@@ -2833,15 +3130,16 @@ class EpochsPanel(QWidget):
             self._event_type = event_type
         if trec:
             self._trec = float(trec)
-        self._hypno = list(hypno) if hypno else None
+        self._epochs = _as_epoch_table(epochs, hypno, self._trec)
+        self._hypno = (list(self._epochs.stages)
+                       if (epochs is not None or hypno) else None)
         # event-type-aware amp column, then per-drill outlier aggregation
         self._amp_col = AMP_COL.get(str(self._event_type), 'max_amp')
         if self._amp_col not in (df_slice.columns
                                   if df_slice is not None else []):
             self._amp_col = 'max_amp'
         self._agg = _compute_epoch_outliers(
-            df_slice, hypno=self._hypno, epoch_len=self.EPOCH_LEN,
-            amp_col=self._amp_col)
+            df_slice, epochs=self._epochs, amp_col=self._amp_col)
         self._n_max = int(self._agg['n_events'].max()) \
             if len(self._agg) else 1
         # cache the robust outlier threshold once per drill (median + MAD;
@@ -2898,7 +3196,7 @@ class EpochsPanel(QWidget):
                 st = pd.to_numeric(df_slice['start_time'],
                                     errors='coerce').dropna()
                 if len(st):
-                    start_ep = int(st.min() // self.EPOCH_LEN)
+                    start_ep = self.index_at(st.min())
             except Exception:
                 pass
         self._goto_epoch(start_ep)
@@ -2909,22 +3207,19 @@ class EpochsPanel(QWidget):
             self.requestChannel.emit(ch)
 
     def _set_hypno(self, hypno):
+        """Hidden stage line over the epoch table, one ``[start, end]`` pair
+        per epoch (drawn only when the drill carries stages)."""
         self.hypno.clear()
         # marker survives clear() by re-adding (LinearRegionItem, not data item)
         self.hypno.addItem(self._hypno_marker)
         if not hypno:
             return
-        ymap = {'Wake': 4, 'W': 4, 'REM': 3, 'N1': 2, 'NREM1': 2,
-                'Stage1': 2, 'N2': 1, 'NREM2': 1, 'Stage2': 1,
-                'N3': 0, 'NREM3': 0, 'Stage3': 0}
-        n = len(hypno)
-        ep = self._trec / max(n, 1)
-        xs, ys = [], []
-        for i, s in enumerate(hypno):
-            y = ymap.get(str(s), 2)
-            xs += [i * ep, (i + 1) * ep]
-            ys += [y, y]
-        self.hypno.plot(xs, ys, pen=pg.mkPen((120, 160, 200), width=2),
+        tb = self._epochs
+        ys = np.array([HYPNO_RANK.get(str(s), 2) for s in tb.stages],
+                      dtype=float)
+        xs = np.column_stack([tb.starts, tb.ends]).ravel()
+        self.hypno.plot(xs, np.repeat(ys, 2),
+                        pen=pg.mkPen((120, 160, 200), width=2),
                         connect='pairs')
         self.hypno.setXLink(self.plot)
 
@@ -2934,7 +3229,8 @@ class EpochsPanel(QWidget):
         for m in self._marked:
             t0, t1 = float(m['start_time']), float(m['end_time'])
             it = QtWidgets.QListWidgetItem(
-                f"{_hms(t0)} – {_hms(t1)}  ({int(round((t1 - t0) / 30))} ep)")
+                f"{_hms(t0)} – {_hms(t1)}  "
+                f"({self._epochs.count_in(t0, t1)} ep)")
             it.setData(Qt.UserRole, int(m['id']))
             it.setData(Qt.UserRole + 1, float(t0))   # for jump-to
             self.ranges_list.addItem(it)
@@ -2955,24 +3251,28 @@ class EpochsPanel(QWidget):
         self.plot.addItem(self._ov_marker)
         self.plot.addItem(self._strip_range)
         self.plot.addItem(self._ep_cursor)
-        self.plot.setXRange(0, max(self._trec, self.EPOCH_LEN), padding=0)
+        self.plot.setXRange(0, max(self._trec, self._epochs.end), padding=0)
         if self._agg is None or len(self._agg) == 0:
             return
-        idx = self._agg['idx'].to_numpy()
+        idx = self._agg['idx'].to_numpy(dtype=int)
         n_ev = self._agg['n_events'].to_numpy(dtype=float)
         n_out = self._agg['n_outliers'].to_numpy(dtype=float)
         denom = max(1.0, float(self._n_max))
         H = 1.0
         h_reg = (n_ev - n_out) / denom * H
         h_out = n_out / denom * H
-        centres = idx * self.EPOCH_LEN + self.EPOCH_LEN / 2.0
+        # each bar spans its own epoch (1-30 s on cut recordings)
+        t0s = self._epochs.starts[idx]
+        t1s = self._epochs.ends[idx]
+        centres = (t0s + t1s) / 2.0
+        widths = (t1s - t0s) * 0.95
         # bottom (grey) layer — one item, vectorised
         self.plot.addItem(pg.BarGraphItem(
-            x=centres, width=self.EPOCH_LEN * 0.95,
+            x=centres, width=widths,
             y0=0, height=h_reg, brush=THEME['text_3'], pen=None))
         # top (red) layer stacked on top
         self.plot.addItem(pg.BarGraphItem(
-            x=centres, width=self.EPOCH_LEN * 0.95,
+            x=centres, width=widths,
             y0=h_reg, height=h_out, brush=THEME['bad'], pen=None))
         # marked-artefact bands (dashed purple, transparent fill)
         edge = pg.mkPen('#a371f7', width=1, style=Qt.DashLine)
@@ -2983,10 +3283,9 @@ class EpochsPanel(QWidget):
 
     def _draw_window_overlays(self):
         """Red strips for marked artefact ranges intersecting the current
-        30 s window. Called only from _goto_epoch (right after raw/filt
+        epoch window. Called only from _goto_epoch (right after raw/filt
         clears), so we never accumulate stale overlays."""
-        t0 = self._epoch * self.EPOCH_LEN
-        t1 = t0 + self.EPOCH_LEN
+        t0, t1 = self.span(self._epoch)
         for m in self._marked:
             a, b = float(m['start_time']), float(m['end_time'])
             if b < t0 or a > t1:
@@ -3001,39 +3300,49 @@ class EpochsPanel(QWidget):
     def _epoch_stage(self):
         if not self._hypno:
             return ''
-        i = self._epoch
-        return str(self._hypno[i]) if 0 <= i < len(self._hypno) else ''
+        return self._epochs.stage(self._epoch)
 
     def _n_epochs(self):
-        return max(1, int(np.ceil(self._trec / self.EPOCH_LEN)))
+        return max(1, len(self._epochs))
+
+    @staticmethod
+    def _default_region(t0, t1):
+        """Brush placed at the epoch centre: 4 s wide on a 30 s epoch (as
+        before), shrunk to 30 % of shorter epochs so it stays inside."""
+        mid = (t0 + t1) / 2.0
+        half = min(2.0, 0.15 * (t1 - t0))
+        return [mid - half, mid + half]
 
     def _goto_epoch(self, i):
         n = self._n_epochs()
         i = max(0, min(int(i), n - 1))
         self._epoch = i
-        t0 = i * self.EPOCH_LEN
-        t1 = t0 + self.EPOCH_LEN
+        t0, t1 = self.span(i)
+        dur = t1 - t0
         stage = self._epoch_stage() or '—'
         n_ev, n_out = self._epoch_counts(i)
+        # name the length only when it is not the standard 30 s
+        dtxt = ('' if abs(dur - DEFAULT_EPOCH_S) < 1e-6
+                else f" ({_epoch_len_text(dur)})")
         self.epoch_lbl.setText(
-            f"Epoch {i + 1}/{n} · {_hms(t0)}–{_hms(t1)} · {stage} · "
+            f"Epoch {i + 1}/{n} · {_hms(t0)}–{_hms(t1)}{dtxt} · {stage} · "
             f"{n_ev} events ({n_out} outlier{'s' if n_out != 1 else ''})")
         # move overview + hypno current-epoch markers + strip cursor
         self._ov_marker.setRegion([t0, t1])
         self._hypno_marker.setRegion([t0, t1])
-        self._ep_cursor.setValue(t0 + self.EPOCH_LEN / 2.0)
-        # render 30 s raw + filtered window + ticker
+        self._ep_cursor.setValue((t0 + t1) / 2.0)
+        # render the epoch's raw + filtered window + ticker
         self.raw_plot.clear()
         self.filt_plot.clear()
         self.ticker.clear()
         # re-add brush region (outline-only) centred in window; guard the
         # programmatic setRegion so it stays unfilled until the user drags.
         self._region_programmatic = True
-        self.region.setRegion([t0 + 13.0, t0 + 17.0])
+        self.region.setRegion(self._default_region(t0, t1))
         self._region_programmatic = False
         self._region_fill(False)
         self.raw_plot.addItem(self.region)
-        # lock to exactly 30 s
+        # lock to exactly the epoch
         for p in (self.raw_plot, self.filt_plot):
             p.setXRange(t0, t1, padding=0)
             p.enableAutoRange('x', False)
@@ -3198,7 +3507,7 @@ class EpochsPanel(QWidget):
     def _on_shift_drag(self, t0, t1, finished):
         self._strip_range.setRegion([t0, t1])
         self._strip_range.show()
-        n = max(0, int(round((t1 - t0) / self.EPOCH_LEN)))
+        n = self._epochs.count_in(t0, t1)
         self.mark_n_btn.setEnabled(n > 0 and self._channel is not None)
         self.mark_n_btn.setText(
             f"Mark {n} epoch{'' if n == 1 else 's'} as artefact")
@@ -3214,7 +3523,7 @@ class EpochsPanel(QWidget):
             return
         t0, t1 = self._strip_range.getRegion()
         s, e = float(min(t0, t1)), float(max(t0, t1))
-        if e - s < self.EPOCH_LEN / 2:
+        if self._epochs.count_in(s, e) < 1:
             return
         self.markArtefactRequested.emit(self._channel, s, e)
         self._clear_strip_range()
@@ -3225,7 +3534,7 @@ class EpochsPanel(QWidget):
                 return
             vb = self.plot.getPlotItem().vb
             p = vb.mapSceneToView(ev.scenePos())
-            i = int(p.x() // self.EPOCH_LEN)
+            i = self.index_at(p.x())
         except Exception:
             return
         self._goto_epoch(i)
@@ -3235,7 +3544,7 @@ class EpochsPanel(QWidget):
             t0 = float(item.data(Qt.UserRole + 1))
         except Exception:
             return
-        self._goto_epoch(int(t0 // self.EPOCH_LEN))
+        self._goto_epoch(self.index_at(t0))
 
     def _region_fill(self, on):
         self.region.setBrush(pg.mkBrush(88, 166, 255, 40) if on
@@ -3248,9 +3557,9 @@ class EpochsPanel(QWidget):
             self._region_fill(True)
 
     def _reset_region(self):
-        t0 = self._epoch * self.EPOCH_LEN
+        t0, t1 = self.span(self._epoch)
         self._region_programmatic = True
-        self.region.setRegion([t0 + 13.0, t0 + 17.0])
+        self.region.setRegion(self._default_region(t0, t1))
         self._region_programmatic = False
         self._region_fill(False)
 
@@ -3614,19 +3923,31 @@ class FilterDock(QDockWidget):
             it.setData(Qt.UserRole, str(ch))
             self.channel_list.addItem(it)
 
-    def decorate_channels(self, artefact_set=None, redetect_set=None):
-        """Append ⚑ (channel-artefact verdict) / ↻ (re-detect queued)."""
+    def decorate_channels(self, artefact_set=None, redetect_set=None,
+                          interp_set=None):
+        """Append ⚑ (channel-artefact verdict) / ↻ (re-detect queued) /
+        `` ~`` (interpolated by the cleaning pipeline, with a tooltip).
+
+        ``interp_set`` is remembered, so later calls that pass only the two
+        review sets keep the interpolated marks.
+        """
         artefact_set = artefact_set or set()
         redetect_set = redetect_set or set()
+        if interp_set is not None:
+            self._interp_set = set(str(c) for c in interp_set)
+        interp = getattr(self, '_interp_set', set())
         for i in range(self.channel_list.count()):
             it = self.channel_list.item(i)
             base = str(it.data(Qt.UserRole))
             tag = ""
+            if base in interp:
+                tag += INTERPOLATED_MARK
             if base in artefact_set:
                 tag += " ⚑"
             if base in redetect_set:
                 tag += " ↻"
             it.setText(base + tag)
+            it.setToolTip(INTERPOLATED_TOOLTIP if base in interp else "")
 
 
 # Wake-like labels are never a detection stage, so they are dropped from the
@@ -3903,12 +4224,8 @@ class EventReviewGUI(QMainWindow):
         if n_eeg:
             self.led_eeg.setText(f"EEG  {n_eeg} ch")
         tst = self._scored_minutes()
-        rec = None
         try:
-            if self.annotations is not None:
-                stages = self.annotations.get_stages()
-                if stages:
-                    rec = len(stages) * 30.0
+            rec = annotation_recording_seconds(self.annotations)
         except Exception:
             rec = None
         self.lbl_duration.setText(
@@ -4017,19 +4334,18 @@ class EventReviewGUI(QMainWindow):
     _WAKE_STAGES = QC_WAKE_STAGES
 
     def _scored_minutes(self):
-        """Total minutes in scored sleep stages (total sleep time, TST).
-        None when annotations are absent. Used for the toolbar TST readout —
-        NOT the density denominator (see :meth:`_qc_density_minutes`)."""
-        if self.annotations is None:
+        """Total minutes in scored sleep stages (total sleep time, TST): the
+        sum of the scored epochs' own durations, so 1 s epochs on a cut
+        recording count 1 s. None when annotations are absent. Used for the
+        toolbar TST readout — NOT the density denominator (see
+        :meth:`_qc_density_minutes`)."""
+        table = self._epoch_table()
+        if table is None:
             return None
-        try:
-            stages = self.annotations.get_stages()
-        except Exception:
-            return None
-        if not stages:
-            return None
-        n = sum(1 for s in stages if str(s) in self._SCORED_STAGES)
-        return (n * 30.0) / 60.0 if n else None
+        scored = np.array([s in self._SCORED_STAGES for s in table.stages],
+                          dtype=bool)
+        secs = float(table.durations[scored].sum()) if scored.any() else 0.0
+        return secs / 60.0 if secs else None
 
     def _qc_density_minutes(self, extra_intervals=None, event_stages=None):
         """Artefact-free analysed minutes over the detection run's stage scope —
@@ -4473,7 +4789,8 @@ class EventReviewGUI(QMainWindow):
         # filter-dock decorations: ⚑ channel-artefact verdicts, ↻ queued
         artefact_set = {c for (c, e2), v in all_verdicts.items()
                         if v in ('drop', 'channel_artefact')}
-        self.filter_dock.decorate_channels(artefact_set, self._redetect_queue)
+        self.filter_dock.decorate_channels(artefact_set, self._redetect_queue,
+                                           interp_set=self._eeg_channel_info()[2])
         self._refresh_event_counts()
         self._refresh_status_segments()
         self._refresh_toolbar_state()
@@ -4516,10 +4833,11 @@ class EventReviewGUI(QMainWindow):
         if qc_row is not None:
             try:
                 qc_row = dict(qc_row)
-                qc_row['_hypno'] = self._hypnogram()
+                qc_row['_epochs'] = self._epoch_table()
                 qc_row['_event_type'] = self.qc_widget.current_event_type()
             except Exception:
                 pass
+        self.detail_dock_w.set_epoch_table(self._epoch_table())
         self.detail_dock_w.update_channel(ch, sl, qc_row)
         self.detail_dock_w.set_marked(self._marked_for(ch),
                                       channel=ch, total=self._total_marked())
@@ -4556,13 +4874,12 @@ class EventReviewGUI(QMainWindow):
         if d.empty:
             return []
         d = d.sort_values('amp', ascending=False).head(int(limit))
-        hyp = self._hypnogram()
+        hyp = self._epoch_table()
         rows = []
         for _, r in d.iterrows():
             stage = str(r['stage'])
             if (not stage or stage.lower() in ('', 'nan', 'none')) and hyp:
-                i = int(r['start_time'] // 30)
-                stage = hyp[i] if 0 <= i < len(hyp) else ''
+                stage = hyp.stage_at(r['start_time'])
             rows.append(dict(channel=str(r['channel']),
                              start_time=float(r['start_time']),
                              stage=stage, amp=float(r['amp'])))
@@ -4574,7 +4891,8 @@ class EventReviewGUI(QMainWindow):
         that channel's QC-table row, and shows the Epochs tab."""
         try:
             self.on_qc_drill(str(ch), switch_tab=False)
-            self.epochs_panel._goto_epoch(int(float(t0) // 30))
+            self.epochs_panel._goto_epoch(
+                self.epochs_panel.index_at(float(t0)))
             self.qc_widget.select_channel(str(ch))
             self.tabs.setCurrentIndex(1)
         except Exception:
@@ -4595,7 +4913,7 @@ class EventReviewGUI(QMainWindow):
         evt = self.qc_widget.current_event_type()
         self.epochs_panel.set_channel(
             ch, sl, df, event_type=evt,
-            hypno=self._hypnogram(), trec=self._recording_seconds(),
+            epochs=self._epoch_table(), trec=self._recording_seconds(),
             marked=self._marked_for(ch))
         if switch_tab:
             self.tabs.setCurrentIndex(1)
@@ -4606,11 +4924,12 @@ class EventReviewGUI(QMainWindow):
 
 
     def _recording_seconds(self):
+        """Recording length: the annotation file's (``recording_seconds()``,
+        i.e. Wonambi's ``last_second``), else the last event end, else 8 h."""
         try:
-            if self.annotations is not None:
-                stages = self.annotations.get_stages()
-                if stages:
-                    return len(stages) * 30.0
+            rec = annotation_recording_seconds(self.annotations)
+            if rec:
+                return float(rec)
         except Exception:
             pass
         df = getattr(self, '_qc_events_df', None)
@@ -4622,15 +4941,25 @@ class EventReviewGUI(QMainWindow):
                 pass
         return 8 * 3600.0
 
-    def _hypnogram(self):
+    def _epoch_table(self):
+        """:class:`EpochTable` of the loaded annotations (true per-epoch
+        start/end, 1-30 s on cut recordings), or ``None`` without staging.
+        Cached per annotation object; ``open_annotation_file`` replaces the
+        object, which invalidates it."""
+        ann = self.annotations
+        if ann is None:
+            return None
+        cached = getattr(self, '_epoch_table_cache', None)
+        if cached is not None and cached[0] is ann:
+            return cached[1]
         try:
-            if self.annotations is not None:
-                st = self.annotations.get_stages()
-                if st:
-                    return [str(s) for s in st]
-        except Exception:
-            pass
-        return None
+            table = EpochTable.from_annotations(ann)
+        except Exception as err:
+            logger.warning(f"Could not read the scored epochs from the "
+                           f"annotation file ({err}); staging is not shown.")
+            table = None
+        self._epoch_table_cache = (ann, table)
+        return table
 
     def _marked_for(self, ch):
         """Channel-scoped artefact intervals (evidence_channel == ch)."""
@@ -5241,44 +5570,66 @@ class EventReviewGUI(QMainWindow):
                                           tw_error.__traceback__)
                 self.status_bar.showMessage("Error")
                 QtWidgets.QMessageBox.critical(
-                    self, "Error", load_failure_message(file_path, tw_error))
+                    self, "Error", load_failure_message(
+                        file_path, tw_error, where=REVIEW_GUI_ERROR_WHERE))
                 return
 
         try:
-            self._apply_default_channels(*self._eeg_channel_info())
+            names, types, interp = self._eeg_channel_info()
+            defaults_applied = self._apply_default_channels(names, types)
             self.load_channels()
+            if defaults_applied:
+                note = interpolated_defaults_note(self.selected_channels,
+                                                  interp)
+                if note:
+                    self.status_bar.showMessage(note)
+                    logger.info(note)
             # Start background waveform loader
             self.start_background_loader()
             self._refresh_chrome()
             # Auto-attempt live topo coords from the EEGLAB .set chanlocs
             self._autoload_set_coords()
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load EEG file: {str(e)}")
+            first = (str(e).strip().splitlines() or [type(e).__name__])[0]
+            QtWidgets.QMessageBox.critical(
+                self, "Error",
+                f"The recording opened, but its channels could not be set "
+                f"up: {first}. The full error is {REVIEW_GUI_ERROR_WHERE}.")
             traceback.print_exc()
 
     def _eeg_channel_info(self):
-        """``(channels, chan_type)`` of the loaded EEG file; ``([], None)``
-        when none is loaded. MNE's lower-case types go through the same
-        non-EEG rule."""
+        """``(channels, chan_type, interpolated)`` of the loaded EEG file;
+        ``([], None, set())`` when none is loaded. MNE's lower-case types go
+        through the same non-EEG rule. ``interpolated`` is the set of channel
+        names in ``header['interp_channels']`` (empty when the file names
+        none, and always for MNE reads)."""
         data = self.eeg_data
         if data is None:
-            return [], None
+            return [], None, set()
         if hasattr(data, 'channels'):
             header = getattr(data, 'header', None) or {}
-            return list(data.channels), header.get('chan_type')
+            if not hasattr(header, 'get'):
+                header = {}
+            summary = ChannelTypeSummary([], None,
+                                         header.get('interp_channels'))
+            return (list(data.channels), header.get('chan_type'),
+                    set(summary.interpolated))
         if hasattr(data, 'ch_names'):
             try:
                 types = list(data.get_channel_types())
             except Exception:
                 types = None
-            return list(data.ch_names), types
-        return [], None
+            return list(data.ch_names), types, set()
+        return [], None, set()
 
     def _apply_default_channels(self, channels, chan_type=None):
         """Replace the waveform channels with ``default_review_channels``,
         unless the user has chosen their own and every one of them exists in
         the newly loaded ``channels``. A choice made on a different montage
-        is dropped (reading it would give blank waveforms)."""
+        is dropped (reading it would give blank waveforms).
+
+        Returns ``True`` when the defaults were applied, ``False`` when the
+        user's own selection was kept."""
         names = set(str(c) for c in channels)
         if self._channels_user_set:
             missing = [ch for ch in self.selected_channels if ch not in names]
@@ -5286,16 +5637,17 @@ class EventReviewGUI(QMainWindow):
                 logger.info(f"Keeping your channel selection "
                             f"({', '.join(self.selected_channels)}): all "
                             f"present in the new file.")
-                return
+                return False
             self._channels_user_set = False
             self.selected_channels = default_review_channels(channels, chan_type)
             logger.info(f"Channel selection reset to defaults "
                         f"({', '.join(self.selected_channels) or 'none'}): "
                         f"{', '.join(missing) or 'the selection was empty'} "
                         f"not in the new file.")
-            return
+            return True
         self.selected_channels = default_review_channels(channels, chan_type)
-    
+        return True
+
     def open_annotation_file(self):
         """Open annotation file"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -5345,12 +5697,14 @@ class EventReviewGUI(QMainWindow):
         status-bar hint)."""
         try:
             channels = self._all_db_channels() if self.db else []
+            names, types, interp = self._eeg_channel_info()
             if not channels and self.eeg_data is not None:
-                names, types = self._eeg_channel_info()
                 channels = ChannelTypeSummary(names, types).eeg
             self.channel_list.blockSignals(True)
             self.filter_dock.populate_channels(channels,
                                                checked=self.selected_channels)
+            # " ~" + tooltip on channels the cleaning pipeline interpolated
+            self.filter_dock.decorate_channels(interp_set=interp)
             self.channel_list.blockSignals(False)
             if channels:
                 self.status_bar.showMessage(f"Loaded {len(channels)} channels")

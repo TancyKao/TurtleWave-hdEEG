@@ -28,10 +28,24 @@ MIDLINE_DEFAULT_CHANNELS = ('Cz', 'Fz', 'Pz')
 EEG_PREVIEW_COUNT = 10
 OTHER_PREVIEW_COUNT = 20
 
+#: Where the review GUI's full errors go (it has no log panel); passed as
+#: ``where=`` to :func:`load_failure_message` and reused in its other dialogs.
+REVIEW_GUI_ERROR_WHERE = 'printed in the terminal window that started the review GUI'
+
 #: Keys named in the "Found at the top level" line of a load-failure message.
 FOUND_KEYS_SHOWN = 12
 
 _REFERENCE_NOTE = '(as stored in the file; not changed by TurtleWave)'
+
+#: Tooltip on an interpolated channel in every channel list.
+INTERPOLATED_TOOLTIP = ('Interpolated channel (reconstructed from neighbours by '
+                        'the cleaning pipeline)')
+
+#: Suffix the review GUI's filter-dock list appends to an interpolated channel.
+INTERPOLATED_MARK = ' ~'
+
+#: How many names the Dataset Information "Interpolated channels" line shows.
+INTERP_PREVIEW_COUNT = 10
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +94,11 @@ class ChannelTypeSummary:
     chan_type : sequence of str or None
         ``header['chan_type']``; ``None`` (or a list of the wrong length)
         means every channel is treated as EEG.
+    interp_channels : sequence of str or None
+        ``header['interp_channels']``: channels the cleaning pipeline
+        reconstructed from their neighbours. ``None`` or empty means the file
+        names none. Interpolated channels stay selectable; they are only
+        marked.
 
     Attributes
     ----------
@@ -96,9 +115,12 @@ class ChannelTypeSummary:
         Non-EEG types with their channel counts, in order of first appearance.
     has_types : bool
         Whether the file states any channel type at all.
+    interpolated : list of str
+        Interpolated channel names as the file lists them (duplicates and
+        blanks dropped, surrounding spaces removed).
     """
 
-    def __init__(self, channels, chan_type=None):
+    def __init__(self, channels, chan_type=None, interp_channels=None):
         self.channels = [] if channels is None else [str(c) for c in channels]
         types = _types_for(self.channels, chan_type)
         self.has_types = bool(types) and any(
@@ -115,6 +137,8 @@ class ChannelTypeSummary:
             else:
                 self.eeg.append(ch)
         self.type_counts = list(counts.items())   # dicts keep insertion order
+        self.interpolated = _clean_names(interp_channels)
+        self._interp_set = set(self.interpolated)
 
     @classmethod
     def from_dataset(cls, dataset):
@@ -125,11 +149,16 @@ class ChannelTypeSummary:
         channels = getattr(dataset, 'channels', None)
         channels = [] if channels is None else list(channels)
         header = getattr(dataset, 'header', None) or {}
-        chan_type = header.get('chan_type') if hasattr(header, 'get') else None
-        return cls(channels, chan_type)
+        if not hasattr(header, 'get'):
+            return cls(channels)
+        return cls(channels, header.get('chan_type'),
+                   header.get('interp_channels'))
 
     def is_non_eeg(self, channel):
         return channel in self.type_of
+
+    def is_interpolated(self, channel):
+        return str(channel) in self._interp_set
 
     def visible(self, show_non_eeg):
         """Channels to list, file order: all of them when ``show_non_eeg``,
@@ -155,9 +184,15 @@ class ChannelTypeSummary:
                 f"scalp EEG. Tick to list them.")
 
     def item_tooltip(self, channel):
-        """Tooltip for a Selected-list item, ``''`` for an EEG channel."""
+        """Tooltip for a channel-list item: the non-EEG type and/or the
+        interpolated note, one per line; ``''`` for a plain EEG channel."""
+        parts = []
         t = self.type_of.get(channel)
-        return f"Non-EEG channel ({t})" if t else ''
+        if t:
+            parts.append(f"Non-EEG channel ({t})")
+        if self.is_interpolated(channel):
+            parts.append(INTERPOLATED_TOOLTIP)
+        return '\n'.join(parts)
 
     def run_note(self, selected):
         """Log line naming the non-EEG channels in ``selected``, or ``None``."""
@@ -166,6 +201,44 @@ class ChannelTypeSummary:
             return None
         noun = 'channel' if len(picked) == 1 else 'channels'
         return f"Note: {len(picked)} non-EEG {noun} selected: {', '.join(picked)}."
+
+    def interp_run_note(self, selected):
+        """Log line naming the interpolated channels in ``selected``, or
+        ``None``. Interpolated channels still run; this only says so."""
+        picked = [ch for ch in selected if self.is_interpolated(ch)]
+        if not picked:
+            return None
+        noun = 'channel' if len(picked) == 1 else 'channels'
+        return (f"Note: {len(picked)} interpolated {noun} selected: "
+                f"{', '.join(picked)} (reconstructed from neighbours by the "
+                f"cleaning pipeline).")
+
+    def interp_line(self):
+        """The Setup tab's ``Interpolated channels:`` line."""
+        if not self.interpolated:
+            return "Interpolated channels: none stated in the file"
+        return (f"Interpolated channels: {len(self.interpolated)} "
+                f"({_preview(self.interpolated, INTERP_PREVIEW_COUNT)})")
+
+
+def _clean_names(names):
+    """``names`` as a list of non-blank stripped strings, first occurrence
+    kept; ``[]`` for ``None``, a bare string is one name."""
+    if names is None:
+        return []
+    if isinstance(names, str):
+        names = [names]
+    out, seen = [], set()
+    try:
+        items = list(names)
+    except TypeError:
+        return []
+    for n in items:
+        text = '' if n is None else str(n).strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +335,7 @@ def format_dataset_info(dataset, data_file_path, output_dir, annot_file_path,
     dataset : object
         Anything with ``.channels``, ``.sampling_rate`` and ``.header``
         (``n_samples``, ``start_time`` and, when present, ``chan_type``,
-        ``reference`` and ``event``).
+        ``reference``, ``interp_channels`` and ``event``).
     data_file_path, output_dir, annot_file_path : str
         Shown as the file name and the two output paths.
     log : callable or None
@@ -334,6 +407,7 @@ def format_dataset_info(dataset, data_file_path, output_dir, annot_file_path,
     guarded('Channels', lambda: f"Channels: {summary.count_line()}")
     guarded('Reference', lambda: _reference_line(header.get('reference'),
                                                  len(summary.eeg)))
+    guarded('Interpolated channels', summary.interp_line)
 
     if summary.other:
         guarded('EEG channels', lambda: (
@@ -363,7 +437,7 @@ def _first_line(exc):
     return text.splitlines()[0].strip() if text else ''
 
 
-def load_failure_message(path, exc):
+def load_failure_message(path, exc, where='in the log panel'):
     """Dialog text for a recording that could not be loaded.
 
     Parameters
@@ -374,6 +448,10 @@ def load_failure_message(path, exc):
         What the loader raised. ``EEGLABFormatError`` and the library's
         missing-``.fdt`` ``FileNotFoundError`` get their own wording; anything
         else is reduced to its first line, with HDF5 internals replaced.
+    where : str, optional
+        Where the full error can be read, completing the last sentence
+        "The full error is {where}." Default ``'in the log panel'``
+        (turtlewave_gui); the review GUI passes ``REVIEW_GUI_ERROR_WHERE``.
 
     Returns
     -------
@@ -382,7 +460,7 @@ def load_failure_message(path, exc):
     """
     name = os.path.basename(str(path or '')) or 'This file'
     head = "Could not load this recording."
-    tail = "The full error is in the log panel."
+    tail = f"The full error is {where}."
 
     try:
         from turtlewave_hdEEG.eeglab_io import EEGLABFormatError

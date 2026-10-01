@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Headless acceptance checks for ``_scratch/design/compumedics-channels-spec.md``.
 
+Section 6 covers the interpolated-channel marks (plan section C, GUI half):
+the Dataset Information line, italic + tooltip items in turtlewave_gui, the
+review GUI's " ~" suffix, and the summary / tooltip / run-note text.
+
 Sections 1-5 of the spec: the "Show non-EEG channels" checkbox on the four
 detection tabs, the Setup tab's Dataset Information text, scalp regions from
 10-20 / 10-5 labels, the review GUI's default channels and filter-dock list,
@@ -112,9 +116,18 @@ def stub(channels, chan_type=None, s_freq=250.0, n_samples=250 * 600,
                                  header=header)
 
 
+#: 37 interpolated channels, first three as in the plan's example line.
+REF_INTERP = ['AF3', 'F3', 'F1', 'Cz'] + [
+    lab for lab in REF_LABELS[:257]
+    if lab not in ('AF3', 'F3', 'F1', 'Cz')][40:73]
+assert len(REF_INTERP) == 37 and len(set(REF_INTERP)) == 37
+
+
 def reference_stub():
-    return stub(REF_LABELS, REF_TYPES, n_samples=4827027,
-                reference={'ref': 'average', 'n_good': 220}, event=ref_events())
+    ds = stub(REF_LABELS, REF_TYPES, n_samples=4827027,
+              reference={'ref': 'average', 'n_good': 220}, event=ref_events())
+    ds.header['interp_channels'] = list(REF_INTERP)
+    return ds
 
 
 class LogSpy:
@@ -318,6 +331,7 @@ Removed data: 107.7 min at 189 boundary events (original recording 429.5 min)
 Sampling rate: 250 Hz
 Channels: 277 (257 EEG, 20 other)
 Reference: average of 220 of 257 EEG channels (as stored in the file; not changed by TurtleWave)
+Interpolated channels: 37 ({', '.join(REF_INTERP[:10])} and 27 more)
 EEG channels: Fp1, Fpz, Fp2, AF3, AF4, F11, F7, F5, F3, F1 and 247 more
 Other channels: VEOG, HEOG, Abdo_Effort, Thor_Effort, Resp_Flow, Snore, do_not_use1, ECG, EMGChin, EMGLeftLeg, EMGRightLeg, BodyPosition, Resp_Temp, ECG_2, RightEDB, LeftEDB, OxStatus, HR, SpO2_OSat, BodyPosition_2
 
@@ -338,6 +352,7 @@ Removed data: none
 Sampling rate: 500 Hz
 Channels: 257 (channel types not stated in the file; all listed as EEG)
 Reference: Cz (as stored in the file; not changed by TurtleWave)
+Interpolated channels: none stated in the file
 Channels: E1, E2, E3, E4, E5, E6, E7, E8, E9, E10 and 247 more
 
 Output directory: {out_dir}
@@ -389,7 +404,7 @@ check('2.6', "unreadable timeline: 'Removed data: could not be read (see log)'",
 check('2.6', "every other line still present",
       labels == ['File', 'Recording start', 'Recording end', 'Signal duration',
                  'Removed data', 'Sampling rate', 'Channels', 'Reference',
-                 'EEG channels', 'Other channels', 'Output directory',
+                 'Interpolated channels', 'EEG channels', 'Other channels', 'Output directory',
                  'Annotation file'], repr(labels))
 check('2.6', "the reason went to the log",
       'boundary events could not be read' in spy.text(), spy.text())
@@ -664,9 +679,194 @@ rbody = dialogs.messages[0][1] if dialogs.messages else ''
 check('5.4', "review GUI: same first lines as turtlewave_gui, not an MNE error",
       rbody.splitlines()[:3] == body.splitlines()[:3] and rwin2.eeg_data is None,
       repr(rbody[:300]))
+check('5.5', "review GUI dialog points at the terminal, not a log panel",
+      rbody.endswith('The full error is printed in the terminal window that '
+                     'started the review GUI.')
+      and 'log panel' not in rbody, repr(rbody[-120:]))
+check('5.5', "turtlewave_gui keeps 'The full error is in the log panel.'",
+      body.endswith('The full error is in the log panel.'), repr(body[-80:]))
+
+# ======================================================================= 6
+say("\n== Section 6: interpolated channels")
+TIP = ('Interpolated channel (reconstructed from neighbours by the cleaning '
+       'pipeline)')
+check('6.0', "Dataset Information shows the interpolated line after Reference",
+      'Reference: average of 220 of 257 EEG channels (as stored in the file; '
+      'not changed by TurtleWave)\nInterpolated channels: 37 (AF3, F3, F1, Cz, '
+      in info_for(reference_stub(), os.path.join('/data', REF_FILE)),
+      'see 2.1')
+got = info_for(stub(['Fz', 'Cz', 'Pz']), '/d/none.set')
+check('6.0', "interp_channels absent: 'none stated in the file'",
+      'Interpolated channels: none stated in the file' in got, repr(got))
+three = stub(['Fz', 'Cz', 'Pz'])
+three.header['interp_channels'] = ['Cz', ' Pz ', 'Cz', '']
+got = info_for(three, '/d/three.set')
+check('6.0', "3 names: listed in full, duplicates/blanks dropped",
+      'Interpolated channels: 2 (Cz, Pz)' in got, repr(got))
+empty = stub(['Fz', 'Cz'])
+empty.header['interp_channels'] = []
+check('6.0', "interp_channels == []: 'none stated in the file'",
+      'Interpolated channels: none stated in the file'
+      in info_for(empty, '/d/empty.set'), '')
+
+s6 = ChannelTypeSummary(['Fp1', 'Cz', 'VEOG', 'ECG', 'Pz'],
+                        ['EEG', 'EEG', 'EOG', 'ECG', 'EEG'],
+                        interp_channels=['Cz', 'ECG'])
+check('6.1', "summary.interpolated / is_interpolated",
+      s6.interpolated == ['Cz', 'ECG'] and s6.is_interpolated('Cz')
+      and not s6.is_interpolated('Pz'), repr(s6.interpolated))
+check('6.1', "tooltip text for an interpolated EEG channel",
+      s6.item_tooltip('Cz') == TIP, repr(s6.item_tooltip('Cz')))
+check('6.1', "non-EEG + interpolated: both lines",
+      s6.item_tooltip('ECG') == 'Non-EEG channel (ECG)\n' + TIP,
+      repr(s6.item_tooltip('ECG')))
+check('6.1', "plain EEG channel: no tooltip", s6.item_tooltip('Pz') == '',
+      repr(s6.item_tooltip('Pz')))
+check('6.1', "interp run note names the picked ones, singular noun",
+      s6.interp_run_note(['Pz', 'Cz']) ==
+      'Note: 1 interpolated channel selected: Cz (reconstructed from '
+      'neighbours by the cleaning pipeline).', repr(s6.interp_run_note(['Cz'])))
+check('6.1', "interp run note is None when none picked",
+      s6.interp_run_note(['Pz']) is None, '')
+check('6.1', "from_dataset reads header['interp_channels']",
+      ChannelTypeSummary.from_dataset(three).interpolated == ['Cz', 'Pz'],
+      repr(ChannelTypeSummary.from_dataset(three).interpolated))
+
+five_i = stub(['Fp1', 'Cz', 'VEOG', 'ECG', 'Pz'],
+              ['EEG', 'EEG', 'EOG', 'ECG', 'EEG'])
+five_i.header['interp_channels'] = ['Cz', 'Pz']
+load(win, five_i)
+win.non_eeg_checks['spindle'].setChecked(False)
+win.selected_channels = ['Pz']
+win.update_channel_lists()
+
+
+def item_state(lst, name):
+    for i in range(lst.count()):
+        it = lst.item(i)
+        if it.text() == name:
+            return (it.text(), it.font().italic(), it.toolTip())
+    return None
+
+
+avail_states = {k: item_state(lst, 'Cz') for k, lst in
+                (('spindle', win.available_list),
+                 ('sw', win.sw_available_list),
+                 ('kc', win.kc_available_list))}
+check('6.2', "Available lists: Cz italic, tooltip, text unchanged",
+      all(v == ('Cz', True, TIP) for v in avail_states.values()),
+      repr(avail_states))
+check('6.2', "Available lists: Fp1 not italic, no tooltip",
+      item_state(win.available_list, 'Fp1') == ('Fp1', False, ''),
+      repr(item_state(win.available_list, 'Fp1')))
+sel_states = {k: item_state(lst, 'Pz') for k, lst in DET_SEL(win).items()}
+check('6.2', "Selected lists: Pz italic, tooltip, text unchanged",
+      all(v == ('Pz', True, TIP) for v in sel_states.values()),
+      repr(sel_states))
+for i in range(win.available_list.count()):
+    it = win.available_list.item(i)
+    it.setSelected(it.text() == 'Cz')
+win.add_channels()
+check('6.2', "add_channels reads the bare name back from an italic item",
+      win.selected_channels == ['Pz', 'Cz'], repr(win.selected_channels))
+win.pac_available_channels = ['Cz', 'Fp1']
+win.pac_selected_channels = ['Pz']
+win.update_pac_channel_lists()
+check('6.2', "PAC lists decorated too",
+      item_state(win.pac_available_list, 'Cz') == ('Cz', True, TIP)
+      and item_state(win.pac_selected_list, 'Pz') == ('Pz', True, TIP),
+      repr((item_state(win.pac_available_list, 'Cz'),
+            item_state(win.pac_selected_list, 'Pz'))))
+spy.clear()
+win._log_non_eeg_selection(['Cz', 'ECG', 'Pz'])
+check('6.3', "run start logs the non-EEG note, then the interpolated note",
+      spy.lines == ['Note: 1 non-EEG channel selected: ECG.',
+                    'Note: 2 interpolated channels selected: Cz, Pz '
+                    '(reconstructed from neighbours by the cleaning pipeline).'],
+      repr(spy.lines))
+
+# review GUI: " ~" suffix on the filter-dock list
+rwin3 = rg.EventReviewGUI()
+
+
+class InterpStub(EEGStub):
+    def __init__(self, channels, chan_type, interp):
+        super().__init__(channels, chan_type)
+        self.header['interp_channels'] = list(interp)
+
+
+rg.LargeDataset = lambda path, create_memmap=False: InterpStub(
+    ['Fz', 'Cz', 'Pz', 'ECG'], ['EEG', 'EEG', 'EEG', 'ECG'], ['Cz'])
+try:
+    rwin3.load_eeg_file(os.path.join(TMP, 'interp_stub.edf'))
+    names, ctypes, interp = rwin3._eeg_channel_info()
+    check('6.4', "_eeg_channel_info returns the interpolated set",
+          interp == {'Cz'} and names == ['Fz', 'Cz', 'Pz', 'ECG'],
+          repr((names, interp)))
+    rows = [(rwin3.channel_list.item(i).text(),
+             rwin3.channel_list.item(i).data(Qt.UserRole),
+             rwin3.channel_list.item(i).toolTip())
+            for i in range(rwin3.channel_list.count())]
+    check('6.4', "filter-dock list: 'Cz ~' with tooltip, others bare",
+          rows == [('Fz', 'Fz', ''), ('Cz ~', 'Cz', TIP), ('Pz', 'Pz', '')],
+          repr(rows))
+    rwin3.filter_dock.decorate_channels({'Cz'}, {'Pz'})
+    rows = [rwin3.channel_list.item(i).text()
+            for i in range(rwin3.channel_list.count())]
+    check('6.4', "later verdict decoration keeps the ' ~' mark",
+          rows == ['Fz', 'Cz ~ \u2691', 'Pz \u21bb'], repr(rows))
+    rwin3.filter_dock.decorate_channels(interp_set=set())
+    check('6.4', "interp_set=set() clears the mark",
+          rwin3.channel_list.item(1).text() == 'Cz'
+          and rwin3.channel_list.item(1).toolTip() == '',
+          repr(rwin3.channel_list.item(1).text()))
+
+    # 6.5: defaults that include an interpolated channel are named once
+    rwin4 = rg.EventReviewGUI()
+    rg.LargeDataset = lambda path, create_memmap=False: InterpStub(
+        REF_LABELS, REF_TYPES, ['Cz'])
+    rwin4.load_eeg_file(os.path.join(TMP, 'ref_interp.edf'))
+    msg = rwin4.status_bar.currentMessage()
+    check('6.5', "defaults include interpolated Cz: status bar says so",
+          msg == 'Showing Cz, Fz, Pz. Cz is interpolated (reconstructed from '
+                 'neighbours by the cleaning pipeline).', repr(msg))
+    rwin4._channels_user_set = True
+    rwin4.selected_channels = ['Cz', 'C3']
+    rwin4.load_eeg_file(os.path.join(TMP, 'ref_interp2.edf'))
+    msg = rwin4.status_bar.currentMessage()
+    check('6.5', "user's own selection kept: no interpolated note",
+          'interpolated' not in msg, repr(msg))
+    plural = rg.interpolated_defaults_note(['Cz', 'Fz', 'Pz'], {'Cz', 'Pz'})
+    check('6.5', "plural wording",
+          plural == 'Showing Cz, Fz, Pz. Cz and Pz are interpolated '
+                    '(reconstructed from neighbours by the cleaning pipeline).',
+          repr(plural))
+
+    # F6: channel set-up failure after a successful open
+    def boom():
+        raise RuntimeError("channel table unreadable\nsecond line")
+    rwin4.load_channels = boom
+    with CriticalSpy() as dialogs:
+        rwin4.load_eeg_file(os.path.join(TMP, 'ref_interp3.edf'))
+    fbody = dialogs.messages[0][1] if dialogs.messages else ''
+    check('6.6', "set-up failure dialog wording",
+          fbody == 'The recording opened, but its channels could not be set '
+                   'up: channel table unreadable. The full error is printed in '
+                   'the terminal window that started the review GUI.',
+          repr(fbody))
+    if rwin4.background_loader is not None:
+        rwin4.background_loader.stop()
+        rwin4.background_loader = None
+    rwin4.close()
+finally:
+    rg.LargeDataset = orig_ld
+    if rwin3.background_loader is not None:
+        rwin3.background_loader.stop()
+        rwin3.background_loader = None
 
 rwin.close()
 rwin2.close()
+rwin3.close()
 say("\n" + "=" * 78)
 say(f"{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
 for f in FAILURES:

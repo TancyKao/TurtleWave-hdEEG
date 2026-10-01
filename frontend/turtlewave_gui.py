@@ -3778,11 +3778,23 @@ class TurtleWaveGUI(QMainWindow):
 
     @staticmethod
     def _selected_item(channel, summary):
+        """List item for ``channel``: non-EEG and interpolated channels carry
+        a tooltip, interpolated ones are also italic. The text is always the
+        bare channel name, because add/remove read it back."""
         item = QListWidgetItem(channel)
         tip = summary.item_tooltip(channel)
         if tip:
             item.setToolTip(tip)
+        if summary.is_interpolated(channel):
+            font = item.font()
+            font.setItalic(True)
+            item.setFont(font)
         return item
+
+    def _fill_available(self, lst, channels, summary):
+        """Refill an Available list with decorated items, file order."""
+        for channel in channels:
+            lst.addItem(self._selected_item(channel, summary))
 
     def _add_all_listed(self):
         """"Add All >>" on the Spindle / SW / K-Complex tabs: add every channel
@@ -3798,10 +3810,13 @@ class TurtleWaveGUI(QMainWindow):
         self.update_channel_lists()
 
     def _log_non_eeg_selection(self, selected):
-        """One log line when a run starts with non-EEG channels selected."""
-        note = self._channel_summary().run_note(selected or [])
-        if note:
-            self.write_log(note)
+        """One log line each when a run starts with non-EEG or interpolated
+        channels selected."""
+        summary = self._channel_summary()
+        for note in (summary.run_note(selected or []),
+                     summary.interp_run_note(selected or [])):
+            if note:
+                self.write_log(note)
 
     def update_channel_lists(self):
         """Repaint the Available / Selected lists of the Spindle, Slow Wave and
@@ -3829,7 +3844,7 @@ class TurtleWaveGUI(QMainWindow):
         for avail, sel in pairs:
             avail.clear()
             sel.clear()
-            avail.addItems(available)
+            self._fill_available(avail, available, summary)
             for channel in self.selected_channels:
                 sel.addItem(self._selected_item(channel, summary))
     
@@ -3980,9 +3995,10 @@ class TurtleWaveGUI(QMainWindow):
         self.pac_selected_list.clear()
 
         selected = set(self.pac_selected_channels)
-        self.pac_available_list.addItems(
+        self._fill_available(
+            self.pac_available_list,
             [ch for ch in self._pac_listed_channels(summary)
-             if ch not in selected])
+             if ch not in selected], summary)
         for channel in self.pac_selected_channels:
             self.pac_selected_list.addItem(self._selected_item(channel, summary))
 
