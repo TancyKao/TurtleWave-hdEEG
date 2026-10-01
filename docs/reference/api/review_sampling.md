@@ -3,8 +3,12 @@
 `turtlewave_hdEEG.review_sampling` draws a stratified random sample of one
 detection scope, scores a reviewer's labels on it, and estimates precision.
 
+- `preview_allocation` returns what `draw_review_sample` would draw, cell by
+  cell, without writing anything. It is what the GUI's draw dialog shows.
 - `draw_review_sample` draws (or returns) a sample and writes
   `review_sample_designs` and `review_samples`.
+- `read_sample_labels` lists every stored label on a sample, flagging labels
+  voided because the event is gone or its end time moved.
 - `sample_progress` reports how far a reviewer has got and what to show next.
 - `compute_review_precision` returns a design-weighted precision per domain and
   writes `review_precision`.

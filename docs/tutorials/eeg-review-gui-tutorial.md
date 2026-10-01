@@ -50,9 +50,11 @@ Channels (QC) tab populates with one row per channel.
 
 The **Channels (QC)** tab is the landing surface. Each row is a channel, not
 an individual event — this is a QC triage view, not a per-event review list.
-Beside the amplitude columns you'll also see `off-band %`, `low prom. %`,
-`at floor %`, `amp/bg ×` and `amp/thr ×`, and a `checks` flag. They summarise
-stored figures for every event on the channel.
+Beside the amplitude columns you'll also see `Off-band`, `Low prom.`,
+`At floor`, `Amp / bg` and `Amp / thr`, and a `Checks` flag. They summarise
+stored figures for every event on the channel, and a channel is flagged only
+when it differs from the rest of the montage. The **Stage**, **Show** and
+**Sort** controls above the table change what you see.
 
 Use the left filter dock to switch event type (spindle / slow wave /
 K-complex / PAC) and to narrow by method or frequency band. Channels flagged
@@ -67,7 +69,7 @@ montage) sort to the top.
 ## Step 4: Drill into a Channel's Epochs
 
 1. Select a channel in the QC table
-2. Click **Drill into epochs ▸** (this switches you to the **2 · Epochs** tab)
+2. Click **Open in Epochs** under the table (this switches you to the **2 · Epochs** tab)
 
 The Epochs panel steps through 30-second windows for that channel, with a
 hypnogram strip and outlier markers. Use **P**/**N** to jump between outlier
@@ -88,6 +90,7 @@ epochs, or the prev/next buttons to step one epoch at a time.
 3. Look at the raw trace, then the figures, and press `A` to accept the event.
 4. Select another event, press `R`, then `1` to reject it as an artefact.
 5. Press `Ctrl+Z` (`Cmd+Z` on macOS) to undo the last decision.
+6. Press `?` to open the keys cheat sheet, and `?` or `Esc` to close it.
 
 !!! success "What you should see"
     The accepted band turns green with a ✓. The `Current` line in the dock reads

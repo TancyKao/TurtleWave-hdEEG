@@ -21,48 +21,58 @@ To judge one event once it is on screen, see
 
 ## Run the population checks on the Channels tab
 
-The Channels (QC) tab adds five columns per channel for the event type in view.
-They are computed in a background thread from the stored figures.
+The Channels (QC) tab adds columns per channel for the event type in view,
+computed in a background thread from the stored figures.
 
-| Column | Share or median | What a high or low value says |
+| Column | What it is | What a high or low value says |
 |---|---|---|
-| `off-band %` | events whose peak frequency, after removing the 1/f background, lies outside the run band | the channel picks up a rhythm outside the band, such as alpha |
-| `low prom. %` | spindles whose spectral peak stands under 10 dB above the 1/f background | mostly poor signal-to-noise (see below) |
-| `at floor %` | events within 0.05 s of the run's minimum duration | the detector is cutting short bursts out of noise |
-| `amp/bg ×` | median event band RMS over the surrounding background RMS | near 1 means events barely stand out |
-| `amp/thr ×` | median detection-signal peak over the detection threshold | 1.0 to 1.2 means most events barely crossed the bar |
+| `Off-band` | share of events whose peak frequency, after removing the 1/f background, lies outside the run band | the channel picks up a rhythm outside the band |
+| `At floor` | share within 0.05 s of the run's minimum duration | many short events at the limit |
+| `Amp / bg` | median event band RMS over the surrounding background RMS | near 1 means events barely stand out |
+| `Amp / thr` | median detection peak over the detection threshold | near 1.0 means most events only just crossed the bar |
+| `Low prom.` | share whose spectral peak stands under 10 dB above the 1/f background | context only; follows signal-to-noise |
 
 To read them:
 
-1. Switch the topography combo to `off-band (% of events)` first. Look for a
-   posterior or regional patch of high values.
-2. Read `low prom. %` second. It is secondary evidence, not a verdict.
-3. Sort by the `checks` column, or choose `checks: hard` or `checks: soft` in
-   the **Outlier** filter.
-4. Select a flagged channel. The right dock names the flagged checks in words.
+1. Choose the **Stage** button for the stages you want, or leave the combined
+   `NREM2 + NREM3` button. It sets the check columns, the flag and the list; the
+   amplitude and density columns follow the Filters dock.
+2. Switch the topography combo to `Off-band share`. Flagged channels carry a
+   ring, and up to 12 carry their name.
+3. Leave **Sort** on `Checks (hard first)`, or set **Show** to `Flagged` to hide
+   the rest. The count line above the table gives the totals.
+4. Read the flagged-channel list under the topography. It states facts only, for
+   example `34 % of spindles off-band · 61 % of those peak at 8–9 Hz`. The
+   most common 1 Hz bin appears when the channel has at least 10 off-band events
+   (the library reports it from 5);
+   hover the row for the share below and above the band. What those peaks are is
+   for you to decide: the list never says.
+5. Select a channel and use the bottom bar: **Open in Epochs**, **Drop channel**,
+   **Mark channel artefact** or **Add to re-detect queue**.
 
-Lead with the off-band share because low prominence tracks signal-to-noise more
-than any off-band rhythm. In synthetic tests, weak genuine spindles under 1 s
-were labelled low-prominence a third to a half of the time. A noisy but
-otherwise fine channel therefore has a high low-prominence share.
+**How a channel is flagged.** There are no fixed thresholds. Each channel is
+compared with the rest of the montage. It is flagged when its off-band or
+at-floor share is well above the montage median, or its median amp/bg or amp/thr
+is well below it: hard when the robust z is above the hard limit, soft when above
+the soft limit (set under **View ▸ Outlier threshold…**), and only if it also
+differs from the median by at least 10 percentage points (shares) or 0.3×
+(ratios) and has at least 20 events. The footer under the table states the rule
+with the current limits. A problem every channel shares produces no flags, so a
+uniform topography also deserves a look, and the Precision report is where it
+shows.
 
-A channel is flagged on a column only when it is a robust outlier against the
-montage (the same `hard` and `soft` z limits as the amplitude flag, set under
-**View ▸ Outlier threshold…**) and also differs from the montage median by at
-least 10 percentage points (shares) or 0.3× (ratios). Channels with fewer than
-20 events with a value show `—` and are never flagged. A problem shared by every
-channel produces no flags, so a uniform topography also deserves a look.
+**Low prominence never flags.** It tracks a channel's signal-to-noise more than
+any off-band rhythm: in synthetic tests, weak genuine spindles under 1 s were
+labelled low-prominence a third to a half of the time. It stays as a column and
+a topography choice for context.
 
-To list the events behind a flagged check, click the flagged phrase in the dock
-line. The Epochs tab then shows a removable chip such as
-`Showing off-band spindles only (117 of 344) ✕`, and `}` and `{` step through
-those events only. `Esc` removes the filter.
+To list the events behind a flagged check, press **Open in Epochs** (it filters
+to the channel's largest-z flagged column). The Epochs tab then shows a removable
+chip such as `Showing off-band spindles only (117 of 344) ✕`, and `}` and `{`
+step through those events only. `Esc` removes the filter.
 
-The existing amplitude `flag`, the `HARD` / `SOFT` counts and **Queue all HARD**
-are unchanged.
-
-When a channel is mostly failing, use **Mark channel artefact** or **Add to
-re-detect queue**, as in [Review EEG events](review-eeg-events.md).
+The amplitude `Amp flag`, and **Queue all HARD**, are unchanged: they use the
+amplitude flag, not the `Checks` flag.
 
 ## Draw a review sample
 
@@ -96,6 +106,11 @@ To draw it in the GUI:
    newest. If the run has no stored figures, the dialog says the sample is
    stratified by region and stage only.
 
+The preview in the dialog comes from the library. To see the allocation from
+Python without writing anything, call `preview_allocation` with the same
+arguments as `draw_review_sample`; it returns the cells with their sizes and
+sample counts.
+
 To draw it from Python:
 
 ```python
@@ -106,6 +121,10 @@ conn = open_write_connection('wonambi/neural_events.db')
 sample_id = draw_review_sample(conn, run_id='<any run of the scope>',
                                event_type='spindle', n_total=120, seed=1)
 ```
+
+To list every stored label on a sample, with the rules that void a stale one,
+call `read_sample_labels(conn, sample_id)`. The valid labels of a reviewer number
+`sample_progress(...)['n_reviewed']`.
 
 `draw_review_sample` raises on an empty scope (including EGI `E<n>` labels,
 which map to region `other`), when the runs of the scope have different
@@ -128,9 +147,15 @@ region needs more.
    event after deciding** on (the default), the next sample event is selected.
 3. Use `}` and `{` to step through all events on the drilled channel, in the
    sample or not; `]` returns to the next undecided sample event.
-4. The region, stage and flag words for an event (for example
-   `parietal · NREM2 · flagged: off-band`) appear in the Event panel only after
-   you have accepted or rejected that event (not after unsure), so they cannot steer the decision.
+4. While you review, the Event panel hides every flag word and keeps every
+   number: `in band` / `OFF BAND`, `low prominence`, `at the floor`, `barely
+   above background`, `meets` / `fails`, and the `flagged: off-band` part of the
+   Sample row. A line says `Labels hidden until you accept or reject this sample
+   event.` The words appear after you accept or reject, and an unsure does not
+   reveal them. This keeps the stratifier from steering your decision.
+   The right dock likewise hides channel-level flags while the sample is
+   active (the flagged-channel list, topography rings and the amplitude flag
+   text); they return on **Exit sample**.
 5. When the last event is decided, the Event panel says so and offers
    **Open precision report** and, if any were unsure, **Revisit the unsure**.
    While you work, the bar shows the time left at your own pace; the done state

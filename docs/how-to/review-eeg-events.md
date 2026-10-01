@@ -22,20 +22,22 @@ that database. By default they already are — detection writes straight into
 
 **Solution:**
 
-1. On the **1 · Channels (QC)** tab, use the **Outlier:** dropdown next to the event type selector
-2. Choose `hard`, `soft`, `dead`, or `ok` to filter the table, or `any` to see every flagged channel
-3. Click a column header to sort (e.g. by density or max peak-to-peak amplitude)
+1. On the **1 · Channels (QC)** tab, open the **Show** combo and choose `Flagged`, `Dropped` or `Dead`, or leave it on `All channels`
+2. Open the **Sort** combo to order the rows, for example `Checks (hard first)`, `Off-band share ↓` or `Amp z ↓`. Clicking a column header also sorts
+3. Use the **Stage** buttons to set the stages the check columns use
 
 !!! tip
-    The count strip above the table (HARD / SOFT / DEAD / OK) always reflects the full, unfiltered channel count for the current event type.
+    The count line above the table (`8 checks flagged · 3 amp flagged · 1 dead`) always counts all channels, whatever Show is set to.
 
 ## Find a Channel That Picks Up the Wrong Thing
 
 **Problem:** You suspect a region detects alpha or noise as events.
 
 **Solution:** On the Channels (QC) tab, switch the topography combo to
-`off-band (% of events)`, then read `low prom. %`, `at floor %`, `amp/bg ×` and
-`amp/thr ×`. Filter the table with `checks: hard` or `checks: soft`. See
+`Off-band share`, then read `At floor`, `Amp / bg` and `Amp / thr`. Set **Show**
+to `Flagged`. Read the flagged-channel list under the topography: it states
+numbers, and you decide what they mean. `Low prom.` is context only and never
+flags. See
 [Validate a detection run](validate-a-detection-run.md#run-the-population-checks-on-the-channels-tab).
 
 Runs detected with 4.5 or earlier show `—` in these columns.
@@ -54,6 +56,24 @@ Runs detected with 4.5 or earlier show `—` in these columns.
 
 [Decide whether an event is genuine](decide-if-an-event-is-genuine.md) gives the
 six checks to apply and the reason codes. A decision never removes the event.
+
+## Show Only the Events You Have Not Decided
+
+**Problem:** You want to see, among a channel's events, only those still undecided.
+
+**Solution:** In the left dock, under REVIEW STATUS, clear the boxes you do not
+want: `unreviewed`, `accepted`, `rejected`, `unsure` (`reviewed` ticks the last
+three). Events that do not pass are drawn faint and skipped by `}` and `{`;
+clicking still selects them. The filter uses your own decisions only and applies
+to the Epochs tab. It resets at every launch.
+
+## Look Up a Key
+
+**Problem:** You forgot a key or the reason numbers.
+
+**Solution:** Press `?` on either tab, or choose **Help ▸ Keyboard shortcuts…**.
+The sheet lists the keys and the reason grid for the event type you are on. The
+top bar also shows the main keys for the current tab.
 
 ## Filter by Event Type, Method, or Frequency Band
 
@@ -93,7 +113,7 @@ These filters apply globally, across both the Channels (QC) and Epochs tabs.
 **Solution:**
 
 1. Select the channel's row in the Channels (QC) table
-2. Click **Drill into epochs ▸**
+2. Click **Open in Epochs** in the bar under the table (for a channel with a `Checks` flag it also filters the events to the flagged check)
 3. On the **2 · Epochs** tab, use **P** / **N** to jump between outlier epochs, or the prev/next buttons to step one epoch at a time
 
 On a cut recording (see

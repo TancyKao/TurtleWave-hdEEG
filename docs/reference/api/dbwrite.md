@@ -102,7 +102,15 @@ A few of these primitives are worth knowing about even outside a detection call:
 - **`event_population_summary(db, run_id, event_type)`** returns one row per
   channel and stage with the shares and medians behind the Channels-tab
   population checks. Each share has its own count beside it, and rows without
-  stored figures return an empty frame.
+  stored figures return an empty frame. `pooled=True` returns one row per
+  channel over all stages (`stage = 'all'`), with shares, medians and quartiles
+  recomputed on the pooled events. Besides `share_off_band` it returns
+  `share_at_ceiling` (events within 0.05 s of the upper duration limit),
+  `n_off_band`, `off_band_below_share` and `off_band_above_share` (where off-band
+  peaks lie against the run band) and `off_band_mode_lo`, `off_band_mode_hi`,
+  `off_band_mode_share` (the most common integer 1 Hz bin of the off-band peaks,
+  NULL with fewer than 5 off-band events; the review GUI list shows it from 10). Low prominence is reported but is
+  context only.
 - **`export_events_to_csv`** gained `exclude_rejected` and `reviewer`, and 20 new
   columns (see [Upgrade to 4.6](../../how-to/upgrade-to-4.6.md#what-changed)).
 

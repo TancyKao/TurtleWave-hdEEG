@@ -159,6 +159,39 @@ revised design is pre-registered and not yet run. No finite-population
 correction is applied, which errs wide. The difference between two domains uses
 the MOVER (square-and-add) interval.
 
+## Why channel flags are relative, and why the list states only facts
+
+The Channels tab flags a channel against the rest of the montage, with the same
+robust z-score as the amplitude flag, and never against a fixed number. A
+fixed cut-off such as "30 % off-band is bad" would hold only for one band, one
+reference and one cohort, and the figures' own cutoffs already come from
+synthetic noise. A relative rule asks a question that does not depend on those
+choices: which channels behave unlike the rest? The price is that a problem
+every channel shares is not flagged. It shows as a uniform topography, and the
+Precision report is where it becomes a number.
+
+Four columns can flag: the off-band share, the at-floor share, the median
+amplitude over background and the median amplitude over threshold. The
+low-prominence share cannot. It mostly tracks a channel's signal-to-noise, so
+flagging on it would flag quiet but healthy channels; it stays on screen as
+context. The at-ceiling share (events within 0.05 s of the upper duration
+limit) is shown in a tooltip and also never flags.
+
+For an off-band channel the flagged-channel list adds where the off-band peaks
+lie: the most common 1 Hz bin, and the shares below and above the run band. The
+list stops there. It does not say that a cluster of peaks at 8 to 9 Hz is
+posterior alpha, or that a neighbour shows the same pattern. Whether an
+off-band rhythm is alpha, an artefact or something real depends on the site,
+the neighbours and the EOG and EMG, which is the reviewer's judgement. A label
+placed by the software would carry authority the numbers do not have.
+
+The same reasoning hides flag words during live sample review. The Event panel
+keeps every number but withholds `OFF BAND`, `low prominence` and similar words
+until the reviewer has accepted or rejected the event, because the sample was
+stratified on those flags and showing them would let the stratifier steer the
+label. Neighbours are labelled by rank (1 is the nearest) rather than distance,
+because EEGLAB electrode coordinates carry no reliable units.
+
 ## What the figures cannot do
 
 - **They are flags, not rejection rules.** No figure should drop an event.

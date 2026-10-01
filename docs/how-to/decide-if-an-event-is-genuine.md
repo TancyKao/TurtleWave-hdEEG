@@ -77,7 +77,9 @@ A genuine spindle usually appears on adjacent channels at about the same time.
 One channel only, with clean neighbours, is suspect but not proof.
 
 Where: the **Neighbours** group under the filtered trace. The target is on top
-and up to six nearest channels follow, with their own detected events shaded.
+(`E75 · target`) and up to six nearest channels follow, labelled by rank
+(`E19 · 1` is the nearest), with their own detected events shaded. No distance
+is shown.
 
 ### 6. Check the EOG and EMG context
 
@@ -85,43 +87,58 @@ A rise in chin EMG, or eye movements, during the burst means an arousal or an
 eye artefact.
 
 Where: the **Physiology** strip under Neighbours. It shows only the kinds of
-channel the file types as EOG, chin EMG or ECG.
+channel the file types as EOG, chin EMG or ECG. Two thin lines on each row mark
+the start and end of the selected event; nothing covers the signal.
 
 ## Record the decision
 
 1. Press `A` to accept when all six agree.
 2. Press `R` to reject, then a digit for the first reason that failed (table
-   below). `Enter` repeats the last reject reason of the session.
+   below), or click a reason button. `Enter` repeats the last reject reason of
+   the session.
 3. Press `U` to mark unsure when the checks conflict. A reason is optional.
-4. Press `C` to type a comment, and `Enter` to save it. Reason `9` (Other)
-   needs a comment.
+4. Press `C` to type a comment, and `Enter` to save it. Reason `0` (Other) needs
+   a comment.
 5. Press `Ctrl+Z` (`Cmd+Z` on macOS) to undo the last decision.
 
-Nothing is written for a reject until you choose a reason.
+Nothing is written for a reject until you choose a reason. You can also click a
+reason button with nothing armed: that arms Reject with that reason
+preselected, and the hint reads `Click {label} again or press Enter to reject
+({label})`. A second click on the same reason, or `Enter`, writes the reject. A
+click on a different reason switches the preselection. `Esc`, selecting another
+event or paging cancels it. A digit with nothing armed does nothing, so a stray
+key never writes. Press `?`
+to see the keys and the reason grid for the event type you are on.
+
+!!! note "While you review a sample, flag words are hidden"
+    In live sample review the Event panel keeps the numbers but hides words such
+    as `OFF BAND` and `low prominence` until you accept or reject the event. Judge
+    from the numbers and the traces.
 
 ## Reason codes and their RA categories
 
+The grid depends on the event type. `0` is always Other.
+
+| Key (spindles) | Key (slow waves, K-complexes) | Reason code | Meaning | Category when rejected |
+|---|---|---|---|---|
+| `1` | `1` | `artefact` | movement, electrode or muscle | FP-artifact |
+| `2` | `2` | `eye-movement` | the deflection follows the EOG | FP-artifact |
+| `3` | `3` | `not-in-raw` | not visible in the raw trace | FP-other |
+| `4` | | `filter-ringing` | step or spike in the raw trace | FP-other |
+| `5` | | `off-band` | outside the frequency band | FP-other |
+| `6` | `4` | `too-short` | too short for the event type | FP-other |
+| `7` | `5` | `arousal` | EEG speed-up, often with EMG | FP-other |
+| `8` | `6` | `single-channel` | only on this channel | FP-other |
+| | `7` | `not-isolated` | not isolated from other waves | FP-other |
+| | `8` | `wrong-morphology` | wrong shape for the event type | FP-other |
+| `0` | `0` | `other` | described in the comment | FP-other |
+
 Each decision maps to one of four categories of the research-assistant (RA)
 protocol. `turtlewave_hdEEG.dbwrite.review_category(decision, reason)` returns
-the category.
-
-| Key | Reason code | Meaning | Category when rejected |
-|---|---|---|---|
-| `1` | `artefact` | movement, electrode or muscle | FP-artifact |
-| `2` | `arousal` | EEG speed-up, often with EMG | FP-other |
-| `3` | `too-short` | too short | FP-other |
-| `4` | `filter-ringing` | step or spike in the raw trace | FP-other |
-| `5` | `eye-movement` | eye movement | FP-artifact |
-| `6` | `not-in-raw` | not visible in the raw trace | FP-other |
-| `7` | `off-band` | outside the frequency band | FP-other |
-| `8` | `single-channel` | only on this channel | FP-other |
-| `9` | `other` | described in the comment | FP-other |
-| combo only | `not-isolated` | not isolated from other waves | FP-other |
-| combo only | `wrong-morphology` | wrong shape for the event type | FP-other |
-
-The other decisions map as follows: accept is TP (true positive), unsure is
-Ambiguous, and a reject with no reason is FP-other. Posterior alpha without an
-arousal is `off-band`, not `arousal`.
+the category. Accept is TP (true positive), unsure is Ambiguous, and a reject
+with no reason is FP-other. Posterior alpha without an arousal is `off-band`,
+not `arousal`. A stored reason with no button in the current grid still shows
+on the `Current` line.
 
 ## Decisions are evidence, not deletions
 
