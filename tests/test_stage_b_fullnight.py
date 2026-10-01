@@ -19,6 +19,7 @@ any test fails.
 
 import json
 import logging
+import gc
 import os
 import shutil
 import sqlite3
@@ -60,6 +61,7 @@ class Workdir:
         return self.path
 
     def __exit__(self, *exc):
+        gc.collect()   # Windows: drop datasets that still map files
         shutil.rmtree(self.path, ignore_errors=True)
 
 
@@ -604,7 +606,11 @@ def test_cycles_unavailable_recorded():
         skips = [m for m in log.messages(logging.INFO) if 'unavailable' in m]
         assert results == [{'2022': [], '1979': []}, {}, {}], results
         assert len(errors) == 1 and len(skips) == 2, (errors, skips)
-        assert dbwrite.subject_cycles_unavailable(sqlite3.connect(db), 'sub-e')
+        conn = sqlite3.connect(db)
+        try:
+            assert dbwrite.subject_cycles_unavailable(conn, 'sub-e')
+        finally:
+            conn.close()
         print(f"   [ok] first run: one ERROR; later runs: '{skips[0][:70]}...'")
 
 

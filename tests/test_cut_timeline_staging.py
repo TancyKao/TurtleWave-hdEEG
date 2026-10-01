@@ -33,6 +33,7 @@ if any test fails.
 
 import json
 import logging
+import gc
 import os
 import shutil
 import sys
@@ -66,6 +67,7 @@ class Workdir:
         return self.path
 
     def __exit__(self, *exc):
+        gc.collect()   # Windows: drop datasets that still map files
         shutil.rmtree(self.path, ignore_errors=True)
 
 

@@ -24,6 +24,12 @@ import sys
 import tempfile
 import types
 
+# Windows consoles and CI pipes default to cp1252, which cannot encode the
+# flag glyph and middle dots these checks print; replace rather than crash.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(errors='replace')
+
 REAL_STDOUT = sys.stdout          # captured BEFORE any TurtleWaveGUI exists
 
 

@@ -53,73 +53,92 @@ jobs:
           python -c "import frontend.turtlewave_gui; import frontend.eeg_review_gui; print('GUI modules OK')"
 
       - name: Run smoke tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_turtlewave.py
 
       - name: Run frontend stage-token tests (offscreen)
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_frontend_stage_tokens.py
 
       - name: Run reject-types GUI acceptance tests (offscreen)
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_reject_types_gui.py
 
       - name: Run slow-wave amplitude-floor tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_sw_amplitude_floor.py
 
       - name: Run annotation I/O tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_annotation_io.py
 
       - name: Run annotation event-import tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_annotation_events.py
 
       - name: Run SQLite journal-mode tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_db_journal.py
 
       - name: Run cycle connection-reuse tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_cycle_connection_reuse.py
 
       - name: Run cycle re-run regression tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_cycle_rerun.py
 
       - name: Run database scope-guard tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_db_scope_guards.py
 
       - name: Run EEGLAB file-layout tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_eeglab_layouts.py
 
       - name: Run cut-recording timeline and staging tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_cut_timeline_staging.py
 
       - name: Run electrode region tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_region_from_label.py
 
       - name: Run interpolated-channel tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_interp_channels.py
 
       - name: Run full-night cycle tests
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_stage_b_fullnight.py
 
       - name: Run frontend channel-type tests (offscreen)
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_frontend_channel_types.py
 
       - name: Run review GUI variable-epoch tests (offscreen)
+        if: ${{ !cancelled() }}
         run: |
           python tests/test_review_gui_variable_epochs.py
 
       - name: Run cycle detection unit tests
+        if: ${{ !cancelled() }}
         run: |
+          python -m pip install "pytest>=7"
           python -m pytest tests/test_detect_cycles.py -q
