@@ -18,34 +18,59 @@ import pandas as pd
 # Reasons
 # ---------------------------------------------------------------------------
 
-#: ``(key, token, combo label, short label for status lines, tooltip)``.
-#: Keys 1-9 follow the UX spec's numbering; the library vocabulary
-#: (``dbwrite.REVIEW_REASONS``, Method Spec M7) has two more tokens,
-#: ``not-isolated`` and ``wrong-morphology``, which have no digit and are
-#: picked from the combo. ``arousal`` replaced the spec's ``arousal-alpha``
-#: (M7: posterior alpha without an arousal is ``off-band``).
-REASONS = (
-    ('1', 'artefact', 'Artefact (movement, electrode, muscle)', 'artefact',
-     'Rejects this event only. To also remove the time from the density '
-     'denominator, brush it on the trace and use Mark as artefact.'),
-    ('2', 'arousal', 'Arousal (EEG speed-up, often with EMG)', 'arousal', ''),
-    ('3', 'too-short', 'Too short', 'too short', ''),
-    ('4', 'filter-ringing', 'Filter ringing (step or spike in raw)',
-     'filter ringing', ''),
-    ('5', 'eye-movement', 'Eye movement', 'eye movement', ''),
-    ('6', 'not-in-raw', 'Not visible in the raw trace',
-     'not visible in the raw trace', ''),
-    ('7', 'off-band', 'Outside the frequency band',
-     'outside the frequency band', ''),
-    ('8', 'single-channel', 'Only on this channel', 'only on this channel', ''),
-    ('9', 'other', 'Other (describe in the comment)', 'other', ''),
-    ('', 'not-isolated', 'Not isolated from other waves', 'not isolated', ''),
-    ('', 'wrong-morphology', 'Wrong shape for this event type',
-     'wrong shape', ''),
-)
-REASON_BY_DIGIT = {r[0]: r[1] for r in REASONS if r[0]}
-REASON_SHORT = {r[1]: r[3] for r in REASONS}
-REASON_LABEL = {r[1]: r[2] for r in REASONS}
+#: Grid label of every stored reason token (``dbwrite.REVIEW_REASONS``, 11
+#: values, Method Spec M7). Used on the Current line and in the Precision
+#: report, so a stored reason is shown even where the event type's grid has
+#: no button for it.
+REASON_LABEL = {
+    'artefact': 'Artefact', 'eye-movement': 'Eye movement',
+    'not-in-raw': 'Not in raw', 'filter-ringing': 'Filter ringing',
+    'off-band': 'Off-band', 'too-short': 'Too short', 'arousal': 'Arousal',
+    'single-channel': 'Single channel', 'not-isolated': 'Not isolated',
+    'wrong-morphology': 'Wrong morphology', 'other': 'Other',
+}
+#: Lower-case words for status lines (``Rejected … (arousal)``).
+REASON_SHORT = {t: l.lower() for t, l in REASON_LABEL.items()}
+REASON_TIP = {
+    'artefact': ('Movement, electrode or muscle artefact. Rejects this event '
+                 'only; to also remove the time from the density denominator, '
+                 'brush it on the trace and use Mark as artefact.'),
+    'eye-movement': 'The deflection follows the EOG.',
+    'not-in-raw': 'Not visible in the raw trace.',
+    'filter-ringing': 'Ringing from a step or spike in the raw trace.',
+    'off-band': "The rhythm is outside the run's frequency band.",
+    'too-short': 'Too short to count as this event.',
+    'arousal': 'Part of an arousal: EEG speed-up, often with EMG.',
+    'single-channel': 'Only on this channel, not on its neighbours.',
+    'not-isolated': 'Not isolated from other waves.',
+    'wrong-morphology': 'Wrong shape for this event type.',
+    'other': 'Describe the reason in the comment (required).',
+}
+#: Reason grids (UX spec revision 3, section 5): ``(digit, token)`` in
+#: button order, two columns row-major; ``other`` is always ``0`` and last;
+#: ``9`` is unused and ignored.
+_GRID_SPINDLE = (('1', 'artefact'), ('2', 'eye-movement'),
+                 ('3', 'not-in-raw'), ('4', 'filter-ringing'),
+                 ('5', 'off-band'), ('6', 'too-short'), ('7', 'arousal'),
+                 ('8', 'single-channel'), ('0', 'other'))
+_GRID_SLOW = (('1', 'artefact'), ('2', 'eye-movement'), ('3', 'not-in-raw'),
+              ('4', 'too-short'), ('5', 'arousal'), ('6', 'single-channel'),
+              ('7', 'not-isolated'), ('8', 'wrong-morphology'),
+              ('0', 'other'))
+
+
+def reason_grid(event_type):
+    """``[(digit, token, label, tooltip)]`` of the event type's grid."""
+    grid = _GRID_SPINDLE if str(event_type) == 'spindle' else _GRID_SLOW
+    return [(d, t, REASON_LABEL[t], REASON_TIP[t]) for d, t in grid]
+
+
+def digit_reason(event_type, digit):
+    """Token for a digit key in the event type's grid, or ``None``
+    (``9`` and anything else is ignored)."""
+    return dict((d, t) for d, t, _l, _tip in reason_grid(event_type)).get(
+        str(digit))
+
 
 DECISION_PAST = {'accept': 'accepted', 'reject': 'rejected',
                  'unsure': 'unsure'}
@@ -184,17 +209,21 @@ def fmt_when(iso, today=None):
 
 
 # ---------------------------------------------------------------------------
-# Population checks (spec section 1)
+# Population checks (UX spec revision 3, section 1)
 # ---------------------------------------------------------------------------
 
 #: ``column -> (table header, topography combo label)``.
 CHECK_COLUMNS = {
-    'pct_off_band': ('off-band %', 'off-band (% of events)'),
-    'pct_low_prom': ('low prom. %', 'low prominence (% of events)'),
-    'pct_dur_floor': ('at floor %', 'at the duration floor (% of events)'),
-    'med_amp_ratio': ('amp/bg ×', 'amp. vs background (median ×)'),
-    'med_thresh_ratio': ('amp/thr ×', 'amp. vs threshold (median ×)'),
+    'pct_off_band': ('Off-band', 'Off-band share'),
+    'pct_low_prom': ('Low prom.', 'Low-prominence share (context)'),
+    'pct_dur_floor': ('At floor', 'At-floor share'),
+    'med_amp_ratio': ('Amp / bg', 'Amp vs background (median)'),
+    'med_thresh_ratio': ('Amp / thr', 'Amp vs threshold (median)'),
 }
+#: The four columns that can set ``checks_flag``. Low prominence is context
+#: only (user decision, revision 3): it follows a channel's signal-to-noise.
+FLAG_COLUMNS = ('pct_off_band', 'pct_dur_floor', 'med_amp_ratio',
+                'med_thresh_ratio')
 SHARE_COLUMNS = ('pct_off_band', 'pct_low_prom', 'pct_dur_floor')
 RATIO_COLUMNS = ('med_amp_ratio', 'med_thresh_ratio')
 #: ``value column -> the n column it is computed over``.
@@ -204,6 +233,7 @@ CHECK_N = {'pct_off_band': 'n_freq', 'pct_low_prom': 'n_prom',
 CHECK_MIN_N = 20          #: fewer events with a value -> '—', never flagged
 SHARE_GUARD = 10.0        #: percentage points from the montage median
 RATIO_GUARD = 0.3         #: × from the montage median (provisional)
+MODE_MIN_OFF_BAND = 10    #: off-band events needed for the mode-bin clause
 
 #: Methods whose stored detector peak and threshold are one signal.
 _RATIO_METHODS_FALLBACK = ('Moelle2011', 'Ferrarelli2007', 'Nir2011',
@@ -213,12 +243,17 @@ NOT_RECORDED_RUN = ('Event checks are not recorded for this run (detected '
                     'with 4.5 or earlier). Figures are stored by detection '
                     'runs made with 4.6 or later; re-detect this run to get '
                     'them.')
+NOT_RECORDED_LIST = ('Checks not recorded for this run (detected with 4.5 or '
+                     'earlier).')
 THRESHOLD_NOT_RECORDED = ('Threshold not recorded for this run (detected '
                           'with 4.5 or earlier)')
 THRESHOLD_NOT_RECORDED_TIP = ('Re-run detection with TurtleWave 4.6 or later '
                               'to record the detector\'s thresholds. Nothing '
                               'about this event is wrong.')
 TOO_FEW_TIP = 'Too few events on this channel to judge (n = {n}).'
+STAGE_TOOLTIP = ('Stages used for the check columns, the checks flag and the '
+                 'flagged-channel list. Density and amplitude columns follow '
+                 'the Filters dock.')
 
 
 def method_has_ratio(method):
@@ -265,68 +300,59 @@ def no_ratio_note(method):
             f'are not the same signal.')
 
 
-def pool_population(summary, medians=None):
-    """Per-channel population figures from ``event_population_summary``.
+#: Columns of :func:`population_from_summary`.
+POP_COLUMNS = ['channel', 'n', 'n_no_peak', 'n_freq', 'pct_off_band',
+               'n_prom', 'pct_low_prom', 'n_bound', 'pct_dur_floor',
+               'pct_at_ceiling', 'n_amp', 'med_amp_ratio', 'n_thresh',
+               'med_thresh_ratio', 'n_off_band', 'off_band_below_share',
+               'off_band_above_share', 'off_band_mode_lo', 'off_band_mode_hi',
+               'off_band_mode_share']
 
-    Shares are pooled over the stages exactly (``sum(share x n) / sum(n)``,
-    each over its own ``n_*`` denominator). Medians cannot be pooled from
-    per-stage medians, so they come from ``medians`` (``channel,
-    med_amp_ratio, med_thresh_ratio``, computed over the channel's events);
-    without it they fall back to the stage median of the largest stage.
+
+def population_from_summary(summary, stage=None):
+    """Per-channel check values from ``dbwrite.event_population_summary``.
 
     Parameters
     ----------
-    summary : pandas.DataFrame or None
-        Output of ``dbwrite.event_population_summary``.
-    medians : pandas.DataFrame or None, optional
-        ``channel, med_amp_ratio, med_thresh_ratio`` over each channel's events.
-        Default ``None``.
+    summary : pandas.DataFrame
+        Rows of the summary: per channel x stage, or the ``pooled=True``
+        frame (stage ``'all'``).
+    stage : str or None, optional
+        Keep only this stage's rows. ``None`` keeps every row and expects
+        one row per channel (the pooled frame).
 
     Returns
     -------
     pandas.DataFrame
-        ``channel, n, n_no_peak, n_freq, pct_off_band, n_prom, pct_low_prom,
-        n_bound, pct_dur_floor, n_amp, med_amp_ratio, n_thresh,
-        med_thresh_ratio``; shares in percent.
+        :data:`POP_COLUMNS`; shares in percent, medians as stored.
     """
-    cols = ['channel', 'n', 'n_no_peak', 'n_freq', 'pct_off_band', 'n_prom',
-            'pct_low_prom', 'n_bound', 'pct_dur_floor', 'n_amp',
-            'med_amp_ratio', 'n_thresh', 'med_thresh_ratio']
     if summary is None or len(summary) == 0:
-        return pd.DataFrame(columns=cols)
-    s = summary.copy()
+        return pd.DataFrame(columns=POP_COLUMNS)
+    s = summary if stage is None else summary[summary['stage'] == stage]
+    if s.empty:
+        return pd.DataFrame(columns=POP_COLUMNS)
+    s = s.drop_duplicates('channel')
+
+    def num(c):
+        return pd.to_numeric(s[c], errors='coerce') if c in s.columns \
+            else pd.Series(np.nan, index=s.index)
+
+    out = pd.DataFrame({'channel': s['channel'].astype(str).values})
     for c in ('n', 'n_near_splice', 'n_freq', 'n_prom', 'n_bound', 'n_amp',
-              'n_thresh'):
-        s[c] = pd.to_numeric(s[c], errors='coerce').fillna(0)
-    for share, n in (('share_off_band', 'n_freq'),
-                     ('share_low_prom', 'n_prom'),
-                     ('share_at_floor', 'n_bound')):
-        s['_w_' + share] = pd.to_numeric(s[share], errors='coerce').fillna(0) \
-            * s[n]
-    g = s.groupby('channel', sort=True)
-    out = g[['n', 'n_near_splice', 'n_freq', 'n_prom', 'n_bound', 'n_amp',
-             'n_thresh']].sum()
-    for share, n, col in (('share_off_band', 'n_freq', 'pct_off_band'),
-                          ('share_low_prom', 'n_prom', 'pct_low_prom'),
-                          ('share_at_floor', 'n_bound', 'pct_dur_floor')):
-        w = g['_w_' + share].sum()
-        out[col] = np.where(out[n] > 0, 100.0 * w / out[n].where(out[n] > 0),
-                            np.nan)
-    out['n_no_peak'] = (out['n'] - out['n_near_splice'] - out['n_freq']).clip(
-        lower=0)
-    if medians is not None and len(medians):
-        m = medians.set_index('channel')
-        out['med_amp_ratio'] = m['med_amp_ratio'].reindex(out.index)
-        out['med_thresh_ratio'] = m['med_thresh_ratio'].reindex(out.index)
-    else:
-        big = s.sort_values('n').groupby('channel').tail(1).set_index('channel')
-        out['med_amp_ratio'] = big['amp_ratio_median'].reindex(out.index)
-        out['med_thresh_ratio'] = big['thresh_ratio_median'].reindex(out.index)
-    out = out.reset_index()
-    for c in ('n', 'n_no_peak', 'n_freq', 'n_prom', 'n_bound', 'n_amp',
-              'n_thresh'):
-        out[c] = out[c].astype(int)
-    return out[cols]
+              'n_thresh', 'n_off_band'):
+        out[c] = num(c).fillna(0).astype(int).values
+    out['n_no_peak'] = (out['n'] - out['n_near_splice']
+                        - out['n_freq']).clip(lower=0)
+    out['pct_off_band'] = (100.0 * num('share_off_band')).values
+    out['pct_low_prom'] = (100.0 * num('share_low_prom')).values
+    out['pct_dur_floor'] = (100.0 * num('share_at_floor')).values
+    out['pct_at_ceiling'] = (100.0 * num('share_at_ceiling')).values
+    out['med_amp_ratio'] = num('amp_ratio_median').values
+    out['med_thresh_ratio'] = num('thresh_ratio_median').values
+    for c in ('off_band_below_share', 'off_band_above_share',
+              'off_band_mode_lo', 'off_band_mode_hi', 'off_band_mode_share'):
+        out[c] = num(c).values
+    return out[POP_COLUMNS].sort_values('channel').reset_index(drop=True)
 
 
 def _one_sided_z(x, higher_is_bad):
@@ -335,7 +361,7 @@ def _one_sided_z(x, higher_is_bad):
     z = np.zeros(len(x))
     ok = np.isfinite(x)
     if ok.sum() < 3:
-        return z, np.nan
+        return z, (float(np.median(x[ok])) if ok.any() else np.nan)
     v = x[ok]
     med = float(np.median(v))
     scale = 1.4826 * float(np.median(np.abs(v - med)))
@@ -352,23 +378,14 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
                      ratio_allowed=True):
     """Add ``z_*``, ``flag_*``, ``checks_flag`` and montage medians.
 
-    A column is flagged for a channel when its one-sided robust z exceeds
-    ``soft_z`` / ``hard_z`` AND the difference from the montage median is at
-    least :data:`SHARE_GUARD` points (shares) or :data:`RATIO_GUARD` (ratios).
-    Channels with fewer than :data:`CHECK_MIN_N` events with a value get NaN
-    for that column (shown ``—``) and no flag. ``pct_low_prom`` is spindle
-    only; ``med_thresh_ratio`` only when the method allows a ratio.
-
-    Parameters
-    ----------
-    pop : pandas.DataFrame
-        Output of :func:`pool_population`.
-    hard_z, soft_z : float, optional
-        Robust-z limits of a hard and a soft flag (defaults 3.5 and 2.0).
-    event_type : str, optional
-        ``'spindle'`` keeps the low-prominence column. Default ``'spindle'``.
-    ratio_allowed : bool, optional
-        False when the method allows no amp/threshold ratio. Default True.
+    The four :data:`FLAG_COLUMNS` are flagged on a one-sided robust z above
+    ``soft_z`` / ``hard_z`` (high is bad for the two shares, low for the two
+    ratios) AND a difference from the montage median of at least
+    :data:`SHARE_GUARD` points / :data:`RATIO_GUARD`; channels with fewer
+    than :data:`CHECK_MIN_N` events with a value get NaN (shown ``—``) and
+    no flag. ``pct_low_prom`` (spindles only) keeps its value and montage
+    median and never flags; ``med_thresh_ratio`` is NaN when the method
+    allows no ratio.
 
     Returns
     -------
@@ -377,7 +394,6 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
     """
     df = pop.copy()
     medians = {}
-    df['checks_flag'] = ''
     reasons = [[] for _ in range(len(df))]
     for col in CHECK_COLUMNS:
         n = df[CHECK_N[col]].to_numpy(dtype=float) if len(df) else np.array([])
@@ -392,135 +408,251 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
         higher_bad = col in SHARE_COLUMNS
         z, med = _one_sided_z(vals, higher_bad)
         medians[col] = med
-        guard = SHARE_GUARD if higher_bad else RATIO_GUARD
-        diff = np.abs(vals - med) if np.isfinite(med) else np.zeros(len(df))
         flag = np.array([''] * len(df), dtype=object)
-        ok = np.isfinite(vals) & (diff >= guard - 1e-9)
-        flag[ok & (z > soft_z)] = 'soft'
-        flag[ok & (z > hard_z)] = 'hard'
+        if col in FLAG_COLUMNS:
+            guard = SHARE_GUARD if higher_bad else RATIO_GUARD
+            diff = (np.abs(vals - med) if np.isfinite(med)
+                    else np.zeros(len(df)))
+            ok = np.isfinite(vals) & (diff >= guard - 1e-9)
+            flag[ok & (z > soft_z)] = 'soft'
+            flag[ok & (z > hard_z)] = 'hard'
+            for i, f in enumerate(flag):
+                if f:
+                    reasons[i].append(f"{col} z={z[i]:.1f}")
+        else:
+            z = np.zeros(len(df))       # context only: never tinted
         df['z_' + col] = z
         df['flag_' + col] = flag
-        for i, f in enumerate(flag):
-            if f:
-                reasons[i].append(f"{col} z={z[i]:.1f}")
     if len(df):
-        fl = df[['flag_' + c for c in CHECK_COLUMNS]].to_numpy()
+        fl = df[['flag_' + c for c in FLAG_COLUMNS]].to_numpy()
         df['checks_flag'] = np.where((fl == 'hard').any(axis=1), 'hard',
                                      np.where((fl == 'soft').any(axis=1),
                                               'soft', ''))
+        df['checks_z'] = df[['z_' + c for c in FLAG_COLUMNS]].max(axis=1)
+    else:
+        df['checks_flag'] = []
+        df['checks_z'] = []
     df['checks_reasons'] = ['; '.join(r) for r in reasons]
     return df, medians
 
 
 def fmt_check(col, v):
-    """Cell text of one check column: ``34 %`` or ``1.8×``; ``—`` missing.
-
-    Parameters
-    ----------
-    col : str
-        A key of :data:`CHECK_COLUMNS`.
-    v : float or None
-        The value.
-
-    Returns
-    -------
-    str
-        The cell text.
-    """
+    """Cell text of one check column: ``34 %`` or ``1.8×``; ``—`` missing."""
     f = _finite(v)
     if f is None:
         return '—'
-    if col in SHARE_COLUMNS:
+    if col in SHARE_COLUMNS or col == 'pct_at_ceiling':
         return f"{f:.0f} %"
     return f"{f:.1f}×"
 
 
-_PHRASE = {
-    'pct_off_band': '{p} % of {events} off-band',
-    'pct_low_prom': '{p} % low prominence',
-    'pct_dur_floor': '{p} % at the duration floor',
-    'med_amp_ratio': 'amplitude {r}× background (median)',
-    'med_thresh_ratio': 'amplitude {r}× threshold (median)',
-}
+_FACT_SHORT = {'pct_off_band': 'off-band {v}', 'pct_dur_floor': 'at floor {v}',
+               'med_amp_ratio': 'amp/bg {v}', 'med_thresh_ratio': 'amp/thr {v}'}
 
 
-def dock_check_items(row, event_type, medians, limit=3):
-    """Flagged phrases for the dock line, hard first then by z, at most 3.
-
-    Parameters
-    ----------
-    row : pandas.Series or dict
-        The channel's row from :func:`population_flags`.
-    event_type : str
-        Event type, for the plural in the phrase.
-    medians : dict
-        Montage median per check column.
-    limit : int, optional
-        Most items returned. Default 3.
-
-    Returns
-    -------
-    list of dict
-        ``key`` (check column), ``text``, ``severity`` ('hard'|'soft'),
-        ``tooltip``.
-    """
-    items = []
-    for col in CHECK_COLUMNS:
-        f = str(row.get('flag_' + col, '') or '')
-        if f not in ('hard', 'soft'):
-            continue
-        v = _finite(row.get(col))
-        if v is None:
-            continue
-        text = _PHRASE[col].format(
-            p=f"{v:.0f}", r=f"{v:.1f}",
-            events=EVENT_PLURAL.get(event_type, event_type))
-        med = medians.get(col)
-        mtxt = fmt_check(col, med)
-        items.append({'key': col, 'text': text, 'severity': f,
-                      'z': float(row.get('z_' + col, 0) or 0),
-                      'tooltip': f"Montage median {mtxt}; robust z "
-                                 f"{float(row.get('z_' + col, 0) or 0):.1f}."})
-    items.sort(key=lambda d: (d['severity'] != 'hard', -d['z']))
-    return items[:limit]
+def flagged_columns(row):
+    """The row's flagged columns, hard before soft, then by z descending."""
+    cols = [c for c in FLAG_COLUMNS
+            if str(row.get('flag_' + c, '') or '') in ('hard', 'soft')]
+    return sorted(cols, key=lambda c: (row.get('flag_' + c) != 'hard',
+                                       -float(row.get('z_' + c) or 0)))
 
 
-DOCK_HINT = ('Most events failing? Drop channel. Run band wrong for this site? '
-             'Add to re-detect queue. Unsure? Click a figure to look at those '
-             'events.')
+def top_flag_column(row):
+    """The flagged column with the largest z, or ``None``."""
+    cols = [c for c in FLAG_COLUMNS
+            if str(row.get('flag_' + c, '') or '') in ('hard', 'soft')]
+    if not cols:
+        return None
+    return max(cols, key=lambda c: float(row.get('z_' + c) or 0))
 
 
-def dock_check_line(channel, items, recorded=True):
-    """Plain text of the dock line (the widget renders the same as links).
+def checks_cell(row, recorded=True):
+    """``Checks`` cell: ``× HARD · off-band 60 %``, ``—``, ``— dead channel``."""
+    if str(row.get('flag', '') or '') == 'dead':
+        return '— dead channel'
+    fl = str(row.get('checks_flag', '') or '')
+    if not recorded or fl not in ('hard', 'soft'):
+        return '—'
+    col = top_flag_column(row)
+    badge = '× HARD' if fl == 'hard' else '▲ SOFT'
+    return f"{badge} · " + _FACT_SHORT[col].format(
+        v=fmt_check(col, row.get(col)))
 
-    Parameters
-    ----------
-    channel : str
-        Channel name.
-    items : list of dict
-        Output of :func:`dock_check_items`.
-    recorded : bool, optional
-        False when the run stored no figures. Default True.
 
-    Returns
-    -------
-    str
-        The line text.
-    """
-    if not recorded:
-        return f"{channel}: event checks not recorded for this run"
-    if not items:
-        return f"{channel}: event checks in line with the rest of the montage"
-    return f"{channel}: " + ' · '.join(d['text'] for d in items)
+def checks_tooltip(row, medians):
+    """One line per flagged column: header, value, montage median, z."""
+    lines = []
+    for col in flagged_columns(row):
+        lines.append(f"{CHECK_COLUMNS[col][0]} {fmt_check(col, row.get(col))}"
+                     f" · montage median {fmt_check(col, medians.get(col))}"
+                     f" · robust z {float(row.get('z_' + col) or 0):.1f}")
+    return '\n'.join(lines)
+
+
+def at_floor_tooltip(row, bounds):
+    """``At floor`` cell tooltip (floor and ceiling shares)."""
+    lo, hi = (bounds or (None, None))
+    p = fmt_check('pct_dur_floor', row.get('pct_dur_floor'))
+    mn = f"{lo:g} s" if lo is not None else 'not recorded'
+    if hi is None:
+        return (f"At the floor ({mn}): {p} · no upper duration limit for "
+                f"this run.")
+    q = fmt_check('pct_at_ceiling', row.get('pct_at_ceiling'))
+    n = int(row.get('n_bound') or 0)
+    return (f"At the floor ({mn}): {p} · at the ceiling ({hi:g} s): {q} · "
+            f"{n} events with a duration bound.")
+
+
+def flagged_facts(row, event_type, medians, min_dur=None):
+    """Facts of one flagged channel, hard first (spec section 1)."""
+    ev = EVENT_PLURAL.get(event_type, event_type)
+    out = []
+    for col in flagged_columns(row):
+        v = row.get(col)
+        if col == 'pct_off_band':
+            fact = f"{_finite(v):.0f} % of {ev} off-band"
+            if (int(row.get('n_off_band') or 0) >= MODE_MIN_OFF_BAND
+                    and _finite(row.get('off_band_mode_share')) is not None
+                    and _finite(row.get('off_band_mode_lo')) is not None):
+                fact += (f" · {100 * float(row['off_band_mode_share']):.0f} % "
+                         f"of those peak at {float(row['off_band_mode_lo']):g}"
+                         f"–{float(row['off_band_mode_hi']):g} Hz")
+        elif col == 'pct_dur_floor':
+            fact = (f"{_finite(v):.0f} % of {ev} at the duration floor"
+                    + (f" ({min_dur:g} s)" if min_dur is not None else ''))
+        elif col == 'med_amp_ratio':
+            fact = (f"median amplitude {_finite(v):.1f}× background (montage "
+                    f"median {fmt_check(col, medians.get(col))})")
+        else:
+            fact = (f"median amplitude {_finite(v):.1f}× threshold (montage "
+                    f"median {fmt_check(col, medians.get(col))})")
+        out.append(fact)
+    return out
+
+
+def flagged_tooltip(row):
+    """Off-band row tooltip: below / above shares and the mode bin."""
+    if 'pct_off_band' not in flagged_columns(row):
+        return ''
+    b, a = (_finite(row.get(k)) for k in ('off_band_below_share',
+                                          'off_band_above_share'))
+    text = (f"Off-band peaks below the band: {'—' if b is None else f'{100 * b:.0f} %'}"
+            f" · above the band: {'—' if a is None else f'{100 * a:.0f} %'}.")
+    lo, hi, m = (_finite(row.get(k)) for k in ('off_band_mode_lo',
+                                               'off_band_mode_hi',
+                                               'off_band_mode_share'))
+    if lo is not None and m is not None:
+        text += (f" Most common 1 Hz bin: {lo:g}–{hi:g} Hz ({100 * m:.0f} % "
+                 f"of off-band events).")
+    return text
+
+
+def footer_text(hard_z, soft_z, event_type='spindle', ratio=True):
+    """Footer rule text from the live z limits (spec section 1)."""
+    ratios = 'amp/bg or amp/thr' if ratio else 'amp/bg'
+    text = ("Checks compare each channel with the rest of the montage. A "
+            "channel is flagged when its off-band or at-floor share is well "
+            f"above the montage median, or its median {ratios} is well below "
+            f"it: hard when the robust z is above {hard_z:.1f}, soft above "
+            f"{soft_z:.1f}, and only if the difference is at least 10 "
+            "percentage points (shares) or 0.3× (ratios) and the channel has "
+            "at least 20 events.")
+    if event_type == 'spindle':
+        text += " Low prominence is shown for context and never flags."
+    text += (" A problem every channel shares is not flagged; see the "
+             "Precision report.")
+    return text
+
+
+def header_count_line(qc, recorded=True, sample=False):
+    """``8 checks flagged · 3 amp flagged · 1 dead`` (+ `` · n dropped``);
+    ``— checks flagged`` during live sample review."""
+    def count(mask):
+        return int(mask.sum()) if len(qc) else 0
+    amp = count(qc['flag'].isin(['hard', 'soft'])) if len(qc) else 0
+    dead = count(qc['flag'] == 'dead') if len(qc) else 0
+    dropped = count(qc['verdict'].isin(['drop', 'channel_artefact'])) \
+        if len(qc) and 'verdict' in qc.columns else 0
+    if sample:
+        head = '— checks flagged'
+    elif recorded:
+        chk = count(qc['checks_flag'].isin(['hard', 'soft'])) \
+            if len(qc) and 'checks_flag' in qc.columns else 0
+        head = f"{chk} checks flagged"
+    else:
+        head = 'checks not recorded'
+    text = f"{head} · {amp} amp flagged · {dead} dead"
+    if dropped:
+        text += f" · {dropped} dropped"
+    return text
+
+
+SHOW_ITEMS = ('All channels', 'Flagged', 'Dropped', 'Dead')
+
+
+def show_mask(qc, item, sample=False):
+    """Rows of the QC frame kept by a Show item (``Flagged`` counts the
+    amplitude flag only during live sample review)."""
+    if not len(qc):
+        return pd.Series([], dtype=bool)
+    if item == 'Flagged' and sample:
+        return qc['flag'].isin(['hard', 'soft'])
+    if item == 'Flagged':
+        chk = qc['checks_flag'] if 'checks_flag' in qc.columns else ''
+        return qc['flag'].isin(['hard', 'soft']) | pd.Series(
+            chk, index=qc.index).isin(['hard', 'soft'])
+    if item == 'Dropped':
+        return qc['verdict'].isin(['drop', 'channel_artefact']) \
+            if 'verdict' in qc.columns else pd.Series(False, index=qc.index)
+    if item == 'Dead':
+        return qc['flag'] == 'dead'
+    return pd.Series(True, index=qc.index)
+
+
+#: Sort combo: ``label -> (column key, descending)``; ``None`` key is the
+#: checks order (hard, soft, none; then by largest check z).
+SORT_ITEMS = (
+    ('Checks (hard first)', None, True),
+    ('Off-band share ↓', 'pct_off_band', True),
+    ('At-floor share ↓', 'pct_dur_floor', True),
+    ('Amp / bg ↑', 'med_amp_ratio', False),
+    ('Amp / thr ↑', 'med_thresh_ratio', False),
+    ('Low prominence share ↓', 'pct_low_prom', True),
+    ('Amp z ↓', 'amp_z', True),
+    ('Channel', 'channel', False),
+    ('Region', 'region', False),
+)
+
+
+def topo_caption(col, event_type, stages_text, band=None, min_dur=None):
+    """Caption under the colour bar for a check metric."""
+    ev = EVENT_PLURAL.get(event_type, event_type)
+    head = f"{CHECK_COLUMNS[col][1].split(' (')[0]} · {ev} · {stages_text}"
+    lo, hi = band if band else (None, None)
+    if col == 'pct_off_band':
+        rng = f"{lo:g}–{hi:g} Hz" if lo is not None else 'the run band'
+        tail = f"share of events whose 1/f-corrected peak lies outside {rng}"
+    elif col == 'pct_low_prom':
+        tail = ('share of events whose peak stands less than 10 dB above the '
+                '1/f background · context only, never flags')
+    elif col == 'pct_dur_floor':
+        mn = f"{min_dur:g} s" if min_dur is not None else 'run'
+        tail = f"share of events within 0.05 s of the {mn} minimum duration"
+    elif col == 'med_amp_ratio':
+        tail = 'median event band RMS over the surrounding band RMS'
+    else:
+        tail = "median detection peak over the run's threshold"
+    return f"{head} · {tail}"
 
 
 def filter_chip_text(col, event_type, n_shown, n_total, ratio=None):
-    """Epochs-tab chip text for a check filter.
+    """Epochs-tab chip text for a check filter (low prominence has none).
 
     Parameters
     ----------
     col : str
-        A key of :data:`CHECK_COLUMNS`.
+        A key of :data:`FLAG_COLUMNS`.
     event_type : str
         Event type, for the plural.
     n_shown, n_total : int
@@ -536,8 +668,6 @@ def filter_chip_text(col, event_type, n_shown, n_total, ratio=None):
     ev = EVENT_PLURAL.get(event_type, event_type)
     if col == 'pct_off_band':
         head = f"Showing off-band {ev} only"
-    elif col == 'pct_low_prom':
-        head = f"Showing low-prominence {ev} only"
     elif col == 'pct_dur_floor':
         head = f"Showing at-floor {ev} only"
     elif col == 'med_amp_ratio':
@@ -555,7 +685,7 @@ def failing_mask(df, col, ratio=None):
     df : pandas.DataFrame
         The drilled channel's events, with the figure columns.
     col : str
-        A key of :data:`CHECK_COLUMNS`.
+        A key of :data:`FLAG_COLUMNS`.
     ratio : float or None, optional
         The montage median, for the two ratio columns. Default ``None``.
 
@@ -579,25 +709,9 @@ def failing_mask(df, col, ratio=None):
 
 
 def header_tooltips(band=None, min_dur=None, n_no_peak=None):
-    """Header tooltips of the five check columns and ``checks``.
-
-    Parameters
-    ----------
-    band : tuple of float or None, optional
-        Run band, for the off-band tooltip.
-    min_dur : float or None, optional
-        Run minimum duration in seconds, for the at-floor tooltip.
-    n_no_peak : int or None, optional
-        Events with no spectral peak on the channel.
-
-    Returns
-    -------
-    dict
-        Tooltip text keyed by column.
-    """
+    """Header tooltips of the check columns and ``Checks`` (revision 3)."""
     lo, hi = band if band else (None, None)
     btxt = f"{lo:g}–{hi:g} Hz" if lo is not None else 'run band'
-    mtxt = f"{min_dur:g} s" if min_dur is not None else 'not recorded'
     ntxt = '—' if n_no_peak is None else str(int(n_no_peak))
     return {
         'pct_off_band': ("Share of this channel's events whose peak frequency, "
@@ -605,27 +719,24 @@ def header_tooltips(band=None, min_dur=None, n_no_peak=None):
                          f"run band ({btxt}). Events with no spectral peak are "
                          f"not counted: {ntxt} on this channel."),
         'pct_low_prom': ("Share of events whose spectral peak stands less than "
-                         "10 dB above the 1/f background. Under 1 s this label "
-                         "is unreliable: a third to a half of weak genuine "
-                         "spindles shorter than 1 s get it."),
+                         "10 dB above the 1/f background. Context only: it "
+                         "follows the channel's signal-to-noise and never sets "
+                         "the checks flag. Under 1 s the label is unreliable."),
         'pct_dur_floor': ("Share of events lasting no more than 0.05 s longer "
-                          f"than the run's minimum duration ({mtxt}). Many "
-                          "events at the floor means the detector is cutting "
-                          "short bursts out of noise."),
+                          "than the run's minimum duration. Hover a cell for "
+                          "the floor and ceiling shares."),
         'med_amp_ratio': ("Median, over this channel's events, of event band "
                           "RMS divided by the median band RMS of the "
                           "surrounding ±15 s (other events, artefact and "
                           "other stages left out)."),
         'med_thresh_ratio': ("Median of the event's detection-signal peak "
                              "divided by the detection threshold for its run. "
-                             "1.0–1.2 means most events barely crossed the "
-                             "threshold."),
-        'checks_flag': ("Flagged when a channel's off-band, low-prominence or "
-                        "at-floor share is much higher, or its amplitude "
-                        "ratios much lower, than the rest of the montage (same "
-                        "z limits as the amplitude flag). A problem shared by "
-                        "every channel is not flagged here; see the Precision "
-                        "report."),
+                             "A value near 1.0 means most events only just "
+                             "crossed the threshold."),
+        'checks_flag': ("Compared with the rest of the montage: off-band "
+                        "share, at-floor share, amp/bg and amp/thr. Low "
+                        "prominence is not used. A problem every channel "
+                        "shares is not flagged; see the Precision report."),
     }
 
 
@@ -1014,6 +1125,42 @@ def threshold_row(method, ev, thresholds, run_recorded, ratio=None):
     return _row('amp_thr', label, 'no ratio', tip=DETECTOR_TIP)
 
 
+HIDDEN_LABELS_NOTE = 'Labels hidden until you accept or reject this sample event.'
+
+_HIDE_SUBSTRINGS = (' · low prominence (unreliable under 1 s)',
+                    ' · low prominence', ' · barely above background',
+                    ' · barely crossed', ' · meets', ' · fails')
+
+
+def hide_flag_words(rows):
+    """The rows with every flag word and badge removed and no warn / bad
+    colour, numbers kept (UX spec revision 3, section 4, live sample review).
+
+    Returns a new list; the input rows are not changed.
+    """
+    import re
+    out = []
+    for r in rows:
+        r = dict(r, sub=list(r['sub']))
+        key = r['key']
+        if key == 'duration' and r.get('_neutral'):
+            r['sub'] = list(r['_neutral'])
+        if key in ('peak_freq', 'wave_freq'):
+            v = re.sub(r'   (in band|OFF BAND)( · )?', '   ', r['value'])
+            r['value'] = v.rstrip()
+        if key == 'amp_thr' and (r['value'] == 'meets both'
+                                 or r['value'].startswith('fails ')):
+            r['value'] = '2 criteria'
+        for i, t in enumerate(r['sub']):
+            for w in _HIDE_SUBSTRINGS:
+                t = t.replace(w, '')
+            r['sub'][i] = t
+        if r.get('level') in ('warn', 'bad'):
+            r['level'] = None
+        out.append(r)
+    return out
+
+
 def build_event_rows(ev, *, event_type, run, run_id, thresholds=None,
                      figures=None, figure_state='stored', interpolated=False,
                      outlier_thr=None, amp_col='max_amp', ptp_units_uv=False,
@@ -1124,8 +1271,13 @@ def build_event_rows(ev, *, event_type, run, run_id, thresholds=None,
             sub = f"{bmin:g} s – no upper bound · {dur - bmin:.2f} s above the floor"
         else:
             sub = f"within run limits {lim} · {dur - bmin:.2f} s above the floor"
-        rows.append(_row('duration', 'Duration', f"{dur:.2f} s", [sub],
-                         level=level))
+        drow = _row('duration', 'Duration', f"{dur:.2f} s", [sub],
+                    level=level)
+        # the same facts without a judgement, for live sample review
+        above = (f" · {dur - bmin:.2f} s above the floor"
+                 if bmin is not None else '')
+        drow['_neutral'] = [f"run limits {lim}{above}"]
+        rows.append(drow)
 
     def figure_missing_row(key, label):
         if figure_state == 'computing':
@@ -1341,7 +1493,7 @@ def neighbour_header(target, chosen, source, window_s, region=None, k=6):
     n = len(chosen)
     win = f"{window_s:g} s around the event"
     if source == 'position':
-        what = f"{n} nearest by electrode position"
+        what = f"{n} nearest by electrode position (1 = nearest)"
         tail = win
     elif source == 'region':
         what = f"{n} from the same region ({region or 'unknown'})"
@@ -1350,6 +1502,83 @@ def neighbour_header(target, chosen, source, window_s, region=None, k=6):
         what = f"{n} of the selected channels"
         tail = 'no positions or region match'
     return f"NEIGHBOURS · {target} + {what} · {tail}"
+
+
+def neighbour_labels(target, chosen, source, interpolated=()):
+    """Row labels: ``{target} · target`` then ``{ch} · {rank}`` (rank 1 =
+    nearest) for the position rule; region and selected-channel fallbacks
+    are not ranked, so their rows read ``{ch}``. ``~`` marks interpolated
+    channels. No distance anywhere (EEGLAB coordinates carry no reliable
+    units)."""
+    interp = set(interpolated or ())
+
+    def name(c):
+        return ('~' + c) if c in interp else c
+    out = [f"{name(target)} · target"]
+    for i, c in enumerate(chosen, 1):
+        out.append(f"{name(c)} · {i}" if source == 'position' else name(c))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Keys, cheat sheet, status bar, legends (UX spec revision 3, section 15)
+# ---------------------------------------------------------------------------
+
+KEY_HINTS = {
+    'epochs': ('A accept · R reject · U unsure · ] [ unreviewed · N P outlier '
+               '· ? keys'),
+    'sample': ('A accept · R reject · U unsure · ] [ sample · N P outlier · '
+               '? keys'),
+    'channels': 'F re-detect queue · ? keys',
+}
+REVIEW_STATUS_ITEMS = ('unreviewed', 'reviewed', 'accepted', 'rejected',
+                       'unsure')
+REVIEW_STATUS_CAPTION = 'Your decisions only. Applies to the Epochs tab.'
+STRIP_LEGEND = ('grey bars = events per epoch · red = amplitude outliers · '
+                'purple dashes = marked artefact · white line = current epoch')
+STRIP_LEGEND_SAMPLE = ' · blue ticks = sample events'
+SAVE_LINE = 'Decisions save to {db} as you make them.'
+SAVE_LINE_NO_NAME = 'Set a reviewer name to save decisions.'
+SAVE_LINE_NO_STORE = ('Decisions cannot be saved: this TurtleWave library has '
+                      'no review store.')
+_GRID_HEAD = {'spindle': 'SPINDLES', 'slow_wave': 'SLOW WAVES',
+              'k_complex': 'K-COMPLEXES'}
+
+
+def cheat_sheet_text(event_type='spindle', undo='Ctrl+Z'):
+    """The ``?`` dialog's text (spec section 15); ``undo`` is the platform's
+    text for Ctrl+Z (``⌘Z`` on macOS)."""
+    et = event_type if event_type in _GRID_HEAD else 'spindle'
+    grid = reason_grid(et)
+    cells = [f"{d}  {l}" for d, _t, l, _tip in grid]
+    width = max(len(c) for c in cells) + 3
+    pairs = ['  ' + ''.join(c.ljust(width) for c in cells[i:i + 2]).rstrip()
+             for i in range(0, len(cells), 2)]
+    u = f"{undo:<8}"
+    return '\n'.join([
+        'KEYS' + ' ' * 56 + '? or Esc to close', '',
+        'DECIDE (Epochs tab)',
+        '  A        accept',
+        '  R        reject, then a reason',
+        '  U        unsure, reason optional',
+        '  1–8, 0   reason while Reject or Unsure is waiting; 0 = other '
+        '(needs a comment)',
+        '  Enter    save with the last reason, or save the comment',
+        '  C        type a comment',
+        '  Esc      cancel a waiting Reject or Unsure',
+        f"  {u} undo the last decision", '',
+        f"REASONS FOR {_GRID_HEAD[et]}", *pairs, '',
+        'MOVE (Epochs tab)',
+        '  ] [      next / previous sample event (in sample mode)',
+        '           next / previous unreviewed event on this channel '
+        '(otherwise)',
+        '  } {      next / previous event on this channel',
+        '  → ←      next / previous epoch',
+        '  N P      next / previous epoch with outliers', '',
+        'CHANNELS',
+        '  F        add the selected channel to the re-detect queue',
+        '  Shift+drag on the epoch strip   select epochs to mark as artefact',
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -1378,13 +1607,18 @@ def load_population(db_path, event_type, methods=None, freq_band=None):
     -------
     dict
         ``run_id``, ``run`` (``get_run_info``-style dict), ``runs_in_view``
-        (list of ``(run_id, n)``), ``recorded`` (bool), ``pop`` (per-channel
-        :func:`pool_population` frame) and ``error`` (str or None).
+        (list of ``(run_id, n)``), ``recorded`` (bool), ``stages`` (the
+        run's stages, in order), ``by_stage`` (``{stage: frame}``) and
+        ``pooled`` (all stages, ``event_population_summary(pooled=True)``),
+        each a :func:`population_from_summary` frame; ``pop`` is
+        ``pooled``; ``error`` (str or None).
     """
     import json
     import sqlite3
     out = {'run_id': None, 'run': {}, 'runs_in_view': [], 'recorded': False,
-           'figures_off': False, 'pop': pool_population(None), 'error': None}
+           'figures_off': False, 'stages': [], 'by_stage': {},
+           'pooled': population_from_summary(None),
+           'pop': population_from_summary(None), 'error': None}
     from pathlib import Path
     try:
         con = sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro',
@@ -1436,15 +1670,21 @@ def load_population(db_path, event_type, methods=None, freq_band=None):
         summary = event_population_summary(con, run_id, event_type)
         if summary is None or len(summary) == 0:
             return out
-        med = pd.read_sql_query(
-            "SELECT channel, amp_ratio, thresh_ratio FROM events "
-            "WHERE run_id = ? AND event_type = ?", con,
-            params=[str(run_id), str(event_type)])
-        medians = (med.groupby('channel')[['amp_ratio', 'thresh_ratio']]
-                   .median().rename(columns={'amp_ratio': 'med_amp_ratio',
-                                             'thresh_ratio': 'med_thresh_ratio'})
-                   .reset_index())
-        out['pop'] = pool_population(summary, medians)
+        import inspect
+        kw = {}
+        if 'stages' in inspect.signature(event_population_summary).parameters:
+            st = run_stages(out['run'])
+            kw = {'stages': st} if st else {}   # pool only the run's stages
+        pooled = event_population_summary(con, run_id, event_type,
+                                          pooled=True, **kw)
+        present = [x for x in summary['stage'].astype(str).unique()
+                   if x != 'unscored']
+        stages = [x for x in run_stages(out['run']) if x in present] or \
+            sorted(present)
+        out['stages'] = stages
+        out['by_stage'] = {st: population_from_summary(summary, st)
+                           for st in stages}
+        out['pooled'] = out['pop'] = population_from_summary(pooled)
         out['recorded'] = True
     except Exception as err:   # never break the dashboard
         out['error'] = f"{type(err).__name__}: {err}"

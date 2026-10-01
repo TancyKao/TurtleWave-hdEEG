@@ -37,6 +37,9 @@ import pandas as pd                                           # noqa: E402
 import pyqtgraph as pg                                        # noqa: E402
 from PyQt5 import QtWidgets                                   # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gui_settings_guard                                    # noqa: E402
+gui_settings_guard.isolate()   # before any frontend import
 import frontend.eeg_review_gui as rg                          # noqa: E402
 from turtlewave_hdEEG import CustomAnnotations                # noqa: E402
 
@@ -323,6 +326,8 @@ if win.background_loader is not None:
 win.close()
 
 say("\n" + "=" * 78)
+check('settings', "the real review-GUI preferences file was not "
+      "touched", *gui_settings_guard.untouched())
 say(f"{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
 for f in FAILURES:
     say("  FAILED: " + f)

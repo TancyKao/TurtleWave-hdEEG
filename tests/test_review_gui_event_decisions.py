@@ -40,9 +40,8 @@ from PyQt5.QtTest import QTest                                # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix='tw_decisions_')
 # Isolate QSettings before anything reads them.
-QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
-QtCore.QSettings.setPath(QtCore.QSettings.IniFormat,
-                         QtCore.QSettings.UserScope, TMP)
+import gui_settings_guard                                    # noqa: E402
+gui_settings_guard.isolate()     # before any frontend import
 
 import frontend.eeg_review_gui as rg                          # noqa: E402
 from frontend import event_review as er                       # noqa: E402
@@ -125,10 +124,15 @@ for c in ('uuid', 'duration', 'run_id', 'method', 'epoch_stage', 'in_band',
 check('1.1b', "local REVIEW_REASONS / DECISIONS equal the library's",
       rg.REVIEW_REASONS == tuple(dbwrite.REVIEW_REASONS)
       and rg.REVIEW_DECISIONS == tuple(dbwrite.REVIEW_DECISIONS))
-check('1.1c', "every library reason has a panel label; digits 1-9 map to "
-      "library tokens", set(er.REASON_LABEL) == set(dbwrite.REVIEW_REASONS)
-      and set(er.REASON_BY_DIGIT.values()) <= set(dbwrite.REVIEW_REASONS)
-      and len(er.REASON_BY_DIGIT) == 9)
+check('1.1c', "every library reason has a label; both grids use library "
+      "tokens, 9 buttons, 0 = other last, no 9",
+      set(er.REASON_LABEL) == set(dbwrite.REVIEW_REASONS)
+      and all({t for _d, t, _l, _tip in er.reason_grid(et)}
+              <= set(dbwrite.REVIEW_REASONS)
+              and len(er.reason_grid(et)) == 9
+              and er.reason_grid(et)[-1][:2] == ('0', 'other')
+              and er.digit_reason(et, '9') is None
+              for et in ('spindle', 'slow_wave', 'k_complex')))
 DB = make_db(os.path.join(TMP, 'review.db'))
 db = rg.EventDatabase(DB)
 df = db.get_events(event_type='spindle', channels=['Cz'],
@@ -218,9 +222,19 @@ check('2.8', "[6] unsure on an outlier: warn fill alpha 40, dotted edge",
       u_.brush.color().getRgb() == (224, 163, 52, 40)
       and u_.lines[0].pen.style() == Qt.DotLine,
       repr(u_.brush.color().getRgb()))
-glyphs = sorted(t.toPlainText() for t in panel.glyph_items())
+texts = [t.toPlainText() for t in panel.glyph_items()]
+glyphs = sorted(t for t in texts if t != 'outlier')
 check('2.9', "[6] decided bands carry ✓ ✗ ? TextItems on the raw trace",
       glyphs == sorted(['✓', '✗', '?']), repr(glyphs))
+labels_on = {p: [it.toPlainText() for pp, it in panel._event_items
+                 if pp is p and isinstance(it, rg.pg.TextItem)]
+             for p in (panel.raw_plot, panel.filt_plot)}
+check('2.9b', "[89] the outlier band carries an 'outlier' label on each "
+      "plot; no 'selected' text anywhere",
+      labels_on[panel.raw_plot].count('outlier') == 1
+      and labels_on[panel.filt_plot].count('outlier') == 1
+      and not any('selected' in t for v in labels_on.values() for t in v),
+      repr(labels_on))
 panel.select_event('u-c', emit=False)
 s_ = band_for('u-c', panel.raw_plot)
 check('2.10', "[6] selected: accent edge width 2, on top",
@@ -582,7 +596,10 @@ check('6.8', "[35] U, Enter writes unsure with no reason",
 cur = ep._selected_uuid
 key(Qt.Key_R)
 key(Qt.Key_9)
-check('6.9', "[35] R, 9 waits for a comment (nothing written)",
+check('6.9a', "[85] R, 9 writes nothing (9 is not a reason key)",
+      rows_db(cur) == [] and win._armed == 'reject', repr(rows_db(cur)))
+key(Qt.Key_0)
+check('6.9', "[35] R, 0 waits for a comment (nothing written)",
       rows_db(cur) == [] and evp.comment.hasFocus()
       and not win.review_shortcuts_enabled())
 QTest.keyClicks(evp.comment, 'spike train')
@@ -606,8 +623,9 @@ first = rows_db('u-g')
 ep.select_event('u-g')
 app.processEvents()
 key(Qt.Key_R)
-key(Qt.Key_2)
-check('6.11', "[36] A then R,2 leaves one row reject / arousal",
+key(Qt.Key_7)
+check('6.11', "[36] A then R,7 (spindle grid) leaves one row reject / "
+      "arousal",
       [r[:3] for r in rows_db('u-g')] == [('TK', 'reject', 'arousal')],
       repr(rows_db('u-g')))
 check('6.12', "status names the change",
@@ -928,7 +946,342 @@ check('8.8', "4.6 run with figures, this row all NULL: 'figures not "
       repr(evp.row_text('halfwaves')))
 win.close()
 
+
+# ======================================================================= 9
+say("\n== 9. Revision 3: grids, header, REVIEW STATUS, keys, status bar, marks")
+P9 = os.path.join(TMP, 'rev3.db')
+con = fx.open_schema(P9)
+fx.add_run(con, RUN)
+fx.add_run(con, 'run-sw', event_type='slow_wave', method='Massimini2004',
+           band=(0.5, 4.0), timestamp='2026-09-15T10:00:00')
+rows9 = [ev_row(u, 'Cz', s, d, a, RUN)
+         for u, s, d, a in zip(UUIDS, STARTS, DURS, AMPS)]
+for i, st in enumerate((5.0, 15.0, 25.0)):
+    r = list(ev_row(f'sw-{i}', 'Cz', st, 1.0, 80.0, 'run-sw'))
+    r[1], r[7], r[8], r[9] = 'slow_wave', 'Massimini2004', 0.5, 4.0
+    rows9.append(tuple(r))
+fx.insert_rows(con, rows9)
+con.commit()
+con.close()
+db9 = rg.EventDatabase(P9)
+win = rg.EventReviewGUI()
+win.db = db9
+win.eeg_data = FakeData(CH, TYPES)
+win._refresh_physio_channels()
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+
+
+def use(evt):
+    win.qc_widget.evt_combo.blockSignals(True)
+    win.qc_widget.evt_combo.setCurrentText(evt)
+    win.qc_widget.evt_combo.blockSignals(False)
+    win._qc_events_df = db9.get_events(event_type=evt,
+                                       columns=rg.QC_EVENT_COLS)
+    win.on_qc_drill('Cz', switch_tab=True)
+    app.processEvents()
+
+
+win.show()
+win.activateWindow()
+app.processEvents()
+use('spindle')
+ep = win.epochs_panel
+evp = win.detail_dock_w.event_panel
+fd = win.filter_dock
+check('9.84a', "[84] spindle grid texts", evp.grid_texts() ==
+      ['1  Artefact', '2  Eye movement', '3  Not in raw', '4  Filter ringing',
+       '5  Off-band', '6  Too short', '7  Arousal', '8  Single channel',
+       '0  Other'], repr(evp.grid_texts()))
+check('9.87', "[87] comment placeholder and grid header",
+      evp.comment.placeholderText() == 'Comment (C) — required for "other"'
+      and evp.grid_hdr.text() == 'Reason (required for Reject)')
+ep._goto_epoch(0)
+ep.select_event('u-c')
+app.processEvents()
+check('9.79a', "[79] header EVENT 3 OF 5 IN EPOCH for the third of five",
+      evp.header_lbl.text() == 'EVENT 3 OF 5 IN EPOCH',
+      repr(evp.header_lbl.text()))
+press9 = lambda k: (QTest.keyClick(ep, k), app.processEvents())  # noqa: E731
+press9(Qt.Key_R)
+press9(Qt.Key_4)
+press9(Qt.Key_Z) if False else None
+check('9.85a', "[85] spindle R,4 writes filter-ringing",
+      rows_db9 := [r[:3] for r in db9.conn.execute(
+          "SELECT reviewer, decision, reason FROM event_reviews WHERE uuid = "
+          "'u-c'")] == [('TK', 'reject', 'filter-ringing')],
+      repr(list(db9.conn.execute("SELECT decision, reason FROM event_reviews"
+                                 " WHERE uuid = 'u-c'"))))
+ep.select_event('u-b')
+press9(Qt.Key_R)
+press9(Qt.Key_5)
+check('9.85b', "[85] spindle R,5 writes off-band",
+      list(db9.conn.execute("SELECT decision, reason FROM event_reviews "
+                            "WHERE uuid = 'u-b'")) == [('reject', 'off-band')])
+ep.select_event('u-a')
+press9(Qt.Key_3)
+check('9.86a', "[86] a digit with nothing armed writes nothing",
+      list(db9.conn.execute("SELECT 1 FROM event_reviews WHERE uuid = 'u-a'"))
+      == [])
+evp.reason_buttons['not-in-raw'].click()
+app.processEvents()
+check('9.86b', "[86] one click on '3  Not in raw' with nothing armed writes "
+      "nothing; it arms Reject with that reason preselected",
+      list(db9.conn.execute("SELECT 1 FROM event_reviews WHERE uuid = 'u-a'"))
+      == [] and win._armed == 'reject'
+      and evp.reason_buttons['not-in-raw'].isChecked()
+      and evp.hint_lbl.text() == 'Click Not in raw again or press Enter to '
+                                 'reject (Not in raw).',
+      repr(evp.hint_lbl.text()))
+evp.reason_buttons['not-in-raw'].click()
+app.processEvents()
+check('9.86b2', "[86] a second click writes reject / not-in-raw",
+      list(db9.conn.execute("SELECT decision, reason FROM event_reviews "
+                            "WHERE uuid = 'u-a'")) == [('reject',
+                                                        'not-in-raw')])
+ep.select_event('u-f')
+evp.reason_buttons['artefact'].click()
+evp.reason_buttons['too-short'].click()
+app.processEvents()
+switched = (win._preselect == 'too-short' and list(db9.conn.execute(
+    "SELECT 1 FROM event_reviews WHERE uuid = 'u-f' AND reviewer = 'TK'"))
+    == [])
+QTest.keyClick(ep, Qt.Key_Escape)
+app.processEvents()
+check('9.86d', "[86] a different reason switches the preselection; Esc "
+      "cancels; nothing written", switched and win._armed is None
+      and list(db9.conn.execute("SELECT 1 FROM event_reviews WHERE uuid = "
+                                "'u-f' AND reviewer = 'TK'")) == [])
+evp.reason_buttons['off-band'].click()
+QTest.keyClick(ep, Qt.Key_Return)
+app.processEvents()
+check('9.86e', "[86] click then Enter writes the preselected reason",
+      list(db9.conn.execute("SELECT decision, reason FROM event_reviews "
+                            "WHERE uuid = 'u-f' AND reviewer = 'TK'"))
+      == [('reject', 'off-band')])
+ep.select_event('u-out')
+evp.comment.clear()
+evp.reason_buttons['other'].click()
+evp.reason_buttons['other'].click()
+app.processEvents()
+check('9.86c', "[86] two clicks on '0  Other' wait for a comment",
+      list(db9.conn.execute("SELECT 1 FROM event_reviews WHERE uuid = "
+                            "'u-out'")) == [] and evp.comment.hasFocus())
+QTest.keyClick(evp.comment, Qt.Key_Escape)
+ep.setFocus()
+app.processEvents()
+# REVIEW STATUS
+sc = fd.status_checks
+check('9.72a', "[72] REVIEW STATUS: five boxes, all checked, reviewed "
+      "tri-state", list(sc) == ['unreviewed', 'reviewed', 'accepted',
+                                'rejected', 'unsure']
+      and all(c.isChecked() for c in sc.values())
+      and sc['reviewed'].isTristate())
+sc['reviewed'].click()
+app.processEvents()
+off = [sc[k].isChecked() for k in ('accepted', 'rejected', 'unsure')]
+sc['reviewed'].click()
+app.processEvents()
+on = [sc[k].isChecked() for k in ('accepted', 'rejected', 'unsure')]
+sc['rejected'].setChecked(False)
+app.processEvents()
+check('9.72b', "[72] reviewed sets its three children; unchecking rejected "
+      "alone makes it partial", off == [False] * 3 and on == [True] * 3
+      and sc['reviewed'].checkState() == Qt.PartiallyChecked)
+check('9.74', "[74] caption", fd.status_caption.text() ==
+      'Your decisions only. Applies to the Epochs tab.')
+for k in ('reviewed', 'accepted', 'rejected', 'unsure'):
+    sc[k].setChecked(False)
+sc['unreviewed'].setChecked(True)
+app.processEvents()
+dbwrite.store_event_review(db9.conn, 'u-e', 'accept', 'JS')
+db9.conn.commit()
+ep._goto_epoch(0)
+alpha = {u: next((it.brush.color().alpha() for it in ep.band_items(
+    ep.raw_plot) if abs(it.getRegion()[0] - STARTS[UUIDS.index(u)]) < 1e-9),
+    None) for u in ('u-a', 'u-b', 'u-c', 'u-e')}
+check('9.73a', "[73] only unreviewed: TK's decided events at half fill, "
+      "JS-only u-e full", alpha['u-a'] == 10 and alpha['u-c'] == 10
+      and alpha['u-e'] == 30, repr(alpha))
+ep.select_event('u-a')
+QTest.keyClick(ep, Qt.Key_BraceRight)
+app.processEvents()
+check('9.73b', "[73] } skips TK-decided events (u-b, u-c): lands on u-out",
+      ep._selected_uuid == 'u-out', repr(ep._selected_uuid))
+check('9.79b', "[79] the status filter does not change n in the header",
+      evp.header_lbl.text() == 'EVENT 4 OF 5 IN EPOCH',
+      repr(evp.header_lbl.text()))
+# [73] ] / [ ignore the filter: with only 'rejected' shown, ] from u-a still
+# goes to the next event TK has not decided (u-out), which the filter hides
+for k in ('unreviewed', 'accepted', 'unsure'):
+    sc[k].setChecked(False)
+sc['rejected'].setChecked(True)
+app.processEvents()
+ep.select_event('u-a')
+QTest.keyClick(ep, Qt.Key_BracketRight)
+app.processEvents()
+after_r = ep._selected_uuid
+QTest.keyClick(ep, Qt.Key_BracketLeft)
+app.processEvents()
+check('9.73c', "[73] ] / [ ignore REVIEW STATUS: ] lands on an unreviewed "
+      "event the filter dims, [ comes back", after_r == 'u-out'
+      and ep._selected_uuid != 'u-out', repr((after_r, ep._selected_uuid)))
+for c in sc.values():
+    c.setChecked(True)
+app.processEvents()
+ep.clear_selection()
+check('9.79c', "[79] no selection: header EVENT", evp.header_lbl.text() ==
+      'EVENT', repr(evp.header_lbl.text()))
+# key hints, cheat sheet, status bar, legend
+check('9.75a', "[75] top-bar hint on the Epochs tab",
+      win.key_hint_lbl.text() == 'A accept · R reject · U unsure · ] [ '
+                                 'unreviewed · N P outlier · ? keys',
+      repr(win.key_hint_lbl.text()))
+QTest.keyClick(ep, Qt.Key_Question)
+app.processEvents()
+sheet = win._cheat_sheet
+txt = sheet.text() if sheet is not None else ''
+check('9.76a', "[76] ? opens the sheet with keys and the spindle grid",
+      sheet is not None and sheet.isVisible()
+      and all(k in txt for k in ('A        accept', '1–8, 0', 'Enter',
+                                 'C        type a comment', '] [', '} {',
+                                 'N P', 'Shift+drag', '4  Filter ringing'))
+      and 'REASONS FOR SPINDLES' in txt, repr(txt[:80]))
+QTest.keyClick(sheet, Qt.Key_Question)
+app.processEvents()
+check('9.76b', "[76] ? again closes it", not sheet.isVisible())
+win.open_cheat_sheet()
+QTest.keyClick(win._cheat_sheet, Qt.Key_Escape)
+app.processEvents()
+check('9.76c', "[76] Esc closes it", not win._cheat_sheet.isVisible())
+segs = [w for w in win.status_bar.findChildren(QtWidgets.QWidget)
+        if w in (win.seg_reviewer, win.seg_position, win.seg_save)]
+order = sorted((w.mapTo(win, QtCore.QPoint(0, 0)).x(), w) for w in segs)
+check('9.77a', "[77] status bar: reviewer, position, save line in order",
+      [w for _x, w in order] == [win.seg_reviewer, win.seg_position,
+                                 win.seg_save]
+      and win.seg_position.text().startswith('Cz · epoch ')
+      and win.seg_save.text() == 'Decisions save to rev3.db as you make '
+                                 'them.', repr(win.seg_save.text()))
+win.set_reviewer_name('')
+check('9.77b', "[77] no reviewer name: save line asks for one",
+      win.seg_save.text() == 'Set a reviewer name to save decisions.')
+win.set_reviewer_name('TK')
+check('9.78', "[78] strip legend", ep.strip_legend.text() ==
+      'grey bars = events per epoch · red = amplitude outliers · purple '
+      'dashes = marked artefact · white line = current epoch')
+win.tabs.setCurrentIndex(0)
+app.processEvents()
+check('9.75b', "[75] Channels tab hint", win.key_hint_lbl.text() ==
+      'F re-detect queue · ? keys', repr(win.key_hint_lbl.text()))
+win.open_cheat_sheet()
+check('9.76d', "[76] ? from the Channels tab (no drill change) opens it",
+      win._cheat_sheet.isVisible())
+win._cheat_sheet.close()
+win.tabs.setCurrentIndex(1)
+win.activateWindow()
+app.processEvents()
+# physiology marks [90, 91]
+ep.physio.set_open(True)
+ep._goto_epoch(0)
+app.processEvents()
+reads = ep.physio.n_reads
+texts_before = [sum(isinstance(i, rg.pg.TextItem)
+                    for i in w.getPlotItem().items)
+                for _k, _c, w in ep.physio.rows]
+ep.select_event('u-c')
+app.processEvents()
+lines_ok, extra = True, False
+for i, (_k, _c, w) in enumerate(ep.physio.rows):
+    its = w.getPlotItem().items
+    vl = [x for x in its if isinstance(x, rg.pg.InfiniteLine)]
+    lines_ok &= (len(vl) == 2
+                 and sorted(round(x.value(), 3) for x in vl) == [12.0, 12.8]
+                 and all(x.pen.widthF() == 1 for x in vl))
+    extra |= any(isinstance(x, (rg.pg.LinearRegionItem,
+                                QtWidgets.QGraphicsRectItem)) for x in its)
+    extra |= sum(isinstance(x, rg.pg.TextItem) for x in its) != \
+        texts_before[i]
+check('9.90a', "[90] each physiology row: exactly two 1 px lines at the "
+      "event's start and end; no region, rect or text for the selection",
+      lines_ok and not extra and len(ep.physio.rows) == 4)
+ep.select_event('u-b')
+app.processEvents()
+check('9.91', "[91] changing the selection reads no physiology data",
+      ep.physio.n_reads == reads + 0 and sorted(
+          round(x.value(), 3) for x in ep.physio.selection_lines(0))
+      == [7.0, 7.8], repr(ep.physio.n_reads - reads))
+ep.physio.set_open(False)
+ep.select_event('u-c')
+app.processEvents()
+ep.physio.set_open(True)
+app.processEvents()
+check('9.90c', "selecting with the strip closed, then opening it: two "
+      "lines per row", all(len(ep.physio.selection_lines(i)) == 2
+                           for i in range(len(ep.physio.rows))),
+      repr([len(ep.physio.selection_lines(i))
+            for i in range(len(ep.physio.rows))]))
+ep.clear_selection()
+app.processEvents()
+check('9.90b', "[90] nothing selected: the lines are gone", all(
+    not [x for x in w.getPlotItem().items
+         if isinstance(x, rg.pg.InfiniteLine)]
+    for _k, _c, w in ep.physio.rows))
+# neighbours [92, 93]
+win.detail_dock_w._coords = dict(coords, Cz=(0.0, 0.0))
+ep.neighbours.set_open(True)
+ep.select_event('u-a')
+app.processEvents()
+labs = ep.neighbours.plot.row_labels()
+hdr = ep.neighbours.header.text()
+check('9.92', "[92] with coordinates: target, then ranks 1…6, nearest "
+      "first; no cm / mm; header (1 = nearest)",
+      labs[0] == 'Cz · target'
+      and [l.split(' · ')[1] for l in labs[1:]] == [str(i) for i in
+                                                     range(1, len(labs))]
+      and not any(u in ' '.join(labs) + hdr for u in (' cm', ' mm'))
+      and '(1 = nearest)' in hdr, repr((labs, hdr)))
+win.detail_dock_w._coords = None
+ep.select_event('u-b')
+app.processEvents()
+labs = ep.neighbours.plot.row_labels()
+check('9.93', "[93] region fallback: no rank numbers",
+      labs[0] == 'Cz · target'
+      and not any(l.split(' · ')[-1].isdigit() for l in labs[1:]),
+      repr(labs))
+# slow-wave grid and digits [84, 85, 88]
+use('slow_wave')
+ep = win.epochs_panel
+check('9.84b', "[84] slow-wave grid texts", evp.grid_texts() ==
+      ['1  Artefact', '2  Eye movement', '3  Not in raw', '4  Too short',
+       '5  Arousal', '6  Single channel', '7  Not isolated',
+       '8  Wrong morphology', '0  Other'], repr(evp.grid_texts()))
+for uid, key_, want in (('sw-0', Qt.Key_4, 'too-short'),
+                        ('sw-1', Qt.Key_7, 'not-isolated'),
+                        ('sw-2', Qt.Key_8, 'wrong-morphology')):
+    ep.select_event(uid)
+    press9(Qt.Key_R)
+    press9(key_)
+    got = list(db9.conn.execute("SELECT decision, reason FROM event_reviews "
+                                "WHERE uuid = ? AND reviewer = 'TK'", (uid,)))
+    check('9.85c', f"[85] slow wave R,{want}", got == [('reject', want)],
+          repr(got))
+dbwrite.store_event_review(db9.conn, 'sw-0', 'reject', 'TK',
+                           reason='filter-ringing')
+db9.conn.commit()
+ep.select_event('sw-1')
+ep.select_event('sw-0')
+app.processEvents()
+check('9.88', "[88] a stored filter-ringing reject on a slow wave shows "
+      "its label on the Current line",
+      evp.current_lbl.text().startswith('Rejected by TK · ')
+      and evp.current_lbl.text().endswith(' · Filter ringing'),
+      repr(evp.current_lbl.text()))
+win.close()
+
 say("\n" + "=" * 78)
+check('settings', "the real review-GUI preferences file was not "
+      "touched", *gui_settings_guard.untouched())
 say(f"{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
 for f in FAILURES:
     say("  FAILED: " + f)

@@ -31,9 +31,8 @@ from PyQt5.QtCore import Qt                                   # noqa: E402
 from PyQt5.QtTest import QTest                                # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix='tw_sample_')
-QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
-QtCore.QSettings.setPath(QtCore.QSettings.IniFormat,
-                         QtCore.QSettings.UserScope, TMP)
+import gui_settings_guard                                    # noqa: E402
+gui_settings_guard.isolate()     # before any frontend import
 
 import frontend.eeg_review_gui as rg                          # noqa: E402
 from frontend import sample_review as sr                      # noqa: E402
@@ -62,13 +61,16 @@ rng = np.random.default_rng(11)
 RUN = 'run-fixture'
 
 
-def build(path, channels, n=80, figures=True):
+def build(path, channels, n=80, figures=True, special=None, low_prom=0.3,
+          gen=None):
     con = fx.open_schema(path)
     fx.add_run(con, RUN, figures=figures,
                version='4.6.0' if figures else '4.5.0')
     t0 = 0.0
-    for ch in channels:
-        rows, _ = fx.make_rows(ch, n, RUN, rng, off_band=0.1, low_prom=0.3,
+    for i, ch in enumerate(channels):
+        ob = (special or {}).get(ch, 0.06 + 0.01 * (i % 5))
+        rows, _ = fx.make_rows(ch, n, RUN, gen or rng, off_band=ob,
+                               low_prom=low_prom,
                                t0=t0, figures=figures)
         fx.insert_rows(con, rows)
     con.commit()
@@ -88,6 +90,14 @@ def window(path):
     win.activateWindow()
     app.processEvents()
     return win
+
+
+def col_cell(win, ch, key, role=Qt.DisplayRole):
+    m = win.qc_widget.model
+    for r in range(m.rowCount()):
+        if m.channel_at(r) == ch:
+            return m.data(m.index(r, rg._QC_COL_INDEX[key]), role)
+    return None
 
 
 def press(win, key, mod=Qt.NoModifier):
@@ -128,6 +138,7 @@ def drive(dlg, size=120, seed=48213):
     seen['button'] = dlg.draw_btn.text()
     dlg.size_spin.setValue(size)
     dlg.seed_spin.setValue(seed)
+    dlg.refresh_preview()
     seen['total_row'] = [dlg.cell(dlg.table.rowCount() - 1, j)
                          for j in range(4)]
     return QtWidgets.QDialog.Accepted
@@ -146,6 +157,49 @@ check('17b', "the preview's total row matched (120 in sample, flagged "
       "counted) and the flag note was shown", seen['total_row'][2] == '120'
       and seen['total_row'][3] not in ('—', None)
       and seen['note'] == sr.FLAGGED_NOTE, repr(seen['total_row']))
+# A population with few off-band events, so the library takes fewer flagged
+# (F) than unflagged (U) events: the dialog's "of which flagged" must be F.
+P_FU = os.path.join(TMP, 'sparse_flags.db')
+# own generator so the shared one (and every later fixture) is unchanged
+build(P_FU, CH10, special={ch: 0.02 for ch in CH10}, low_prom=0.02,
+      gen=np.random.default_rng(7))
+wfu = window(P_FU)
+seen_fu = {}
+
+
+def drive_fu(dlg):
+    dlg.size_spin.setValue(120)
+    dlg.seed_spin.setValue(48213)
+    dlg.refresh_preview()
+    seen_fu['total_row'] = [dlg.cell(dlg.table.rowCount() - 1, j)
+                            for j in range(4)]
+    seen_fu['subject'] = dlg.subject_lbl.text()
+    return QtWidgets.QDialog.Rejected
+
+
+wfu._exec_dialog = drive_fu
+wfu.subject = 'WINDOW-SUBJECT'        # differs from the database's subject
+wfu._open_draw_dialog()
+app.processEvents()
+pv17 = rs.preview_allocation(wfu.db.conn, scope=sr.scope_for_run(
+    wfu.db.conn, RUN, 'spindle'), n_total=120, seed=48213)
+nF = sum(c['parts'].get('F', {}).get('n', 0) for c in pv17['cells'])
+nU = sum(c['parts'].get('U', {}).get('n', 0) for c in pv17['cells'])
+check('17g', "unequal F and U: the total row's flagged count is the "
+      "library's F, not U", nF != nU and seen_fu.get('total_row', [''] * 4)[3]
+      == str(nF), repr((seen_fu.get('total_row'), nF, nU)))
+db_subject = rs.prepare_population(wfu.db.conn, scope=sr.scope_for_run(
+    wfu.db.conn, RUN, 'spindle'))['population']['subject']
+check('17h', "the draw dialog names the database's subject (from the "
+      "prepared population), not the window's", db_subject
+      and db_subject != 'WINDOW-SUBJECT'
+      and seen_fu.get('subject') == str(db_subject),
+      repr((seen_fu.get('subject'), db_subject)))
+wfu.close()
+wfu.deleteLater()
+win.raise_()
+win.activateWindow()          # window-context shortcuts need the active window
+app.processEvents()
 check('17c', "status names the draw", win.status_bar.currentMessage()
       .startswith('Drew 120 events across 10 region × stage groups (seed '
                   '48213).') or win.status_bar.currentMessage()
@@ -207,9 +261,21 @@ win._start_sample()
 app.processEvents()
 check('18j', "… also when the selection never left it",
       ep._selected_uuid == order[1], repr(order.index(ep._selected_uuid)))
-check('20a', "before a decision there is no 'sample' row (stratum and flags "
-      "are never shown before deciding)", 'sample' not in evp.row_keys(),
-      repr(evp.row_keys()[:2]))
+srow0 = (evp.row_text('sample') or '')
+check('20a', "[20] before this reviewer's accept/reject the sample row reads "
+      "only 'event i of N' (no stratum, flags or weight)",
+      evp.row_keys()[:1] == ['sample']
+      and re.match(r'^event \d+ of 120$', srow0) is not None
+      and not evp.row('sample')['tooltip']
+      and evp.hidden_lbl.isVisibleTo(evp)
+      and evp.hidden_lbl.text() == 'Labels hidden until you accept or '
+                                   'reject this sample event.',
+      repr((evp.row_keys()[:2], srow0)))
+check('75s', "[75] top-bar hint in sample mode", win.key_hint_lbl.text() ==
+      'A accept · R reject · U unsure · ] [ sample · N P outlier · ? keys',
+      repr(win.key_hint_lbl.text()))
+check('78s', "[78] strip legend in sample mode ends with the blue ticks",
+      ep.strip_legend.text().endswith(' · blue ticks = sample events'))
 press(win, Qt.Key_A)
 check('19a', "auto-advance: A selects the next undecided sample event",
       ep._selected_uuid == order[2], repr(ep._selected_uuid))
@@ -287,8 +353,10 @@ visited = {ep._selected_uuid}
 for _ in range(4):
     press(win, Qt.Key_BracketRight)
     visited.add(ep._selected_uuid)
-check('21f', "an unsure event shows no stratum row (revisit stays unprimed)",
-      'sample' not in evp.row_keys(), repr(evp.row_keys()[:1]))
+check('21f', "[81] an unsure sample event keeps its flags hidden (revisit "
+      "stays unprimed)", re.match(r'^event \d+ of 120$',
+                                  evp.row_text('sample') or '') is not None
+      and evp.hidden_lbl.isVisibleTo(evp), repr(evp.row_text('sample')))
 check('21d', "after Revisit, ] visits only the unsure events",
       visited == unsure and bar.label.text() ==
       'REVIEW SAMPLE · revisiting 3 unsure', repr((len(visited),
@@ -575,7 +643,253 @@ check('51', "fits 1280 × 800: size hint within it and no grid scroll bar "
 dlg2.close()
 win.close()
 
+
+# ===================================================================== 80-83
+say("\n== 80-83. Flag words hidden in live sample review")
+P3 = os.path.join(TMP, 'hidden.db')
+build(P3, CH10, special={'O2': 0.7})
+con3 = sqlite3.connect(P3)
+sc3 = sr.scope_for_run(con3, RUN, 'spindle')
+sid3 = rs.draw_review_sample(con3, scope=sc3, n_total=120, seed=3)
+order3 = sr.presentation_order(con3, sid3)
+target = order3[0]
+start3 = con3.execute("SELECT start_time FROM events WHERE uuid = ?",
+                      (target,)).fetchone()[0]
+con3.execute("UPDATE events SET max_amp = 40 + (rowid % 7)")  # a spread,
+# so the median + 3.5·MAD outlier rule has a finite threshold
+con3.execute(
+    "UPDATE events SET in_band = 0, low_prominence = 1, prominence_db = 7.2,"
+    " peak_freq_ap = 7.5, near_bound = -1, duration = 0.52, end_time = ?, "
+    "amp_ratio = 1.2, max_amp = 900.0 WHERE uuid = ?",
+    (start3 + 0.52, target))
+con3.commit()
+con3.close()
+win = window(P3)
+win.on_qc_drill(sr.sample_rows(win.db.conn, sid3)[target]['channel'],
+                switch_tab=True)
+dk = win.detail_dock_w
+dk.set_coords({ch: ((i % 5) / 5.0 - 0.4, (i // 5) / 2.0 - 0.25)
+               for i, ch in enumerate(CH10)})
+dk.topo_combo.setCurrentIndex(dk.topo_combo.findData('pct_off_band'))
+win.on_qc_channel_selected('O2')
+app.processEvents()
+rings_before = len(dk.ring_items)
+rows_before = len(dk.flagged.rows)
+qw = win.qc_widget
+qw.sort_combo.setCurrentText('Checks (hard first)')
+app.processEvents()
+sorted_before = qw.visible_channels()
+win._start_sample()
+app.processEvents()
+win.on_qc_channel_selected('O2')
+dock_txt = ' '.join(l.text() for l in dk.findChildren(QtWidgets.QLabel)
+                    if l.isVisibleTo(dk))
+leak = [w for w in ('HARD', 'SOFT', '× hard', '▲ soft', 'off-band')
+        if w in dock_txt]
+check('dock-s', "sample active: no channel flag words in the dock, the "
+      "flagged list replaced by one line with counts —, no rings",
+      rings_before > 0 and rows_before > 0 and not leak
+      and dk.ring_items == [] and dk.flagged.rows == []
+      and dk.flagged.empty.text() == 'Channel checks are hidden while you '
+                                     'review the sample.'
+      and dk.flagged.counts.text() == '—'
+      and '\n' not in dk.facts_line.text(),
+      repr((rings_before, rows_before, leak)))
+qw = win.qc_widget
+cells = [col_cell(win, 'O2', k) for k in ('checks_flag', 'pct_off_band',
+                                          'pct_low_prom', 'pct_dur_floor',
+                                          'med_amp_ratio', 'med_thresh_ratio')]
+tops = [(dk.topo_combo.itemText(i), dk.topo_combo.model().item(i).isEnabled(),
+         dk.topo_combo.itemData(i, Qt.ToolTipRole))
+        for i in range(3, dk.topo_combo.count())]
+check('tbl-s', "sample active: Checks and population cells read — with the "
+      "tooltip; header '— checks flagged'; Topo check items disabled",
+      cells == ['—'] * 6
+      and col_cell(win, 'O2', 'pct_off_band', Qt.ToolTipRole)
+      == 'Hidden while you review the sample.'
+      and qw.counts_lbl.text().startswith('— checks flagged · ')
+      and tops and all(not en and tip == 'Hidden while you review the '
+                       'sample.' for _t, en, tip in tops),
+      repr((cells, qw.counts_lbl.text())))
+# montage order = the order of the coordinates loaded above (CH10), not
+# the database's alphabetical order
+chan_order = [c for c in CH10 if c in qw.visible_channels()]
+sort_items = {qw.sort_combo.itemText(i): (
+    qw.sort_combo.model().item(i).isEnabled(),
+    qw.sort_combo.itemData(i, Qt.ToolTipRole))
+    for i in range(qw.sort_combo.count())}
+check_sorts = [lab for lab, k, _d in rg._er.SORT_ITEMS
+               if k is None or k in rg._er.CHECK_COLUMNS]
+check('sort-s', "sample active: rows in montage order (Fz, F3, Cz, ...; O2, "
+      "flagged, is not on top), Sort reads 'Channel order', check sorts disabled with the "
+      "tooltip, header clicks do not sort",
+      sorted_before[0] == 'O2' and qw.visible_channels() == chan_order
+      and qw.visible_channels()[0] != 'O2'
+      and chan_order != sorted(chan_order)
+      and qw.sort_combo.currentText() == 'Channel order'
+      and all(not sort_items[l][0] and sort_items[l][1]
+              == 'Hidden while you review the sample.' for l in check_sorts)
+      and sort_items['Amp z ↓'][0] and sort_items['Channel'][0]
+      and not qw.table.isSortingEnabled(),
+      repr((sorted_before[:2], qw.visible_channels()[:3],
+            qw.sort_combo.currentText())))
+n_flag_s = qw.show_combo.itemText(1)
+check('tbl-f', "sample active: Show > Flagged counts amplitude flags only",
+      n_flag_s == f"Flagged ({int(qw.model.df['flag'].isin(['hard', 'soft']).sum())})",
+      repr(n_flag_s))
+# no check filter during sample review
+win._open_in_epochs('O2')
+app.processEvents()
+ep_ = win.epochs_panel
+msg_open = win.status_bar.currentMessage()
+full = [it.brush.color().alpha() for it in ep_.band_items(ep_.raw_plot)]
+ep_._goto_epoch(0)
+ep_.clear_selection()
+seen_all = set()
+for _ in range(len(ep_._ev) + 2):
+    QTest.keyClick(ep_, Qt.Key_BraceRight)
+    app.processEvents()
+    if ep_._selected_uuid:
+        seen_all.add(ep_._selected_uuid)
+check('flt-s', "sample active: Open in Epochs on a flagged channel applies "
+      "no filter (no chip, full fill, } visits every event)",
+      ep_._channel == 'O2' and ep_.chip_text() == '' and ep_._check_filter
+      is None and len(full) > 0 and len(set(full)) == 1
+      and len(seen_all) == len(ep_._ev)
+      and msg_open
+      == 'Check filter not applied while you review the sample.',
+      repr((ep_._channel, ep_.chip_text(), ep_._check_filter,
+            sorted(set(full)), len(seen_all), len(ep_._ev),
+            msg_open)))
+win._exit_sample()
+win.on_qc_channel_selected('O2')
+app.processEvents()
+check('sort-e', "after Exit: the previous sort ('Checks (hard first)', "
+      "O2 on top) is back and every Sort item is enabled again",
+      qw.sort_combo.currentText() == 'Checks (hard first)'
+      and qw.visible_channels() == sorted_before
+      and qw.sort_combo.findText('Channel order') < 0
+      and all(qw.sort_combo.model().item(i).isEnabled()
+              for i in range(qw.sort_combo.count()))
+      and qw.table.isSortingEnabled(),
+      repr((qw.sort_combo.currentText(), qw.visible_channels()[:3])))
+check('tbl-e', "after Exit: check cells, header count and Topo items back",
+      col_cell(win, 'O2', 'checks_flag').startswith('× HARD')
+      and qw.counts_lbl.text()[0].isdigit()
+      and all(dk.topo_combo.model().item(i).isEnabled()
+              for i in range(3, dk.topo_combo.count())),
+      repr((col_cell(win, 'O2', 'checks_flag'), qw.counts_lbl.text())))
+check('dock-e', "after Exit the rings, the list and the facts are back",
+      len(dk.ring_items) == rings_before
+      and len(dk.flagged.rows) == rows_before
+      and 'checks × hard' in dk.facts_line.text(),
+      repr((len(dk.ring_items), dk.facts_line.text())))
+win.on_qc_drill(sr.sample_rows(win.db.conn, sid3)[target]['channel'],
+                switch_tab=True)
+win._start_sample()
+app.processEvents()
+ep = win.epochs_panel
+evp = win.detail_dock_w.event_panel
+BANNED = ('in band', 'OFF BAND', 'low prominence', 'at the floor',
+          'at the ceiling', 'outside run limits', 'barely', 'meets', 'fails')
+
+
+def panel_text():
+    return '\n'.join((r['value'] + '\n' + '\n'.join(r['sub']))
+                     for r in evp._rows)
+
+
+def coloured():
+    return [r['key'] for r in evp._rows if r.get('level') in ('warn', 'bad')]
+
+
+t = panel_text()
+check('80', "[80] no flag word before a decision; numbers stay; no warn/bad "
+      "colour; the hidden line is shown", ep._selected_uuid == target
+      and not any(b in t for b in BANNED)
+      and all(u in t for u in ('Hz', 'dB', '×'))
+      and coloured() == [] and evp.hidden_lbl.isVisibleTo(evp),
+      repr(([b for b in BANNED if b in t], coloured())))
+labels_on_trace = [it.toPlainText() for p, it in ep._event_items
+                   if isinstance(it, rg.pg.TextItem)]
+check('83', "[83] outlier row and the outlier trace label present before "
+      "any decision", (evp.row_text('outlier') or '').startswith('yes')
+      and labels_on_trace.count('outlier') == 2, repr(labels_on_trace))
+win._auto_advance = False
+press(win, Qt.Key_U)
+press(win, Qt.Key_Return)
+t = panel_text()
+check('81a', "[81] after U + Enter the labels stay hidden",
+      not any(b in t for b in BANNED) and evp.hidden_lbl.isVisibleTo(evp))
+press(win, Qt.Key_A)
+t = panel_text()
+check('81b', "[81] after A they appear and the hidden line goes",
+      'OFF BAND' in t and 'low prominence' in t
+      and not evp.hidden_lbl.isVisibleTo(evp), repr(t[:120]))
+press(win, Qt.Key_Z, Qt.ControlModifier)
+t = panel_text()
+check('81c', "[81] Ctrl+Z (back to unsure) hides them again",
+      not any(b in t for b in BANNED) and evp.hidden_lbl.isVisibleTo(evp),
+      repr([b for b in BANNED if b in t]))
+win._exit_sample()
+ep.select_event(target)
+app.processEvents()
+t = panel_text()
+check('82a', "[82] the same event outside sample mode shows its labels",
+      'OFF BAND' in t and not evp.hidden_lbl.isVisibleTo(evp))
+win._start_sample()
+other = next(u for u in ep._ev['uuid'] if u not in win._sample['rows'])
+ep.select_event(other)
+app.processEvents()
+check('82b', "[82] a non-sample event in sample mode shows labels, no "
+      "hidden line, no sample row", not evp.hidden_lbl.isVisibleTo(evp)
+      and 'sample' not in evp.row_keys())
+# [item 2] a flagged and an unflagged undecided event in ONE cell: before a
+# decision both rows are identical in form (no stratum, flags or weight);
+# after accept the stratum and the weight tooltip appear.
+rows3 = win._sample['rows']
+undecided = [u for u in win._sample['order'] if u not in ep._reviews]
+pair = None
+for u in undecided:
+    for v in undecided:
+        if (rows3[u]['region'], rows3[u]['stage']) == (
+                rows3[v]['region'], rows3[v]['stage']) \
+                and rows3[u]['flagged'] == 1 and rows3[v]['flagged'] == 0:
+            pair = (u, v)
+            break
+    if pair:
+        break
+before = {}
+for u in pair or ():
+    win._goto_sample_event(u)
+    app.processEvents()
+    r = evp.row('sample')
+    before[u] = (r['value'], list(r['sub']), r['tooltip'])
+check('wt-a', "flagged + unflagged in one cell, undecided: both rows read "
+      "only 'event i of N', no sub-line, no tooltip", pair is not None
+      and all(re.match(r'^event \d+ of 120$', val) and sub == [] and not tip
+              for val, sub, tip in before.values()), repr(before))
+after = {}
+for u in pair or ():
+    win._goto_sample_event(u)
+    app.processEvents()
+    press(win, Qt.Key_A)
+    win._goto_sample_event(u)
+    app.processEvents()
+    r = evp.row('sample')
+    after[u] = (r['value'], r['tooltip'])
+check('wt-b', "after accept: region · stage · flags, and the weight "
+      "tooltip, which differs between the flagged and unflagged event",
+      pair is not None
+      and after[pair[0]][0].startswith(
+          f"{rows3[pair[0]]['region']} · {rows3[pair[0]]['stage']} · flagged")
+      and after[pair[1]][0].endswith('not flagged')
+      and all('weight' in tip.lower() for _v, tip in after.values())
+      and after[pair[0]][1] != after[pair[1]][1], repr(after))
+win.close()
 say("\n" + "=" * 78)
+check('settings', "the real review-GUI preferences file was not "
+      "touched", *gui_settings_guard.untouched())
 say(f"{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
 for f in FAILURES:
     say("  FAILED: " + f)

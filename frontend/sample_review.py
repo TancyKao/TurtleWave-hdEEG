@@ -136,26 +136,28 @@ def presentation_order(conn, sample_id):
 
 def reviewer_labels(conn, sample_id):
     """``{reviewer: {uuid: (decision, reason)}}`` of the VALID labels on a
-    sample's events.
-
-    Uses the library's own label reader (``review_sampling._labels``), so a
-    label is void here exactly when it is void in ``review_precision``: the
-    event is gone, or its end time moved more than 0.05 s since the draw.
-    """
-    rs = _rs()
-    rows = rs._sample_rows(conn, sample_id)
-    labels, _stale, _missing = rs._labels(conn, sample_id, rows)
-    return {rv: {u: (v[0], v[1]) for u, v in lab.items()}
-            for rv, lab in labels.items()}
+    sample's events, from the library's ``read_sample_labels`` (the same
+    voiding rules as ``review_precision``: event gone, end time moved more
+    than 0.05 s, or a label from another sample whose end time differs)."""
+    df = _rs().read_sample_labels(conn, sample_id)
+    out = {}
+    for r in df[df['valid'].astype(bool)].itertuples(index=False):
+        out.setdefault(r.reviewer, {})[r.uuid] = (
+            r.decision, None if r.reason != r.reason else r.reason)
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Text
 # ---------------------------------------------------------------------------
 
-def stratum_text(row):
-    """``parietal · NREM2 · flagged: off-band`` (spec section 2)."""
+def stratum_text(row, hide_flags=False):
+    """``parietal · NREM2 · flagged: off-band`` (spec section 2); with
+    ``hide_flags`` just ``parietal · NREM2`` (live sample review before this
+    reviewer's accept or reject)."""
     head = f"{row.get('region')} · {row.get('stage')}"
+    if hide_flags:
+        return head
     flagged = row.get('flagged')
     cell = str(row.get('cell') or '')
     if flagged is None:
@@ -415,55 +417,64 @@ def csv_rows(design, frames, threshold, estimate):
 # Draw preview
 # ---------------------------------------------------------------------------
 
-def population_for(conn, scope):
-    """The library's in-scope population of ``scope`` (no write).
+def prepare(conn, scope):
+    """The scope's population read once, when the library offers
+    ``review_sampling.prepare_population`` (else ``None``). Raises
+    ``ValueError`` as the draw would."""
+    fn = getattr(_rs(), 'prepare_population', None)
+    if fn is None:
+        return None
+    return fn(conn, scope=dict(scope))
 
-    Uses ``review_sampling._population``, the function the draw itself
-    reads, so the preview is exactly what Draw will draw. Raises
-    ``ValueError`` as the draw would (empty or mixed-parameter scope).
-    """
-    return _rs()._population(conn, dict(scope))
+
+def prepared_subject(prepared):
+    """Subject of a prepared population: ``prepared['population']
+    ['subject']`` (what ``prepare_population`` returns), else a top-level
+    ``subject`` key or attribute."""
+    if prepared is None:
+        return None
+    pop = (prepared.get('population') if isinstance(prepared, dict)
+           else getattr(prepared, 'population', None))
+    if isinstance(pop, dict) and pop.get('subject') is not None:
+        return pop['subject']
+    if isinstance(prepared, dict):
+        return prepared.get('subject')
+    return getattr(prepared, 'subject', None)
 
 
-def preview_allocation(pop, n_total, seed, n_shared=30):
-    """Per region × stage: events in scope, in sample, of which flagged.
+def preview(conn, scope, n_total, seed, n_shared=30, prepared=None):
+    """What Draw would draw, from the library's ``preview_allocation``
+    (reads only). Raises ``ValueError`` as the draw would.
 
     Returns
     -------
-    (list of dict, dict)
+    (list of dict, dict, dict)
         Rows ``group, n_events, n_sample, n_flagged, census`` in region then
-        stage order, and the totals.
+        stage order; totals; the library's preview dict (``subject``,
+        ``flag_available``, ``exists``, ``sample_id`` …).
     """
-    rs = _rs()
-    rows = rs.select_sample(
-        [(e['uuid'], e['region'], e['stage'], e['flagged'])
-         for e in pop['events']], int(seed), int(n_total), int(n_shared),
-        flag_available=pop['flag_available'])
-    sizes = {}
-    for e in pop['events']:
-        key = (e['region'], e['stage'])
-        if e['region'] in REGION_ORDER and e['stage'] in STAGE_ORDER:
-            sizes[key] = sizes.get(key, 0) + 1
-    drawn, flagged = {}, {}
-    for r in rows:
-        key = (r['region'], r['stage'])
-        drawn[key] = drawn.get(key, 0) + 1
-        flagged[key] = flagged.get(key, 0) + bool(r['flagged'])
+    kw = {'prepared': prepared} if prepared is not None else {}
+    pv = _rs().preview_allocation(conn, scope=dict(scope),
+                                  n_total=int(n_total), seed=int(seed),
+                                  n_shared=int(n_shared), **kw)
+    flag = bool(pv['flag_available'])
+    by = {(c['region'], c['stage']): c for c in pv['cells']}
     out = []
     for region in REGION_ORDER:
         for stage in STAGE_ORDER:
-            key = (region, stage)
-            if key not in sizes:
+            c = by.get((region, stage))
+            if c is None:
                 continue
-            out.append({'group': f"{region} · {stage}",
-                        'n_events': sizes[key], 'n_sample': drawn.get(key, 0),
-                        'n_flagged': (flagged.get(key, 0)
-                                      if pop['flag_available'] else None),
-                        'census': drawn.get(key, 0) >= sizes[key]})
-    tot = {'n_events': sum(sizes.values()), 'n_sample': len(rows),
-           'n_flagged': (sum(flagged.values()) if pop['flag_available']
-                         else None), 'groups': len(out)}
-    return out, tot
+            out.append({'group': f"{region} · {stage}", 'n_events': c['N_h'],
+                        'n_sample': c['n_h'],
+                        'n_flagged': (c['parts'].get('F', {}).get('n', 0)
+                                      if flag else None),
+                        'census': bool(c['census'])})
+    tot = {'n_events': sum(r['n_events'] for r in out),
+           'n_sample': sum(r['n_sample'] for r in out),
+           'n_flagged': (sum(r['n_flagged'] for r in out) if flag else None),
+           'groups': len(out)}
+    return out, tot, pv
 
 
 def existing_sample_note(design, counts):

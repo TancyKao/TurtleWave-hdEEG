@@ -23,7 +23,10 @@ _ACCENT = '#5a8fce'
 
 
 def _settings():
-    return QtCore.QSettings('turtlewave', 'eeg_review_gui')
+    """Same store as ``eeg_review_gui._review_settings`` (default format)."""
+    return QtCore.QSettings(QtCore.QSettings.defaultFormat(),
+                            QtCore.QSettings.UserScope, 'turtlewave',
+                            'eeg_review_gui')
 
 
 class SampleBar(QtWidgets.QWidget):
@@ -81,18 +84,22 @@ class SampleBar(QtWidgets.QWidget):
 class DrawSampleDialog(QtWidgets.QDialog):
     """``Draw review sample``: size, seed, a live allocation preview.
 
-    The preview runs the library's own selection on the scope's population
-    (nothing is written until Draw). Never deletes an existing sample.
+    ``preview_fn(size, seed) -> (rows, totals, preview)`` is the library's
+    ``preview_allocation`` (reads only; nothing is written until Draw). It
+    runs 200 ms after the last size or seed change. Never deletes an
+    existing sample.
     """
 
-    def __init__(self, subject, events_line, population, existing_note=None,
+    def __init__(self, subject, events_line, preview_fn, existing_note=None,
                  seed=None, parent=None, error=None):
         super().__init__(parent)
         self.setWindowTitle('Draw review sample')
-        self.pop = population
+        self.preview_fn = preview_fn
+        self.flag_available = None
         lay = QtWidgets.QVBoxLayout(self)
         form = QtWidgets.QFormLayout()
-        form.addRow('Subject', QtWidgets.QLabel(str(subject or '—')))
+        self.subject_lbl = QtWidgets.QLabel(str(subject or '—'))
+        form.addRow('Subject', self.subject_lbl)
         form.addRow('Events', QtWidgets.QLabel(events_line))
         self.size_spin = QtWidgets.QSpinBox()
         self.size_spin.setRange(20, 2000)
@@ -138,19 +145,25 @@ class DrawSampleDialog(QtWidgets.QDialog):
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
         lay.addWidget(box)
-        self.size_spin.valueChanged.connect(self._preview)
-        self.seed_spin.valueChanged.connect(self._preview)
-        self._preview()
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self.refresh_preview)
+        self.size_spin.valueChanged.connect(lambda *_: self._timer.start())
+        self.seed_spin.valueChanged.connect(lambda *_: self._timer.start())
+        self.refresh_preview()
 
-    def _preview(self):
-        if self.pop is None:
+    def refresh_preview(self):
+        """Recompute the allocation preview now."""
+        self._timer.stop()
+        if self.preview_fn is None:
             self.draw_btn.setEnabled(False)
             self.table.setRowCount(0)
             return
         try:
-            rows, tot = sr.preview_allocation(self.pop, self.size_spin.value(),
-                                              self.seed_spin.value())
-        except ValueError as err:
+            rows, tot, pv = self.preview_fn(self.size_spin.value(),
+                                            self.seed_spin.value())
+        except Exception as err:       # refusals, or a closed database
             self.error.setText(str(err))
             self.error.setVisible(True)
             self.draw_btn.setEnabled(False)
@@ -173,8 +186,13 @@ class DrawSampleDialog(QtWidgets.QDialog):
                         tot['n_sample'],
                         '—' if tot['n_flagged'] is None else tot['n_flagged']])
         self.n_groups = tot['groups']
-        self.note.setText(sr.FLAGGED_NOTE if self.pop['flag_available']
+        self.flag_available = bool(pv['flag_available'])
+        self.note.setText(sr.FLAGGED_NOTE if self.flag_available
                           else sr.LEGACY_NOTE)
+
+    def done(self, result):
+        self._timer.stop()
+        super().done(result)
 
     def cell(self, row, col):
         it = self.table.item(row, col)
