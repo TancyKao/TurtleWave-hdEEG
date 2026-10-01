@@ -22,12 +22,31 @@ Two tabs, plus two docks:
   current event type, filtered by outlier flag (`hard` / `soft` / `dead` /
   `ok`), with actions to mark a channel as an artefact, queue it for
   re-detection, or drill into its epochs.
-- **2 · Epochs** — steps through 30-second windows for a single channel, with
-  a hypnogram strip, outlier markers, and range-marking for artefacts.
+- **2 · Epochs** — steps through the scored epochs for a single channel, with
+  a hypnogram strip, outlier markers, and range-marking for artefacts. Epochs
+  are the annotation file's own epochs: 30 s on a uniform grid, and on a cut
+  recording whole-second epochs of 1 to 30 s. The window and the hypnogram
+  strip follow each epoch's true length. Without an annotation file the tab
+  uses a synthetic 30 s grid.
 - **Filters dock** (left) — event type, detection method, frequency band, and
   channel selection, applied globally across both tabs.
 - **Topography & detail dock** (right) — scalp topography for the current QC
   metric, the global worst-events list, and the selected channel's detail.
+
+## Channel Marks and Defaults
+
+- A channel the file names as interpolated (`header['interp_channels']`) is
+  listed in the Filters dock with a trailing ` ~` and the tooltip
+  "Interpolated channel (reconstructed from neighbours by the cleaning
+  pipeline)". The channel name used for lookups is unchanged.
+- A channel flagged as an artefact keeps its existing ⚑ tag.
+- The waveform channels open as `E112`, `E118`, `Cz` when all three exist (EGI
+  nets). Otherwise they are those of `Cz`, `Fz`, `Pz` that exist, topped up to
+  three from the start of the list. Channels the file types as non-EEG are
+  never chosen. A selection you made yourself is kept when every channel in it
+  exists in the next file loaded.
+- The dashed vertical gridlines in the trace are every 30 s, as a display
+  guide. They are not epoch edges on a cut recording.
 
 ## Menu Bar
 

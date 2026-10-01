@@ -4,6 +4,11 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 
 ## Core Modules
 
+### Recording I/O and Staging
+
+- [**EEGLAB I/O**](eeglab_io.md) - `open_dataset`, both EEGLAB `.set` layouts, channel types, reference and interpolated channels
+- [**Recording Timeline**](timeline.md) - boundary time map, exact epochs and the timeline sidecar for cut recordings
+
 ### Event Processing
 
 - [**Spindle Processor**](eventprocessor.md) - Core spindle detection functionality

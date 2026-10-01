@@ -70,8 +70,27 @@ These filters apply globally, across both the Channels (QC) and Epochs tabs.
 2. Click **Drill into epochs ▸**
 3. On the **2 · Epochs** tab, use **P** / **N** to jump between outlier epochs, or the prev/next buttons to step one epoch at a time
 
+On a cut recording (see
+[How to analyse Compumedics and other cut EEGLAB recordings](analyse-compumedics-recordings.md)),
+epochs are the real scored epochs and differ in length: most are 30 s, the ones
+next to a removed stretch are 1 to 29 s. The window shows the whole epoch, so a
+1 s epoch shows a 1 s window, and the hypnogram strip draws each epoch at its
+true width. The dashed gridlines inside the trace stay at 30 s as a display
+guide and do not mark epoch edges.
+
 !!! tip
     Click a point in the global worst-events list (right dock) to jump straight to that channel and epoch without going through the table.
+
+## Pick the channels to view, and spot interpolated ones
+
+**Problem:** You want to know which channels the cleaning pipeline
+reconstructed from their neighbours before you review their events.
+
+**Solution:** Look at the Filters dock channel list. An interpolated channel
+shows a trailing ` ~` (for example `Cz ~`), with a tooltip saying it was
+reconstructed from neighbours. The mark is display only. On open, the GUI
+shows `Cz`, `Fz` and `Pz` when the file has them, never a channel the file
+types as non-EEG.
 
 ## Mark a Channel as an Artefact
 

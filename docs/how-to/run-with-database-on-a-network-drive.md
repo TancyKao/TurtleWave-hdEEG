@@ -148,22 +148,29 @@ The environment variable still has two real uses:
 
     ```bat
     set TURTLEWAVE_SQLITE_JOURNAL=DELETE
-    python examples\backfill_cycles.py
+    python examples\backfill_cycles.py --root Z:\study --dry-run
+    python examples\backfill_cycles.py --root Z:\study
     ```
 
 === "Windows (PowerShell)"
 
     ```powershell
     $env:TURTLEWAVE_SQLITE_JOURNAL = "DELETE"
-    python examples\backfill_cycles.py
+    python examples\backfill_cycles.py --root Z:\study --dry-run
+    python examples\backfill_cycles.py --root Z:\study
     ```
 
 === "macOS / Linux"
 
     ```bash
     export TURTLEWAVE_SQLITE_JOURNAL=DELETE
-    python examples/backfill_cycles.py
+    python examples/backfill_cycles.py --root /Volumes/share/study --dry-run
+    python examples/backfill_cycles.py --root /Volumes/share/study
     ```
+
+`--dry-run` lists the databases the script would modify and exits. The second
+command lists them again and asks before writing; add `--yes` to skip the
+question, which you need when there is no terminal to answer it.
 
 !!! warning "PowerShell's `$env:` doesn't survive closing the terminal"
     `$env:TURTLEWAVE_SQLITE_JOURNAL = "DELETE"` only sets the variable for

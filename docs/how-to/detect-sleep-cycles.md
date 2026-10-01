@@ -26,6 +26,23 @@ scored hypnogram and the events already in the database.
     annotation XML is never written by a detection run itself — see
     [What lands in the database](direct-to-database-detection.md#cycles-and-stage-durations-populate-automatically).
 
+    A detection run **never re-detects stored cycles**. Cycles you stored
+    with your own thresholds (a backfill with a shorter Wake bout, say) stay as
+    they are; only `finalize_cycles_and_durations`, or
+    `ensure_cycles_populated(..., force=True)`, recomputes them. What a
+    detection run does add is missing per-cycle coverage: if a cut
+    recording already has cycles but no `analysed_time_cycles` rows for the
+    run's stages and reject set, those rows are computed from the **stored**
+    cycles, with one INFO line saying how many were added.
+
+    A recording staged from its stage events has no full-night hypnogram, so
+    its cycles can never be computed. The first finalize records that as
+    "cycles unavailable" (a `stage_durations` row with `time_base='cut'` and no
+    `sleep_cycles` rows). Later detection runs skip the step with one INFO
+    line instead of retrying and logging the ERROR again. To get cycles,
+    re-annotate the recording so the sidecar holds a full-night hypnogram,
+    then run `finalize_cycles_and_durations`.
+
 ## When to use this
 
 **Problem:** You have detected events (spindles, slow waves, K-complexes)
@@ -211,32 +228,43 @@ run. Only a failure at or before the database write counts as FAIL. The
 final tally names how many passing subjects had their plot skipped:
 
 ```bash
-python examples/backfill_cycles.py
+# 1. See which databases and XMLs would be modified, then exit
+python examples/backfill_cycles.py --root /data/study --dry-run
+
+# 2. Run it; it lists the files and asks before writing
+python examples/backfill_cycles.py --root /data/study
+
+# Only some subjects, no question asked (needed without a terminal)
+python examples/backfill_cycles.py --root /data/study --subjects sub-01 sub-02 --yes
 ```
 
-Edit its `ROOT` (and optional `SUBJECTS` allowlist) constants at the top of
-the file before running.
+`--root` is required: the folder holding one subfolder per subject, each with
+`wonambi/neural_events.db` and a `sub-*.xml`. `--subjects` lists subfolder
+names (default: every folder that has a database). `--dry-run` prints what
+would be modified and exits. Without `--yes` the script lists every database
+and XML it will write and asks `Proceed? [y/N]`; with no terminal (a batch job,
+a pipe) it aborts without writing unless you pass `--yes`.
 
-Its CONFIG block also exposes two thresholds, in minutes, plus the epoch
-length used to convert them for `detect_cycles`: `WAKE_THRESH_MIN` (minutes
+The thresholds are options too, in minutes, plus the epoch
+length used to convert them for `detect_cycles`: `--wake-thresh-min` (minutes
 of Wake absorbed into a surrounding NREM period; library default 5 min, i.e.
 `wake_thresh=10` epochs at 30 s — a Wake bout **up to and including** this
-many minutes is absorbed), `NREM_MIN_MIN` (minimum length of an NREM period
+many minutes is absorbed), `--nrem-min-min` (minimum length of an NREM period
 to count at all; library default 15 min, i.e. `nrem_min=30` epochs — an
 NREM run must be **longer than** this many minutes to survive; a run of
-exactly `NREM_MIN_MIN` is dropped), and `EPOCH_LENGTH` (the scoring's epoch
+exactly `--nrem-min-min` is dropped), and `--epoch-length` (the scoring's epoch
 length in seconds, used to convert both of the above from minutes to epochs
 before calling `finalize_cycles_and_durations`).
 
 !!! warning
-    `EPOCH_LENGTH` is a property of the sleep scoring, not a tunable
+    `--epoch-length` is a property of the sleep scoring, not a tunable
     parameter — it must match the epoch length the hypnogram was actually
     scored at (30 s for standard AASM scoring). Setting it to the wrong
     value silently rescales every minute-based threshold and duration in
     the run, with no error to flag the mismatch.
 
 !!! note
-    Re-running with different `WAKE_THRESH_MIN` / `NREM_MIN_MIN` values
+    Re-running with different `--wake-thresh-min` / `--nrem-min-min` values
     replaces the subject's existing `sleep_cycles` rows, `events.cycle`
     tags, and XML cycle markers outright — the database does not record
     which threshold produced them, so name `export_cycle_events.py` output
@@ -247,18 +275,87 @@ before calling `finalize_cycles_and_durations`).
     of writing that silently.
 
 `rem_min` (the minimum REM epochs for a `'1979'` REM period;
-library default 10 epochs) is not exposed by `backfill_cycles.py`'s CONFIG
-block and always runs at the library default — the script has no equivalent
-`REM_MIN_MIN` constant.
+library default 10 epochs) is not exposed by `backfill_cycles.py` and always runs at the library
+default — the script has no equivalent option.
 
 !!! note
     `finalize_cycles_and_durations` (and `ParalCycles.run`) are strictly
     post-detection: they annotate an existing `neural_events.db` and never
-    create one. If `db_path` doesn't exist — most often a mistyped `ROOT` in
+    create one. If `db_path` doesn't exist — most often a mistyped `--root` in
     `backfill_cycles.py` — they raise `FileNotFoundError` naming the path
     rather than silently creating an empty database that would only fail
     later, on `no such table: main.events`. Run event detection first, or
     correct the path.
+
+## Cycles on a cut recording
+
+**Problem:** The recording had data cut out before you received it (EEGLAB
+`pop_select` boundary events, as in Compumedics exports), and cycles and stage
+minutes must still describe the whole night.
+
+**Solution:** Annotate the file first so the timeline sidecar
+(`<xml stem>_timeline.json`) exists beside the XML, then call the finalize step
+with `timeline='auto'`, the default. See
+[How to analyse Compumedics and other cut EEGLAB recordings](analyse-compumedics-recordings.md)
+for the annotation step and
+[About cut recordings and time bases](../explanation/cut-recordings-and-time-bases.md)
+for the reasoning.
+
+```python
+cycles_by_method = finalize_cycles_and_durations(
+    annot,
+    db_path,
+    subject=subject,
+    timeline="auto",          # "auto" (default), "none" or a RecordingTimeline
+    coverage_floor_min=5.0,   # per-cycle, per-stage analysed-time floor, minutes
+)
+```
+
+`timeline` takes three kinds of value.
+
+- `'auto'` loads the sidecar if there is one. With a valid sidecar, cycles and
+  stage durations are computed on the full-night hypnogram at 30 s, and the
+  cycle boundaries are converted to the cut file's time. With no sidecar, it
+  behaves as in earlier releases, provided the XML has uniform 30 s epochs.
+- `'none'` ignores any sidecar. It raises `ValueError` if the XML has
+  variable-length epochs.
+- A `RecordingTimeline` object is used as given.
+
+On a cut file the converted values are not the full-night values. In
+`sleep_cycles`, `nrem_start_sec`, `nrem_end_sec` and `rem_end_sec` hold cut
+time, snapped to an epoch edge, and the originals are kept in
+`nrem_start_orig`, `nrem_end_orig` and `rem_end_orig`. The `time_base` column
+says which: `'cut'` for a converted row. The `*_min` durations stay full-night.
+Consequently `cycle_dur_min` is the full-night span of the cycle and does not
+equal the difference of the second columns on a cut file. Tables written by
+earlier releases gain the new columns on the next write, with NULL in the old
+rows. `stage_durations` gains `time_base` the same way.
+
+The `analysed_time_cycles` table reports how much of each cycle a detector
+could actually use, per `(subject, method, cycle_number, stage, reject_types)`:
+`fullnight_seconds`, `removed_seconds` (lost to the cut), `masked_seconds`
+(lost to artefact rejection), `analysed_seconds`, `coverage`
+(`analysed_seconds / fullnight_seconds`) and `low_coverage`, set when
+`analysed_seconds` is under `coverage_floor_min` (5 minutes by default,
+stored in `coverage_floor_seconds`). Filter on `low_coverage` before you pool
+cycle-level results. Rows are per single stage (`NREM1`, `NREM2`, `NREM3`,
+`REM` by default; `stages=` changes this) and exist only when the sidecar holds
+a full-night hypnogram. `coverage` is capped at 1 and is NULL when the
+cycle has no full-night time in the stage. Read the table with
+`turtlewave_hdEEG.density.read_cycle_analysed_time(db_path, subject=None)`,
+which returns a DataFrame with `low_coverage` as bool.
+
+### Sidecar failure modes
+
+| Situation | Result |
+|---|---|
+| No sidecar, uniform 30 s epochs | Works as in earlier releases (`timeline='auto'`). |
+| No sidecar, variable-length epochs | `ValueError`. Re-run the annotation step; the finalize step never guesses. |
+| Sidecar present but its `annotation_file`, schema, `cut_epochs` or `last_second` disagree with the XML | `SidecarMismatchError` listing the first three differing epochs. Re-run the annotation step to rewrite the XML and sidecar together. |
+| Sidecar from before 4.5.0 (schema 1) | `SidecarMismatchError`; re-annotate. |
+| `timeline='none'` on a cut file | The sidecar is ignored, so a variable-length XML raises `ValueError` as in the second row. Use it only for uniform-epoch files. |
+| Sidecar from a file staged from its stage events (`fullnight_stages` is empty) | No cycles. One `ERROR` is logged; `sleep_cycles`, `events.cycle` and `analysed_time_cycles` are cleared for the subject. `stage_durations` is written from the cut file's epoch durations with `time_base='cut'`, and its `epoch_length` is the median epoch duration, not 30. |
+| An unknown `timeline` value | `ValueError`. |
 
 ## What lands in the database
 
@@ -278,7 +375,9 @@ block and always runs at the library default — the script has no equivalent
 - **`stage_durations`** — one row per subject: minutes in Wake / N1 / N2 / N3
   / REM / artefact, reconciled to the full hypnogram span. Written even when
   no cycles are detected (an all-Wake or unscorable night still has stage
-  durations).
+  durations). `time_base` is `'original'` normally and `'cut'`
+  for a file staged from its stage events; there `epoch_length` is the median
+  epoch duration.
 - **`events.cycle`** — every event in the `events` table gets tagged with its
   cycle number under `tag_method` (`'2022'` by default). Because tagging
   rewrites event rows by time window regardless of method ("last run wins"),
@@ -314,7 +413,7 @@ plot_from_annotations(annot, cycles_by_method, out_png, subject=subject)
 ```
 
 `examples/backfill_cycles.py` produces the same plot for every subject it
-processes; `PLOT = True` in its CONFIG block is the default, and `PLOT = False`
+processes; drawing the plot is the default, and `--no-plot`
 turns it off. It passes its own `plot_path`, named for the wake and NREM
 thresholds rather than for the methods, so each threshold pair keeps its own
 PNG.
@@ -373,12 +472,12 @@ backfill annotates an existing neural_events.db and never creates one -- run
 event detection first, or correct the path.
 ```
 
-The realistic trigger is a mistyped `ROOT` in `backfill_cycles.py` (or a
+The realistic trigger is a mistyped `--root` in `backfill_cycles.py` (or a
 subject folder that hasn't had spindle/slow-wave/K-complex detection run
 yet). Before this check existed, a bad path was silently created as an
 empty database and the run died later on `no such table: main.events`,
 leaving a stray file behind — on a network share, in whatever journal mode
-the creating call chose. Fix `ROOT`/`db_path` so it points at a
+the creating call chose. Fix `--root`/`db_path` so it points at a
 `neural_events.db` that event detection has already populated, or run
 detection first.
 
