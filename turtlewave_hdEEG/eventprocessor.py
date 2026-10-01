@@ -8,6 +8,8 @@ from wonambi.trans import select, fetch, math
 from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSpindle as DetectSpindle
 from turtlewave_hdEEG import dbwrite
+from turtlewave_hdEEG import event_metrics
+from turtlewave_hdEEG.extensions import detection_threshold_values
 from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
                                     resolve_cat,
                                     warn_interpolated_channels)
@@ -477,6 +479,7 @@ class ParalEvents:
                        *, write_db=None, db_path=None, subject=None,
                        resume=False, run_params=None,
                        replace_channels=None, reject_types=None,
+                       compute_figures=True,
                        **detector_params):
         """
         Detect spindles in the dataset while considering artifacts and arousals.
@@ -581,6 +584,12 @@ class ParalEvents:
             in the set keep the append/upsert behaviour and are never touched.
             Only meaningful with ``write_db=True``. ``None`` (default) disables
             replacement entirely.
+        compute_figures : bool, keyword-only, default True
+            Compute the per-event review figures
+            (:mod:`turtlewave_hdEEG.event_metrics`) on the detector's own
+            segment and store them in the additive ``events`` figure columns.
+            Database path only; the legacy JSON path never computes them.
+            False writes NULL figures and detects exactly the same events.
         **detector_params : dict
             Additional parameters to pass to the detector. These are
             method-specific and can include parameters like det_thresh,
@@ -812,6 +821,8 @@ class ParalEvents:
                     'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': db_n_fft_sec,
                     'interpolated_channels': list(interp_selected),
+                    'event_figures': (event_metrics.figure_config('spindle')
+                                      if compute_figures else None),
                 }
                 if run_params:
                     params_dict.update(run_params)
@@ -999,6 +1010,13 @@ class ParalEvents:
                             # Run detection
                             spindles = detection(seg['data'])
 
+                            # This segment's resolved thresholds, carried on
+                            # each event for the figures pass (thresh_ratio).
+                            seg_thresholds = None
+                            if write_db and compute_figures:
+                                seg_thresholds = detection_threshold_values(
+                                    detection, spindles)[0]
+
                             # The thresholds Wonambi resolved for THIS segment
                             # (Spindles.det_values); CIRUS returns none and
                             # yields no entry.
@@ -1051,6 +1069,11 @@ class ParalEvents:
                                         'duration': sp_dur, 'stage': stages_key,
                                         'epoch_stage': epoch_stage,
                                         'method': meth,
+                                        # Private keys for the figures pass;
+                                        # write_channel_events ignores them.
+                                        '_seg_idx': i,
+                                        '_thresholds': seg_thresholds,
+                                        '_duration_bounds': meth_duration,
                                     }
                                     ev.update(morph)
                                     channel_db_events.append(ev)
@@ -1098,6 +1121,14 @@ class ParalEvents:
                     # Direct-DB write: one batched re-measurement + one
                     # transaction per channel, BEFORE the JSON write.
                     if write_db and db_conn is not None:
+                        # Per-event review figures, now that every method's
+                        # events on this channel are known (the background
+                        # excludes all of them).
+                        if compute_figures:
+                            event_metrics.apply_channel_figures(
+                                segments, channel_db_events, frequency,
+                                'spindle', _det_epochs, stage,
+                                log=self.logger, channel=ch)
                         batched = dbwrite.compute_batched_params(
                             channel_param_segments, frequency, s_freq,
                             db_n_fft_sec, self.logger)

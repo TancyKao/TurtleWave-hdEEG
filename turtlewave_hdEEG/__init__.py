@@ -21,7 +21,12 @@ from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
                          ImprovedDetectKComplex)
 from .extensions import THRESHOLD_UNITS
 from .dbwrite import (ensure_detection_thresholds_schema,
-                      store_detection_thresholds, read_detection_thresholds)
+                      store_detection_thresholds, read_detection_thresholds,
+                      event_population_summary)
+from .event_metrics import EventFigures, PeakFreq, event_figures
+from .review_sampling import (draw_review_sample, top_up_region,
+                              sample_progress, compute_review_precision,
+                              label_agreement, ensure_review_sampling_schema)
 from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
                       set_journal_mode, VALID_JOURNAL_MODES,
                       resolve_db_target, read_analysed_time,

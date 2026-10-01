@@ -10,6 +10,8 @@ from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
 from turtlewave_hdEEG import dbwrite
+from turtlewave_hdEEG import event_metrics
+from turtlewave_hdEEG.extensions import detection_threshold_values
 from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
                                     resolve_cat,
                                     warn_interpolated_channels)
@@ -73,7 +75,8 @@ class ParalKC:
                           save_to_annotations=False, json_dir=None,
                           *, write_db=None, db_path=None, subject=None,
                           resume=False,
-                          run_params=None, replace_channels=None, n_fft_sec=4):
+                          run_params=None, replace_channels=None, n_fft_sec=4,
+                          compute_figures=True):
         """
         Detect K-complexes in the dataset.
 
@@ -162,6 +165,12 @@ class ParalKC:
             meaningful with ``write_db=True``. ``None`` (default) disables it.
         n_fft_sec : int, keyword-only, default 4
             FFT window (seconds) for the batched spectral re-measurement.
+        compute_figures : bool, keyword-only, default True
+            Compute the per-event review figures
+            (:mod:`turtlewave_hdEEG.event_metrics`) on the detector's own
+            segment and store them in the additive ``events`` figure columns.
+            Database path only. False writes NULL figures and detects exactly
+            the same events.
 
         Returns
         -------
@@ -386,6 +395,8 @@ class ParalKC:
                     'reject_arousals': 'Arousal' in reject_types,
                     'n_fft_sec': n_fft_sec,
                     'interpolated_channels': list(interp_selected),
+                    'event_figures': (event_metrics.figure_config('k_complex')
+                                      if compute_figures else None),
                 }
                 if run_params:
                     params_dict.update(run_params)
@@ -530,6 +541,14 @@ class ParalKC:
 
                         kcs = detector(processed_seg['data'])
 
+                        # This segment's criteria and whole-wave bound, for
+                        # the figures pass (thresh_ratio, near_bound).
+                        seg_thresholds = None
+                        if write_db and compute_figures:
+                            seg_thresholds = detection_threshold_values(
+                                detector, kcs)[0]
+                        seg_bounds = getattr(detector, 'duration', None)
+
                         if write_db:
                             spec = dbwrite.detection_threshold_spec(
                                 detector, kcs, ch, segment_idx=i,
@@ -570,6 +589,11 @@ class ParalKC:
                                     'duration': kc_dur, 'stage': stages_str,
                                     'epoch_stage': epoch_stage,
                                     'method': meth,
+                                    # Private keys for the figures pass;
+                                    # write_channel_events ignores them.
+                                    '_seg_idx': i,
+                                    '_thresholds': seg_thresholds,
+                                    '_duration_bounds': seg_bounds,
                                 }
                                 ev.update(morph)
                                 channel_db_events.append(ev)
@@ -611,6 +635,13 @@ class ParalKC:
                 # Direct-DB write: one batched re-measurement + one transaction
                 # per channel, BEFORE the JSON write.
                 if write_db and db_conn is not None:
+                    # Per-event review figures, now that every method's
+                    # events on this channel are known.
+                    if compute_figures:
+                        event_metrics.apply_channel_figures(
+                            segments, channel_db_events, frequency,
+                            self.EVENT_TYPE, _det_epochs, stage,
+                            log=self.logger, channel=ch)
                     batched = dbwrite.compute_batched_params(
                         channel_param_segments, frequency, s_freq,
                         n_fft_sec, self.logger)

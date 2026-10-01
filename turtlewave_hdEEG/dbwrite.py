@@ -101,6 +101,31 @@ _DET_VALUE_COLUMNS = (
     ('det_zero_time', 'REAL'),
 )
 
+# Per-event review figures added in 4.6 (event_metrics, Method Spec "v2"),
+# computed at detection time on the detector's own segment and stored
+# additively, nullable, in no key and no index. Booleans are 0/1; near_bound
+# is -1 (floor) / 0 / +1 (ceiling). near_splice = 1 means the event sits
+# within the edge guard of a splice (or spans one) and its signal figures are
+# NULL by design. Spindle-only: halfwaves_above_bg, cycles_nominal,
+# peak_freq_ap, prominence_db, low_prominence. Slow wave / K-complex only:
+# wave_freq. The settings are in detection_runs.params_json['event_figures'].
+_EVENT_FIGURE_COLUMNS = (
+    ('halfwaves_above_bg', 'INTEGER'),
+    ('cycles_nominal', 'REAL'),
+    ('peak_freq_ap', 'REAL'),
+    ('prominence_db', 'REAL'),
+    ('in_band', 'INTEGER'),
+    ('low_prominence', 'INTEGER'),
+    ('bg_rms', 'REAL'),
+    ('bg_n_windows', 'INTEGER'),
+    ('bg_stage_mixed', 'INTEGER'),
+    ('amp_ratio', 'REAL'),
+    ('thresh_ratio', 'REAL'),
+    ('near_bound', 'INTEGER'),
+    ('near_splice', 'INTEGER'),
+    ('wave_freq', 'REAL'),
+)
+
 # Column order used by the direct-write INSERT. Kept in one place so the SQL and
 # the value tuple never drift.
 EVENT_INSERT_COLUMNS = (
@@ -2759,7 +2784,8 @@ def ensure_direct_write_schema(conn, logger=None):
         added = []
         for col, col_type in (_DET_MORPH_COLUMNS
                               + (_RUN_ID_COLUMN, _EPOCH_STAGE_COLUMN)
-                              + _DET_VALUE_COLUMNS):
+                              + _DET_VALUE_COLUMNS
+                              + _EVENT_FIGURE_COLUMNS):
             if col not in existing:
                 cur.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type}")
                 added.append(col)
@@ -4867,6 +4893,11 @@ def write_channel_events(conn, run_id, event_type, channel, method,
     det_value_columns = [col for col, _ in _DET_VALUE_COLUMNS
                          if col in present_columns]
     insert_columns.extend(det_value_columns)
+    # The 4.6 per-event review figures, gated the same way. An event without
+    # figures (figures disabled, or the figures pass failed) writes NULLs.
+    figure_columns = [col for col, _ in _EVENT_FIGURE_COLUMNS
+                      if col in present_columns]
+    insert_columns.extend(figure_columns)
     placeholders = ', '.join(['?'] * len(insert_columns))
     sql = (f"INSERT OR REPLACE INTO events ({', '.join(insert_columns)}) "
            f"VALUES ({placeholders})")
@@ -4931,6 +4962,7 @@ def write_channel_events(conn, run_id, event_type, channel, method,
                 # the event (the detectors count and report those).
                 row = row + (ev.get('epoch_stage'),)
             row = row + tuple(ev.get(col) for col in det_value_columns)
+            row = row + tuple(ev.get(col) for col in figure_columns)
             conn.execute(sql, row)
 
         if thresholds:
@@ -5204,6 +5236,111 @@ def read_detection_thresholds(db_or_conn, run_id, channel=None, method=None,
             conn.close()
 
 
+#: Columns of :func:`event_population_summary`, in order.
+POPULATION_SUMMARY_COLUMNS = (
+    'channel', 'stage', 'n', 'n_near_splice',
+    'n_freq', 'share_off_band', 'n_prom', 'share_low_prom',
+    'n_bound', 'share_at_floor',
+    'n_amp', 'amp_ratio_median', 'amp_ratio_q25', 'amp_ratio_q75',
+    'n_thresh', 'thresh_ratio_median', 'thresh_ratio_q25', 'thresh_ratio_q75',
+)
+
+
+def event_population_summary(db_or_conn, run_id, event_type):
+    """Per-channel x stage population of the per-event review figures.
+
+    The Channels (QC) tab's diagnostic: how many of a channel's events are
+    off-band, low-prominence or at the duration floor, and how far they stand
+    above background and above the detector threshold. Scoped to ONE run
+    (two runs on one scope have different thresholds and figures) and grouped
+    by the event's own scored epoch stage (``events.epoch_stage``; NULL is
+    reported as ``'unscored'``), not by the run's joint stage token.
+
+    Every share is over the events for which that figure was computed, and
+    its denominator is the ``n_*`` column beside it: ``n_freq`` for
+    ``share_off_band`` (``in_band`` not NULL; for spindles a peak was found
+    and the event is not near a splice, for slow waves a half-wave was
+    measured), ``n_prom`` for ``share_low_prom``, ``n_bound`` for
+    ``share_at_floor`` (``near_bound = -1``). ``amp_ratio`` and
+    ``thresh_ratio`` are skewed, so they are summarised by median and
+    interquartile range over ``n_amp`` / ``n_thresh`` events. Lead with
+    ``share_off_band``: ``share_low_prom`` mostly tracks a channel's
+    signal-to-noise (Method Spec M2).
+
+    Parameters
+    ----------
+    db_or_conn : str or sqlite3.Connection
+        Database path or an open connection (not closed).
+    run_id : str
+        The run to summarise.
+    event_type : str
+        ``'spindle'``, ``'slow_wave'`` or ``'k_complex'``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns :data:`POPULATION_SUMMARY_COLUMNS`, one row per channel x
+        stage, ordered by channel and stage. Empty (with those columns) for a
+        run without events or a database without the figure columns.
+    """
+    import pandas as pd
+
+    columns = list(POPULATION_SUMMARY_COLUMNS)
+    own = not isinstance(db_or_conn, sqlite3.Connection)
+    if own:
+        if not db_or_conn or not os.path.exists(db_or_conn):
+            raise FileNotFoundError(f"No database at {db_or_conn!r}")
+        conn = sqlite3.connect(db_or_conn, timeout=60.0)
+    else:
+        conn = db_or_conn
+    try:
+        present = _table_columns(conn, 'events')
+        needed = {c for c, _ in _EVENT_FIGURE_COLUMNS} | {'epoch_stage', 'run_id'}
+        if not present or not needed <= set(present):
+            return pd.DataFrame(columns=columns)
+        counts = pd.read_sql_query(
+            """
+            SELECT channel, COALESCE(epoch_stage, 'unscored') AS stage_label,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN near_splice = 1 THEN 1 ELSE 0 END) AS n_near_splice,
+                   COUNT(in_band) AS n_freq,
+                   AVG(CASE WHEN in_band IS NULL THEN NULL
+                            ELSE 1.0 - in_band END) AS share_off_band,
+                   COUNT(low_prominence) AS n_prom,
+                   AVG(low_prominence * 1.0) AS share_low_prom,
+                   COUNT(near_bound) AS n_bound,
+                   AVG(CASE WHEN near_bound IS NULL THEN NULL
+                            WHEN near_bound = -1 THEN 1.0 ELSE 0.0 END)
+                       AS share_at_floor,
+                   COUNT(amp_ratio) AS n_amp,
+                   COUNT(thresh_ratio) AS n_thresh
+            FROM events WHERE run_id = ? AND event_type = ?
+            GROUP BY channel, stage_label
+            """, conn, params=[str(run_id), str(event_type)])
+        # Aliased: a bare `stage` in GROUP BY resolves to events.stage (the
+        # run's joint token), not to the epoch stage.
+        counts = counts.rename(columns={'stage_label': 'stage'})
+        if counts.empty:
+            return pd.DataFrame(columns=columns)
+        values = pd.read_sql_query(
+            "SELECT channel, COALESCE(epoch_stage, 'unscored') AS stage, "
+            "amp_ratio, thresh_ratio FROM events "
+            "WHERE run_id = ? AND event_type = ?",
+            conn, params=[str(run_id), str(event_type)])
+        grouped = values.groupby(['channel', 'stage'])
+        quant = pd.DataFrame({
+            f'{col}_{name}': grouped[col].quantile(q)
+            for col in ('amp_ratio', 'thresh_ratio')
+            for name, q in (('median', 0.5), ('q25', 0.25), ('q75', 0.75))
+        }).reset_index()
+        out = counts.merge(quant, on=['channel', 'stage'], how='left')
+        return (out[columns].sort_values(['channel', 'stage'])
+                .reset_index(drop=True))
+    finally:
+        if own:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # DB -> CSV export (P2, stage 2)
 # ---------------------------------------------------------------------------
@@ -5274,6 +5411,22 @@ _EXPORT_COLUMNS = [
     ('rms_orig (uV)', ('db', 'rms_orig', True)),
     ('power_orig', ('db', 'power_orig', True)),
     ('det_zero_time (s)', ('db', 'det_zero_time', True)),
+    # 4.6 per-event review figures (event_metrics). Booleans 0/1; near_bound
+    # -1/0/+1. All ignored by the importer.
+    ('halfwaves_above_bg', ('db', 'halfwaves_above_bg', True)),
+    ('cycles_nominal', ('db', 'cycles_nominal', True)),
+    ('peak_freq_ap (Hz)', ('db', 'peak_freq_ap', True)),
+    ('prominence_db (dB)', ('db', 'prominence_db', True)),
+    ('in_band', ('db', 'in_band', True)),
+    ('low_prominence', ('db', 'low_prominence', True)),
+    ('bg_rms (uV)', ('db', 'bg_rms', True)),
+    ('bg_n_windows', ('db', 'bg_n_windows', True)),
+    ('bg_stage_mixed', ('db', 'bg_stage_mixed', True)),
+    ('amp_ratio', ('db', 'amp_ratio', True)),
+    ('thresh_ratio', ('db', 'thresh_ratio', True)),
+    ('near_bound', ('db', 'near_bound', True)),
+    ('near_splice', ('db', 'near_splice', True)),
+    ('wave_freq (Hz)', ('db', 'wave_freq', True)),
 ]
 
 # Canonical sleep-stage vocabulary, matching the rest of the codebase
