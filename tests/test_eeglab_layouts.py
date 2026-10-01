@@ -25,6 +25,7 @@ test fails.
 """
 
 import datetime
+import gc
 import os
 import shutil
 import sys
@@ -51,18 +52,28 @@ STAGES = ['W', '1', '2', '3', 'R']
 
 
 class Workdir:
-    """Temporary directory removed on exit."""
+    """Temporary directory removed on exit.
+
+    Datasets opened inside keep a memory map (``.fdt``) or an HDF5 handle
+    (``.set``) for their lifetime, and Windows refuses to rewrite or delete a
+    mapped file. So no test writes the same path twice (``_write`` puts every
+    recording in a fresh sub-folder), and exit collects garbage before
+    deleting.
+    """
 
     def __enter__(self):
         self.path = tempfile.mkdtemp(prefix='tw_eeglab_')
         return self.path
 
     def __exit__(self, *exc):
+        gc.collect()
         shutil.rmtree(self.path, ignore_errors=True)
 
 
 def _write(tmp, layout, v73, name=None, **kwargs):
-    path = os.path.join(tmp, name or f"rec_{layout}_{'h5' if v73 else 'mat'}.set")
+    # a fresh folder per call: an earlier dataset may still map its .fdt
+    folder = tempfile.mkdtemp(dir=tmp)
+    path = os.path.join(folder, name or f"rec_{layout}_{'h5' if v73 else 'mat'}.set")
     truth = fx.write_set(path, layout, v73, **kwargs)
     return path, truth
 
@@ -312,7 +323,8 @@ def test_signal_file_lookup():
             name = f"named_{layout}_{v73}.set"
             path, truth = _write(tmp, layout, v73, name=name, datfile='signal_a.fdt')
             decoy = np.zeros((5, 1000), dtype=np.float32)
-            decoy.T.tofile(os.path.join(tmp, os.path.splitext(name)[0] + '.fdt'))
+            decoy.T.tofile(os.path.join(os.path.dirname(path),
+                                        os.path.splitext(name)[0] + '.fdt'))
             ds = open_dataset(path)
             assert np.array_equal(ds.read_data().data[0], truth['data'].astype(float)), (layout, v73)
         print("   [ok] datfile names an existing file -> that one, not <stem>.fdt")
@@ -486,6 +498,7 @@ def test_error_missing_srate():
 
         # many keys are truncated in the message but complete on the attribute
         many = {f'var{i:02d}': np.arange(2) for i in range(20)}
+        other = os.path.join(tmp, 'other_many.set')
         scipy.io.savemat(other, many)
         try:
             open_dataset(other)
