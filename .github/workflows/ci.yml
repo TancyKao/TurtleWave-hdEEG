@@ -91,3 +91,35 @@ jobs:
       - name: Run database scope-guard tests
         run: |
           python tests/test_db_scope_guards.py
+
+      - name: Run EEGLAB file-layout tests
+        run: |
+          python tests/test_eeglab_layouts.py
+
+      - name: Run cut-recording timeline and staging tests
+        run: |
+          python tests/test_cut_timeline_staging.py
+
+      - name: Run electrode region tests
+        run: |
+          python tests/test_region_from_label.py
+
+      - name: Run interpolated-channel tests
+        run: |
+          python tests/test_interp_channels.py
+
+      - name: Run full-night cycle tests
+        run: |
+          python tests/test_stage_b_fullnight.py
+
+      - name: Run frontend channel-type tests (offscreen)
+        run: |
+          python tests/test_frontend_channel_types.py
+
+      - name: Run review GUI variable-epoch tests (offscreen)
+        run: |
+          python tests/test_review_gui_variable_epochs.py
+
+      - name: Run cycle detection unit tests
+        run: |
+          python -m pytest tests/test_detect_cycles.py -q

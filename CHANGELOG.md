@@ -7,20 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Sleep-cycle definitions change with this release. Cycles already stored in a `sleep_cycles` table were computed under the 4.4 rules and are refreshed only by re-running `examples/backfill_cycles.py`; `db_meta['turtlewave_version']` says which release last wrote a database.
+## [4.5.0] - 2026-10-01
+
+Staging of recordings that had data cut out (EEGLAB `boundary` events) was misaligned before 4.5.0, because `etc.stages` was imported as stored. Emotion 16js/18sb, MCI clean_rebuilt and LocalSleep excerpt outputs built on the header staging import should be re-annotated and re-detected, and not pooled with pre-4.5 rows.
+
+Sleep-cycle definitions also change. Cycles already stored in a `sleep_cycles` table were computed under the 4.4 rules and are refreshed only by re-running `examples/backfill_cycles.py`; `db_meta['turtlewave_version']` says which release last wrote a database.
 
 ### Added
 
-- `detect_cycles(nrem_onset=...)`: `'n2n3'` (default) starts a `'2022'` NREM period at its first N2/N3 epoch; `'any'` keeps the 4.4 any-stage onset. Threaded through `ParalCycles.detect`/`run` and `finalize_cycles_and_durations`.
+- `open_dataset` loads EEGLAB `.set` files that store their fields at the top level, such as Compumedics and OSA_CPAP exports; `LargeDataset` uses it.
+- Dataset headers carry `chan_type`, `reference` and `interp_channels`.
+- `RecordingTimeline` maps cut-file time to the original night, recorded in a `_timeline.json` sidecar next to the annotation file.
+- `CustomAnnotations.get_stage_intervals` returns the hypnogram as start, end and stage intervals.
+- `timeline='auto'` and `coverage_floor_min` on `ParalCycles.run` and `finalize_cycles_and_durations`.
+- `analysed_time_cycles` table holding per-cycle analysed time and coverage.
+- `sleep_cycles.time_base` with `*_orig` full-night bounds, and `stage_durations.time_base`.
+- Detection warns when selected channels were interpolated and records them in `detection_runs.interpolated_channels`.
+- `region_from_label` maps 10-5 electrode labels to scalp regions.
+- `detect_cycles(nrem_onset=...)`: `'n2n3'` (default) starts a `'2022'` NREM period at its first N2/N3 epoch; `'any'` keeps the 4.4 onset.
 - `detect_cycles(rem_gap=..., completion_min=...)` for the Feinberg & Floyd REM-interruption and end-of-night rules.
-- Cycle dicts gain `nrem_sleep_min`, `rem_sleep_min`, `rem_in_nremp_min`, `wake_in_seg_min`, `rem_class`, `complete` and `sorem`. The `sleep_cycles` table is unchanged.
-- `tests/test_detect_cycles.py`: unit tests for both rules.
+- Cycle dicts gain `nrem_sleep_min`, `rem_sleep_min`, `rem_in_nremp_min`, `wake_in_seg_min`, `rem_class`, `complete` and `sorem`.
+- GUI: Dataset Information on the Setup tab states the reference, channel counts, removed data, interpolated channels and the corrected recording end time.
+- GUI: a shared "Show non-EEG channels" checkbox on the detection tabs.
+- GUI: interpolated channels are marked in both GUIs.
 
 ### Changed
 
-- `'2022'` NREM periods start at the first N2/N3 epoch by default, and the last segment ends at the last sleep epoch instead of the last epoch of the recording, so trailing wake is outside every cycle.
-- `'1979'` is now the Feinberg & Floyd (1979) rule: stage-2 sleep onset, REM runs separated by less than `nrem_min` epochs of NREM sleep merged into one REM episode, 5-min REM minimum with the first REM period exempt, sleep-onset REM absorbed, wake never a boundary, unpaired NREM periods carried forward, end-of-night completion flag. It previously was a REM-closed variant of `'2022'` that merged unpaired NREM periods forward.
-- Docs: the sleep-cycle how-to describes both rules with their sources and drops the "not Feinberg & Floyd" comparison table.
+- Cut recordings are staged with exact variable-length epochs instead of a regular 30 s grid.
+- On cut recordings the staging reading is chosen by scoring `etc.stages` against the file's stage events.
+- Sleep cycles and stage durations are computed on the full-night hypnogram.
+- A detection run reads stored cycles and never re-detects them.
+- Duplicate EEGLAB channel labels are renamed so every channel is unique.
+- Respiratory event matching covers any `apnea`, an exact `rera` and names with spaces; counts change on runs that exclude `Resp`.
+- `'2022'` NREM periods start at the first N2/N3 epoch by default, and the last segment ends at the last sleep epoch, so trailing wake is outside every cycle.
+- `'1979'` is now the Feinberg & Floyd (1979) rule; it previously was a REM-closed variant of `'2022'`.
+- GUI: channel lists show EEG channels only by default.
+- Review GUI: works on variable-length epochs.
+- Review GUI: defaults to Cz/Fz/Pz when the EGI default channels are absent.
+- `examples/backfill_cycles.py` and `examples/csv_to_db_import.py` require `--root` and confirm before writing.
+- Docs: new how-to for Compumedics recordings and explanation of cut-recording time bases; the sleep-cycle how-to describes both rules with their sources.
+
+### Fixed
+
+- Staging on cut recordings no longer shifts every epoch after the first cut.
+- GUI: a `.set` file that cannot be read shows a readable message.
 
 ## [4.4.0] — 2026-09-15
 
