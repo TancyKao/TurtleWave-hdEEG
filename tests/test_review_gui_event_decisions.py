@@ -1,44 +1,55 @@
 #!/usr/bin/env python3
-"""Headless checks: per-event bands, selection and decisions in the review GUI
-(4.6.0 plan, Phase 2 items D1 and D2).
+"""Headless checks: per-event selection, the Event panel, decisions, keys,
+reviewer name, neighbours and physiology in the review GUI (4.6.0).
 
-1. Data: ``QC_EVENT_COLS`` (montage-wide) stays the lean nine columns;
-   ``QC_DRILL_COLS`` (one drilled channel) adds uuid / duration / run_id /
-   method / epoch_stage; ``get_events`` drops columns an older database lacks;
-   ``EventDatabase`` no longer adds review columns to ``events``;
-   ``get_run_info`` parses ``params_json``; ``get_reviews_for``,
-   ``get_events(reviewed_only / unreviewed_only)``, ``get_review_stats`` and
-   ``export_reviewed_events`` read ``event_reviews``.
-2. ``EpochsPanel``: every event in the window gets a band on both traces,
-   outliers keep their red, reviewed events take their decision colour.
-3. Selection: a click at an event's time selects its uuid
-   (``eventSelected``); a click within 0.25 s of an event picks it, a click
-   far from every event picks nothing; selecting does not move the artefact
-   brush.
-4. Keys: ``]`` selects the next unreviewed event and skips a reviewed one,
-   paging the epoch when needed; ``[`` goes back; ``A`` emits
-   ``decisionRequested('accept')``.
-5. Main window: drilling passes the review map, a selection is named in the
-   status bar, a decision is stored only when the library can store it.
+Numbers in brackets are the acceptance criteria of
+``_scratch/design/event-decision-spec.md`` (revision 2, section 13).
+Population checks (8-15) are in ``test_review_gui_population.py``; review
+sample (16-24) and precision report (45-51) are not built yet.
+
+1. Data layer: lean montage columns, drill columns, ``event_reviews``
+   readers, ``get_run_info``, the reason vocabulary.
+2. Bands [1, 6]: one band per event starting in the epoch, clipped; spec
+   fills, edges, glyphs; ticker agrees.
+3. Selection [2-5]: click, 0.3 s tolerance, overlap cycling, brush drag and
+   in-window selection never select / move / read.
+4. Keys on the panel [7]: ``]`` ``[`` ``}`` ``{``, wrap, Right clears.
+5. Event panel rows [25-33] from ``event_review.build_event_rows``.
+6. Main window: reviewer prompt and QSettings, A / R / U flow, undo,
+   comment focus, blind scoping, progress [34-39].
+7. Neighbours and physiology [41-44].
 
 Run with:
     QT_QPA_PLATFORM=offscreen python tests/test_review_gui_event_decisions.py
 """
 import os
-import sqlite3
+import re
 import sys
 import tempfile
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
+import numpy as np                                            # noqa: E402
 import pandas as pd                                           # noqa: E402
 from PyQt5 import QtCore, QtWidgets                           # noqa: E402
 from PyQt5.QtCore import Qt                                   # noqa: E402
 from PyQt5.QtTest import QTest                                # noqa: E402
 
+TMP = tempfile.mkdtemp(prefix='tw_decisions_')
+# Isolate QSettings before anything reads them.
+QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+QtCore.QSettings.setPath(QtCore.QSettings.IniFormat,
+                         QtCore.QSettings.UserScope, TMP)
+
 import frontend.eeg_review_gui as rg                          # noqa: E402
+from frontend import event_review as er                       # noqa: E402
+from frontend.channel_types import (neighbour_channels,       # noqa: E402
+                                    physio_channels)
+from turtlewave_hdEEG import dbwrite                          # noqa: E402
+import review_population_fixture as fx                        # noqa: E402
 
 REAL_STDOUT = sys.stdout
 FAILURES = []
@@ -58,67 +69,48 @@ def check(item, label, ok, detail=""):
 
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-TMP = tempfile.mkdtemp(prefix='tw_decisions_')
 
-# Cz spindles: five in epoch 0 [0, 30), three in epoch 1, one in epoch 3.
-# 'u-out' is a 900 µV amplitude outlier.
-STARTS = [2.0, 7.0, 12.0, 18.0, 25.0, 33.0, 41.0, 52.0, 95.0]
+# Cz spindles: five starting in epoch 0 [0, 30), three in epoch 1, one in
+# epoch 3. 'u-out' is a 900 µV outlier; 'u-e' runs past the end of epoch 0.
+STARTS = [2.0, 7.0, 12.0, 18.0, 29.6, 33.0, 41.0, 52.0, 95.0]
+DURS = [0.8, 0.8, 0.8, 0.8, 1.0, 0.8, 0.8, 0.8, 0.8]
 UUIDS = ['u-a', 'u-b', 'u-c', 'u-out', 'u-e', 'u-f', 'u-g', 'u-h', 'u-i']
 AMPS = [40.0, 42.0, 38.0, 900.0, 41.0, 39.0, 43.0, 40.0, 41.0]
 RUN = 'run-moelle-9-12'
-PARAMS = '{"duration_by_method": {"Moelle2011": [0.5, 3.0]}, "frequency": [9, 12]}'
+RUN_B = 'run-moelle-9-12-b'
 
 
-def make_db(path, with_new_cols=True):
-    con = sqlite3.connect(path)
-    extra = ", run_id TEXT, epoch_stage TEXT" if with_new_cols else ""
-    con.execute(f"""CREATE TABLE events (uuid TEXT PRIMARY KEY,
-        event_type TEXT, channel TEXT, start_time REAL, end_time REAL,
-        duration REAL, stage TEXT, method TEXT, freq_lower REAL,
-        freq_upper REAL, min_amp REAL, max_amp REAL, peak2peak_amp REAL
-        {extra})""")
-    for u, s, a in zip(UUIDS, STARTS, AMPS):
-        row = [u, 'spindle', 'Cz', s, s + 0.8, 0.8, 'NREM2', 'Moelle2011',
-               9.0, 12.0, -a / 2, a, a]
-        if with_new_cols:
-            row += [RUN, 'NREM2']
-        con.execute(f"INSERT INTO events VALUES ({','.join('?' * len(row))})",
-                    row)
-    if with_new_cols:
-        con.execute("""CREATE TABLE detection_runs (run_id TEXT PRIMARY KEY,
-            subject TEXT, event_type TEXT, method TEXT, params_json TEXT, stages TEXT,
-            reject_types TEXT, reject_artifacts INTEGER,
-            reject_arousals INTEGER, timestamp TEXT)""")
-        con.execute("INSERT INTO detection_runs VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (RUN, 'sub-test', 'spindle', 'Moelle2011', PARAMS, 'NREM2+NREM3',
-                     'Artefact,Arousal', 1, 1, '2026-10-01T10:00:00'))
+def ev_row(uuid, ch, start, dur, amp, run_id, *, in_band=1, low=0,
+           near=0, amp_ratio=2.5, thresh_ratio=None, peak_val_det=5.16,
+           epoch_stage='NREM2', figures=True, peak_freq_ap=10.5):
+    fig = ((7, 6.0, peak_freq_ap, 15.0 if not low else 7.2, in_band, low,
+            1.8, 55, 0, amp_ratio, thresh_ratio, near, 0, None)
+           if figures else (None,) * 14)
+    return ((uuid, 'spindle', ch, start, start + dur, dur, 'NREM2+NREM3',
+             'Moelle2011', 9.0, 12.0, -amp / 2, amp, amp, run_id,
+             epoch_stage) + fig + (9.8, peak_val_det, None, None, None))
+
+
+def make_db(path):
+    con = fx.open_schema(path)
+    fx.add_run(con, RUN)
+    fx.add_run(con, RUN_B, timestamp='2026-09-01T10:00:00')
+    rows = [ev_row(u, 'Cz', s, d, a, RUN)
+            for u, s, d, a in zip(UUIDS, STARTS, DURS, AMPS)]
+    # second run on the same scope: one event on Fz
+    rows.append(ev_row('u-fz', 'Fz', 20.0, 0.8, 40.0, RUN_B))
+    fx.insert_rows(con, rows)
+    dbwrite.store_detection_thresholds(con, RUN, 'Cz', 'Moelle2011',
+                                       {'det_value_lo': 3.43}, 'uV')
+    dbwrite.store_detection_thresholds(con, RUN_B, 'Fz', 'Moelle2011',
+                                       {'det_value_lo': 5.16}, 'uV')
     con.commit()
     con.close()
     return path
 
 
-def put_review(db, uuid, decision, reviewer='tester'):
-    """Through the library when it can store reviews, else straight into a
-    table of the planned schema (the GUI's no-op fallback writes nothing)."""
-    if db.has_review_backend:
-        return db.add_review(uuid, decision, reviewer=reviewer,
-                             reason='artefact' if decision == 'reject' else None)
-    db.conn.execute("""CREATE TABLE IF NOT EXISTS event_reviews (
-        uuid TEXT, reviewer TEXT, run_id TEXT, subject TEXT,
-        event_type TEXT, channel TEXT, start_time REAL,
-        decision TEXT CHECK (decision IN ('accept','reject','unsure')),
-        reason TEXT, comment TEXT, reviewed_at TEXT,
-        turtlewave_version TEXT, PRIMARY KEY (uuid, reviewer))""")
-    db.conn.execute(
-        "INSERT OR REPLACE INTO event_reviews (uuid, reviewer, decision, "
-        "reason, reviewed_at) VALUES (?,?,?,?,?)",
-        (uuid, reviewer, decision, None, '2026-10-01T10:00:00'))
-    db.conn.commit()
-    return True
-
-
 say("=" * 78)
-say("Headless: event bands, selection and decisions")
+say("Headless: event selection, Event panel, decisions, keys, neighbours")
 say("=" * 78)
 
 # ======================================================================= 1
@@ -127,153 +119,119 @@ LEAN = ['channel', 'start_time', 'end_time', 'stage', 'min_amp', 'max_amp',
         'peak2peak_amp', 'freq_lower', 'freq_upper']
 check('1.0', "QC_EVENT_COLS (montage-wide) is the original nine columns",
       rg.QC_EVENT_COLS == LEAN, repr(rg.QC_EVENT_COLS))
-for c in ('uuid', 'duration', 'run_id', 'method', 'epoch_stage'):
+for c in ('uuid', 'duration', 'run_id', 'method', 'epoch_stage', 'in_band',
+          'amp_ratio'):
     check('1.1', f"QC_DRILL_COLS includes {c}", c in rg.QC_DRILL_COLS)
-from turtlewave_hdEEG import dbwrite as _dw                   # noqa: E402
-check('1.1b', "local fallback REVIEW_DECISIONS equals the library's",
-      rg.REVIEW_DECISIONS == tuple(_dw.REVIEW_DECISIONS),
-      repr((rg.REVIEW_DECISIONS, _dw.REVIEW_DECISIONS)))
-check('1.1c', "local fallback REVIEW_REASONS equals the library's",
-      rg.REVIEW_REASONS == tuple(_dw.REVIEW_REASONS),
-      repr((rg.REVIEW_REASONS, _dw.REVIEW_REASONS)))
-check('1.1d', "review_vocabulary() returns the library constants",
-      rg.review_vocabulary() == (tuple(_dw.REVIEW_DECISIONS),
-                                 tuple(_dw.REVIEW_REASONS)),
-      repr(rg.review_vocabulary()))
-say(f"  review backend in the library: "
-    f"{rg._review_backend() is not None}")
-
-db = rg.EventDatabase(make_db(os.path.join(TMP, 'new.db')))
-ev_cols = db._table_columns('events')
-check('1.2', "events is not altered (no reviewed/review_decision/reviewer)",
-      not {'reviewed', 'review_decision', 'reviewer', 'review_timestamp',
-           'review_comments'} & set(ev_cols), repr(ev_cols))
-idx = [r[0] for r in db.conn.execute(
-    "SELECT name FROM sqlite_master WHERE type='index'")]
-check('1.3', "no idx_reviewed / idx_review_decision index",
-      'idx_reviewed' not in idx and 'idx_review_decision' not in idx, repr(idx))
+check('1.1b', "local REVIEW_REASONS / DECISIONS equal the library's",
+      rg.REVIEW_REASONS == tuple(dbwrite.REVIEW_REASONS)
+      and rg.REVIEW_DECISIONS == tuple(dbwrite.REVIEW_DECISIONS))
+check('1.1c', "every library reason has a panel label; digits 1-9 map to "
+      "library tokens", set(er.REASON_LABEL) == set(dbwrite.REVIEW_REASONS)
+      and set(er.REASON_BY_DIGIT.values()) <= set(dbwrite.REVIEW_REASONS)
+      and len(er.REASON_BY_DIGIT) == 9)
+DB = make_db(os.path.join(TMP, 'review.db'))
+db = rg.EventDatabase(DB)
 df = db.get_events(event_type='spindle', channels=['Cz'],
                    columns=rg.QC_DRILL_COLS)
-check('1.4', "drill fetch returns all 14 columns and 9 rows",
+check('1.2', "drill fetch returns the drill columns and 9 Cz rows",
       list(df.columns) == rg.QC_DRILL_COLS and len(df) == 9,
-      repr((list(df.columns), len(df))))
+      repr(list(df.columns)))
 info = db.get_run_info(RUN)
-check('1.5', "get_run_info parses params_json, keeps method and stages",
-      info.get('method') == 'Moelle2011'
-      and info.get('stages') == 'NREM2+NREM3'
-      and info.get('params', {}).get('duration_by_method')
-      == {'Moelle2011': [0.5, 3.0]}, repr(info))
-check('1.6', "get_run_info: unknown run and None give {}",
-      db.get_run_info('nope') == {} and db.get_run_info(None) == {})
-check('1.7', "no reviews yet: reviewed_only empty, unreviewed_only all 9",
-      len(db.get_events(reviewed_only=True)) == 0
-      and len(db.get_events(unreviewed_only=True)) == 9
-      and db.get_reviews_for(UUIDS) == {})
-
-put_review(db, 'u-b', 'accept')
-put_review(db, 'u-c', 'reject')
-put_review(db, 'u-c', 'accept', reviewer='second')
-rv = db.get_reviews_for(UUIDS, reviewer='tester')
-check('1.8', "get_reviews_for(reviewer=) -> {uuid: (decision, reason, "
-      "reviewer)}", set(rv) == {'u-b', 'u-c'}
-      and rv['u-b'][0] == 'accept' and rv['u-c'][0] == 'reject'
-      and rv['u-c'][2] == 'tester', repr(rv))
-rv_any = db.get_reviews_for(UUIDS)
-check('1.8b', "get_reviews_for(any reviewer): the latest write wins, even "
-      "within one second", rv_any.get('u-c', (None,))[:3:2]
-      == ('accept', 'second'), repr(rv_any))
-check('1.9', "get_events reviewed_only 2 / unreviewed_only 7",
-      len(db.get_events(reviewed_only=True)) == 2
-      and len(db.get_events(unreviewed_only=True)) == 7)
-st = db.get_review_stats()
-check('1.10', "get_review_stats over event_reviews",
-      st.get('total') == 9 and st.get('reviewed') == 2
-      and st.get('accept_count') == 2 and st.get('reject_count') == 1,
-      repr(st))
-out_csv = os.path.join(TMP, 'reviewed.csv')
-n = db.export_reviewed_events(out_csv)
-exp = pd.read_csv(out_csv)
-check('1.11', "export: one row per (event, reviewer) with review columns",
-      n == 3 and len(exp) == 3
-      and {'reviewer', 'review_decision', 'review_reason'} <= set(exp.columns),
-      repr((n, list(exp.columns)[-5:])))
-
-old = rg.EventDatabase(make_db(os.path.join(TMP, 'old.db'),
-                               with_new_cols=False))
-odf = old.get_events(event_type='spindle', columns=rg.QC_DRILL_COLS)
-check('1.12', "older database: drill fetch drops run_id/epoch_stage, no error",
-      'run_id' not in odf.columns and 'uuid' in odf.columns and len(odf) == 9,
-      repr(list(odf.columns)))
-check('1.13', "older database: no detection_runs -> get_run_info {}",
-      old.get_run_info(RUN) == {})
+check('1.3', "get_run_info parses params_json (duration_by_method)",
+      info.get('params', {}).get('duration_by_method')
+      == {'Moelle2011': [0.5, 3.0]} and info.get('method') == 'Moelle2011',
+      repr(info.get('params')))
+check('1.4', "no events-table review columns are added",
+      not {'reviewed', 'review_decision'} & set(db._table_columns('events')))
 
 # ======================================================================= 2
-say("\n== 2. Bands")
+say("\n== 2. Bands [1, 6]")
 panel = rg.EpochsPanel()
 panel.resize(1400, 900)
 panel.show()
 app.processEvents()
-selected, decisions = [], []
+selected, decisions, cleared = [], [], []
 panel.eventSelected.connect(selected.append)
 panel.decisionRequested.connect(decisions.append)
+panel.selectionCleared.connect(lambda: cleared.append(1))
+reads = []
+panel.read_window = lambda ch, a, b: (reads.append((ch, a, b)) or
+                                      (np.linspace(a, b, 600),
+                                       np.sin(np.linspace(0, 60, 600)) * 30,
+                                       20.0))
 panel.set_channel('Cz', df, df, event_type='spindle', trec=120.0)
-check('2.1', "drill opens on the outlier's epoch 0", panel._epoch == 0,
-      repr(panel._epoch))
 
 
 def bands(plot):
-    return [it for p, it in panel._event_items if p is plot]
+    return panel.band_items(plot)
 
 
-def band_brush(uuid, plot):
-    s = float(df.loc[df['uuid'] == uuid, 'start_time'].iloc[0])
-    for it in bands(plot):
-        if abs(it.getRegion()[0] - s) < 1e-9:
-            return it.brush.color().getRgb()
-    return None
+def band_for(uuid, plot):
+    s = STARTS[UUIDS.index(uuid)]
+    return next((it for it in bands(plot)
+                 if abs(it.getRegion()[0] - s) < 1e-9), None)
 
 
-check('2.2', "five events in epoch 0 -> five bands on raw and five on "
-      "filtered", len(bands(panel.raw_plot)) == 5
-      and len(bands(panel.filt_plot)) == 5
-      and all(it in panel.raw_plot.getPlotItem().items
-              for it in bands(panel.raw_plot)),
+check('2.1', "[1] five events start in epoch 0 -> five bands on raw, five "
+      "on filtered", len(bands(panel.raw_plot)) == 5
+      and len(bands(panel.filt_plot)) == 5,
       repr((len(bands(panel.raw_plot)), len(bands(panel.filt_plot)))))
-check('2.3', "outlier band keeps the red (224, 83, 63)",
-      band_brush('u-out', panel.raw_plot)[:3] == (224, 83, 63)
-      and band_brush('u-out', panel.filt_plot)[:3] == (224, 83, 63),
-      repr(band_brush('u-out', panel.raw_plot)))
-check('2.4', "ordinary band is grey",
-      band_brush('u-a', panel.raw_plot)[:3] == (136, 136, 136),
-      repr(band_brush('u-a', panel.raw_plot)))
-panel.set_reviews({'u-b': ('accept', None, 'tester')})
-acc = rg.QtGui.QColor(rg.DECISION_COLOR['accept']).getRgb()[:3]
-check('2.5', "reviewed band takes the decision colour; still 5 bands",
-      band_brush('u-b', panel.raw_plot)[:3] == acc
-      and len(bands(panel.raw_plot)) == 5,
-      repr(band_brush('u-b', panel.raw_plot)))
-tick_cols = {it.opts['brush'] for it in panel._ticker_items}
-check('2.6', "ticker draws an accept-coloured bar for the reviewed event",
-      rg.DECISION_COLOR['accept'] in tick_cols, repr(tick_cols))
-
-# an event straddling from epoch 0 into epoch 1 gets a band AND a ticker bar
-sdf = pd.DataFrame({'channel': 'Cz', 'uuid': ['s-1', 's-2'],
-                    'start_time': [29.6, 40.0], 'end_time': [30.6, 40.8],
-                    'max_amp': [40.0, 41.0]})
-spanel = rg.EpochsPanel()
-spanel.set_channel('Cz', sdf, sdf, event_type='spindle', trec=60.0)
-spanel._goto_epoch(1)
-s_bands = [it for p, it in spanel._event_items if p is spanel.raw_plot]
-s_bars = sum(len(it.opts['x']) for it in spanel._ticker_items)
-s_x = sorted(float(x) for it in spanel._ticker_items for x in it.opts['x'])
-check('2.7', "straddling event: band and ticker agree (2 bands, 2 bars, the "
-      "straddler's bar pinned inside the window)",
-      len(s_bands) == 2 and s_bars == 2 and 30.0 < s_x[0] < 30.5,
-      repr((len(s_bands), s_bars, s_x)))
-spanel.close()
+check('2.2', "u-e (29.6-30.6 s) is clipped at the epoch end (30 s)",
+      abs(band_for('u-e', panel.raw_plot).getRegion()[1] - 30.0) < 1e-9,
+      repr(band_for('u-e', panel.raw_plot).getRegion()))
+panel._goto_epoch(1)
+check('2.3', "u-e is not drawn in epoch 1 (starts in epoch 0); ticker "
+      "agrees", len(bands(panel.raw_plot)) == 3
+      and sum(len(it.opts['x']) for it in panel._ticker_items) == 3,
+      repr(len(bands(panel.raw_plot))))
+panel._goto_epoch(0)
+c = band_for('u-out', panel.raw_plot)
+check('2.4', "outlier: red fill alpha 46, red edge alpha 140",
+      c.brush.color().getRgb() == (224, 83, 63, 46)
+      and c.lines[0].pen.color().getRgb()[3] == 140,
+      repr((c.brush.color().getRgb(), c.lines[0].pen.color().getRgb())))
+c = band_for('u-a', panel.raw_plot)
+check('2.5', "regular: text_3 fill alpha 30, no edge",
+      c.brush.color().getRgb() == (136, 136, 136, 30)
+      and c.lines[0].pen.style() == Qt.NoPen,
+      repr((c.brush.color().getRgb(), c.lines[0].pen.style())))
+panel.set_reviews({'u-a': ('accept', None, 'TK'),
+                   'u-b': ('reject', 'artefact', 'TK'),
+                   'u-out': ('unsure', None, 'TK')})
+a_, r_, u_ = (band_for(u, panel.raw_plot) for u in ('u-a', 'u-b', 'u-out'))
+check('2.6', "[6] accepted: ok fill alpha 40, solid ok edge",
+      a_.brush.color().getRgb() == (105, 179, 93, 40)
+      and a_.lines[0].pen.style() == Qt.SolidLine,
+      repr(a_.brush.color().getRgb()))
+check('2.7', "[6] rejected: grey fill alpha 20, dashed bad edge (decision "
+      "replaces outlier style)", r_.brush.color().getRgb() == (136, 136, 136, 20)
+      and r_.lines[0].pen.style() == Qt.DashLine
+      and r_.lines[0].pen.color().name() == '#e0533f',
+      repr((r_.brush.color().getRgb(), r_.lines[0].pen.style())))
+check('2.8', "[6] unsure on an outlier: warn fill alpha 40, dotted edge",
+      u_.brush.color().getRgb() == (224, 163, 52, 40)
+      and u_.lines[0].pen.style() == Qt.DotLine,
+      repr(u_.brush.color().getRgb()))
+glyphs = sorted(t.toPlainText() for t in panel.glyph_items())
+check('2.9', "[6] decided bands carry ✓ ✗ ? TextItems on the raw trace",
+      glyphs == sorted(['✓', '✗', '?']), repr(glyphs))
+panel.select_event('u-c', emit=False)
+s_ = band_for('u-c', panel.raw_plot)
+check('2.10', "[6] selected: accent edge width 2, on top",
+      s_.lines[0].pen.color().name() == rg.THEME['accent'].lower()
+      and s_.lines[0].pen.widthF() == 2 and s_.zValue() == 8,
+      repr((s_.lines[0].pen.color().name(), s_.lines[0].pen.widthF())))
+tick_pens = [it.opts.get('pen') for it in panel._ticker_items]
+check('2.11', "ticker: rejected bar is an outline, selected bar has an "
+      "accent outline", any(it.opts.get('brush') is None
+                            and it.opts.get('height') == 9
+                            for it in panel._ticker_items)
+      and any(it.opts.get('height') == 16 for it in panel._ticker_items))
+panel.set_reviews({})
+panel.clear_selection(emit=False)
 
 # ======================================================================= 3
-say("\n== 3. Click selection")
+say("\n== 3. Selection [2-5]")
 
 
 class FakeClick:
@@ -289,142 +247,679 @@ class FakeClick:
         return self._pos
 
 
+panel._goto_epoch(0)
 region_before = tuple(panel.region.getRegion())
+n_reads = len(reads)
 panel._on_trace_click(FakeClick(panel.raw_plot, 12.4), panel.raw_plot)
-check('3.1', "click at 12.4 s on the raw trace selects u-c",
-      selected[-1:] == ['u-c'] and panel._selected_uuid == 'u-c',
-      repr(selected))
-check('3.2', "selecting does not move the artefact brush",
-      tuple(panel.region.getRegion()) == region_before,
-      repr((region_before, panel.region.getRegion())))
-sel_pen = [it for it in bands(panel.raw_plot)
-           if abs(it.getRegion()[0] - 12.0) < 1e-9][0]
-check('3.3', "selected band: accent edge on top (z 8)",
-      sel_pen.zValue() == 8
-      and sel_pen.lines[0].pen.color().name() == rg.THEME['accent'].lower(),
-      repr((sel_pen.zValue(), sel_pen.lines[0].pen.color().name())))
-panel._on_trace_click(FakeClick(panel.ticker, 18.95), panel.ticker)
-check('3.4', "click on the ticker 0.15 s after u-out's end selects it",
-      selected[-1] == 'u-out', repr(selected))
+check('3.1', "[2] click at an event's midpoint emits eventSelected(uuid)",
+      selected[-1:] == ['u-c'], repr(selected))
+check('3.2', "[5] selecting within the epoch makes no read_window call and "
+      "does not move the brush", len(reads) == n_reads
+      and tuple(panel.region.getRegion()) == region_before)
 n_sel = len(selected)
-panel._on_trace_click(FakeClick(panel.raw_plot, 22.0), panel.raw_plot)
-check('3.5', "click 3 s from every event selects nothing",
-      len(selected) == n_sel and panel._selected_uuid == 'u-out',
-      repr(selected))
-check('3.6', "_event_at: containing event, nearest within 0.25 s, else None",
-      panel._event_at(7.5) == 'u-b' and panel._event_at(1.8) == 'u-a'
-      and panel._event_at(1.5) is None)
+panel._on_trace_click(FakeClick(panel.raw_plot, 23.0), panel.raw_plot)
+check('3.3', "[2] a click 1 s or more from any event emits nothing, keeps "
+      "the selection", len(selected) == n_sel
+      and panel._selected_uuid == 'u-c')
+panel._on_trace_click(FakeClick(panel.filt_plot, 18.0 + 0.8 + 0.25),
+                      panel.filt_plot)
+check('3.4', "click on the filtered trace 0.25 s past u-out's end selects "
+      "it (0.3 s tolerance)", selected[-1] == 'u-out', repr(selected[-1]))
+check('3.5', "_event_at: 0.35 s from an edge selects nothing",
+      panel._event_at(2.0 - 0.35) is None and panel._event_at(1.75) == 'u-a')
+# [3] overlapping events: two runs on one scope
+ov = pd.DataFrame({'channel': 'Cz', 'uuid': ['o-long', 'o-short'],
+                   'start_time': [10.0, 10.9], 'end_time': [12.0, 11.3],
+                   'max_amp': [40.0, 41.0]})
+opanel = rg.EpochsPanel()
+opanel.resize(1400, 900)
+opanel.show()
+app.processEvents()
+osel = []
+opanel.eventSelected.connect(osel.append)
+opanel.set_channel('Cz', ov, ov, event_type='spindle', trec=60.0)
+opanel._on_trace_click(FakeClick(opanel.raw_plot, 11.0), opanel.raw_plot)
+opanel._on_trace_click(FakeClick(opanel.raw_plot, 11.0), opanel.raw_plot)
+check('3.6', "[3] overlapping: first click nearest centre, second click at "
+      "the same x the other", osel == ['o-long', 'o-short'], repr(osel))
+opanel.close()
+# [4] dragging the brush does not select
+n_sel = len(selected)
+panel.region.setRegion([5.0, 9.0])
+app.processEvents()
+check('3.7', "[4] moving the artefact brush emits no eventSelected",
+      len(selected) == n_sel)
 
 # ======================================================================= 4
-say("\n== 4. Keys")
-panel.set_reviews({'u-e': ('accept', None, 'tester')})
+say("\n== 4. Keys on the panel [7]")
+panel.set_reviews({'u-e': ('accept', None, 'TK')})
 panel.select_event('u-out')
 panel.setFocus()
 QTest.keyClick(panel, Qt.Key_BracketRight)
-check('4.1', "] from u-out skips reviewed u-e and pages to epoch 1 -> u-f",
-      panel._selected_uuid == 'u-f' and panel._epoch == 1
-      and selected[-1] == 'u-f', repr((panel._selected_uuid, panel._epoch)))
+check('4.1', "] from u-out skips reviewed u-e, pages to epoch 1 -> u-f",
+      panel._selected_uuid == 'u-f' and panel._epoch == 1,
+      repr((panel._selected_uuid, panel._epoch)))
 QTest.keyClick(panel, Qt.Key_BracketLeft)
-check('4.2', "[ goes back to u-out (skipping u-e) on epoch 0",
-      panel._selected_uuid == 'u-out' and panel._epoch == 0,
-      repr((panel._selected_uuid, panel._epoch)))
-QTest.keyClick(panel, Qt.Key_A)
-check('4.3', "A emits decisionRequested('accept')",
-      decisions == ['accept'], repr(decisions))
-QTest.keyClick(panel, Qt.Key_R)
-QTest.keyClick(panel, Qt.Key_U)
-check('4.4', "R and U emit reject and unsure",
-      decisions == ['accept', 'reject', 'unsure'], repr(decisions))
-panel._goto_epoch(2)       # empty epoch, selection off screen
+check('4.2', "[ goes back to u-out", panel._selected_uuid == 'u-out')
+QTest.keyClick(panel, Qt.Key_BraceRight)
+check('4.3', "} selects the next event of any status (u-e, reviewed)",
+      panel._selected_uuid == 'u-e', repr(panel._selected_uuid))
+QTest.keyClick(panel, Qt.Key_BraceLeft)
+check('4.4', "{ goes back to u-out", panel._selected_uuid == 'u-out')
+panel.select_event('u-i')
 QTest.keyClick(panel, Qt.Key_BracketRight)
-check('4.5', "] from an empty epoch selects the first unreviewed after it "
-      "(u-i on epoch 3)", panel._selected_uuid == 'u-i' and panel._epoch == 3,
-      repr((panel._selected_uuid, panel._epoch)))
-QTest.keyClick(panel, Qt.Key_BracketRight)
-check('4.6', "] past the last unreviewed event stays put",
-      panel._selected_uuid == 'u-i', repr(panel._selected_uuid))
-panel.set_channel('Cz', df, df, event_type='spindle', trec=120.0)
-n_dec = len(decisions)
+check('4.5', "] past the last unreviewed wraps once to the earliest "
+      "(u-a), last_nav 'wrapped'", panel._selected_uuid == 'u-a'
+      and panel.last_nav == 'wrapped',
+      repr((panel._selected_uuid, panel.last_nav)))
 QTest.keyClick(panel, Qt.Key_A)
-check('4.7', "a new drill clears the selection; A then emits nothing",
-      panel._selected_uuid is None and len(decisions) == n_dec)
+check('4.6', "A emits decisionRequested('accept')", decisions == ['accept'])
+n_clear = len(cleared)
+panel._next()        # Right
+check('4.7', "[7] Right with the selected event in the epoch clears the "
+      "selection", panel._selected_uuid is None and len(cleared) == n_clear + 1)
+panel.select_event('u-c')
+QTest.keyClick(panel, Qt.Key_Escape)
+check('4.8', "Esc (no strip range, no filter) clears the selection",
+      panel._selected_uuid is None)
+panel.close()
 
 # ======================================================================= 5
-say("\n== 5. Main window wiring")
+say("\n== 5. Event panel rows [25-33]")
+run46 = {'method': 'Moelle2011', 'stages': 'NREM2+NREM3',
+         'turtlewave_version': '4.6.0', 'timestamp': '2026-09-14T10:00:00',
+         'params': {'duration_by_method': {'Moelle2011': [0.5, 3.0]},
+                    'event_figures': {'spec_revision': 'v2'}}}
+run45 = {'method': 'Moelle2011', 'stages': 'NREM2', 'timestamp':
+         '2026-01-01T10:00:00', 'params': {'duration': [0.5, 3.0]}}
+base = {'uuid': 'x', 'channel': 'PPOz', 'start_time': 6812.856,
+        'end_time': 6813.456, 'duration': 0.6, 'method': 'Moelle2011',
+        'freq_lower': 9.0, 'freq_upper': 12.0, 'epoch_stage': 'NREM2',
+        'max_amp': 50.07, 'peak_val_det': 5.16, 'peak_freq': 9.8,
+        'run_id': '3f2a9c1d', 'halfwaves_above_bg': 7, 'cycles_nominal': 6.0,
+        'peak_freq_ap': 9.5, 'prominence_db': 7.2, 'in_band': 1,
+        'low_prominence': 1, 'bg_rms': 1.8, 'bg_n_windows': 55,
+        'bg_stage_mixed': 0, 'amp_ratio': 1.81, 'thresh_ratio': None,
+        'near_bound': 0, 'near_splice': 0}
+
+
+def rows_of(ev, **kw):
+    kw.setdefault('event_type', 'spindle')
+    kw.setdefault('run', run46)
+    kw.setdefault('run_id', ev.get('run_id'))
+    kw.setdefault('figures', ev)
+    return er.build_event_rows(ev, **kw)
+
+
+def text_of(rows, key):
+    r = next((r for r in rows if r['key'] == key), None)
+    return None if r is None else '\n'.join([r['value']] + r['sub'])
+
+
+r = rows_of(base, outlier_thr=38.2)
+keys = [x['key'] for x in r]
+check('5.1', "[25] spindle row keys in order", keys ==
+      ['time', 'channel', 'stage', 'detection', 'duration', 'halfwaves',
+       'cycles_nominal', 'peak_freq', 'amp_bg', 'amp_thr', 'outlier'],
+      repr(keys))
+sw = dict(base, method='Massimini2004', det_trough=-80.0, det_ptp=120.0,
+          det_zero_time=6813.0, wave_freq=0.9, freq_lower=0.5,
+          freq_upper=4.0)
+rsw = rows_of(sw, event_type='slow_wave', ptp_units_uv=True,
+              thresholds={'max_trough_amp': -40.0, 'min_ptp': 75.0})
+check('5.2', "[25] slow-wave row keys in order", [x['key'] for x in rsw] ==
+      ['time', 'channel', 'stage', 'detection', 'duration', 'wave_freq',
+       'amp_bg', 'amp_thr', 'sw_trough', 'sw_ptp', 'sw_neg_half', 'outlier'],
+      repr([x['key'] for x in rsw]))
+check('5.3', "[26] half-waves sub-line exact; cycles never an integer",
+      text_of(r, 'halfwaves').split('\n')[1]
+      == 'half-waves standing out from background (2.5× bg RMS)'
+      and not re.match(r'^\d+$', text_of(r, 'cycles_nominal').split('\n')[0]),
+      repr((text_of(r, 'halfwaves'), text_of(r, 'cycles_nominal'))))
+pf = text_of(r, 'peak_freq')
+check('5.4', "[27] 0.6 s, 7.2 dB: 'low prominence (unreliable under 1 s)' "
+      "and 'coarse (resolution 1.7 Hz)'",
+      'prominence 7.2 dB · low prominence (unreliable under 1 s)' in pf
+      and 'coarse (resolution 1.7 Hz)' in pf, repr(pf))
+long_ = dict(base, end_time=base['start_time'] + 1.2, duration=1.2)
+pf12 = text_of(rows_of(long_), 'peak_freq')
+pf15 = text_of(rows_of(dict(long_, prominence_db=15.0, low_prominence=0)),
+               'peak_freq')
+check('5.5', "[27] 1.2 s: 'low prominence' without 'unreliable'; 15 dB "
+      "still shows 'prominence 15.0 dB'", 'low prominence' in pf12
+      and 'unreliable' not in pf12 and 'prominence 15.0 dB' in pf15,
+      repr((pf12, pf15)))
+check('5.6', "[28] in_band false -> OFF BAND; no peak -> no-peak text",
+      'OFF BAND' in text_of(rows_of(dict(base, in_band=0, peak_freq_ap=8.0)),
+                            'peak_freq')
+      and text_of(rows_of(dict(base, peak_freq_ap=None, in_band=None)),
+                  'peak_freq').startswith('— no peak above the 1/f background'))
+check('5.7', "[29] stage mix and insufficient background",
+      'near a stage change' in text_of(rows_of(dict(base, bg_stage_mixed=1)),
+                                       'amp_bg')
+      and 'too little clean background' in text_of(
+          rows_of(dict(base, amp_ratio=None, bg_rms=None, bg_n_windows=6)),
+          'amp_bg'))
+check('5.8', "[30] near_bound -1 -> 'at the floor of the run limits'",
+      'at the floor of the run limits' in text_of(
+          rows_of(dict(base, near_bound=-1, duration=0.52,
+                       end_time=base['start_time'] + 0.52)), 'duration'))
+t45 = text_of(rows_of(dict(base, halfwaves_above_bg=None, cycles_nominal=None,
+                           peak_freq_ap=None, amp_ratio=None),
+                      run=run45, thresholds=pd.DataFrame(),
+                      figure_state='missing'), 'amp_thr')
+check('5.9', "[31] pre-4.6 run, no thresholds: exact not-recorded text",
+      t45 == 'Threshold not recorded for this run (detected with 4.5 or '
+             'earlier)', repr(t45))
+ta = text_of(rows_of(base, thresholds={'det_value_lo': 3.43}), 'amp_thr')
+tb = text_of(rows_of(base, thresholds={'det_value_lo': 5.16}), 'amp_thr')
+check('5.10', "[31] two runs on one scope give different amp_thr (1.5× vs "
+      "1.0× barely crossed)", ta.startswith('1.5×') and tb.startswith('1.0×')
+      and 'barely crossed' in tb, repr((ta, tb)))
+branches = {
+    'Moelle2011': ({'det_value_lo': 3.43}, '1.5×'),
+    'Ferrarelli2007': ({'det_value_lo': 3.43, 'sel_value': 2.0}, '1.5×'),
+    'Nir2011': ({'det_value_lo': 3.43}, '1.5×'),
+    'Ray2015': ({'det_value_lo': 2.33, 'sel_value': 0.1}, 'no ratio'),
+    'Wamsley2012': ({'det_value_lo': 12.0}, 'no ratio'),
+    'Martin2013': ({'det_value_lo': 4.0}, 'no ratio'),
+    'Lacourse2018': ({'abs_pow_thresh': 1.25, 'rel_pow_thresh': 1.6,
+                      'covar_thresh': 1.3, 'corr_thresh': 0.69},
+                     '4 thresholds'),
+    'CIRUS': ({}, 'not available for CIRUS'),
+    'Massimini2004': ({'max_trough_amp': -40.0, 'min_ptp': 75.0},
+                      'meets both'),
+    'Ngo2015': ({'peak_thresh_factor': 1.25}, 'relative'),
+    'Staresina2015': ({'ptp_percentile': 75.0}, 'relative'),
+}
+for m, (th, want) in branches.items():
+    et = 'slow_wave' if m in ('Massimini2004', 'Ngo2015',
+                              'Staresina2015') else 'spindle'
+    got = er.threshold_row(m, dict(sw if et == 'slow_wave' else base),
+                           th, True)['value']
+    check('5.11', f"[32] amp_thr value for {m}", got == want,
+          repr((got, want)))
+fails = er.threshold_row('Massimini2004', dict(sw, det_ptp=60.0),
+                         {'max_trough_amp': -40.0, 'min_ptp': 75.0}, True)
+check('5.12', "[32] Massimini failing one criterion: 'fails 1 of 2'",
+      fails['value'] == 'fails 1 of 2', repr(fails['value']))
+check('5.14', "run_stages: list repr, joint token, single stage, params",
+      er.run_stages({'stages': "['NREM2', 'NREM3']"}) == ['NREM2', 'NREM3']
+      and er.run_stages({'stages': 'NREM2NREM3'}) == ['NREM2', 'NREM3']
+      and er.run_stages({'stages': 'NREM2'}) == ['NREM2']
+      and er.run_stages({'stages': "['NREM2']"}) == ['NREM2']
+      and er.run_stages({'stages': "['x']", 'params': {'stages': ['NREM3']}})
+      == ['NREM3'],
+      repr([er.run_stages({'stages': "['NREM2', 'NREM3']"}),
+            er.run_stages({'stages': 'NREM2NREM3'})]))
+check('5.15', "run_ref_chan: params key wins ([] = none); else the column "
+      "repr", er.run_ref_chan({'params': {'ref_chan': []},
+                               'ref_chan': "['M1']"}) == []
+      and er.run_ref_chan({'params': {}, 'ref_chan': "['M1', 'M2']"})
+      == ['M1', 'M2'] and er.run_ref_chan({'ref_chan': '[]'}) == []
+      and er.run_ref_chan({'ref_chan': 'None'}) == [])
+check('5.16', "rereference keeps the target in an average reference "
+      "(Wonambi montage) and matches the formula",
+      np.allclose(rg._rereference_like_wonambi(
+          np.array([[1., 2, 3], [3, 3, 3], [5, 4, 3]]), ['Cz', 'Fz', 'Pz'],
+          np.arange(3) / 100.0, 100.0, 'Cz', ['Cz', 'Fz', 'Pz']),
+          np.array([1., 2, 3]) - np.array([3., 3, 3]))
+      and np.allclose(er.rereference(
+          np.array([[1., 2, 3], [3, 3, 3], [5, 4, 3]]), ['Cz', 'Fz', 'Pz'],
+          'Cz', ['Cz', 'Fz', 'Pz']), [-2., -1, 0]))
+off_run = dict(run46, params=dict(run46['params'], event_figures=None))
+toff = text_of(rows_of(dict(base, halfwaves_above_bg=None), run=off_run,
+                       thresholds=pd.DataFrame(), figure_state='unavailable',
+                       figure_note=er.FIGURES_OFF_FIG), 'amp_thr')
+hoff = text_of(rows_of(dict(base, halfwaves_above_bg=None), run=off_run,
+                       figure_state='unavailable',
+                       figure_note=er.FIGURES_OFF_FIG), 'halfwaves')
+check('5.17', "4.6 run with figures off: not the 4.5 wording, figures say "
+      "switched off", toff == 'Threshold not recorded for this run'
+      and hoff == '— ' + er.FIGURES_OFF_FIG, repr((toff, hoff)))
+crit = text_of(rows_of(sw, event_type='slow_wave', thresholds={
+    'max_trough_amp': -40.0, 'min_ptp': 75.0, 'trough_duration_lo': 0.25,
+    'trough_duration_hi': 1.0}), 'sw_neg_half')
+check('5.18', "negative half-wave criterion read from the stored "
+      "trough_duration_lo / hi", 'criterion 0.25–1 s' in crit, repr(crit))
+nulls = {k: None for k in base}
+nulls.update({'uuid': 'n', 'channel': 'Cz', 'method': 'Moelle2011'})
+bad = []
+for et, run_ in (('spindle', run46), ('spindle', run45),
+                 ('slow_wave', run46), ('slow_wave', {})):
+    for state in ('stored', 'missing', 'computing'):
+        for row in er.build_event_rows(nulls, event_type=et, run=run_,
+                                       run_id=None, figures=nulls,
+                                       figure_state=state):
+            for t in [row['value']] + row['sub']:
+                if (not str(t).strip() or re.search(r'\bnan\b|\bNone\b',
+                                                     str(t))):
+                    bad.append((et, state, row['key'], t))
+check('5.13', "[33] all-NULL rows: no nan / None / empty text anywhere",
+      not bad, repr(bad[:4]))
+
+# ======================================================================= 6
+say("\n== 6. Main window: reviewer, decisions, undo, keys [34-39]")
 win = rg.EventReviewGUI()
 win.db = db
 win.qc_widget.evt_combo.blockSignals(True)
 win.qc_widget.evt_combo.setCurrentText('spindle')
 win.qc_widget.evt_combo.blockSignals(False)
-# montage-wide QC frame: the lean columns only, no uuid
 win._qc_events_df = db.get_events(event_type='spindle',
                                   columns=rg.QC_EVENT_COLS)
-check('5.0', "montage-wide QC frame carries no uuid",
-      'uuid' not in win._qc_events_df.columns)
-win.on_qc_drill('Cz', switch_tab=False)
-dsl = win.epochs_panel._df
-check('5.0b', "drill fetches Cz's slice with the identity columns",
-      dsl is not None and len(dsl) == 9
-      and {'uuid', 'run_id', 'epoch_stage'} <= set(dsl.columns)
-      and list(win.epochs_panel._ev['uuid']) == UUIDS,
-      repr(None if dsl is None else list(dsl.columns)))
-check('5.1', "drill passes the stored reviews to the panel",
-      set(win.epochs_panel._reviews) == {'u-b', 'u-c'},
-      repr(win.epochs_panel._reviews))
-win.epochs_panel.select_event('u-a')
-msg = win.status_bar.currentMessage()
-evt_word = str(win.epochs_panel._event_type).replace('_', ' ')
-check('5.2', "selection named in the status bar",
-      win.selected_event_uuid == 'u-a'
-      and msg == f"Selected {evt_word} on Cz at 00:00:02 (1 of 9 on channel)",
-      repr(msg))
 win.show()
 win.activateWindow()
 app.processEvents()
-win.tabs.setCurrentIndex(0)
-win.qc_widget.setFocus()
-app.processEvents()
+asked = []
+win._ask_reviewer_name = lambda prefill: (asked.append(prefill) or ('', False))
 win.on_qc_drill('Cz', switch_tab=True)
 app.processEvents()
-fw = QtWidgets.QApplication.focusWidget()
-check('5.2b', "the panel has keyboard focus after a drill (no click needed)",
-      fw is win.epochs_panel, repr(fw))
-win.epochs_panel.select_event('u-a')
-n_rows = db.conn.execute("SELECT COUNT(*) FROM event_reviews").fetchone()[0]
-win.reviewer_name = ''
-win._on_decision_requested('accept')
+ep = win.epochs_panel
+evp = win.detail_dock_w.event_panel
+check('6.0', "reviewer segment reads 'Reviewer: not set'; review keys live "
+      "on the Epochs tab", win.seg_reviewer.text() == 'Reviewer: not set'
+      and win.review_shortcuts_enabled())
+
+
+def rows_db(uuid):
+    return db.conn.execute(
+        "SELECT reviewer, decision, reason, comment, reviewed_at FROM "
+        "event_reviews WHERE uuid = ? ORDER BY reviewer", (uuid,)).fetchall()
+
+
+def key(k, text=''):
+    QTest.keyClick(ep, k)
+    app.processEvents()
+
+
+ep.select_event('u-a')
+app.processEvents()
+key(Qt.Key_A)
+check('6.1', "[34] no name: A opens the name dialog; Cancel writes nothing",
+      len(asked) == 1 and rows_db('u-a') == []
+      and win.status_bar.currentMessage()
+      == 'Decision not saved — a reviewer name is needed.',
+      repr((asked, win.status_bar.currentMessage())))
+win._ask_reviewer_name = lambda prefill: ('  TK  ', True)
+key(Qt.Key_A)
+check('6.2', "name given: saved stripped, in QSettings, on the status "
+      "segment; A writes accept", win.reviewer_name == 'TK'
+      and rg._review_settings().value('review/reviewer_name') == 'TK'
+      and win.seg_reviewer.text() == 'Reviewer: TK'
+      and [r[:3] for r in rows_db('u-a')] == [('TK', 'accept', None)],
+      repr(rows_db('u-a')))
+check('6.3', "auto-advance selected the next unreviewed event (u-b)",
+      ep._selected_uuid == 'u-b', repr(ep._selected_uuid))
+key(Qt.Key_R)
+check('6.4', "[35] R alone writes nothing", rows_db('u-b') == [])
+key(Qt.Key_Escape)
+check('6.5', "[35] R, Esc writes nothing; status says cancelled",
+      rows_db('u-b') == [] and win._armed is None
+      and win.status_bar.currentMessage()
+      == 'Reject cancelled — no reason chosen.')
+key(Qt.Key_R)
+key(Qt.Key_1)
+check('6.6', "[35] R, 1 writes reject / artefact",
+      [r[:3] for r in rows_db('u-b')] == [('TK', 'reject', 'artefact')],
+      repr(rows_db('u-b')))
 msg = win.status_bar.currentMessage()
-n_after = db.conn.execute("SELECT COUNT(*) FROM event_reviews").fetchone()[0]
-check('5.3', "no reviewer name: nothing written, status asks for a name",
-      n_after == n_rows and 'u-a' not in db.get_reviews_for(['u-a'])
-      and msg == "Decision not saved: set a reviewer name first "
-                 "(Review ▸ Reviewer name…)", repr((n_rows, n_after, msg)))
-check('5.3b', "Review menu carries 'Reviewer name…'",
-      win.act_reviewer_name.text() == 'Reviewer name…')
-win.set_reviewer_name('TK')
-win._on_decision_requested('accept')
-rows = db.conn.execute("SELECT reviewer, decision FROM event_reviews "
-                       "WHERE uuid = 'u-a'").fetchall()
-if db.has_review_backend:
-    check('5.3c', "after set_reviewer_name('TK'): one row under 'TK', band "
-          "tinted", rows == [('TK', 'accept')]
-          and 'u-a' in win.epochs_panel._reviews, repr(rows))
-else:
-    check('5.3c', "library without event_reviews: nothing stored",
-          rows == [], repr(rows))
-
-qc_frame = win._qc_events_df
-win.db = None
+check('6.7', "status after a write names it, the next unreviewed and undo",
+      msg.startswith('Rejected spindle on Cz at 00:00:07.0 (artefact) · next '
+                     'unreviewed ') and msg.endswith(' · Ctrl+Z to undo'),
+      repr(msg))
+cur = ep._selected_uuid
+key(Qt.Key_U)
+key(Qt.Key_Return)
+check('6.8', "[35] U, Enter writes unsure with no reason",
+      [r[:3] for r in rows_db(cur)] == [('TK', 'unsure', None)],
+      repr(rows_db(cur)))
+cur = ep._selected_uuid
+key(Qt.Key_R)
+key(Qt.Key_9)
+check('6.9', "[35] R, 9 waits for a comment (nothing written)",
+      rows_db(cur) == [] and evp.comment.hasFocus()
+      and not win.review_shortcuts_enabled())
+QTest.keyClicks(evp.comment, 'spike train')
+QTest.keyClick(evp.comment, Qt.Key_Return)
+app.processEvents()
+check('6.10', "[35] … then the comment and Enter write reject / other",
+      [r[:4] for r in rows_db(cur)] == [('TK', 'reject', 'other',
+                                         'spike train')], repr(rows_db(cur)))
+# [36] change then undo twice
+ep.select_event('u-g')
+app.processEvents()
+key(Qt.Key_A)
+# back-date the accept by one hour so a same-second coincidence cannot pass
+import datetime as _dtm                                       # noqa: E402
+past = (_dtm.datetime.now().astimezone() - _dtm.timedelta(hours=1)
+        ).isoformat(timespec='seconds')
+db.conn.execute("UPDATE event_reviews SET reviewed_at = ? WHERE uuid = 'u-g' "
+                "AND reviewer = 'TK'", (past,))
+db.conn.commit()
+first = rows_db('u-g')
+ep.select_event('u-g')
+app.processEvents()
+key(Qt.Key_R)
+key(Qt.Key_2)
+check('6.11', "[36] A then R,2 leaves one row reject / arousal",
+      [r[:3] for r in rows_db('u-g')] == [('TK', 'reject', 'arousal')],
+      repr(rows_db('u-g')))
+check('6.12', "status names the change",
+      win.status_bar.currentMessage() == 'Changed from accepted to rejected '
+                                         '(arousal) · Ctrl+Z to undo',
+      repr(win.status_bar.currentMessage()))
+QTest.keyClick(ep, Qt.Key_Z, Qt.ControlModifier)
+app.processEvents()
+check('6.13', "[36] Ctrl+Z restores accept and its reviewed_at (one hour "
+      "old), selects it", rows_db('u-g') == first and first[0][4] == past
+      and ep._selected_uuid == 'u-g'
+      and win.status_bar.currentMessage().startswith(
+          'Undid reject of Cz 00:00:41.0 — now accepted'),
+      repr((rows_db('u-g'), win.status_bar.currentMessage())))
+QTest.keyClick(ep, Qt.Key_Z, Qt.ControlModifier)
+app.processEvents()
+check('6.14', "[36] a second Ctrl+Z deletes the row",
+      rows_db('u-g') == [], repr(rows_db('u-g')))
+# undo of a decision on another channel re-drills
+win.on_qc_drill('Fz', switch_tab=False)
+ep.select_event('u-fz')
+key(Qt.Key_A)
 win.on_qc_drill('Cz', switch_tab=False)
-check('5.4', "no database: drill falls back to the QC frame; nothing to "
-      "select", len(win.epochs_panel._df) == len(qc_frame)
-      and not win.epochs_panel.select_event('u-a'),
-      repr(len(win.epochs_panel._df)))
+QTest.keyClick(ep, Qt.Key_Z, Qt.ControlModifier)
+app.processEvents()
+check('6.15', "[36] undo of a decision on another channel re-drills it",
+      ep._channel == 'Fz' and ep._selected_uuid == 'u-fz'
+      and rows_db('u-fz') == [], repr((ep._channel, ep._selected_uuid)))
+win.on_qc_drill('Cz', switch_tab=False)
+ep.select_event('u-h')
+evp.comment.setFocus()
+app.processEvents()
+QTest.keyClicks(evp.comment, 'ar')
+app.processEvents()
+check('6.16', "[37] typing a / r in the comment field writes no decision",
+      rows_db('u-h') == [] and evp.comment.text() == 'ar'
+      and not win.review_shortcuts_enabled())
+evp.comment.clear()
+ep.setFocus()
+app.processEvents()
+# [38] another reviewer's decision does not count as reviewed
+dbwrite.store_event_review(db.conn, 'u-h', 'accept', 'JS')
+win.on_qc_drill('Cz', switch_tab=False)
+mine = {u for u, v in ep._reviews.items()}
+ep.select_event('u-g')
+key(Qt.Key_BracketRight)
+check('6.17', "[38] ] skips events decided by TK, not those decided only "
+      "by JS (u-h)", ep._selected_uuid == 'u-h' and 'u-h' not in mine,
+      repr((ep._selected_uuid, sorted(mine))))
+check('6.18', "blind by default: JS's decision is hidden on the Current line",
+      'Also decided by 1 other reviewer(s); hidden so your decisions stay '
+      'independent.' in evp.current_sub.text()
+      and evp.current_lbl.text() == 'Not reviewed',
+      repr((evp.current_lbl.text(), evp.current_sub.text())))
+check('6.19', "Show other reviewers is off at launch", not
+      win.act_show_others.isChecked())
+win._confirm_show_others = lambda: True
+win.act_show_others.setChecked(True)
+app.processEvents()
+check('6.20', "turning it on (confirmed) lists JS's decision",
+      'JS: accepted · ' in evp.current_sub.text(),
+      repr(evp.current_sub.text()))
+win.act_show_others.setChecked(False)
+# [39] progress
+n_dec = len(ep._reviews)
+counts = {d: sum(1 for v in ep._reviews.values() if v[0] == d)
+          for d in ('accept', 'reject', 'unsure')}
+check('6.21', "[39] progress line counts this reviewer only",
+      evp.progress_lbl.text() ==
+      f"Progress  {n_dec} reviewed / 9 on Cz · {counts['accept']} accepted · "
+      f"{counts['reject']} rejected · {counts['unsure']} unsure",
+      repr(evp.progress_lbl.text()))
+win.set_reviewer_name('JS')
+check('6.22', "changing the name rescopes bands and says so",
+      set(ep._reviews) == {'u-h'} and win.status_bar.currentMessage() ==
+      "Changing the name shows that reviewer's decisions and sample progress "
+      "instead.", repr(set(ep._reviews)))
+win.set_reviewer_name('TK')
+win.tabs.setCurrentIndex(0)
+app.processEvents()
+check('6.23', "review keys are off on the Channels tab",
+      not win.review_shortcuts_enabled())
+win.tabs.setCurrentIndex(1)
+app.processEvents()
+ep.select_event('u-a')
+evp.clear_btn.click()
+app.processEvents()
+check('6.24', "Clear deletes this reviewer's decision and Ctrl+Z restores it",
+      rows_db('u-a') == [], repr(rows_db('u-a')))
+QTest.keyClick(ep, Qt.Key_Z, Qt.ControlModifier)
+app.processEvents()
+check('6.25', "… restored", [r[:2] for r in rows_db('u-a')] == [('TK',
+                                                                 'accept')])
+ep.select_event('u-c')
+check('6.26', "selection status names stage and decision",
+      win.status_bar.currentMessage().startswith(
+          'Selected spindle on Cz at 00:00:12.0 · NREM2 · ')
+      and win.status_bar.currentMessage().endswith(
+          ' — A accept · R reject · U unsure'),
+      repr(win.status_bar.currentMessage()))
+check('6.27', "the dock panel shows the spindle rows for the selection",
+      evp.row_keys() == ['time', 'channel', 'stage', 'detection', 'duration',
+                         'halfwaves', 'cycles_nominal', 'peak_freq', 'amp_bg',
+                         'amp_thr', 'outlier']
+      and evp.row_text('amp_thr').startswith('1.5×'), repr(evp.row_keys()))
+win.close()
 
-for w in (panel,):
-    w.close()
-if win.background_loader is not None:
-    win.background_loader.stop()
+# ======================================================================= 7
+say("\n== 7. Neighbours and physiology [41-44]")
+CH = ['Fz', 'Cz', 'Pz', 'POz', 'PPOz', 'O1', 'O2', 'P3', 'P4', 'C3', 'VEOG',
+      'HEOG', 'EMGChin', 'ECG']
+TYPES = ['EEG'] * 10 + ['EOG', 'EOG', 'EMG', 'ECG']
+coords = {'Fz': (0, 0.5), 'Cz': (0, 0), 'Pz': (0, -0.4), 'POz': (0, -0.6),
+          'PPOz': (0, -0.5), 'O1': (-0.2, -0.8), 'O2': (0.2, -0.8),
+          'P3': (-0.3, -0.4), 'P4': (0.3, -0.4), 'C3': (-0.4, 0)}
+chs, src, _ = neighbour_channels('PPOz', [c for c, t in zip(CH, TYPES)
+                                          if t == 'EEG'], coords, k=6)
+check('7.1', "[42] by position: 6 nearest, no EOG/EMG/ECG",
+      src == 'position' and len(chs) == 6 and chs[0] in ('POz', 'Pz')
+      and not {'VEOG', 'HEOG', 'EMGChin', 'ECG'} & set(chs), repr(chs))
+check('7.2', "physio_channels: none typed -> {}; typed -> EOG, EOG, chin "
+      "EMG, ECG", physio_channels(CH, None) == {}
+      and physio_channels(CH, TYPES) == {'eog': ['VEOG', 'HEOG'],
+                                         'emg': 'EMGChin', 'ecg': 'ECG'})
+
+
+class FakeData:
+    def __init__(self, channels, types, interp=()):
+        self.channels = list(channels)
+        self.header = {'chan_type': list(types), 'interp_channels': list(interp),
+                       's_freq': 100.0}
+        self.n_reads = 0
+
+    def read_data(self, chan, begtime, endtime):
+        self.n_reads += 1
+        n = max(2, int((endtime - begtime) * 100))
+        ts = begtime + np.arange(n) / 100.0
+        arr = np.vstack([np.sin(2 * np.pi * 10 * ts) * 20 for _ in chan])
+        return type('W', (), {'data': [arr], 's_freq': 100.0,
+                              'axis': {'time': [ts],
+                                       'chan': [np.array(chan)]}})()
+
+
+db = rg.EventDatabase(DB)          # the previous window closed it
+win = rg.EventReviewGUI()
+win.db = db
+win.eeg_data = FakeData(CH, TYPES, interp=['P4'])
+win.qc_widget.evt_combo.blockSignals(True)
+win.qc_widget.evt_combo.setCurrentText('spindle')
+win.qc_widget.evt_combo.blockSignals(False)
+win._qc_events_df = db.get_events(event_type='spindle',
+                                  columns=rg.QC_EVENT_COLS)
+win._refresh_physio_channels()
+win.detail_dock_w._coords = None
+win.on_qc_drill('Cz', switch_tab=True)
+ep = win.epochs_panel
+ep.neighbours.set_open(True)
+ep.select_event('u-a')
+app.processEvents()
+hdr = ep.neighbours.header.text()
+check('7.3', "[41] without coordinates: 'from the same region'",
+      'from the same region' in hdr, repr(hdr))
+win.detail_dock_w._coords = dict(coords, Cz=(0.0, 0.0))
+ep.select_event('u-b')
+hdr = ep.neighbours.header.text()
+labels = ep.neighbours.plot.row_labels()
+check('7.4', "[41, 42] with coordinates: 'by electrode position', target "
+      "first, ≤ 6 others, interpolated P4 shown as ~P4, no physio channels",
+      'by electrode position' in hdr and labels[0].startswith('Cz')
+      and len(labels) <= 7 and not any(l.startswith(('VEOG', 'HEOG', 'EMG',
+                                                     'ECG')) for l in labels)
+      and any(l.startswith('~P4') for l in labels), repr((hdr, labels)))
+ep.neighbours.set_open(False)
+n0 = ep.neighbours.n_reads
+ep.select_event('u-c')
+check('7.5', "[43] collapsed: selecting an event triggers no neighbour read",
+      ep.neighbours.n_reads == n0)
+check('7.6', "[44] physiology rows in the order EOG, EOG, Chin EMG, ECG",
+      ep.physio.row_titles() == ['EOG · VEOG', 'EOG · HEOG',
+                                 'Chin EMG · EMGChin', 'ECG · ECG']
+      and ep.physio.isVisibleTo(ep), repr(ep.physio.row_titles()))
+win.eeg_data = FakeData(CH[:10], TYPES[:10])
+win._refresh_physio_channels()
+check('7.7', "[44] no typed EOG/EMG/ECG: physiology group hidden",
+      not ep.physio.isVisibleTo(ep) and ep.physio.row_titles() == [])
+win.close()
+
+# ======================================================================= 8
+say("\n== 8. Pre-4.6 row: figures computed on selection with the run's ref")
+
+
+class SpindleData(FakeData):
+    """Pink-ish noise with a 10.5 Hz, 1 s Hann-tapered burst at 100.0 s on
+    Cz; Fz carries a 3 µV offset that re-referencing must remove."""
+
+    def __init__(self):
+        super().__init__(['Cz', 'Fz', 'Pz'], ['EEG'] * 3)
+        self.calls = []
+        self.duration = 400.0
+
+    def read_data(self, chan, begtime, endtime):
+        self.calls.append(list(chan))
+        fs = 250.0
+        n = int(round((endtime - begtime) * fs))
+        ts = begtime + np.arange(n) / fs
+        r = np.random.default_rng(int(begtime * 10) % 1000)
+        rows = []
+        for c in chan:
+            x = np.cumsum(r.normal(0, 1, n)) * 0.3
+            x = x - np.convolve(x, np.ones(250) / 250, mode='same')
+            if c == 'Cz':
+                m = (ts >= 100.0) & (ts <= 101.0)
+                x = x.copy()
+                x[m] += 20 * np.hanning(m.sum()) * np.sin(
+                    2 * np.pi * 10.5 * (ts[m] - 100.0))
+            rows.append(x + (3.0 if c == 'Fz' else 0.0))
+        return type('W', (), {'data': [np.vstack(rows)], 's_freq': fs,
+                              'axis': {'time': [ts],
+                                       'chan': [np.array(chan)]}})()
+
+
+P_OLD = os.path.join(TMP, 'old.db')
+con = fx.open_schema(P_OLD)
+# written as the library writes a 4.5 run: stages "['NREM2', 'NREM3']" and
+# ref_chan "['Fz']" as str(list) columns, ref_chan absent from params_json
+fx.add_run(con, 'run-old', figures=False, version='4.5.0', ref_chan=['Fz'],
+           ref_in_params=False)
+fx.add_run(con, 'run-avg', figures=False, version='4.5.0',
+           ref_chan=['Cz', 'Fz', 'Pz'], timestamp='2026-01-02T10:00:00')
+fx.add_run(con, 'run-m1', figures=False, version='4.5.0', ref_chan=['M1'],
+           timestamp='2026-01-03T10:00:00')
+fx.add_run(con, 'run-new', timestamp='2026-01-04T10:00:00')
+fx.insert_rows(con, [
+    ev_row('old-1', 'Cz', 100.0, 1.0, 40.0, 'run-old', figures=False,
+           peak_val_det=None),
+    ev_row('avg-1', 'Cz', 160.0, 1.0, 40.0, 'run-avg', figures=False,
+           peak_val_det=None),
+    ev_row('m1-1', 'Cz', 220.0, 1.0, 40.0, 'run-m1', figures=False,
+           peak_val_det=None),
+    ev_row('new-1', 'Cz', 280.0, 1.0, 40.0, 'run-new', figures=False)])
+con.commit()
+con.close()
+db = rg.EventDatabase(P_OLD)
+win = rg.EventReviewGUI()
+win.db = db
+win.qc_widget.evt_combo.blockSignals(True)
+win.qc_widget.evt_combo.setCurrentText('spindle')
+win.qc_widget.evt_combo.blockSignals(False)
+win._qc_events_df = db.get_events(event_type='spindle',
+                                  columns=rg.QC_EVENT_COLS)
+ep = win.epochs_panel
+evp = win.detail_dock_w.event_panel
+# scored NREM2 / NREM3 epochs over the whole read, so the background windows
+# survive the run's stage exclusion only if the stored stages parse
+win._epoch_table = lambda: rg.EpochTable(
+    [(30.0 * i, 30.0 * (i + 1), 'NREM2' if i % 2 else 'NREM3')
+     for i in range(14)])
+win.on_qc_drill('Cz', switch_tab=True)
+ep.select_event('old-1')
+check('8.1', "pre-4.6 row without EEG: figures 'not recorded' and the load "
+      "note", evp.row_text('halfwaves').startswith('— not recorded for this run')
+      and evp.note_lbl.text() == er.LOAD_EEG_NOTE
+      and evp.row_text('amp_thr') == er.THRESHOLD_NOT_RECORDED,
+      repr((evp.row_text('halfwaves'), evp.row_text('amp_thr'))))
+win.eeg_data = SpindleData()
+ep.clear_selection()
+ep.select_event('old-1')
+check('8.2', "with EEG: the four figure rows show 'computing…' first",
+      all(evp.row_text(k) == 'computing…'
+          for k in ('halfwaves', 'cycles_nominal', 'peak_freq', 'amp_bg')),
+      repr([evp.row_text(k) for k in ('halfwaves', 'peak_freq')]))
+for _ in range(5):
+    app.processEvents()
+hw = evp.row_text('halfwaves')
+pf = evp.row_text('peak_freq')
+check('8.3', "then computed: a half-wave count and a peak near 10.5 Hz, "
+      "labelled as computed now", re.match(r'^\d+\n', hw or '') is not None
+      and re.search(r'1[01]\.\d Hz', pf or '') is not None
+      and evp.row('halfwaves')['tooltip'] == er.COMPUTED_TIP,
+      repr((hw, pf)))
+check('8.4', "the read included the run's reference channel (Fz) with Cz "
+      "(parsed from the str(list) column)",
+      any(set(c) == {'Cz', 'Fz'} for c in win.eeg_data.calls),
+      repr(win.eeg_data.calls))
+bg = evp.row_text('amp_bg')
+check('8.5', "stages stored as \"['NREM2', 'NREM3']\" keep the background: "
+      "amp vs background is a ratio, not 'too little clean background'",
+      re.match(r'^\d+\.\d×\n', bg or '') is not None
+      and 'too little' not in bg, repr(bg))
+win.eeg_data.calls.clear()
+ep.select_event('avg-1')
+for _ in range(5):
+    app.processEvents()
+check('8.6', "average reference including the target: the figure read is "
+      "Cz, Fz, Pz in one call (target kept in the reference)",
+      [c for c in win.eeg_data.calls if len(c) > 1] == [['Cz', 'Fz', 'Pz']]
+      and re.match(r'^\d+\n', evp.row_text('halfwaves') or ''),
+      repr((win.eeg_data.calls, evp.row_text('halfwaves'))))
+import logging as _logging                                    # noqa: E402
+caught = []
+h = _logging.Handler()
+h.emit = lambda rec: caught.append((rec.levelno, rec.getMessage()))
+rg.logger.addHandler(h)
+ep.select_event('m1-1')
+for _ in range(5):
+    app.processEvents()
+rg.logger.removeHandler(h)
+check('8.7', "reference channel not in the recording: WARNING naming it, no "
+      "silent fall-back to the stored reference",
+      any(lv == _logging.WARNING and 'M1' in m for lv, m in caught)
+      and evp.row_text('halfwaves')
+      == '— not computed: reference channel M1 not in this recording',
+      repr((caught, evp.row_text('halfwaves'))))
+ep.select_event('new-1')
+check('8.8', "4.6 run with figures, this row all NULL: 'figures not "
+      "computed for this channel', not 'stored'",
+      evp.row_text('halfwaves') == '— ' + er.FIGURES_FAILED_FIG,
+      repr(evp.row_text('halfwaves')))
 win.close()
 
 say("\n" + "=" * 78)

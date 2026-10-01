@@ -57,6 +57,25 @@ except ImportError:  # run as a script
                                load_failure_message, INTERPOLATED_MARK,
                                INTERPOLATED_TOOLTIP, REVIEW_GUI_ERROR_WHERE)
 
+# Per-event review text, population checks and panel rows. Qt-free.
+try:
+    from frontend import event_review as _er
+except ImportError:  # run as a script
+    import event_review as _er
+CHECK_COLUMNS = _er.CHECK_COLUMNS
+CHECK_N = _er.CHECK_N
+CHECK_MIN_N = _er.CHECK_MIN_N
+TOO_FEW_TIP = _er.TOO_FEW_TIP
+THRESHOLD_NOT_RECORDED = _er.THRESHOLD_NOT_RECORDED
+fmt_check = _er.fmt_check
+method_has_ratio = _er.method_has_ratio
+no_ratio_note = _er.no_ratio_note
+
+try:
+    from frontend.channel_types import (neighbour_channels, physio_channels)
+except ImportError:  # run as a script
+    from channel_types import neighbour_channels, physio_channels
+
 try:
     from turtlewave_hdEEG.utils import region_from_label
 except ImportError:
@@ -710,7 +729,8 @@ class EventDatabase:
         
         return pd.read_sql_query(query, self.conn, params=params)
     
-    def add_review(self, uuid, decision, reviewer="", comments="", reason=None):
+    def add_review(self, uuid, decision, reviewer="", comments="", reason=None,
+                   reviewed_at=None):
         """Store one reviewer's decision on one event in ``event_reviews``.
 
         A wrapper over ``turtlewave_hdEEG.dbwrite.store_event_review``; a
@@ -739,7 +759,8 @@ class EventDatabase:
             return False
         dw.store_event_review(self.conn, str(uuid), decision,
                               reviewer or '', reason=reason,
-                              comment=comments or None)
+                              comment=comments or None,
+                              reviewed_at=reviewed_at)
         self.conn.commit()
         return True
 
@@ -781,6 +802,125 @@ class EventDatabase:
                 logger.warning(f"Could not read event_reviews ({err}).")
                 return {}
         return out
+
+    def get_review(self, uuid, reviewer):
+        """One reviewer's stored row on one event, or ``None``.
+
+        Returns
+        -------
+        dict or None
+            ``decision, reason, comment, reviewed_at`` (and every other
+            stored column) for ``(uuid, reviewer)``.
+        """
+        if not self._table_columns('event_reviews'):
+            return None
+        try:
+            cur = self.conn.execute(
+                "SELECT * FROM event_reviews WHERE uuid = ? AND reviewer = ?",
+                (str(uuid), str(reviewer).strip()))
+            row = cur.fetchone()
+            names = [d[0] for d in cur.description]
+        except sqlite3.Error:
+            return None
+        return dict(zip(names, row)) if row else None
+
+    def get_other_reviews(self, uuid, reviewer):
+        """Rows of every OTHER reviewer on one event, oldest first."""
+        if not self._table_columns('event_reviews'):
+            return []
+        try:
+            cur = self.conn.execute(
+                "SELECT * FROM event_reviews WHERE uuid = ? AND reviewer <> ? "
+                "ORDER BY reviewed_at, rowid",
+                (str(uuid), str(reviewer or '').strip()))
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, r)) for r in cur.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def restore_review(self, uuid, reviewer, before):
+        """Put one reviewer's row back as it was (undo / Clear's undo).
+
+        ``before`` is a :meth:`get_review` dict, or ``None`` to remove the
+        row. Returns True when the database changed.
+        """
+        dw = _review_backend()
+        if dw is None:
+            return False
+        if before is None:
+            if not hasattr(dw, 'delete_event_review'):
+                return False
+            ok = dw.delete_event_review(self.conn, str(uuid), reviewer)
+            self.conn.commit()
+            return bool(ok)
+        dw.store_event_review(
+            self.conn, str(uuid), before['decision'], reviewer,
+            reason=before.get('reason'), comment=before.get('comment'),
+            reviewed_at=before.get('reviewed_at'))
+        self.conn.commit()
+        return True
+
+    def get_event(self, uuid):
+        """The full ``events`` row of one event, as a dict (``{}`` if gone)."""
+        try:
+            cur = self.conn.execute("SELECT * FROM events WHERE uuid = ?",
+                                    (str(uuid),))
+            row = cur.fetchone()
+            names = [d[0] for d in cur.description]
+        except sqlite3.Error:
+            return {}
+        return dict(zip(names, row)) if row else {}
+
+    def ptp_units_microvolts(self):
+        """True when ``db_meta.det_ptp_units`` says ``events.det_ptp`` is µV."""
+        if not self._table_columns('db_meta'):
+            return False
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM db_meta WHERE key = 'det_ptp_units'"
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        return bool(row) and str(row[0]).lower() == 'microvolts'
+
+    def get_thresholds(self, run_id, channel=None, method=None, at_time=None):
+        """``read_detection_thresholds`` of the row's own run; an empty
+        frame without the library or the table."""
+        try:
+            from turtlewave_hdEEG.dbwrite import read_detection_thresholds
+        except ImportError:
+            return pd.DataFrame()
+        if run_id is None:
+            return pd.DataFrame()
+        try:
+            return read_detection_thresholds(self.conn, run_id, channel=channel,
+                                             method=method, at_time=at_time)
+        except Exception as err:
+            logger.warning(f"Could not read detection thresholds ({err}).")
+            return pd.DataFrame()
+
+    def neighbour_events(self, channels, event_type, t0, t1, methods=None,
+                         freq_band=None):
+        """``channel, start_time, end_time`` of same-type events on
+        ``channels`` overlapping ``[t0, t1]``."""
+        if not channels:
+            return pd.DataFrame(columns=['channel', 'start_time', 'end_time'])
+        q = (f"SELECT channel, start_time, end_time FROM events "
+             f"WHERE event_type = ? AND channel IN "
+             f"({','.join('?' * len(channels))}) "
+             f"AND start_time < ? AND end_time > ?")
+        p = [str(event_type)] + [str(c) for c in channels] + [float(t1),
+                                                             float(t0)]
+        if methods:
+            q += f" AND method IN ({','.join('?' * len(methods))})"
+            p += list(methods)
+        if freq_band:
+            q += " AND freq_lower = ? AND freq_upper = ?"
+            p += [float(freq_band[0]), float(freq_band[1])]
+        try:
+            return pd.read_sql_query(q, self.conn, params=p)
+        except Exception:
+            return pd.DataFrame(columns=['channel', 'start_time', 'end_time'])
 
     def get_review_stats(self):
         """Counts over ``event_reviews`` for events still in ``events``.
@@ -1696,7 +1836,13 @@ _QC_COLS = [
     ('n', 'n'), ('mean_amp', 'mean µV*'), ('p95_amp', 'p95 µV*'),
     ('mean_p2p', 'mean p2p*'), ('max_p2p', 'max p2p*'),
     ('flag', 'flag'),
+    # population checks (4.6 per-event figures); see frontend/event_review.py
+    ('pct_off_band', 'off-band %'), ('pct_low_prom', 'low prom. %'),
+    ('pct_dur_floor', 'at floor %'), ('med_amp_ratio', 'amp/bg ×'),
+    ('med_thresh_ratio', 'amp/thr ×'), ('checks_flag', 'checks'),
 ]
+#: Column index of each key in the QC table (for hiding / header tooltips).
+_QC_COL_INDEX = {k: i for i, (k, _) in enumerate(_QC_COLS)}
 
 # Selection-state glyph vocabulary, shared by the State column + the tray.
 _STATE_ART_COLOR = '#f85149'   # ⚑ channel artefact (verdict drop/channel_artefact)
@@ -1768,6 +1914,7 @@ def _short_stage(s):
 TOPO_METRIC_LABEL = {'density': 'density (ev/min)',
                      'mean_amp': 'mean amp (µV)',
                      'max_p2p': 'max p2p (µV)'}
+TOPO_METRIC_LABEL.update({c: v[1] for c, v in CHECK_COLUMNS.items()})
 
 # Shared "impossible physiological scale" red used by both worst lists.
 IMPOSSIBLE_AMP_COLOR = '#f85149'
@@ -1820,6 +1967,10 @@ class ChannelQCModel(QAbstractTableModel):
         self._records = []   # list[dict] — O(1) cell access (no pandas .iloc)
         self._redetect = set()   # channels queued for re-detection
         self._event_type = ''    # active event type (for State tooltip)
+        # population-check context: recorded?, method, ratio allowed,
+        # header tooltips (set by ChannelQCWidget.set_checks_context)
+        self._checks = {'recorded': False, 'method': '', 'ratio': True,
+                        'tips': {}, 'pending': False}
 
     def set_data(self, qc_df, verdicts=None, redetect=None, event_type=''):
         self.beginResetModel()
@@ -1882,6 +2033,12 @@ class ChannelQCModel(QAbstractTableModel):
                         "to export the channel list.")
                 return '\n'.join(tips)
             # BackgroundRole falls through to the shared verdict/heat wash.
+        if key in CHECK_COLUMNS or key == 'checks_flag':
+            out = self._check_cell(rec, key, role)
+            if out is not None:
+                return out
+            if role != Qt.BackgroundRole:
+                return QVariant()
         if role == Qt.DisplayRole:
             if key == 'verdict':
                 return _STATUS_TEXT.get(str(val or ''), str(val))
@@ -1933,7 +2090,302 @@ class ChannelQCModel(QAbstractTableModel):
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
             return _QC_COLS[section][1]
+        if role == Qt.ToolTipRole and orientation == Qt.Horizontal:
+            tip = self._checks['tips'].get(_QC_COLS[section][0])
+            if tip:
+                return tip
         return QVariant()
+
+    def _check_cell(self, rec, key, role):
+        """Display / sort / tooltip / colour of a population-check cell."""
+        ck = self._checks
+        if key == 'checks_flag':
+            fl = str(rec.get('checks_flag', '') or '')
+            if role == Qt.DisplayRole:
+                return fl.upper()
+            if role == Qt.UserRole:
+                return {'hard': 2, 'soft': 1}.get(fl, 0)
+            if role == Qt.ForegroundRole and fl in ('hard', 'soft'):
+                return (QtGui.QColor(248, 81, 73) if fl == 'hard'
+                        else QtGui.QColor(210, 153, 34))
+            if role == Qt.BackgroundRole and fl in _FLAG_BG:
+                return _FLAG_BG[fl]
+            if role == Qt.ToolTipRole:
+                return str(rec.get('checks_reasons', '') or '') or None
+            return None
+        val = rec.get(key)
+        missing = _er._finite(val) is None
+        if role == Qt.DisplayRole:
+            if ck.get('pending') and not ck.get('recorded'):
+                return '…'
+            return fmt_check(key, val)
+        if role == Qt.UserRole:
+            return -1.0 if missing else float(val)
+        if role == Qt.ToolTipRole:
+            if not ck.get('recorded'):
+                if ck.get('figures_off'):
+                    return ('Not computed for this run: event figures were '
+                            'switched off when it was detected.')
+                if key == 'med_thresh_ratio' and method_has_ratio(ck['method']):
+                    return THRESHOLD_NOT_RECORDED + '.'
+                return ('Not recorded for this run (detected with 4.5 or '
+                        'earlier).')
+            if key == 'med_thresh_ratio' and not ck.get('ratio'):
+                return no_ratio_note(ck['method'])
+            n = rec.get(CHECK_N[key])
+            if missing and n is not None and n < CHECK_MIN_N:
+                return TOO_FEW_TIP.format(n=int(n))
+            if key == 'pct_off_band' and rec.get('n_no_peak') is not None:
+                return (f"Events with no spectral peak are not counted: "
+                        f"{int(rec.get('n_no_peak') or 0)} on this channel.")
+            return None
+        if role == Qt.BackgroundRole:
+            return _heat_bg(rec.get('z_' + key)) if not missing else None
+        return None
+
+
+class EventDecisionPanel(QWidget):
+    """EVENT + DECISION block of the right dock (UX spec sections 4-5).
+
+    Renders what the main window computes: the rows from
+    :func:`frontend.event_review.build_event_rows`, the current decision, the
+    progress line and the hint. It holds no decision logic; its signals go to
+    ``EventReviewGUI``, which writes, arms and undoes.
+
+    For tests: :meth:`row_keys` lists the visible rows in order and
+    :meth:`row_text` returns a row's value and sub-lines as plain text.
+    """
+
+    decisionClicked = pyqtSignal(str)   # 'accept' | 'reject' | 'unsure'
+    reasonChosen = pyqtSignal(str)      # token; '' = No reason (mouse pick)
+    commentSubmitted = pyqtSignal()     # Enter in the comment field
+    commentEscape = pyqtSignal()        # Esc in the comment field
+    clearClicked = pyqtSignal()
+    prevClicked = pyqtSignal()
+    nextClicked = pyqtSignal()
+    autoAdvanceToggled = pyqtSignal(bool)
+
+    EMPTY_TEXT = ('Click an event band, or press ] for the next unreviewed '
+                  'event.')
+    HINT = 'A accept · R reject · U unsure · ] next · Ctrl+Z undo'
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lay.addWidget(_h_label("EVENT"))
+        self.empty_lbl = QLabel(self.EMPTY_TEXT)
+        self.empty_lbl.setWordWrap(True)
+        self.empty_lbl.setStyleSheet("color:#888888;font-size:11px;")
+        lay.addWidget(self.empty_lbl)
+        self.note_lbl = QLabel("")
+        self.note_lbl.setWordWrap(True)
+        self.note_lbl.setStyleSheet("color:#888888;font-size:11px;")
+        self.note_lbl.setVisible(False)
+        lay.addWidget(self.note_lbl)
+        self._rows_box = QWidget()
+        self._grid = QtWidgets.QGridLayout(self._rows_box)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(1)
+        lay.addWidget(self._rows_box)
+        self._rows = []           # list of dict rows as given
+        self._row_widgets = {}    # key -> (label, value, [sub labels])
+
+        lay.addWidget(_h_label("DECISION"))
+        brow = QHBoxLayout()
+        self.btn = {}
+        for dec, text in (('accept', 'Accept  A'), ('reject', 'Reject  R'),
+                          ('unsure', 'Unsure  U')):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, d=dec: self.decisionClicked.emit(d))
+            brow.addWidget(b)
+            self.btn[dec] = b
+        lay.addLayout(brow)
+        rrow = QHBoxLayout()
+        rrow.addWidget(QLabel("Reason"))
+        self.reason_combo = QComboBox()
+        self.reason_combo.setFocusPolicy(Qt.ClickFocus)
+        self.reason_combo.addItem('No reason', '')
+        for key, token, label, _short, tip in _er.REASONS:
+            self.reason_combo.addItem(f"{key}  {label}" if key else label,
+                                      token)
+            if tip:
+                self.reason_combo.setItemData(self.reason_combo.count() - 1,
+                                              tip, Qt.ToolTipRole)
+        self.reason_combo.activated.connect(
+            lambda i: self.reasonChosen.emit(
+                str(self.reason_combo.itemData(i) or '')))
+        rrow.addWidget(self.reason_combo, 1)
+        lay.addLayout(rrow)
+        crow = QHBoxLayout()
+        crow.addWidget(QLabel("Comment"))
+        self.comment = QLineEdit()
+        self.comment.setMaxLength(500)
+        self.comment.setPlaceholderText(
+            'Comment (optional) — C to type, Enter to save')
+        self.comment.returnPressed.connect(self.commentSubmitted.emit)
+        self.comment.installEventFilter(self)
+        crow.addWidget(self.comment, 1)
+        lay.addLayout(crow)
+        cur = QHBoxLayout()
+        cur.addWidget(QLabel("Current"))
+        self.current_lbl = QLabel("Not reviewed")
+        self.current_lbl.setStyleSheet(
+            "font-family:'IBM Plex Mono',monospace;font-size:12px;")
+        cur.addWidget(self.current_lbl, 1)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setFlat(True)
+        self.clear_btn.setFocusPolicy(Qt.NoFocus)
+        self.clear_btn.clicked.connect(self.clearClicked.emit)
+        cur.addWidget(self.clear_btn)
+        lay.addLayout(cur)
+        self.current_sub = QLabel("")
+        self.current_sub.setWordWrap(True)
+        self.current_sub.setStyleSheet("color:#888888;font-size:11px;")
+        lay.addWidget(self.current_sub)
+        nrow = QHBoxLayout()
+        self.prev_btn = QPushButton("◀ Prev  [")
+        self.next_btn = QPushButton("Next  ] ▶")
+        for b, sig, tip in ((self.prev_btn, self.prevClicked,
+                             'Previous unreviewed event on this channel'),
+                            (self.next_btn, self.nextClicked,
+                             'Next unreviewed event on this channel')):
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setToolTip(tip)
+            b.clicked.connect(sig.emit)
+            nrow.addWidget(b)
+        lay.addLayout(nrow)
+        self.auto_chk = QCheckBox("Go to next unreviewed after deciding")
+        self.auto_chk.setFocusPolicy(Qt.NoFocus)
+        self.auto_chk.setChecked(True)
+        self.auto_chk.toggled.connect(self.autoAdvanceToggled.emit)
+        lay.addWidget(self.auto_chk)
+        self.progress_lbl = QLabel("")
+        self.progress_lbl.setStyleSheet("font-size:11px;")
+        lay.addWidget(self.progress_lbl)
+        self.hint_lbl = QLabel(self.HINT)
+        self.hint_lbl.setWordWrap(True)
+        self.hint_lbl.setStyleSheet("color:#888888;font-size:11px;")
+        lay.addWidget(self.hint_lbl)
+        self.set_empty(self.EMPTY_TEXT)
+
+    # ---- comment field keys --------------------------------------------
+    def eventFilter(self, obj, ev):
+        if obj is self.comment and ev.type() == QtCore.QEvent.KeyPress \
+                and ev.key() == Qt.Key_Escape:
+            self.commentEscape.emit()
+            return True
+        return super().eventFilter(obj, ev)
+
+    # ---- rows ------------------------------------------------------------
+    _LEVEL_STYLE = {'warn': "color:#e0a334;font-weight:600;",
+                    'bad': "color:#e0533f;font-weight:600;",
+                    'muted': "color:#888888;"}
+
+    def _clear_grid(self):
+        while self._grid.count():
+            it = self._grid.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        self._row_widgets = {}
+
+    def set_rows(self, rows):
+        """Show ``rows`` (``build_event_rows`` dicts) in order."""
+        self._clear_grid()
+        self._rows = list(rows or [])
+        r = 0
+        for row in self._rows:
+            lab = QLabel(row['label'])
+            lab.setStyleSheet("color:#b8b8b8;font-size:11px;")
+            val = QLabel(str(row['value']))
+            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val.setWordWrap(True)
+            val.setStyleSheet(
+                "font-family:'IBM Plex Mono',monospace;font-size:12px;"
+                + self._LEVEL_STYLE.get(row.get('level'), "color:#e5e5e5;"))
+            if row.get('tooltip'):
+                val.setToolTip(row['tooltip'])
+                lab.setToolTip(row['tooltip'])
+            self._grid.addWidget(lab, r, 0, Qt.AlignTop)
+            self._grid.addWidget(val, r, 1)
+            subs = []
+            for text in row.get('sub', []):
+                r += 1
+                sl = QLabel(text)
+                sl.setWordWrap(True)
+                sl.setAlignment(Qt.AlignRight)
+                warn_words = ('low prominence', 'barely', 'at the floor',
+                              'outside run limits', 'at the ceiling', 'fails')
+                hot = any(w in text for w in warn_words)
+                sl.setStyleSheet("font-size:11px;" + (
+                    "color:#e0a334;" if hot else "color:#888888;"))
+                self._grid.addWidget(sl, r, 1)
+                subs.append(sl)
+            self._row_widgets[row['key']] = (lab, val, subs)
+            r += 1
+        self._rows_box.setVisible(bool(self._rows))
+        self.empty_lbl.setVisible(not self._rows)
+
+    def row_keys(self):
+        return [row['key'] for row in self._rows]
+
+    def row_text(self, key):
+        """Value and sub-lines of one row as plain text (``None`` if absent)."""
+        for row in self._rows:
+            if row['key'] == key:
+                return '\n'.join([str(row['value'])] + list(row['sub']))
+        return None
+
+    def row(self, key):
+        return next((r for r in self._rows if r['key'] == key), None)
+
+    # ---- states ----------------------------------------------------------
+    def set_empty(self, message):
+        self.set_rows([])
+        self.empty_lbl.setText(message)
+        self.note_lbl.setVisible(False)
+        self.set_current('Not reviewed', [])
+        self.set_armed(None)
+        self.set_controls_enabled(False)
+
+    def set_note(self, text):
+        self.note_lbl.setText(text or '')
+        self.note_lbl.setVisible(bool(text))
+
+    def set_controls_enabled(self, on):
+        for b in list(self.btn.values()) + [self.clear_btn]:
+            b.setEnabled(bool(on))
+        self.reason_combo.setEnabled(bool(on))
+        self.comment.setEnabled(bool(on))
+
+    def set_current(self, text, subs, tooltip=''):
+        self.current_lbl.setText(text)
+        self.current_lbl.setToolTip(tooltip or '')
+        self.current_sub.setText('\n'.join(subs or []))
+        self.current_sub.setVisible(bool(subs))
+
+    def set_decision(self, decision):
+        for d, b in self.btn.items():
+            b.setChecked(d == decision)
+
+    def set_armed(self, decision, hint=None):
+        """Show an armed Reject/Unsure (or none) and its hint."""
+        for d, b in self.btn.items():
+            b.setStyleSheet("border:2px solid #5a8fce;" if d == decision
+                            else "")
+        self.hint_lbl.setText(hint or self.HINT)
+
+    def set_reason(self, token):
+        i = self.reason_combo.findData(token or '')
+        self.reason_combo.setCurrentIndex(max(0, i))
+
+    def set_progress(self, text):
+        self.progress_lbl.setText(text or '')
 
 
 class ChannelDetailDock(QWidget):
@@ -1948,6 +2400,7 @@ class ChannelDetailDock(QWidget):
     gotoChannelEpochRequested = pyqtSignal(str, float)  # channel, event start_t
     channelPicked = pyqtSignal(str)             # topo electrode clicked -> select
     unmarkArtefactRequested = pyqtSignal(int)   # interval id (× button)
+    checkLinkActivated = pyqtSignal(str, str)   # channel, check column
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1995,6 +2448,12 @@ class ChannelDetailDock(QWidget):
         self.topo.hideAxis('bottom')
         self.topo.hideAxis('left')
         lay.addWidget(self.topo)
+        # population-check caption (not recorded / which run)
+        self.checks_caption = QLabel("")
+        self.checks_caption.setWordWrap(True)
+        self.checks_caption.setStyleSheet("color:#6b7585;font-size:11px;")
+        lay.addWidget(self.checks_caption)
+        self._checks_recorded = None
 
         # --- global worst events (ALL channels) ------------------------
         # Read-only ranking of the most extreme events for the current event
@@ -2026,6 +2485,27 @@ class ChannelDetailDock(QWidget):
         self.subtitle = QLabel("")
         self.subtitle.setStyleSheet("color:#6b7585;font-size:11px;")
         lay.addWidget(self.subtitle)
+        # population-check line: flagged phrases are links into the Epochs
+        # tab with a matching event filter
+        self.checks_line = QLabel("")
+        self.checks_line.setWordWrap(True)
+        self.checks_line.setTextFormat(Qt.RichText)
+        self.checks_line.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.checks_line.setStyleSheet("font-size:12px;")
+        self.checks_line.linkActivated.connect(self._on_check_link)
+        self.checks_line.linkHovered.connect(self._on_check_hover)
+        lay.addWidget(self.checks_line)
+        self.checks_hint = QLabel(_er.DOCK_HINT)
+        self.checks_hint.setWordWrap(True)
+        self.checks_hint.setStyleSheet("color:#888888;font-size:11px;")
+        self.checks_hint.setVisible(False)
+        lay.addWidget(self.checks_hint)
+        self._check_items = []
+        self._check_channel = None
+
+        # --- the selected event and its decision ------------------------
+        self.event_panel = EventDecisionPanel()
+        lay.addWidget(self.event_panel)
 
         # --- per-channel worst epochs ----------------------------------
         # Top-12 epochs sorted by (n_outliers desc, max_amp desc), filtered
@@ -2168,6 +2648,82 @@ class ChannelDetailDock(QWidget):
     def set_coords(self, coords):
         self._coords = coords or None
         self.update_topo(self._qc_df)
+
+    # ---- population checks --------------------------------------------
+    def set_checks_context(self, recorded, event_type='spindle', ratio=True,
+                           method='', caption=''):
+        """Topography combo items and caption for the population checks.
+
+        The five items are listed for every event type except
+        ``low prominence`` (spindles only); on a run without stored figures
+        they are disabled with the suffix `` — not recorded for this run``.
+        """
+        keep = self.topo_combo.currentData()
+        self.topo_combo.blockSignals(True)
+        while self.topo_combo.count() > 3:
+            self.topo_combo.removeItem(3)
+        model = self.topo_combo.model()
+        for col, (_hdr, label) in CHECK_COLUMNS.items():
+            if col == 'pct_low_prom' and event_type != 'spindle':
+                continue
+            text = label
+            enabled = bool(recorded)
+            if not recorded:
+                text += ' — not recorded for this run'
+            elif col == 'med_thresh_ratio' and not ratio:
+                text += f' — no ratio for {method}'
+                enabled = False
+            self.topo_combo.addItem(text, col)
+            item = model.item(self.topo_combo.count() - 1)
+            if item is not None:
+                item.setEnabled(enabled)
+        idx = self.topo_combo.findData(keep)
+        if idx < 0 or not (model.item(idx) and model.item(idx).isEnabled()):
+            idx = 0
+        self.topo_combo.setCurrentIndex(idx)
+        self.topo_combo.blockSignals(False)
+        self.topo_metric = self.topo_combo.currentData() or 'density'
+        self._checks_recorded = bool(recorded)
+        self.checks_caption.setText(caption or '')
+
+    def set_check_line(self, channel, items, recorded=True):
+        """The SELECTED CHANNEL population-check line (spec section 1)."""
+        self._check_items = list(items or [])
+        self._check_channel = channel
+        if channel is None:
+            self.checks_line.setText('')
+            self.checks_hint.setVisible(False)
+            return
+        if not recorded or not items:
+            text = _er.dock_check_line(channel, items, recorded)
+            self.checks_line.setText(
+                f"<span style='color:#888888'>{text}</span>")
+            self.checks_hint.setVisible(False)
+            return
+        parts = []
+        for d in self._check_items:
+            col = '#e0533f' if d['severity'] == 'hard' else '#e0a334'
+            parts.append(f"<a href='{d['key']}' style='color:{col};"
+                         f"font-weight:600;text-decoration:none'>"
+                         f"{d['text']}</a>")
+        self.checks_line.setText(
+            f"<span style='color:#e5e5e5'>{channel}: </span>"
+            + " <span style='color:#888888'>·</span> ".join(parts))
+        self.checks_hint.setVisible(True)
+
+    def check_line_text(self):
+        """The dock line as plain text (what a reader sees)."""
+        return QtGui.QTextDocumentFragment.fromHtml(
+            self.checks_line.text()).toPlainText()
+
+    def _on_check_link(self, key):
+        if self._check_channel:
+            self.checkLinkActivated.emit(str(self._check_channel), str(key))
+
+    def _on_check_hover(self, key):
+        tip = next((d['tooltip'] for d in self._check_items
+                    if d['key'] == key), '')
+        self.checks_line.setToolTip(tip)
 
     def set_event_type(self, event_type):
         """Set the event type used in the topo title + global-worst header."""
@@ -2375,8 +2931,10 @@ class ChannelDetailDock(QWidget):
         unit = 'µV' if _is_uv else 'ev/min'
         vfmt = '.0f' if _is_uv else '.2f'
 
-        def _tip(x, y, data, _vl=label, _u=unit, _f=vfmt):
+        def _tip(x, y, data, _vl=label, _u=unit, _f=vfmt, _m=metric):
             ch, v = data
+            if _m in CHECK_COLUMNS:
+                return f"{ch}\n{_vl.split(' (')[0]} {fmt_check(_m, v)}"
             return f"{ch}\n{_vl.split(' (')[0]} {v:{_f}} {_u}"
 
         sp = pg.ScatterPlotItem(
@@ -2484,7 +3042,8 @@ class ChannelQCWidget(QWidget):
         bar.addWidget(self.evt_combo)
         bar.addWidget(QLabel("Outlier:"))
         self.flag_combo = QComboBox()
-        self.flag_combo.addItems(['any', 'hard', 'soft', 'dead', 'ok'])
+        self.flag_combo.addItems(['any', 'hard', 'soft', 'dead', 'ok',
+                                  'checks: hard', 'checks: soft'])
         bar.addWidget(self.flag_combo)
         bar.addStretch()
         self.counts_lbl = QLabel("")
@@ -2569,6 +3128,27 @@ class ChannelQCWidget(QWidget):
     def current_event_type(self):
         return self.evt_combo.currentText()
 
+    def set_checks_context(self, recorded, method='', ratio=True,
+                           event_type='spindle', tips=None, pending=False,
+                           figures_off=False):
+        """Population-check state for the table: whether the run stored
+        figures, its method (for the amp/thr tooltip), header tooltips, and
+        whether the low-prominence column applies (spindles only)."""
+        self.model._checks = {'recorded': bool(recorded),
+                              'method': str(method or ''),
+                              'ratio': bool(ratio), 'tips': dict(tips or {}),
+                              'pending': bool(pending),
+                              'figures_off': bool(figures_off)}
+        self.table.setColumnHidden(_QC_COL_INDEX['pct_low_prom'],
+                                   str(event_type) != 'spindle')
+        self.model.headerDataChanged.emit(Qt.Horizontal, 0,
+                                          len(_QC_COLS) - 1)
+        if self.model.rowCount():
+            self.model.dataChanged.emit(
+                self.model.index(0, 0),
+                self.model.index(self.model.rowCount() - 1,
+                                 len(_QC_COLS) - 1))
+
     def set_data(self, qc_df, events_df, verdicts, redetect_set=None):
         self._qc_full = qc_df
         self._events_slice = events_df
@@ -2632,6 +3212,10 @@ class ChannelQCWidget(QWidget):
             df = df[df['flag'] == '']
         elif mode in ('hard', 'soft', 'dead'):
             df = df[df['flag'] == mode]
+        elif mode.startswith('checks: '):
+            want = mode.split(': ', 1)[1]
+            df = (df[df['checks_flag'] == want] if 'checks_flag' in df.columns
+                  else df.iloc[0:0])
         self.model.set_data(df, self._verdicts, self._redetect_ref,
                             self.current_event_type())
 
@@ -2868,7 +3452,10 @@ QC_EVENT_COLS = ['channel', 'start_time', 'end_time', 'stage',
 # they cost ~+300 ms and ~+100 MB per refresh on a 372k-event subject.
 # get_events drops any of these an older database lacks.
 QC_DRILL_COLS = QC_EVENT_COLS + ['uuid', 'duration', 'run_id', 'method',
-                                 'epoch_stage']
+                                 'epoch_stage',
+                                 # 4.6 figures behind the Epochs check filter
+                                 'in_band', 'low_prominence', 'near_bound',
+                                 'amp_ratio', 'thresh_ratio']
 
 
 def _band_for(df_slice, event_type):
@@ -3065,6 +3652,320 @@ class _EpochStripViewBox(pg.ViewBox):
         super().mouseDragEvent(ev, axis=axis)
 
 
+def _review_settings():
+    """The review GUI's ``QSettings`` (org ``turtlewave``, app
+    ``eeg_review_gui``, the names ``main()`` pins)."""
+    return QtCore.QSettings('turtlewave', 'eeg_review_gui')
+
+
+def _setting_bool(key, default):
+    v = _review_settings().value(key, default)
+    if isinstance(v, str):
+        return v.lower() in ('1', 'true', 'yes')
+    return bool(v)
+
+
+def _highpass(data, sfreq, lo):
+    try:
+        b, a = signal.butter(2, max(1e-3, min(lo / (sfreq / 2.0), 0.999)),
+                             btype='high')
+        return signal.filtfilt(b, a, data)
+    except Exception:
+        return data
+
+
+class _Collapsible(QWidget):
+    """Header button ``▾ TITLE`` that shows / hides a body; open state is
+    persisted under ``settings_key``."""
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, title, settings_key, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._key = settings_key
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self.head = QPushButton()
+        self.head.setFlat(True)
+        self.head.setFocusPolicy(Qt.NoFocus)
+        self.head.setStyleSheet("text-align:left;color:#888888;font-size:10px;"
+                                "font-weight:600;letter-spacing:0.05em;")
+        self.head.clicked.connect(lambda: self.set_open(not self._open))
+        lay.addWidget(self.head)
+        self.body = QWidget()
+        self.body_lay = QVBoxLayout(self.body)
+        self.body_lay.setContentsMargins(0, 0, 0, 0)
+        self.body_lay.setSpacing(1)
+        lay.addWidget(self.body)
+        self._open = _setting_bool(settings_key, True)
+        self._apply()
+
+    def is_open(self):
+        return self._open
+
+    def set_title(self, title):
+        self._title = title
+        self._apply()
+
+    def set_open(self, on):
+        self._open = bool(on)
+        _review_settings().setValue(self._key, self._open)
+        self._apply()
+        self.toggled.emit(self._open)
+
+    def _apply(self):
+        self.head.setText(("▾ " if self._open else "▸ ") + self._title)
+        self.body.setVisible(self._open)
+
+
+class NeighboursPlot(EEGDetailWidget):
+    """``EEGDetailWidget`` drawing the selected event on its neighbours:
+    target on top in the accent colour, one shared fixed scale, the event
+    span shaded and the neighbours' own same-type events shaded per row."""
+
+    def plot_neighbours(self, ts, data, labels, event_span, scale,
+                        neighbour_spans=None, detected=None):
+        """``data`` rows follow ``labels``; row 0 is the target."""
+        self.clear()
+        self.channel_curves, self.channel_labels, self.event_items = [], [], []
+        ts = np.asarray(ts, dtype=float)
+        n = len(labels)
+        step = 2.0 * scale
+        x0, x1 = float(ts[0]), float(ts[-1])
+        for i, lab in enumerate(labels):
+            y = -i * step
+            pen = (pg.mkPen(THEME['accent'], width=1.5) if i == 0
+                   else pg.mkPen(THEME['text_2'], width=1))
+            row = np.clip(np.asarray(data[i], dtype=float), -scale, scale)
+            self.channel_curves.append(self.plot(ts, row + y, pen=pen))
+            for s, e in (neighbour_spans or {}).get(lab, []):
+                r = QtWidgets.QGraphicsRectItem(max(s, x0), y - scale,
+                                                min(e, x1) - max(s, x0), step)
+                r.setBrush(pg.mkBrush(136, 136, 136, 40))
+                r.setPen(pg.mkPen(None))
+                self.addItem(r)
+                self.event_items.append(r)
+            text = lab + (' · detected' if detected and lab in detected
+                          else '')
+            t = pg.TextItem(text, anchor=(0, 0.5),
+                            color=THEME['accent'] if i == 0 else THEME['text_2'])
+            t.setPos(x0, y + 0.6 * scale)
+            self.addItem(t, ignoreBounds=True)
+            self.channel_labels.append(t)
+        reg = pg.LinearRegionItem(values=list(event_span), movable=False,
+                                  brush=pg.mkBrush(90, 143, 206, 30),
+                                  pen=pg.mkPen(None))
+        self.addItem(reg)
+        self.event_items.append(reg)
+        self.setXRange(x0, x1, padding=0)
+        self.setYRange(-(n - 1) * step - scale, scale, padding=0)
+        self._last_channels = list(labels)
+
+    def row_labels(self):
+        return [t.toPlainText() for t in self.channel_labels]
+
+
+class NeighboursGroup(_Collapsible):
+    """``▾ NEIGHBOURS`` under the filtered trace (spec section 8). Reads
+    nothing while collapsed; one multi-channel read per selection."""
+
+    def __init__(self, panel):
+        super().__init__('NEIGHBOURS', 'review/neighbours_open', panel)
+        self.panel = panel
+        self.header = QLabel("")
+        self.header.setStyleSheet("color:#888888;font-size:11px;")
+        self.body_lay.addWidget(self.header)
+        self.filter_chk = QCheckBox("Band-filter (run band)")
+        self.filter_chk.setFocusPolicy(Qt.NoFocus)
+        self.filter_chk.setChecked(
+            _setting_bool('review/neighbours_filtered', False))
+        self.filter_chk.toggled.connect(self._on_filter)
+        self.body_lay.addWidget(self.filter_chk)
+        self.plot = NeighboursPlot()
+        _theme_plot(self.plot)
+        self.plot.hideAxis('left')
+        self.plot.setMinimumHeight(160)
+        self.body_lay.addWidget(self.plot)
+        self.empty = QLabel("Select an event to see it on neighbouring "
+                            "channels.")
+        self.empty.setStyleSheet("color:#888888;font-size:11px;")
+        self.body_lay.addWidget(self.empty)
+        self.n_reads = 0
+        self._args = None
+        self.toggled.connect(lambda on: self._render() if on else None)
+        self._show_empty(self.empty.text())
+
+    def _on_filter(self, on):
+        _review_settings().setValue('review/neighbours_filtered', bool(on))
+        self._render()
+
+    def _show_empty(self, text):
+        self.empty.setText(text)
+        self.empty.setVisible(True)
+        self.plot.setVisible(False)
+
+    def set_event(self, target, row, event_type, band):
+        self._args = (target, row, event_type, band)
+        lo, hi = band
+        self.filter_chk.setText(f"Band-filter ({lo:g}–{hi:g} Hz, run band)")
+        if self.is_open():
+            self._render()
+
+    def _render(self):
+        p = self.panel
+        if self._args is None or self._args[1] is None:
+            self.header.setText('')
+            self._show_empty("Select an event to see it on neighbouring "
+                             "channels.")
+            return
+        target, row, event_type, band = self._args
+        if not callable(p.read_channels) or not callable(p.neighbour_provider):
+            self._show_empty("Load the EEG file to see neighbouring channels.")
+            return
+        win = 4.0 if event_type == 'spindle' else 6.0
+        s, e = float(row['start_time']), float(row['end_time'])
+        mid = (s + e) / 2.0
+        t0, t1 = mid - win / 2.0, mid + win / 2.0
+        chans, header, labels = p.neighbour_provider(target, win)
+        self.header.setText(header)
+        self.n_reads += 1
+        out = p.read_channels([target] + list(chans), t0, t1)
+        if not out:
+            self._show_empty("Load the EEG file to see neighbouring channels.")
+            return
+        ts, data, sf, got = out
+        keep = [i for i, c in enumerate(got)]
+        data = np.asarray(data, dtype=float)
+        if self.filter_chk.isChecked():
+            data = np.vstack([_bandpass(r, sf, band[0], band[1]) for r in data])
+        data = data - np.nanmedian(data, axis=1, keepdims=True)
+        lab_of = dict(zip([target] + list(chans), [labels[0]] + labels[1:]))
+        row_labels = [lab_of.get(c, c) for c in got]
+        spans, detected = {}, set()
+        if callable(p.neighbour_events) and len(chans):
+            evs = p.neighbour_events(list(chans), t0, t1)
+            for _, r in (evs if evs is not None else pd.DataFrame()).iterrows():
+                lab = lab_of.get(str(r['channel']), str(r['channel']))
+                spans.setdefault(lab, []).append(
+                    (float(r['start_time']), float(r['end_time'])))
+                if float(r['start_time']) < e and float(r['end_time']) > s:
+                    detected.add(lab)
+        scale = 50.0 if event_type == 'spindle' else 150.0
+        self.empty.setVisible(False)
+        self.plot.setVisible(True)
+        self.plot.plot_neighbours(ts, data[keep], row_labels, (s, e), scale,
+                                  spans, detected)
+
+
+#: Physiology rows: kind -> (row label, filter, fixed half-range or None).
+PHYSIO_ROWS = {'eog': ('EOG', (0.3, 15.0), 150.0),
+               'emg': ('Chin EMG', (10.0, None), 40.0),
+               'ecg': ('ECG', None, None)}
+
+
+class PhysioStrip(_Collapsible):
+    """``▾ PHYSIOLOGY (n)`` under Neighbours (spec section 9): typed EOG,
+    chin EMG and ECG, X-linked to the raw trace, read once per epoch."""
+
+    def __init__(self, panel):
+        super().__init__('PHYSIOLOGY (0)', 'review/physio_open', panel)
+        self.panel = panel
+        self.rows = []          # (kind, channel, PlotWidget)
+        self.legend = QLabel("")
+        self.legend.setStyleSheet("color:#888888;font-size:11px;")
+        self.body_lay.addWidget(self.legend)
+        self.n_reads = 0
+        self._window = None
+        self.toggled.connect(lambda on: self._render() if on else None)
+        self.setVisible(False)
+
+    def set_channels(self, phys):
+        """Build the rows from ``physio_channels()``; hidden when empty."""
+        for _k, _c, w in self.rows:
+            self.body_lay.removeWidget(w)
+            w.deleteLater()
+        self.rows = []
+        phys = phys or {}
+        order = [('eog', c) for c in phys.get('eog', [])]
+        if phys.get('emg'):
+            order.append(('emg', phys['emg']))
+        if phys.get('ecg'):
+            order.append(('ecg', phys['ecg']))
+        for kind, ch in order:
+            w = pg.PlotWidget()
+            _theme_plot(w)
+            w.setFixedHeight(36)
+            w.setMouseEnabled(False, False)
+            w.setMenuEnabled(False)
+            w.hideButtons()
+            w.hideAxis('bottom')
+            w.getAxis('left').setStyle(showValues=False)
+            w.getAxis('left').setWidth(self.panel.AXIS_W)
+            w.setXLink(self.panel.raw_plot)
+            self.body_lay.insertWidget(self.body_lay.count() - 1, w)
+            self.rows.append((kind, ch, w))
+        kinds = []
+        if phys.get('eog'):
+            kinds.append('EOG 0.3–15 Hz')
+        if phys.get('emg'):
+            kinds.append('chin EMG above 10 Hz')
+        if phys.get('ecg'):
+            kinds.append('ECG unfiltered')
+        if kinds and (phys.get('eog') or phys.get('emg')):
+            kinds.append('fixed scales except ECG' if phys.get('ecg')
+                         else 'fixed scales')
+        self.legend.setText(' · '.join(kinds))
+        self.set_title(f"PHYSIOLOGY ({len(self.rows)})")
+        self.setVisible(bool(self.rows))
+
+    def row_titles(self):
+        return [f"{PHYSIO_ROWS[k][0]} · {c}" for k, c, _w in self.rows]
+
+    def show_window(self, t0, t1):
+        self._window = (t0, t1)
+        if self.is_open():
+            self._render()
+
+    def _render(self):
+        if not self.rows or self._window is None \
+                or not callable(self.panel.read_channels):
+            return
+        t0, t1 = self._window
+        self.n_reads += 1
+        out = self.panel.read_channels([c for _k, c, _w in self.rows], t0, t1)
+        for k, c, w in self.rows:
+            w.clear()
+        if not out:
+            return
+        ts, data, sf, got = out
+        idx = {c: i for i, c in enumerate(got)}
+        for kind, ch, w in self.rows:
+            label, filt, half = PHYSIO_ROWS[kind]
+            title = f"{label} · {ch}"
+            if ch not in idx:
+                continue
+            x = np.asarray(data[idx[ch]], dtype=float)
+            if filt and filt[1]:
+                x = _bandpass(x, sf, filt[0], filt[1])
+            elif filt:
+                x = _highpass(x, sf, filt[0])
+            w.plot(ts, x, pen=pg.mkPen(THEME['text_2'], width=1))
+            if half:
+                w.setYRange(-half, half, padding=0)
+                scale = f"±{half:g} µV"
+            else:
+                w.enableAutoRange('y', True)
+                scale = 'auto'
+            t = pg.TextItem(title, anchor=(0, 0), color=THEME['text_2'])
+            t.setPos(t0, half if half else float(np.nanmax(x)) if x.size else 0)
+            w.addItem(t, ignoreBounds=True)
+            r = pg.TextItem(scale, anchor=(1, 0), color=THEME['text_3'])
+            r.setPos(t1, half if half else float(np.nanmax(x)) if x.size else 0)
+            w.addItem(r, ignoreBounds=True)
+
+
 class EpochsPanel(QWidget):
     """Tab 2 — paged scored-epoch viewer with per-channel artefact triage.
 
@@ -3113,9 +4014,12 @@ class EpochsPanel(QWidget):
     requestChannel = pyqtSignal(str)                         # re-drill ch
     eventSelected = pyqtSignal(str)                          # event uuid
     decisionRequested = pyqtSignal(str)        # 'accept' | 'reject' | 'unsure'
+    selectionCleared = pyqtSignal()            # paging / Esc dropped it
+    checkFilterCleared = pyqtSignal()          # chip ✕ / Esc
+    epochChanged = pyqtSignal(int)
 
     #: A click this close (s) to an event that does not contain it selects it.
-    PICK_TOLERANCE_S = 0.25
+    PICK_TOLERANCE_S = 0.3
     _DECISION_KEYS = {Qt.Key_A: 'accept', Qt.Key_R: 'reject',
                       Qt.Key_U: 'unsure'}
 
@@ -3148,8 +4052,20 @@ class EpochsPanel(QWidget):
         self._selected_uuid = None
         self._event_items = []        # bands on raw/filt, redrawn in place
         self._ticker_items = []
+        self._check_filter = None     # {'col', 'uuids'} from a dock link
+        self._last_click = None       # (plot, scene x) for overlap cycling
+        self.last_nav = None          # 'moved' | 'wrapped' | 'none'
+        self._raw_ytop = 1.0          # glyph row on the raw trace
         # injected by the main window:
         self.read_window = None   # (ch, t0, t1) -> (t, data, sfreq) | None
+        # (channels, t0, t1) -> (t, data[n, t], sfreq, labels) | None
+        self.read_channels = None
+        # target channel -> (neighbour channels, header text, labels)
+        self.neighbour_provider = None
+        # (channels, t0, t1) -> DataFrame[channel, start_time, end_time]
+        self.neighbour_events = None
+        # () -> {'eog': [...], 'emg': ch, 'ecg': ch}
+        self.physio_provider = None
         lay = QVBoxLayout(self)
 
         # --- top strip --------------------------------------------------
@@ -3162,6 +4078,24 @@ class EpochsPanel(QWidget):
         self.title = QLabel("Drill into a channel from the Channels tab")
         self.title.setStyleSheet("color:#9ba6b5;")
         top.addWidget(self.title)
+        # removable check-filter chip (Channels-tab dock link)
+        self.chip = QWidget()
+        self.chip.setStyleSheet(
+            "background:#2c4666;border:1px solid #5a8fce;border-radius:9px;")
+        ch_l = QHBoxLayout(self.chip)
+        ch_l.setContentsMargins(8, 1, 3, 1)
+        self.chip_lbl = QLabel("")
+        self.chip_lbl.setStyleSheet("border:0;color:#e5e5e5;font-size:11px;")
+        ch_l.addWidget(self.chip_lbl)
+        self.chip_x = QPushButton("✕")
+        self.chip_x.setFlat(True)
+        self.chip_x.setMaximumWidth(18)
+        self.chip_x.setFocusPolicy(Qt.NoFocus)
+        self.chip_x.setStyleSheet("border:0;color:#e5e5e5;")
+        self.chip_x.clicked.connect(lambda: self.clear_check_filter())
+        ch_l.addWidget(self.chip_x)
+        self.chip.setVisible(False)
+        top.addWidget(self.chip)
         top.addStretch()
         # (Overview Y selector removed — strip is event-count based.)
         lay.addLayout(top)
@@ -3300,6 +4234,8 @@ class EpochsPanel(QWidget):
             lambda ev: self._on_trace_click(ev, self.raw_plot))
         self.ticker.scene().sigMouseClicked.connect(
             lambda ev: self._on_trace_click(ev, self.ticker))
+        self.filt_plot.scene().sigMouseClicked.connect(
+            lambda ev: self._on_trace_click(ev, self.filt_plot))
         # brush region — lives on raw_plot, draggable even with viewbox
         # mouse pan/zoom disabled (LinearRegionItem handles its own mouse).
         # Outline-only until dragged: transparent fill by default, fill
@@ -3319,6 +4255,11 @@ class EpochsPanel(QWidget):
         lc.addWidget(self.filt_hdr)
         lc.addWidget(self.filt_plot, 2)
         lc.addWidget(self.trace_note)
+        # neighbouring channels and EOG / EMG / ECG for the selected event
+        self.neighbours = NeighboursGroup(self)
+        lc.addWidget(self.neighbours)
+        self.physio = PhysioStrip(self)
+        lc.addWidget(self.physio)
 
         # --- action bar ------------------------------------------------
         bar = QHBoxLayout()
@@ -3399,6 +4340,8 @@ class EpochsPanel(QWidget):
         """
         self._reviews = dict(reviews or {})
         self._selected_uuid = None
+        self._last_click = None
+        self.clear_check_filter(emit=False)
         self._channel = channel
         self._all_events = all_events
         self._df = df_slice
@@ -3595,6 +4538,14 @@ class EpochsPanel(QWidget):
         i = max(0, min(int(i), n - 1))
         self._epoch = i
         t0, t1 = self.span(i)
+        # paging keeps the selection only when the event starts here
+        dropped = False
+        if self._selected_uuid is not None:
+            hit = self._ev[self._ev['uuid'] == self._selected_uuid]
+            s0 = float(hit['_start'].iloc[0]) if len(hit) else None
+            if s0 is None or not (t0 <= s0 < t1):
+                self._selected_uuid = None
+                dropped = True
         dur = t1 - t0
         stage = self._epoch_stage() or '—'
         n_ev, n_out = self._epoch_counts(i)
@@ -3612,6 +4563,8 @@ class EpochsPanel(QWidget):
         self.raw_plot.clear()
         self.filt_plot.clear()
         self.ticker.clear()
+        self._event_items = []
+        self._ticker_items = []
         # re-add brush region (outline-only) centred in window; guard the
         # programmatic setRegion so it stays unfilled until the user drags.
         self._region_programmatic = True
@@ -3648,6 +4601,8 @@ class EpochsPanel(QWidget):
                     f"epoch {i + 1}/{n} ({_hms(t0)}–{_hms(t1)})")
                 self.raw_plot.plot(
                     ts, data, pen=pg.mkPen((155, 166, 181), width=1))
+                fin = data[np.isfinite(data)]
+                self._raw_ytop = float(fin.max()) if fin.size else 1.0
                 lo, hi = self._band   # sourced from event rows in set_channel
                 self.filt_plot.plot(
                     ts, _bandpass(data, sfreq, lo, hi),
@@ -3661,9 +4616,15 @@ class EpochsPanel(QWidget):
         else:
             self.trace_note.setText(
                 "load an EEG file to enable the signal trace")
+            self._raw_ytop = 1.0
         self._draw_window_overlays()
         self._draw_trace_events(t0, t1)
         self._draw_ticker(t0, t1)
+        self.physio.show_window(t0, t1)
+        if dropped:
+            self._refresh_neighbours()
+            self.selectionCleared.emit()
+        self.epochChanged.emit(i)
 
     # ---- epoch-event utilities ----------------------------------------
     def _epoch_counts(self, i):
@@ -3699,59 +4660,107 @@ class EpochsPanel(QWidget):
         return sub
 
     def _window_events(self, t0, t1):
-        """Rows of the per-drill event frame overlapping ``[t0, t1]``."""
+        """Rows of the per-drill event frame that START in ``[t0, t1)``
+        (spec: an event that runs past the epoch is drawn clipped)."""
         ev = self._ev
         if ev is None or ev.empty:
             return ev
-        return ev[(ev['_start'] < t1) & (ev['_end'] > t0)]
+        return ev[(ev['_start'] >= t0) & (ev['_start'] < t1)]
 
-    def _band_style(self, uuid, is_out):
-        """``(brush, pen, z)`` of one event band. A decision outranks the
-        outlier flag (it is the reviewer's own answer); the selected event
-        keeps its fill and gains an opaque accent edge on top."""
+    def _decision_of(self, uuid):
         dec = self._reviews.get(uuid) if uuid is not None else None
-        if dec and dec[0] in DECISION_COLOR:
-            c = QtGui.QColor(DECISION_COLOR[dec[0]])
-            rgb = (c.red(), c.green(), c.blue())
-            brush, pen, z = (*rgb, 55), pg.mkPen(*rgb, 170), 4
+        return dec[0] if dec else None
+
+    def _band_style(self, uuid, is_out, filtered_out=False):
+        """``(fill rgba, edge pen, z, glyph, glyph colour)`` of one band
+        (UX spec section 3). A decision replaces the outlier style; the
+        selected event's edge is replaced by a 2 px accent line on top."""
+        dec = self._decision_of(uuid)
+        c3, bad, ok, warn = (QtGui.QColor(THEME[k]) for k in
+                             ('text_3', 'bad', 'ok', 'warn'))
+
+        def rgb(c):
+            return (c.red(), c.green(), c.blue())
+        glyph, gcol = None, None
+        if dec == 'accept':
+            fill, a = rgb(ok), 40
+            pen, z = pg.mkPen(*rgb(ok), width=1), 4
+            glyph, gcol = '✓', THEME['ok']
+        elif dec == 'reject':
+            fill, a = rgb(c3), 20
+            pen, z = pg.mkPen(*rgb(bad), width=1, style=Qt.DashLine), 4
+            glyph, gcol = '✗', THEME['bad']
+        elif dec == 'unsure':
+            fill, a = rgb(warn), 40
+            pen, z = pg.mkPen(*rgb(warn), width=1, style=Qt.DotLine), 4
+            glyph, gcol = '?', THEME['warn']
         elif is_out:
-            brush, pen, z = (224, 83, 63, 46), pg.mkPen(224, 83, 63, 140), 4
+            fill, a = rgb(bad), 46
+            pen, z = pg.mkPen(*rgb(bad), 140), 4
         else:
-            brush, pen, z = (136, 136, 136, 34), pg.mkPen(136, 136, 136, 110), 3
+            fill, a = rgb(c3), 30
+            pen, z = pg.mkPen(None), 3
+        if filtered_out:
+            a = a // 2
         if uuid is not None and uuid == self._selected_uuid:
             pen, z = pg.mkPen(THEME['accent'], width=2), 8
-        return brush, pen, z
+        return (*fill, a), pen, z, glyph, gcol
+
+    def _passes_filter(self, uuid):
+        return (self._check_filter is None
+                or uuid in self._check_filter['uuids'])
 
     def _draw_trace_events(self, t0, t1):
-        """One band per event in the window, on both raw and filtered traces:
-        grey for ordinary events, red for amplitude outliers, tinted by
-        decision once reviewed, accent-edged when selected. Replaces the
-        previous bands in place, so selecting or deciding redraws only these
-        items, never the traces or the artefact brush."""
+        """One band per event starting in the window, on the raw and the
+        filtered trace, clipped at the epoch end, styled by
+        :meth:`_band_style`; decided events carry a glyph on the raw trace.
+        Replaces the previous bands in place, so selecting or deciding
+        redraws only these items, never the traces or the artefact brush."""
         for p, it in self._event_items:
             p.removeItem(it)
         self._event_items = []
         sub = self._window_events(t0, t1)
         if sub is None or sub.empty:
             return
+        ytop = self._raw_ytop
         for s, e, out, u in zip(sub['_start'].to_numpy(dtype=float),
                                 sub['_end'].to_numpy(dtype=float),
                                 sub['_is_out'].to_numpy(dtype=bool),
                                 sub['uuid'].tolist()):
-            brush, pen, z = self._band_style(u, out)
+            fill, pen, z, glyph, gcol = self._band_style(
+                u, out, not self._passes_filter(u))
+            e = min(e, t1)
             for p in (self.raw_plot, self.filt_plot):
-                it = pg.LinearRegionItem(values=[s, e], brush=brush, pen=pen,
+                it = pg.LinearRegionItem(values=[s, e], brush=fill, pen=pen,
                                          movable=False)
                 it.setZValue(z)
                 p.addItem(it)
                 self._event_items.append((p, it))
+            if glyph:
+                txt = pg.TextItem(glyph, color=gcol, anchor=(0, 0))
+                f = txt.textItem.font()
+                f.setPixelSize(10)
+                txt.setFont(f)
+                txt.setPos(s, ytop)
+                txt.setZValue(z + 1)
+                txt.uuid = u
+                self.raw_plot.addItem(txt, ignoreBounds=True)
+                self._event_items.append((self.raw_plot, txt))
+
+    def band_items(self, plot=None):
+        """The current band items (``LinearRegionItem``), for tests."""
+        return [it for p, it in self._event_items
+                if isinstance(it, pg.LinearRegionItem)
+                and (plot is None or p is plot)]
+
+    def glyph_items(self):
+        return [it for p, it in self._event_items
+                if isinstance(it, pg.TextItem)]
 
     def _draw_ticker(self, t0, t1):
-        # Pure visual indicator: grey bars = regular events, red (taller) =
-        # outliers, decision colour once reviewed. No text — counts live in
-        # the epoch header line; the outlier rule lives in the strip header.
-        # Same event set as the bands (_window_events): an event straddling
-        # in from the previous epoch gets its bar pinned at the window edge.
+        # Pure visual indicator, same events as the bands: grey = regular,
+        # red (taller) = outlier, green / grey outline / amber = accepted /
+        # rejected / unsure, accent outline = selected.
         for it in self._ticker_items:
             self.ticker.removeItem(it)
         self._ticker_items = []
@@ -3759,32 +4768,28 @@ class EpochsPanel(QWidget):
         if sub is None or sub.empty:
             return
         uu = sub['uuid']
-        dec = uu.map(lambda u: (self._reviews.get(u) or (None,))[0]
-                     if u is not None and u == u else None)
+        dec = uu.map(self._decision_of)
         reviewed = dec.notna()
-        layers = [(sub[~sub['_is_out'] & ~reviewed], 0.4, 9, THEME['text_3']),
-                  (sub[sub['_is_out'] & ~reviewed], 0.6, 14, THEME['bad'])]
-        for d, col in DECISION_COLOR.items():
-            m = dec == d
-            layers.append((sub[m & ~sub['_is_out']], 0.4, 9, col))
-            layers.append((sub[m & sub['_is_out']], 0.6, 14, col))
+        grey = THEME['text_3']
+        layers = [(sub[~sub['_is_out'] & ~reviewed], 0.4, 9, grey, None),
+                  (sub[sub['_is_out'] & ~reviewed], 0.6, 14, THEME['bad'], None),
+                  (sub[dec == 'accept'], 0.4, 9, THEME['ok'], None),
+                  (sub[dec == 'reject'], 0.4, 9, None, pg.mkPen(grey, width=1)),
+                  (sub[dec == 'unsure'], 0.4, 9, THEME['warn'], None)]
         # Visible widths: 0.4 s reg / 0.6 s outlier — narrower than the
         # smallest spindle (~0.5 s) but reliably visible at 1920 px.
-        for rows, w, h, brush in layers:
+        for rows, w, h, brush, pen in layers:
             if len(rows):
-                x = np.maximum(rows['_start'].to_numpy(dtype=float),
-                               t0 + w / 2.0)
-                it = pg.BarGraphItem(x=x, width=w, y0=0, height=h,
-                                     brush=brush, pen=None)
+                it = pg.BarGraphItem(x=rows['_start'].to_numpy(dtype=float),
+                                     width=w, y0=0, height=h,
+                                     brush=brush, pen=pen)
                 self.ticker.addItem(it)
                 self._ticker_items.append(it)
         sel = sub[uu == self._selected_uuid] if self._selected_uuid else sub[:0]
         if len(sel):
-            it = pg.BarGraphItem(x=np.maximum(
-                                     sel['_start'].to_numpy(dtype=float),
-                                     t0 + 0.3),
+            it = pg.BarGraphItem(x=sel['_start'].to_numpy(dtype=float),
                                  width=0.6, y0=0, height=16, brush=None,
-                                 pen=pg.mkPen(THEME['accent'], width=2))
+                                 pen=pg.mkPen(THEME['accent'], width=1.5))
             it.setZValue(5)
             self.ticker.addItem(it)
             self._ticker_items.append(it)
@@ -3792,7 +4797,7 @@ class EpochsPanel(QWidget):
     # ---- event selection + decisions ----------------------------------
     def set_reviews(self, reviews):
         """Replace the decision map ``{uuid: (decision, reason, reviewer)}``
-        and recolour the current window's bands and ticker."""
+        (the current reviewer's decisions only) and restyle the window."""
         self._reviews = dict(reviews or {})
         self._redraw_event_layers()
 
@@ -3809,32 +4814,39 @@ class EpochsPanel(QWidget):
         hit = self._df[self._df['uuid'] == self._selected_uuid]
         return hit.iloc[0] if len(hit) else None
 
-    def _event_at(self, x):
-        """uuid of the event containing time ``x`` in the current window
-        (the one whose centre is nearest when several overlap), else the
-        nearest one within :attr:`PICK_TOLERANCE_S`; ``None`` otherwise."""
+    def _events_at(self, x):
+        """uuids of events in the window that contain ``x``, nearest centre
+        first; else the single nearest within :attr:`PICK_TOLERANCE_S`."""
         t0, t1 = self.span(self._epoch)
         sub = self._window_events(t0, t1)
         if sub is None or sub.empty:
-            return None
+            return []
         sub = sub[sub['uuid'].notna()]
         if sub.empty:
-            return None
+            return []
         s = sub['_start'].to_numpy(dtype=float)
-        e = sub['_end'].to_numpy(dtype=float)
+        e = np.minimum(sub['_end'].to_numpy(dtype=float), t1)
         inside = (s <= x) & (x <= e)
         if inside.any():
             ix = np.flatnonzero(inside)
-            best = ix[np.argmin(np.abs((s[ix] + e[ix]) / 2.0 - x))]
-            return str(sub['uuid'].iloc[best])
+            ix = ix[np.argsort(np.abs((s[ix] + e[ix]) / 2.0 - x),
+                               kind='mergesort')]
+            return [str(sub['uuid'].iloc[i]) for i in ix]
         gap = np.minimum(np.abs(s - x), np.abs(e - x))
         best = int(np.argmin(gap))
-        if gap[best] <= self.PICK_TOLERANCE_S:
-            return str(sub['uuid'].iloc[best])
-        return None
+        if gap[best] <= self.PICK_TOLERANCE_S + 1e-9:
+            return [str(sub['uuid'].iloc[best])]
+        return []
+
+    def _event_at(self, x):
+        """uuid of the event at time ``x`` (see :meth:`_events_at`)."""
+        hits = self._events_at(x)
+        return hits[0] if hits else None
 
     def _on_trace_click(self, ev, plot):
-        """Left click on the raw trace or the ticker selects an event."""
+        """Left click on the raw or filtered trace, or the ticker, selects
+        an event; a second click within 2 px cycles overlapping events; a
+        click near nothing keeps the current selection."""
         try:
             if ev.button() != Qt.LeftButton:
                 return
@@ -3843,20 +4855,29 @@ class EpochsPanel(QWidget):
             if not vb.sceneBoundingRect().contains(pos):
                 return
             x = float(vb.mapSceneToView(pos).x())
+            px = float(pos.x())
         except Exception:
             return
-        uuid = self._event_at(x)
-        if uuid is not None:
+        hits = self._events_at(x)
+        if hits:
+            last = self._last_click
+            if (last is not None and last[0] is plot
+                    and abs(last[1] - px) <= 2.0 and len(hits) > 1
+                    and self._selected_uuid in hits):
+                uuid = hits[(hits.index(self._selected_uuid) + 1) % len(hits)]
+            else:
+                uuid = hits[0]
+            self._last_click = (plot, px)
             self.select_event(uuid)
-        self.setFocus()      # so A/R/U and ]/[ reach keyPressEvent
+        self.setFocus()      # so the review keys reach this panel
 
     def select_event(self, uuid, emit=True):
         """Select the event ``uuid`` of the drilled channel.
 
-        Pages to the event's epoch only when it is not in the current
-        window, so selecting inside the window never moves the artefact
-        brush. Emits :attr:`eventSelected` unless ``emit`` is False.
-        Returns True when the event exists.
+        Pages to the epoch the event starts in only when it is not the
+        current one, so selecting inside the window never moves the
+        artefact brush. Emits :attr:`eventSelected` unless ``emit`` is
+        False. Returns True when the event exists.
         """
         ev = self._ev
         if uuid is None or ev is None or ev.empty:
@@ -3865,49 +4886,144 @@ class EpochsPanel(QWidget):
         if hit.empty:
             return False
         self._selected_uuid = str(uuid)
-        s, e = float(hit['_start'].iloc[0]), float(hit['_end'].iloc[0])
+        s = float(hit['_start'].iloc[0])
         t0, t1 = self.span(self._epoch)
-        if s < t1 and e > t0:
+        if t0 <= s < t1:
             self._redraw_event_layers()
         else:
             self._goto_epoch(self.index_at(s))
         if emit:
             self.eventSelected.emit(self._selected_uuid)
+        self._refresh_neighbours()
         return True
 
-    def _step_unreviewed(self, step):
-        """Select the next (``step`` > 0) or previous unreviewed event in
-        start-time order, from the selected event when it is on screen,
-        else from the current epoch's start. Returns its uuid or None."""
+    def clear_selection(self, emit=True):
+        """Drop the selection (restyles the window only)."""
+        if self._selected_uuid is None:
+            return False
+        self._selected_uuid = None
+        self._redraw_event_layers()
+        self._refresh_neighbours()
+        if emit:
+            self.selectionCleared.emit()
+        return True
+
+    def _anchor_pos(self):
+        """Index in ``_ev`` of the selected event when it starts in the
+        current epoch, else ``None``."""
+        if self._selected_uuid is None:
+            return None
         ev = self._ev
+        t0, t1 = self.span(self._epoch)
+        hit = ev.index[(ev['uuid'] == self._selected_uuid)
+                       & (ev['_start'] >= t0) & (ev['_start'] < t1)]
+        return int(hit[0]) if len(hit) else None
+
+    def _step(self, ok, step, wrap=False):
+        """Select the next (``step`` > 0) / previous event among rows where
+        ``ok`` is True, from the selected event when it is on screen, else
+        from the current epoch's start. ``wrap`` goes round once. Sets
+        :attr:`last_nav` to ``'moved'``, ``'wrapped'`` or ``'none'``."""
+        ev = self._ev
+        self.last_nav = 'none'
         if ev is None or ev.empty:
             return None
-        ok = ev['uuid'].notna() & ~ev['uuid'].isin(list(self._reviews))
-        t0, t1 = self.span(self._epoch)
-        pos = None
-        if self._selected_uuid is not None:
-            hit = ev.index[(ev['uuid'] == self._selected_uuid)
-                           & (ev['_start'] < t1) & (ev['_end'] > t0)]
-            pos = int(hit[0]) if len(hit) else None
+        t0, _t1 = self.span(self._epoch)
+        pos = self._anchor_pos()
         if pos is not None:
-            cand = ev.index[ok & ((ev.index > pos) if step > 0
-                                  else (ev.index < pos))]
+            after = ev.index > pos if step > 0 else ev.index < pos
         else:
-            cand = ev.index[ok & ((ev['_start'] >= t0) if step > 0
-                                  else (ev['_start'] < t0))]
+            after = (ev['_start'] >= t0) if step > 0 else (ev['_start'] < t0)
+        cand = ev.index[ok & after]
+        if len(cand):
+            self.last_nav = 'moved'
+        elif wrap:
+            cand = ev.index[ok]
+            if pos is not None:
+                cand = cand[cand != pos]
+            if len(cand):
+                self.last_nav = 'wrapped'
         if not len(cand):
             return None
         u = str(ev.at[cand[0] if step > 0 else cand[-1], 'uuid'])
         self.select_event(u)
         return u
 
-    def next_unreviewed(self):
-        """Select the next unreviewed event (``]``)."""
-        return self._step_unreviewed(+1)
+    def _unreviewed_mask(self):
+        ev = self._ev
+        return ev['uuid'].notna() & ~ev['uuid'].isin(list(self._reviews))
 
-    def prev_unreviewed(self):
-        """Select the previous unreviewed event (``[``)."""
-        return self._step_unreviewed(-1)
+    def next_unreviewed(self, wrap=True):
+        """Select the next unreviewed event (``]``), wrapping once."""
+        return self._step(self._unreviewed_mask(), +1, wrap)
+
+    def prev_unreviewed(self, wrap=True):
+        """Select the previous unreviewed event (``[``), wrapping once."""
+        return self._step(self._unreviewed_mask(), -1, wrap)
+
+    def _filter_mask(self):
+        ev = self._ev
+        ok = ev['uuid'].notna()
+        if self._check_filter is not None:
+            ok &= ev['uuid'].isin(list(self._check_filter['uuids']))
+        return ok
+
+    def next_event(self):
+        """Next event of any status (``}``); only filtered events while a
+        check filter is on."""
+        return self._step(self._filter_mask(), +1)
+
+    def prev_event(self):
+        """Previous event of any status (``{``)."""
+        return self._step(self._filter_mask(), -1)
+
+    def n_unreviewed(self):
+        ev = self._ev
+        return 0 if ev is None or ev.empty else int(self._unreviewed_mask().sum())
+
+    # ---- check filter (Channels-tab link) -----------------------------
+    def set_check_filter(self, col, chip_text, uuids):
+        """Show only events failing one population check: the others are
+        drawn at half fill and skipped by ``}`` / ``{``."""
+        self._check_filter = {'col': col, 'uuids': set(uuids)}
+        self.chip_lbl.setText(chip_text[:-2] if chip_text.endswith(' ✕')
+                              else chip_text)
+        self.chip.setVisible(True)
+        self._redraw_event_layers()
+
+    def clear_check_filter(self, emit=True):
+        if self._check_filter is None:
+            return False
+        self._check_filter = None
+        self.chip.setVisible(False)
+        self._redraw_event_layers()
+        if emit:
+            self.checkFilterCleared.emit()
+        return True
+
+    def chip_text(self):
+        """The chip as shown, with its ✕ (empty when no filter is on)."""
+        return (self.chip_lbl.text() + ' ✕') if self.chip.isVisible() else ''
+
+    def _refresh_neighbours(self):
+        """Hand the selection to the Neighbours group (it reads only when
+        open)."""
+        if hasattr(self, 'neighbours'):
+            self.neighbours.set_event(self._channel, self.selected_event(),
+                                      self._event_type, self._band)
+
+    def escape_step(self):
+        """Esc after any armed decision / comment step: clear the strip
+        range, else remove the check filter, else clear the selection.
+        Returns what was done (or ``None``)."""
+        if self._strip_range.isVisible():
+            self._clear_strip_range()
+            return 'strip'
+        if self.clear_check_filter():
+            return 'filter'
+        if self.clear_selection():
+            return 'selection'
+        return None
 
     def _sync_axis_widths(self):
         """Pin a common left-axis column width on ticker + raw + filt so their
@@ -3943,10 +5059,9 @@ class EpochsPanel(QWidget):
             self._goto_epoch(min(ix))
 
     def keyPressEvent(self, ev):
-        # Left/Right are wired as button shortcuts; P/N for outlier hopping;
-        # Esc clears any strip-range selection.
-        # A/R/U ask for a decision on the selected event; ]/[ walk the
-        # unreviewed events.
+        # Used when the panel is shown on its own; inside the main window the
+        # review keys are window shortcuts on the Epochs tab and reach the
+        # same methods. Left/Right are button shortcuts; P/N hop outliers.
         k = ev.key()
         plain = not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier
                                        | Qt.MetaModifier))
@@ -3955,15 +5070,17 @@ class EpochsPanel(QWidget):
         if k == Qt.Key_N:
             self._next_outlier(); return
         if k == Qt.Key_Escape:
-            self._clear_strip_range(); return
+            self.escape_step(); return
         if plain and k in self._DECISION_KEYS:
             if self._selected_uuid is not None:
                 self.decisionRequested.emit(self._DECISION_KEYS[k])
             return
-        if plain and k == Qt.Key_BracketRight:
-            self.next_unreviewed(); return
-        if plain and k == Qt.Key_BracketLeft:
-            self.prev_unreviewed(); return
+        nav = {Qt.Key_BracketRight: self.next_unreviewed,
+               Qt.Key_BracketLeft: self.prev_unreviewed,
+               Qt.Key_BraceRight: self.next_event,
+               Qt.Key_BraceLeft: self.prev_event}
+        if k in nav:
+            nav[k](); return
         super().keyPressEvent(ev)
 
     # ---- strip shift-drag range ---------------------------------------
@@ -4477,8 +5594,69 @@ def qc_density_stage_scope(event_stages, wake_stages=None):
     return sorted(scope) or None
 
 
+class _FiguresNotComputable(Exception):
+    """The figures cannot be computed faithfully; the message says why."""
+
+
+def _rereference_like_wonambi(data, labels, ts, sfreq, target, ref):
+    """``target`` re-referenced to ``ref`` through Wonambi's own
+    ``montage(ref_chan=...)`` (the call the detectors' ``read_data(chan,
+    ref_chan)`` makes), then ``nan_to_num`` as Wonambi's ``_create_data``
+    does. Without Wonambi, :func:`event_review.rereference` (same formula)."""
+    if not ref:
+        return np.nan_to_num(np.asarray(data, dtype=float)[
+            list(labels).index(target)])
+    try:
+        from wonambi.datatype import ChanTime
+        from wonambi.trans import montage
+    except ImportError:
+        return _er.rereference(data, labels, target, ref)
+    ct = ChanTime()
+    ct.s_freq = float(sfreq)
+    ct.axis['chan'] = np.empty(1, dtype='O')
+    ct.axis['chan'][0] = np.asarray(list(labels), dtype='U')
+    ct.axis['time'] = np.empty(1, dtype='O')
+    ct.axis['time'][0] = np.asarray(ts, dtype=float)
+    ct.data = np.empty(1, dtype='O')
+    ct.data[0] = np.asarray(data, dtype=float)
+    m = montage(ct, ref_chan=[str(r) for r in ref])
+    return np.nan_to_num(np.asarray(m(chan=target, trial=0), dtype=float))
+
+
+class _PopulationWorker(QtCore.QThread):
+    """Reads the population checks off the GUI thread, on its own
+    read-only connection (``event_review.load_population``)."""
+
+    done = pyqtSignal(object, object)   # key, result dict
+
+    def __init__(self, key, db_path, event_type, methods, freq_band,
+                 parent=None):
+        super().__init__(parent)
+        self.key = key
+        self._args = (db_path, event_type, methods, freq_band)
+
+    def run(self):
+        self.done.emit(self.key, _er.load_population(*self._args))
+
+
 class EventReviewGUI(QMainWindow):
     """Main event review GUI with 3-panel design"""
+
+    @property
+    def db(self):
+        """The open :class:`EventDatabase` (or ``None``)."""
+        return self.__dict__.get('_db')
+
+    @db.setter
+    def db(self, value):
+        # Every per-database cache goes with the database: a reopened file
+        # gets a fresh connection whose PRAGMA data_version restarts at 1, so
+        # a stale population or figure entry could otherwise match again.
+        self.__dict__['_db'] = value
+        for name in ('_pop_cache', '_fig_cache', '_run_cache'):
+            self.__dict__[name] = {}
+        self.__dict__['_pop_view'] = None
+        self.__dict__['_undo_stack'] = []
     
     def __init__(self):
         super().__init__()
@@ -4490,6 +5668,16 @@ class EventReviewGUI(QMainWindow):
         self.annotations = None
         self.reviewer_name = ""   # provenance field; intentionally unset
         self.selected_event_uuid = None   # event picked on the Epochs trace
+        # decision state (spec section 5) and session-only review settings
+        self._armed = None                # 'reject' | 'unsure' while armed
+        self._pending_other = False       # 'other' chosen, comment awaited
+        self._last_reject_reason = None   # this session's last reject reason
+        self._undo_stack = []
+        self._show_others = False         # never persisted
+        self._show_others_confirmed = False
+        self._auto_advance = _setting_bool('review/auto_advance', True)
+        self._pop_worker = None
+        self._pop_view = None
         self.recording_start_time = None
 
         # Chrome / QC state
@@ -4599,6 +5787,15 @@ class EventReviewGUI(QMainWindow):
         a.triggered.connect(self._prompt_reviewer_name)
         m_review.addAction(a)
         self.act_reviewer_name = a
+        m_review.addSeparator()
+        # review-sample entries (Draw / Resume / Exit / Precision report)
+        # are added here once the sampling module exists.
+        self.m_review = m_review
+        a = QAction('Show other reviewers', self, checkable=True)
+        a.setChecked(False)   # off at every launch, never persisted
+        a.toggled.connect(self._on_show_others)
+        m_review.addAction(a)
+        self.act_show_others = a
 
         m_view = mb.addMenu('&View')
         a = QAction('Outlier threshold…', self)
@@ -4755,8 +5952,23 @@ class EventReviewGUI(QMainWindow):
         # × in the dock's compact marked-artefact list -> unmark
         self.detail_dock_w.unmarkArtefactRequested.connect(
             self._unmark_artefact)
-        self.detail_dock.setWidget(self.detail_dock_w)
+        self.detail_dock_w.checkLinkActivated.connect(self._on_check_link)
+        dock_scroll = QtWidgets.QScrollArea()
+        dock_scroll.setWidgetResizable(True)
+        dock_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        dock_scroll.setWidget(self.detail_dock_w)
+        self.detail_dock.setWidget(dock_scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
+        evp = self.detail_dock_w.event_panel
+        evp.decisionClicked.connect(self._key_decide)
+        evp.reasonChosen.connect(self._on_reason_picked)
+        evp.commentSubmitted.connect(self._on_comment_submitted)
+        evp.commentEscape.connect(self._on_comment_escape)
+        evp.clearClicked.connect(self._clear_decision)
+        evp.prevClicked.connect(lambda: self._nav_unreviewed(-1))
+        evp.nextClicked.connect(lambda: self._nav_unreviewed(+1))
+        evp.auto_chk.setChecked(self._auto_advance)
+        evp.autoAdvanceToggled.connect(self._on_auto_advance)
 
         self.qc_widget.channelSelected.connect(self.on_qc_channel_selected)
         self.qc_widget.requestDrill.connect(self.on_qc_drill)
@@ -4779,7 +5991,13 @@ class EventReviewGUI(QMainWindow):
         self.epochs_panel.eventSelected.connect(self._on_event_selected)
         self.epochs_panel.decisionRequested.connect(
             self._on_decision_requested)
+        self.epochs_panel.selectionCleared.connect(self._on_selection_cleared)
+        self.epochs_panel.checkFilterCleared.connect(
+            self._on_check_filter_cleared)
         self.epochs_panel.read_window = self._read_eeg_window
+        self.epochs_panel.read_channels = self._read_eeg_channels
+        self.epochs_panel.neighbour_provider = self._neighbour_provider
+        self.epochs_panel.neighbour_events = self._neighbour_events
         self._review_qc_sidecar = None
 
         # Always land on the Channels (QC) dashboard — it is the triage entry
@@ -5244,6 +6462,8 @@ class EventReviewGUI(QMainWindow):
                                 artefact_intervals=ivs,
                                 coords=self.detail_dock_w._coords,
                                 **self._qc_thresholds)
+        # population checks: cached per run, else read in the background
+        qc = self._apply_population(qc, evt, methods, freq_band)
         self._qc_events_df = df
         self._qc_df = qc
         self.qc_widget.set_data(qc, df, verdicts, self._redetect_queue)
@@ -5312,6 +6532,7 @@ class EventReviewGUI(QMainWindow):
                 pass
         self.detail_dock_w.set_epoch_table(self._epoch_table())
         self.detail_dock_w.update_channel(ch, sl, qc_row)
+        self._update_check_line(ch)
         self.detail_dock_w.set_marked(self._marked_for(ch),
                                       channel=ch, total=self._total_marked())
 
@@ -5415,88 +6636,912 @@ class EventReviewGUI(QMainWindow):
         self.epochs_panel.setFocus(Qt.OtherFocusReason)
 
     # ------------------------------------------------------------------
-    # Per-event selection and decisions (D2 stubs; the decision panel,
-    # reason picker and reviewer prompt follow in D3/D7)
+    # Per-event selection, figures and decisions (UX spec sections 3-7)
     # ------------------------------------------------------------------
+    UNDO_DEPTH = 500
+
     def _reviews_for_slice(self, sl):
-        """``{uuid: (decision, reason, reviewer)}`` for a drilled slice."""
+        """The CURRENT reviewer's ``{uuid: (decision, reason, reviewer)}`` on
+        a drilled slice (blind: other reviewers never tint bands or count as
+        reviewed). Empty while no reviewer name is set."""
         if self.db is None or sl is None or not len(sl) \
-                or 'uuid' not in sl.columns:
+                or 'uuid' not in sl.columns or not self.reviewer_name:
             return {}
         try:
-            return self.db.get_reviews_for(sl['uuid'].tolist())
+            return self.db.get_reviews_for(sl['uuid'].tolist(),
+                                           reviewer=self.reviewer_name)
         except Exception as err:
             logger.warning(f"Could not read event reviews ({err}).")
             return {}
 
-    def _on_event_selected(self, uuid):
-        """Record the selection and name it in the status bar."""
-        self.selected_event_uuid = uuid
-        panel = self.epochs_panel
-        row = panel.selected_event()
-        ev = panel._ev
-        pos = ev.index[ev['uuid'] == uuid] if ev is not None else []
-        n_of = (f" ({int(pos[0]) + 1} of {len(ev)} on channel)"
-                if len(pos) else "")
-        etype = str(panel._event_type).replace('_', ' ')
-        t = row['start_time'] if row is not None else None
-        self.status_bar.showMessage(
-            f"Selected {etype} on {panel._channel} at {_hms(t)}{n_of}")
+    def _run_info(self, run_id):
+        """``get_run_info`` cached per run for the session."""
+        if self.db is None or run_id is None or run_id != run_id:
+            return {}
+        cache = self.__dict__.setdefault('_run_cache', {})
+        key = (self.db.db_path, str(run_id))
+        if key not in cache:
+            cache[key] = self.db.get_run_info(str(run_id))
+        return cache[key]
 
-    def _on_decision_requested(self, decision):
-        """Store ``decision`` for the selected event when the library can."""
+    def _selected_row(self):
+        """``(row dict, run dict)`` of the selected event, or ``(None, {})``."""
         uuid = self.selected_event_uuid
-        if uuid is None:
+        if uuid is None or self.db is None:
+            return None, {}
+        row = self.db.get_event(uuid)
+        if not row:
+            return None, {}
+        return row, self._run_info(row.get('run_id'))
+
+    def _event_status_line(self, row, prefix='Selected'):
+        evt = self.epochs_panel._event_type
+        word = _er.EVENT_SINGULAR.get(evt, evt)
+        rv = self.epochs_panel._reviews.get(self.selected_event_uuid)
+        stage = row.get('epoch_stage') or '—'
+        return (f"{prefix} {word} on {row.get('channel')} at "
+                f"{_er.fmt_hms1(row.get('start_time'))} · {stage} · "
+                f"{_er.decision_word(*(rv[:2] if rv else (None, None)))} — "
+                f"A accept · R reject · U unsure")
+
+    def _on_event_selected(self, uuid):
+        """Selection from the Epochs tab: fill the Event panel, the Current
+        line and the comment; name the event in the status bar."""
+        cancelled = self._disarm(cancel_message=True)
+        self.selected_event_uuid = uuid
+        row, run = self._selected_row()
+        if row is None:
+            self.detail_dock_w.event_panel.set_empty(
+                EventDecisionPanel.EMPTY_TEXT)
             return
-        if self.db is None or not self.db.has_review_backend:
-            self.status_bar.showMessage(
-                "Decision not saved: this TurtleWave library cannot store "
-                "event reviews.")
-            return
-        # Never save under an invented name: two people would overwrite
-        # each other's decisions under one reviewer key.
-        if not (self.reviewer_name or '').strip():
-            self.status_bar.showMessage(
-                "Decision not saved: set a reviewer name first "
-                "(Review ▸ Reviewer name…)")
-            return
+        self._render_event_panel(row, run)
+        if not cancelled:
+            self.status_bar.showMessage(self._event_status_line(row))
+
+    def _on_selection_cleared(self):
+        cancelled = self._disarm(cancel_message=True)
+        self.selected_event_uuid = None
+        self.detail_dock_w.event_panel.set_empty(EventDecisionPanel.EMPTY_TEXT)
+        if not cancelled:
+            self._refresh_progress()
+
+    def _figures_for(self, row, run):
+        """``(figures dict, state, note)`` for one event (build_event_rows).
+
+        Stored figures when the row has any; ``unavailable`` when the run
+        computed figures but this row has none at all (the channel's figures
+        pass failed); otherwise computed on selection from the raw signal,
+        or ``missing`` / ``unavailable`` without the EEG file.
+        """
+        evt = self.epochs_panel._event_type
+        if _er.has_stored_figures(row, evt):
+            return row, 'stored', None
+        if _er.run_has_figures(run):
+            return {}, 'unavailable', _er.FIGURES_FAILED_FIG
+        cache = self.__dict__.setdefault('_fig_cache', {})
+        uuid = str(row.get('uuid'))
+        if uuid in cache:
+            figs, note = cache[uuid]
+            return (figs, 'computed', None) if figs else (
+                {}, 'unavailable', note or _er.FIGURES_FAILED_FIG)
+        if self.eeg_data is None:
+            if _er.run_figures_switched_off(run):
+                return {}, 'unavailable', _er.FIGURES_OFF_FIG
+            return {}, 'missing', None
+        return {}, 'computing', None
+
+    def _render_event_panel(self, row, run):
+        """Build and show the Event panel rows for ``row``."""
+        panel = self.detail_dock_w.event_panel
+        ep = self.epochs_panel
+        evt = ep._event_type
+        figs, state, note = self._figures_for(row, run)
+        thr = self.db.get_thresholds(row.get('run_id'), row.get('channel'),
+                                     row.get('method'), row.get('start_time')) \
+            if self.db is not None else None
+        interp = str(row.get('channel')) in self._eeg_channel_info()[2]
+        rows = _er.build_event_rows(
+            row, event_type=evt, run=run, run_id=row.get('run_id'),
+            thresholds=thr, figures=figs, figure_state=state,
+            interpolated=interp, outlier_thr=ep._amp_thr, amp_col=ep._amp_col,
+            ptp_units_uv=self.db.ptp_units_microvolts() if self.db else False,
+            figure_note=note)
+        panel.set_rows(rows)
+        panel.set_note(_er.LOAD_EEG_NOTE if state == 'missing' else '')
+        panel.set_controls_enabled(True)
+        self._refresh_current_line(row)
+        self._refresh_progress()
+        if state == 'computing':
+            uuid = str(row.get('uuid'))
+            QtCore.QTimer.singleShot(
+                0, lambda u=uuid, r=row, rn=run: self._compute_figures_later(
+                    u, r, rn))
+
+    def _compute_figures_later(self, uuid, row, run):
+        """Compute a pre-4.6 event's figures from the raw signal (with the
+        run's ``ref_chan``), cache them, and re-render if still selected."""
+        note = None
         try:
-            self.db.add_review(uuid, decision,
-                               reviewer=self.reviewer_name.strip())
+            figs = self._compute_figures(row, run)
+        except _FiguresNotComputable as err:
+            figs, note = None, str(err)
         except Exception as err:
-            self.status_bar.showMessage(f"Decision not saved: {err}")
+            logger.warning(f"Could not compute the event figures ({err}).")
+            figs, note = None, f"figures could not be computed ({err})"
+        cache = self.__dict__.setdefault('_fig_cache', {})
+        cache[uuid] = (figs or {}, note)
+        if self.selected_event_uuid == uuid:
+            r2, run2 = self._selected_row()
+            if r2 is not None:
+                self._render_event_panel(r2, run2)
+
+    def _compute_figures(self, row, run):
+        """``event_metrics.event_figures`` on a ±(S + P) read."""
+        from turtlewave_hdEEG import event_metrics as em
+        evt = self.epochs_panel._event_type
+        geo = em.GEOMETRY.get(evt, em.GEOMETRY['spindle'])
+        start, end = float(row['start_time']), float(row['end_time'])
+        pad = geo['S'] + geo['P']
+        ch = str(row['channel'])
+        # The detector's own reference, target included when it is one of
+        # the reference channels (an average reference), as Wonambi's
+        # read_data(chan, ref_chan) -> montage(ref_chan=...) does.
+        ref = _er.run_ref_chan(run)
+        names = set(self._eeg_channel_info()[0])
+        missing = [r for r in ref if r not in names]
+        if missing:
+            logger.warning(
+                f"Run {row.get('run_id')} was detected re-referenced to "
+                f"{', '.join(ref)}; {', '.join(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} not in this "
+                f"recording, so the figures for {ch} are not computed (the "
+                f"stored reference is not what the detector saw).")
+            raise _FiguresNotComputable(
+                f"not computed: reference channel{'s' if len(missing) > 1 else ''}"
+                f" {', '.join(missing)} not in this recording")
+        out = self._read_eeg_channels(list(dict.fromkeys([ch] + ref)),
+                                      start - pad, end + pad)
+        if not out:
+            return {}
+        ts, data, sf, got = out
+        x = _rereference_like_wonambi(data, got, ts, sf, ch, ref)
+        note = (f"re-referenced to {len(ref)} channel(s)" if ref
+                else 'as stored')
+        df = self.epochs_panel._df
+        others = []
+        if df is not None and len(df) and 'run_id' in df.columns:
+            same = df[(df['run_id'] == row.get('run_id'))
+                      & (df['uuid'] != row.get('uuid'))]
+            others = list(zip(pd.to_numeric(same['start_time']),
+                              pd.to_numeric(same['end_time'])))
+        table = self._epoch_table()
+        stage_epochs = None
+        if table is not None and len(table):
+            stage_epochs = [(float(a), float(b), s) for a, b, s in
+                            zip(table.starts, table.ends, table.stages)
+                            if b > start - pad and a < end + pad]
+        reject = []
+        if self.annotations is not None:
+            params = (run or {}).get('params') or {}
+            for t in params.get('reject_types') or ['Artefact', 'Arousal']:
+                try:
+                    for e in self.annotations.get_events(name=t) or []:
+                        reject.append((float(e['start']), float(e['end'])))
+                except Exception:
+                    continue
+        th = self.db.get_thresholds(row.get('run_id'), ch, row.get('method'),
+                                    start) if self.db is not None else None
+        thd = ({str(r['name']): float(r['value']) for _, r in th.iterrows()}
+               if th is not None and len(th) else None)
+        fig = em.event_figures(
+            x, ts, sf, start, end,
+            (float(row['freq_lower']), float(row['freq_upper'])),
+            others=others, stage_epochs=stage_epochs,
+            run_stages=_er.run_stages(run) or None, thresholds=thd,
+            event_type=evt, ref_note=note, method=row.get('method'),
+            event_values={k: row.get(k) for k in
+                          ('peak_val_det', 'det_trough', 'det_ptp',
+                           'det_zero_time')},
+            duration_bounds=_er.run_duration_bounds(run, row.get('method')),
+            reject_intervals=reject or None)
+        return fig.as_dict()
+
+    def _refresh_current_line(self, row=None):
+        """``Current`` line + sub-lines (other reviewers, comment)."""
+        panel = self.detail_dock_w.event_panel
+        uuid = self.selected_event_uuid
+        if uuid is None or self.db is None:
+            panel.set_current('Not reviewed', [])
             return
-        panel = self.epochs_panel
-        reviews = dict(panel._reviews)
-        reviews.update(self.db.get_reviews_for([uuid]))
-        panel.set_reviews(reviews)
-        self.status_bar.showMessage(f"Saved: {decision} · {uuid}")
+        mine = (self.db.get_review(uuid, self.reviewer_name)
+                if self.reviewer_name else None)
+        subs, tip = [], ''
+        if mine:
+            dec = mine['decision']
+            text = (f"{_er.DECISION_TITLE.get(dec, dec)} by "
+                    f"{self.reviewer_name} · {_er.fmt_when(mine.get('reviewed_at'))}")
+            if mine.get('reason'):
+                text += f" · {_er.REASON_SHORT.get(mine['reason'], mine['reason'])}"
+            if mine.get('comment'):
+                c = str(mine['comment'])
+                tip = c
+                subs.append(c if len(c) <= 80 else c[:79] + '…')
+            panel.set_decision(dec)
+            if not panel.comment.hasFocus():
+                panel.comment.setText(str(mine.get('comment') or ''))
+            panel.set_reason(mine.get('reason') or '')
+        else:
+            text = 'Not reviewed'
+            panel.set_decision(None)
+            if not panel.comment.hasFocus():
+                panel.comment.setText('')
+            panel.set_reason('')
+        others = self.db.get_other_reviews(uuid, self.reviewer_name or '')
+        if others:
+            if self._show_others:
+                for o in others:
+                    subs.append(
+                        f"{o['reviewer']}: "
+                        f"{_er.decision_word(o['decision'], o.get('reason'))}"
+                        f" · {_er.fmt_when(o.get('reviewed_at'), today=datetime.min.date())}")
+            else:
+                subs.append(f"Also decided by {len(others)} other "
+                            f"reviewer(s); hidden so your decisions stay "
+                            f"independent.")
+        panel.set_current(text, subs, tip)
+
+    def _refresh_progress(self):
+        ep = self.epochs_panel
+        ev = ep._ev
+        panel = self.detail_dock_w.event_panel
+        if ev is None or ev.empty or ep._channel is None:
+            panel.set_progress('')
+            return
+        n_all = int(ev['uuid'].notna().sum()) or len(ev)
+        decs = [v[0] for u, v in ep._reviews.items()]
+        counts = {d: decs.count(d) for d in ('accept', 'reject', 'unsure')}
+        panel.set_progress(
+            f"Progress  {len(decs)} reviewed / {n_all} on {ep._channel} · "
+            f"{counts['accept']} accepted · {counts['reject']} rejected · "
+            f"{counts['unsure']} unsure")
+
+    # ---- keys --------------------------------------------------------
+    def _setup_review_shortcuts(self):
+        """Window shortcuts for the review keys, live only on the Epochs tab
+        and silent while a text field (the comment field included) has
+        focus."""
+        binds = [('A', lambda: self._key_decide('accept')),
+                 ('R', lambda: self._key_decide('reject')),
+                 ('U', lambda: self._key_decide('unsure')),
+                 ('C', self._key_comment),
+                 (']', lambda: self._nav_unreviewed(+1)),
+                 ('[', lambda: self._nav_unreviewed(-1)),
+                 ('}', lambda: self._nav_any(+1)),
+                 ('{', lambda: self._nav_any(-1)),
+                 (QtGui.QKeySequence.Undo, self._undo),
+                 ('Escape', self._key_escape),
+                 ('Return', self._key_enter), ('Enter', self._key_enter)]
+        binds += [(str(d), lambda d=str(d): self._key_digit(d))
+                  for d in range(1, 10)]
+        self._review_shortcuts = []
+        for key, slot in binds:
+            sc = QShortcut(QtGui.QKeySequence(key), self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(slot)
+            self._review_shortcuts.append(sc)
+        self.tabs.currentChanged.connect(self._update_review_shortcuts)
+        QApplication.instance().focusChanged.connect(
+            lambda *_: self._update_review_shortcuts())
+        self._update_review_shortcuts()
+
+    def _update_review_shortcuts(self, *_):
+        fw = QApplication.focusWidget()
+        typing = isinstance(fw, (QLineEdit, QtWidgets.QTextEdit,
+                                 QtWidgets.QPlainTextEdit,
+                                 QtWidgets.QAbstractSpinBox))
+        on = self.tabs.currentIndex() == 1 and not typing
+        for sc in getattr(self, '_review_shortcuts', []):
+            sc.setEnabled(on)
+
+    def review_shortcuts_enabled(self):
+        return any(sc.isEnabled() for sc in getattr(self, '_review_shortcuts', []))
+
+    def _key_comment(self):
+        if self.selected_event_uuid is not None:
+            c = self.detail_dock_w.event_panel.comment
+            c.setFocus(Qt.ShortcutFocusReason)
+            c.selectAll()
+
+    def _key_escape(self):
+        if self._disarm(cancel_message=True):
+            return
+        self.epochs_panel.escape_step()
+
+    def _on_comment_escape(self):
+        if self._disarm(cancel_message=True):
+            return
+        self.epochs_panel.setFocus(Qt.OtherFocusReason)
+
+    def _hint_for_arm(self):
+        if self._armed == 'reject':
+            if self._last_reject_reason:
+                lbl = _er.REASON_SHORT.get(self._last_reject_reason,
+                                           self._last_reject_reason)
+                return f"Choose a reason: 1–9, or Enter for “{lbl}”"
+            return 'Choose a reason: 1–9'
+        return 'Optional reason: 1–9, or Enter to save without one'
+
+    def _key_decide(self, decision):
+        """A writes at once; R / U arm and wait for a reason (spec 5)."""
+        if self.selected_event_uuid is None:
+            return
+        panel = self.detail_dock_w.event_panel
+        if decision == 'accept':
+            self._disarm()
+            self._write_decision('accept', None)
+            return
+        self._armed = decision
+        self._pending_other = False
+        if decision == 'reject':
+            panel.set_reason(self._last_reject_reason or '')
+        else:
+            panel.set_reason('')
+        panel.set_armed(decision, self._hint_for_arm())
+
+    _on_decision_requested = _key_decide   # EpochsPanel.decisionRequested
+
+    def _key_digit(self, digit):
+        if self._armed is None:
+            return
+        self._choose_reason(_er.REASON_BY_DIGIT.get(str(digit)))
+
+    def _on_reason_picked(self, token):
+        """Mouse pick in the reason combo: writes while armed."""
+        if self._armed is None:
+            return
+        self._choose_reason(token or None)
+
+    def _choose_reason(self, token):
+        panel = self.detail_dock_w.event_panel
+        if self._armed == 'reject' and not token:
+            panel.set_armed('reject', 'Choose a reason: 1–9')
+            return
+        panel.set_reason(token or '')
+        if token == 'other' and not panel.comment.text().strip():
+            self._pending_other = True
+            panel.set_armed(self._armed, 'Describe the reason, then Enter')
+            panel.comment.setFocus(Qt.OtherFocusReason)
+            return
+        self._write_decision(self._armed, token)
+
+    def _key_enter(self):
+        """Enter: confirm an armed decision with the preselected reason."""
+        panel = self.detail_dock_w.event_panel
+        if self._armed is None:
+            return
+        if self._pending_other:
+            if not panel.comment.text().strip():
+                return
+            self._write_decision(self._armed, 'other')
+            return
+        if self._armed == 'reject':
+            if not self._last_reject_reason:
+                return
+            self._choose_reason(self._last_reject_reason)
+            return
+        token = str(panel.reason_combo.currentData() or '') or None
+        self._choose_reason(token)
+
+    def _on_comment_submitted(self):
+        """Enter in the comment field: complete an armed decision, or save
+        the comment on this reviewer's existing decision."""
+        if self._armed is not None:
+            self._key_enter()
+            if self._armed is None:
+                self.epochs_panel.setFocus(Qt.OtherFocusReason)
+            return
+        uuid = self.selected_event_uuid
+        if uuid is None or self.db is None or not self.reviewer_name:
+            return
+        mine = self.db.get_review(uuid, self.reviewer_name)
+        if mine:
+            self._write_decision(mine['decision'], mine.get('reason'),
+                                 advance=False)
+        self.epochs_panel.setFocus(Qt.OtherFocusReason)
+
+    def _disarm(self, cancel_message=False):
+        """Drop an armed Reject / Unsure. Returns True when one was armed."""
+        armed = getattr(self, '_armed', None)
+        self._armed = None
+        self._pending_other = False
+        self.detail_dock_w.event_panel.set_armed(None)
+        if armed and cancel_message:
+            self.status_bar.showMessage(
+                'Reject cancelled — no reason chosen.' if armed == 'reject'
+                else 'Unsure cancelled — nothing saved.')
+        return bool(armed)
+
+    # ---- reviewer ------------------------------------------------------
+    REVIEWER_PROMPT = ('Your name or initials. It is saved with every accept '
+                       '/ reject decision, so two reviewers\' decisions on the '
+                       'same recording can be compared.')
+
+    def _ask_reviewer_name(self, prefill):
+        """The reviewer dialog; returns ``(text, ok)``. Separate so tests can
+        replace it."""
+        return QtWidgets.QInputDialog.getText(
+            self, 'Reviewer name', self.REVIEWER_PROMPT, QLineEdit.Normal,
+            prefill)
+
+    def _ensure_reviewer_name(self):
+        """Ask once per session; never invent a name."""
+        if self.reviewer_name:
+            return True
+        prefill = str(_review_settings().value('review/reviewer_name', '') or '')
+        name, ok = self._ask_reviewer_name(prefill)
+        name = str(name or '').strip()[:40]
+        if not ok or not name:
+            self.status_bar.showMessage(
+                'Decision not saved — a reviewer name is needed.')
+            return False
+        self.set_reviewer_name(name)
+        return True
 
     def set_reviewer_name(self, name):
-        """Set the name every decision of this session is saved under.
-
-        Interim until the D7 reviewer prompt replaces it. Blank input clears
-        the name, after which decisions are not saved. Returns the name set.
-        """
-        self.reviewer_name = str(name or '').strip()
-        self.status_bar.showMessage(
+        """Set the name decisions are saved under and the bands, Current
+        line and progress are scoped to; saved to ``QSettings``. Returns the
+        name set (whitespace stripped, at most 40 characters)."""
+        old = self.reviewer_name
+        self.reviewer_name = str(name or '').strip()[:40]
+        if self.reviewer_name:
+            _review_settings().setValue('review/reviewer_name',
+                                        self.reviewer_name)
+        self.seg_reviewer.setText(
             f"Reviewer: {self.reviewer_name}" if self.reviewer_name
             else "Reviewer: not set")
+        if old != self.reviewer_name:
+            self._undo_stack = []
+            ep = self.epochs_panel
+            if ep._channel is not None:
+                ep.set_reviews(self._reviews_for_slice(ep._df))
+                if self.selected_event_uuid is not None:
+                    self._refresh_current_line()
+                self._refresh_progress()
+            if old:
+                self.status_bar.showMessage(
+                    "Changing the name shows that reviewer's decisions and "
+                    "sample progress instead.")
+            else:
+                self.status_bar.showMessage(
+                    f"Reviewer: {self.reviewer_name}" if self.reviewer_name
+                    else "Reviewer: not set")
         return self.reviewer_name
 
     def _prompt_reviewer_name(self):
-        """Review > Reviewer name...: ask for the name, never invent one."""
-        name, ok = QtWidgets.QInputDialog.getText(
-            self, "Reviewer name",
-            "Name or initials saved with each decision:",
-            text=self.reviewer_name)
-        if ok:
+        """Review ▸ Reviewer name… and the status-bar segment."""
+        prefill = self.reviewer_name or str(
+            _review_settings().value('review/reviewer_name', '') or '')
+        name, ok = self._ask_reviewer_name(prefill)
+        name = str(name or '').strip()[:40]
+        if ok and name:
             self.set_reviewer_name(name)
 
+    def _confirm_show_others(self):
+        """Ask once per session before showing other reviewers."""
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Show other reviewers' decisions?")
+        box.setText("Show other reviewers' decisions?")
+        box.setInformativeText(
+            "Decisions you make while they are shown are recorded as not "
+            "independent, and the Precision report leaves them out of "
+            "inter-rater agreement.")
+        show = box.addButton('Show them', QtWidgets.QMessageBox.AcceptRole)
+        box.addButton('Cancel', QtWidgets.QMessageBox.RejectRole)
+        box.exec_()
+        return box.clickedButton() is show
 
+    def _on_show_others(self, checked):
+        if checked and not self._show_others_confirmed:
+            if not self._confirm_show_others():
+                self.act_show_others.blockSignals(True)
+                self.act_show_others.setChecked(False)
+                self.act_show_others.blockSignals(False)
+                return
+            self._show_others_confirmed = True
+        self._show_others = bool(checked)
+        if self.selected_event_uuid is not None:
+            self._refresh_current_line()
 
+    # ---- writing and undo ------------------------------------------------
+    def _write_decision(self, decision, reason, advance=True):
+        """Store ``decision`` for the selected event; push undo; advance."""
+        uuid = self.selected_event_uuid
+        if uuid is None:
+            return False
+        if self.db is None or not self.db.has_review_backend:
+            self._disarm()
+            self.status_bar.showMessage(
+                "Decision not saved: this TurtleWave library cannot store "
+                "event reviews.")
+            return False
+        if not self._ensure_reviewer_name():
+            self._disarm()
+            return False
+        panel = self.detail_dock_w.event_panel
+        comment = panel.comment.text().strip() or None
+        if reason == 'other' and not comment:
+            self._pending_other = True
+            panel.set_armed(decision, 'Describe the reason, then Enter')
+            return False
+        who = self.reviewer_name
+        before = self.db.get_review(uuid, who)
+        try:
+            self.db.add_review(uuid, decision, reviewer=who,
+                               comments=comment or '', reason=reason)
+        except Exception as err:
+            self._disarm()
+            self.status_bar.showMessage(f"Decision not saved: {err}")
+            return False
+        row, _run = self._selected_row()
+        row = row or {}
+        self._undo_stack.append({
+            'uuid': uuid, 'reviewer': who, 'before': before,
+            'action': decision, 'channel': row.get('channel'),
+            'start': row.get('start_time'), 'event_type':
+                self.epochs_panel._event_type})
+        del self._undo_stack[:-self.UNDO_DEPTH]
+        if decision == 'reject':
+            self._last_reject_reason = reason
+        self._disarm()
+        ep = self.epochs_panel
+        reviews = dict(ep._reviews)
+        reviews[uuid] = (decision, reason, who)
+        ep.set_reviews(reviews)
+        self._refresh_current_line()
+        self._refresh_progress()
+        # status: changed / new, next unreviewed or channel complete
+        chg = before and (before['decision'], before.get('reason')) != (
+            decision, reason)
+        evt = ep._event_type
+        if chg:
+            msg = (f"Changed from {_er.decision_word(before['decision'], before.get('reason'))}"
+                   f" to {_er.decision_word(decision, reason)} · Ctrl+Z to undo")
+        else:
+            word = _er.EVENT_SINGULAR.get(evt, evt)
+            msg = (f"{_er.DECISION_TITLE[decision]} {word} on "
+                   f"{row.get('channel')} at {_er.fmt_hms1(row.get('start_time'))}")
+            if reason:
+                msg += f" ({_er.REASON_SHORT.get(reason, reason)})"
+            nxt = self._peek_next_unreviewed(uuid)
+            if nxt is None:
+                msg += (f" · all {int(ep._ev['uuid'].notna().sum())} on "
+                        f"{ep._channel} reviewed")
+            else:
+                msg += f" · next unreviewed {_er.fmt_hms1(nxt)}"
+            msg += ' · Ctrl+Z to undo'
+        if advance and self._auto_advance and not chg:
+            if ep.n_unreviewed():
+                ep.next_unreviewed()
+        self.status_bar.showMessage(msg)
+        return True
 
+    def _peek_next_unreviewed(self, uuid):
+        """Start time of the next unreviewed event after ``uuid`` (wrapping),
+        or ``None`` when every event on the channel is reviewed."""
+        ev = self.epochs_panel._ev
+        ok = ev['uuid'].notna() & ~ev['uuid'].isin(
+            list(self.epochs_panel._reviews))
+        if not ok.any():
+            return None
+        pos = ev.index[ev['uuid'] == uuid]
+        after = ev.index[ok & (ev.index > (pos[0] if len(pos) else -1))]
+        cand = after if len(after) else ev.index[ok]
+        return float(ev.at[cand[0], '_start'])
 
+    def _undo(self):
+        """Ctrl+Z: restore this session's last decision write."""
+        self._disarm()
+        if not self._undo_stack:
+            self.status_bar.showMessage('Nothing to undo.')
+            return
+        ent = self._undo_stack.pop()
+        try:
+            self.db.restore_review(ent['uuid'], ent['reviewer'], ent['before'])
+        except Exception as err:
+            self.status_bar.showMessage(f"Undo failed: {err}")
+            return
+        ep = self.epochs_panel
+        if ent['channel'] is not None and ent['channel'] != ep._channel:
+            self.on_qc_drill(str(ent['channel']), switch_tab=False)
+        else:
+            reviews = dict(ep._reviews)
+            b = ent['before']
+            if b is None:
+                reviews.pop(ent['uuid'], None)
+            else:
+                reviews[ent['uuid']] = (b['decision'], b.get('reason'),
+                                        ent['reviewer'])
+            ep.set_reviews(reviews)
+        ep.select_event(ent['uuid'])
+        b = ent['before']
+        now = ('not reviewed' if b is None
+               else _er.decision_word(b['decision'], b.get('reason')))
+        self.status_bar.showMessage(
+            f"Undid {ent['action']} of {ent['channel']} "
+            f"{_er.fmt_hms1(ent['start'])} — now {now}")
+
+    def _clear_decision(self):
+        """Clear: delete this reviewer's decision on the selected event."""
+        uuid = self.selected_event_uuid
+        if uuid is None or self.db is None or not self.reviewer_name:
+            return
+        before = self.db.get_review(uuid, self.reviewer_name)
+        if before is None:
+            self.status_bar.showMessage('Nothing to clear.')
+            return
+        self.db.restore_review(uuid, self.reviewer_name, None)
+        row, _run = self._selected_row()
+        row = row or {}
+        self._undo_stack.append({
+            'uuid': uuid, 'reviewer': self.reviewer_name, 'before': before,
+            'action': 'clear', 'channel': row.get('channel'),
+            'start': row.get('start_time'),
+            'event_type': self.epochs_panel._event_type})
+        ep = self.epochs_panel
+        reviews = dict(ep._reviews)
+        reviews.pop(uuid, None)
+        ep.set_reviews(reviews)
+        self._refresh_current_line()
+        self._refresh_progress()
+        self.status_bar.showMessage(
+            f"Cleared your decision on {row.get('channel')} "
+            f"{_er.fmt_hms1(row.get('start_time'))} · Ctrl+Z to undo")
+
+    # ---- navigation --------------------------------------------------------
+    def _nav_unreviewed(self, step):
+        self._disarm(cancel_message=False)
+        ep = self.epochs_panel
+        u = ep.next_unreviewed() if step > 0 else ep.prev_unreviewed()
+        if ep.last_nav == 'wrapped':
+            self.status_bar.showMessage('Wrapped to the start of the night.')
+        elif u is None and ep._channel is not None and not ep._ev.empty:
+            evt = ep._event_type
+            self.status_bar.showMessage(
+                f"All {int(ep._ev['uuid'].notna().sum())} "
+                f"{_er.EVENT_PLURAL.get(evt, evt)} on {ep._channel} reviewed "
+                f"by {self.reviewer_name or 'you'}. Pick the next channel in "
+                f"the Channels tab.")
+
+    def _nav_any(self, step):
+        self._disarm(cancel_message=False)
+        ep = self.epochs_panel
+        if step > 0:
+            ep.next_event()
+        else:
+            ep.prev_event()
+
+    def _on_auto_advance(self, on):
+        self._auto_advance = bool(on)
+        _review_settings().setValue('review/auto_advance', bool(on))
+
+    # ---- population checks ----------------------------------------------
+    def _population_key(self, evt, methods, freq_band):
+        """Cache key: ``(path, evt, methods, band, stamp)``.
+
+        ``stamp`` is SQLite's ``PRAGMA data_version`` on the GUI's connection,
+        which changes when ANOTHER connection commits (a re-detection or a
+        backfill) and not on this GUI's own review / artefact writes. File
+        mtime and size would change on every decision and throw the cache
+        away mid-review.
+        """
+        path = getattr(self.db, 'db_path', None)
+        conn = getattr(self.db, 'conn', None)
+        try:
+            stamp = conn.execute("PRAGMA data_version").fetchone()[0]
+        except Exception:
+            stamp = None
+        return (path, str(evt), tuple(methods or ()),
+                tuple(freq_band) if freq_band else None, id(conn), stamp)
+
+    def _apply_population(self, qc, evt, methods, freq_band):
+        """Merge cached population checks into ``qc`` (in place copy), or
+        start the background read. Returns the merged frame."""
+        key = self._population_key(evt, methods, freq_band)
+        cache = self.__dict__.setdefault('_pop_cache', {})
+        res = cache.get(key)
+        if res is None:
+            self._start_population(key, evt, methods, freq_band)
+            self._pop_view = (key, None)
+            self.qc_widget.set_checks_context(False, event_type=evt,
+                                              pending=True)
+            self.detail_dock_w.set_checks_context(
+                True, event_type=evt, caption='Reading event checks…')
+            return qc
+        return self._merge_population(qc, evt, key, res)
+
+    def _merge_population(self, qc, evt, key, res):
+        run = res.get('run') or {}
+        method = str(run.get('method') or '')
+        ratio = method_has_ratio(method)
+        pop, med = _er.population_flags(
+            res['pop'], hard_z=self._qc_thresholds['hard_z'],
+            soft_z=self._qc_thresholds['soft_z'], event_type=evt,
+            ratio_allowed=ratio)
+        self._pop_view = (key, {'res': res, 'medians': med, 'pop': pop})
+        out = qc.drop(columns=[c for c in pop.columns
+                               if c != 'channel' and c in qc.columns])
+        out = out.merge(pop, on='channel', how='left') if len(pop) else out
+        if 'checks_flag' not in out.columns:
+            out['checks_flag'] = ''
+        out['checks_flag'] = out['checks_flag'].fillna('')
+        params = run.get('params') or {}
+        band = params.get('frequency')
+        bounds = _er.run_duration_bounds(run, method)
+        tips = _er.header_tooltips(
+            tuple(band) if band else None,
+            bounds[0] if bounds else None,
+            int(pop['n_no_peak'].sum()) if len(pop) else None)
+        recorded = bool(res.get('recorded'))
+        self.qc_widget.set_checks_context(recorded, method, ratio, evt, tips,
+                                          figures_off=bool(res.get('figures_off')))
+        caption = ''
+        if not recorded:
+            caption = (_er.FIGURES_OFF_RUN if res.get('figures_off')
+                       else _er.NOT_RECORDED_RUN)
+        elif len(res.get('runs_in_view') or []) > 1:
+            k = len(res['runs_in_view']) - 1
+            caption = (f"Event checks from {_er.run_label(run, res['run_id'])}"
+                       f"; {k} other run{'s' if k > 1 else ''} in view "
+                       f"{'are' if k > 1 else 'is'} not included.")
+        self.detail_dock_w.set_checks_context(recorded, evt, ratio, method,
+                                              caption)
+        return out
+
+    def _start_population(self, key, evt, methods, freq_band):
+        if self._pop_worker is not None and self._pop_worker.key == key:
+            return
+        path = getattr(self.db, 'db_path', None)
+        if not path:
+            return
+        w = _PopulationWorker(key, path, evt, methods, freq_band, self)
+        w.done.connect(self._on_population_ready)
+        self._pop_worker = w
+        w.start()
+
+    def _on_population_ready(self, key, res):
+        conn = getattr(self.db, 'conn', None)
+        if key[4] != id(conn):        # a database opened since the read began
+            if self._pop_worker is not None and self._pop_worker.key == key:
+                self._pop_worker = None
+            return
+        self.__dict__.setdefault('_pop_cache', {})[key] = res
+        if self._pop_worker is not None and self._pop_worker.key == key:
+            self._pop_worker = None
+        if res.get('error'):
+            logger.warning(f"Event checks could not be read: {res['error']}")
+        view = getattr(self, '_pop_view', None)
+        if view is None or view[0] != key or getattr(self, '_qc_df', None) is None:
+            return
+        qc = self._merge_population(self._qc_df, key[1], key, res)
+        self._qc_df = qc
+        self.qc_widget.set_data(qc, self._qc_events_df,
+                                self.qc_widget._verdicts, self._redetect_queue)
+        self.detail_dock_w.update_topo(qc)
+        ch = getattr(self, '_qc_selected_channel', None)
+        if ch:
+            self._update_check_line(ch)
+
+    def wait_population(self, timeout_s=60.0):
+        """Block until the background population read finishes (tests)."""
+        import time
+        t_end = time.time() + timeout_s
+        while self._pop_worker is not None and time.time() < t_end:
+            self._pop_worker.wait(50)
+            QApplication.processEvents()
+        QApplication.processEvents()
+        return self._pop_worker is None
+
+    def _update_check_line(self, ch):
+        view = getattr(self, '_pop_view', None)
+        qc = getattr(self, '_qc_df', None)
+        if view is None or view[1] is None or qc is None:
+            self.detail_dock_w.set_check_line(None, [])
+            return
+        recorded = bool(view[1]['res'].get('recorded'))
+        hit = qc[qc['channel'] == ch]
+        items = (_er.dock_check_items(hit.iloc[0].to_dict(), view[0][1],
+                                      view[1]['medians'])
+                 if recorded and len(hit) else [])
+        self.detail_dock_w.set_check_line(ch, items, recorded)
+
+    def _on_check_link(self, ch, col):
+        """Dock phrase link: drill the channel and filter its events to
+        those failing that check (spec section 1)."""
+        self.on_qc_drill(ch, switch_tab=True)
+        ep = self.epochs_panel
+        df = ep._df
+        if df is None or not len(df) or 'uuid' not in df.columns:
+            return
+        view = getattr(self, '_pop_view', None)
+        med = (view[1]['medians'].get(col) if view and view[1] else None)
+        if col in _er.RATIO_COLUMNS and (med is None or med != med):
+            return
+        mask = _er.failing_mask(df, col, med)
+        uuids = df.loc[mask.fillna(False), 'uuid'].astype(str).tolist()
+        evt = ep._event_type
+        ep.set_check_filter(col, _er.filter_chip_text(
+            col, evt, len(uuids), int(df['uuid'].notna().sum()), med), uuids)
+
+    def _on_check_filter_cleared(self):
+        self.status_bar.showMessage('Event filter removed.')
+
+    # ---- data readers for the Epochs tab ----------------------------------
+    def _read_eeg_channels(self, channels, t0, t1):
+        """One multi-channel read: ``(times, data[n, t], sfreq, labels)``
+        for the channels the file has, or ``None``."""
+        if self.eeg_data is None or not channels:
+            return None
+        t0 = max(0.0, float(t0))
+        t1 = float(t1)
+        names = self._eeg_channel_info()[0]
+        chans = [c for c in dict.fromkeys(channels) if c in names]
+        if not chans:
+            return None
+        try:
+            if hasattr(self.eeg_data, 'read_data'):
+                wf = self.eeg_data.read_data(chan=chans, begtime=t0,
+                                             endtime=t1)
+                arr = np.asarray(wf.data[0], dtype=float)
+                if arr.ndim == 1:
+                    arr = arr[None, :]
+                sf = float(getattr(wf, 's_freq', 0) or 0) or 500.0
+                try:
+                    ts = np.asarray(wf.axis['time'][0], dtype=float)
+                    if ts.size != arr.shape[1]:
+                        raise ValueError
+                except Exception:
+                    ts = t0 + np.arange(arr.shape[1]) / sf
+                try:
+                    got = [str(c) for c in wf.axis['chan'][0]]
+                except Exception:
+                    got = chans
+                return ts, arr, sf, got
+            if hasattr(self.eeg_data, 'get_data'):
+                sf = float(self.eeg_data.info['sfreq'])
+                allc = list(self.eeg_data.ch_names)
+                i0, i1 = int(t0 * sf), int(t1 * sf)
+                arr = np.asarray(self.eeg_data.get_data(
+                    picks=[allc.index(c) for c in chans], start=i0, stop=i1),
+                    dtype=float)
+                return t0 + np.arange(arr.shape[1]) / sf, arr, sf, chans
+        except Exception as err:
+            logger.warning(f"Could not read {len(chans)} channel(s) ({err}).")
+            return None
+        return None
+
+    def _neighbour_provider(self, target, window_s):
+        """``(channels, header, labels)`` for the Neighbours group."""
+        names, types, interp = self._eeg_channel_info()
+        eeg = ChannelTypeSummary(names, types).eeg
+        coords = self.detail_dock_w._coords or {}
+        chans, source, region = neighbour_channels(
+            target, eeg, coords, region_of=lambda c: _region_for_channel(c),
+            selected=self.selected_channels, k=6)
+        labels = [('~' + c) if c in interp else c for c in [target] + chans]
+        header = _er.neighbour_header(labels[0], chans, source, window_s,
+                                      region)
+        return chans, header, labels
+
+    def _neighbour_events(self, chans, t0, t1):
+        if self.db is None:
+            return None
+        methods, freq_band = self._current_method_freq()
+        return self.db.neighbour_events(chans, self.epochs_panel._event_type,
+                                        t0, t1, methods, freq_band)
+
+    def _refresh_physio_channels(self):
+        names, types, _interp = self._eeg_channel_info()
+        self.epochs_panel.physio.set_channels(physio_channels(names, types))
 
     def _recording_seconds(self):
         """Recording length: the annotation file's (``recording_seconds()``,
@@ -5994,6 +8039,13 @@ class EventReviewGUI(QMainWindow):
         """Segmented status bar: subject · hard · marked · ranges · queue ·
         build re-detect."""
         self.status_bar = self.statusBar()
+        # first permanent segment: who decisions are saved under
+        self.seg_reviewer = QPushButton("Reviewer: not set")
+        self.seg_reviewer.setFlat(True)
+        self.seg_reviewer.setFocusPolicy(Qt.NoFocus)
+        self.seg_reviewer.setStyleSheet("padding:0 8px;")
+        self.seg_reviewer.clicked.connect(self._prompt_reviewer_name)
+        self.status_bar.addPermanentWidget(self.seg_reviewer)
 
         def _seg(text):
             q = QLabel(text)
@@ -6044,8 +8096,10 @@ class EventReviewGUI(QMainWindow):
         self.btn_build_redetect.setEnabled(nq > 0 or nranges > 0)
 
     def setup_keyboard_shortcuts(self):
-        """F flags the selected QC channel for re-detect."""
+        """F flags the selected QC channel for re-detect; the review keys
+        are window shortcuts live on the Epochs tab only."""
         QShortcut(QtGui.QKeySequence('F'), self, self._flag_selected_qc_row)
+        self._setup_review_shortcuts()
 
     def _flag_selected_qc_row(self):
         """Toggle the currently-selected QC channel in the re-detect queue
@@ -6068,6 +8122,7 @@ class EventReviewGUI(QMainWindow):
         if file_path:
             try:
                 self.db = EventDatabase(file_path)
+                self._undo_stack = []
                 self.status_bar.showMessage("Database loaded successfully - Select channels to load events")
                 
                 # Get database size
@@ -6159,6 +8214,7 @@ class EventReviewGUI(QMainWindow):
                 if note:
                     self.status_bar.showMessage(note)
                     logger.info(note)
+            self._refresh_physio_channels()
             # Start background waveform loader
             self.start_background_loader()
             self._refresh_chrome()

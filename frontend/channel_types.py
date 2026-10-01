@@ -278,6 +278,122 @@ def default_review_channels(channels, chan_type=None):
 
 
 # ---------------------------------------------------------------------------
+# Review GUI: neighbouring channels and the physiology strip
+# ---------------------------------------------------------------------------
+
+def nearest_channels(target, coords, candidates, k=6):
+    """The ``k`` candidates nearest ``target`` on the 2-D electrode layout.
+
+    Parameters
+    ----------
+    target : str
+        Channel to centre on; never returned.
+    coords : dict
+        ``{label: (x, y)}``; ``target`` and candidates without a position are
+        skipped.
+    candidates : sequence of str
+        Channels allowed (EEG-type only, in the caller's terms).
+    k : int, optional
+        At most this many. Default 6.
+
+    Returns
+    -------
+    list of str
+        Nearest first; ties keep candidate order. Empty when ``target`` has
+        no position.
+    """
+    if not coords or target not in coords:
+        return []
+    tx, ty = (float(v) for v in coords[target])
+    scored = []
+    for i, ch in enumerate(candidates):
+        if ch == target or ch not in coords:
+            continue
+        x, y = (float(v) for v in coords[ch])
+        scored.append(((x - tx) ** 2 + (y - ty) ** 2, i, ch))
+    scored.sort()
+    return [ch for _, _, ch in scored[:int(k)]]
+
+
+def neighbour_channels(target, candidates, coords=None, region_of=None,
+                       selected=None, k=6):
+    """Neighbours of ``target`` for the review GUI, and how they were chosen.
+
+    By electrode position when ``coords`` place the target; else the
+    candidates in the same region (``region_of(label)``, file order); else
+    the reviewer's selected channels.
+
+    Returns
+    -------
+    (list of str, str, str or None)
+        Channels, the source (``'position'``, ``'region'`` or
+        ``'selected'``) and the target's region (``None`` unless the region
+        rule was used).
+    """
+    candidates = [c for c in candidates if c != target]
+    near = nearest_channels(target, coords or {}, candidates, k)
+    if near:
+        return near, 'position', None
+    if callable(region_of):
+        reg = region_of(target)
+        if reg and reg != 'other':
+            same = [c for c in candidates if region_of(c) == reg][:int(k)]
+            if same:
+                return same, 'region', reg
+    pool = set(candidates)
+    chosen = [c for c in (selected or []) if c != target and c in pool]
+    return chosen[:int(k)], 'selected', None
+
+
+def _kind_of(chan_type):
+    t = '' if chan_type is None else str(chan_type).strip().upper()
+    if 'EOG' in t:
+        return 'eog'
+    if 'EMG' in t:
+        return 'emg'
+    if 'ECG' in t or 'EKG' in t:
+        return 'ecg'
+    return None
+
+
+def physio_channels(channels, chan_type):
+    """EOG / chin EMG / ECG channels for the physiology strip.
+
+    Only positively typed channels count (``header['chan_type']`` containing
+    ``EOG``, ``EMG``, ``ECG`` or ``EKG``); names alone are never trusted.
+
+    Returns
+    -------
+    dict
+        Any of ``'eog'`` (list of at most two, file order), ``'emg'`` (one
+        channel, a name containing ``chin`` or ``subment`` first) and
+        ``'ecg'`` (the first). Empty when the file types none of them.
+    """
+    channels = [] if channels is None else [str(c) for c in channels]
+    types = _types_for(channels, chan_type)
+    if types is None:
+        return {}
+    eog, emg, ecg = [], [], []
+    for ch, t in zip(channels, types):
+        kind = _kind_of(t)
+        if kind == 'eog':
+            eog.append(ch)
+        elif kind == 'emg':
+            emg.append(ch)
+        elif kind == 'ecg':
+            ecg.append(ch)
+    out = {}
+    if eog:
+        out['eog'] = eog[:2]
+    if emg:
+        chin = [c for c in emg if 'CHIN' in c.upper() or 'SUBMENT' in c.upper()]
+        out['emg'] = (chin or emg)[0]
+    if ecg:
+        out['ecg'] = ecg[0]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Setup tab: Dataset Information text
 # ---------------------------------------------------------------------------
 
