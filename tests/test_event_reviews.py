@@ -35,12 +35,19 @@ test fails.
 
 import csv
 import logging
+import gc
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
 import traceback
+
+# Windows consoles and CI pipes default to cp1252, which cannot encode some
+# glyphs these checks print; replace rather than crash.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(errors='replace')
 
 import numpy as np
 
@@ -67,6 +74,7 @@ class Workdir:
         return self.path
 
     def __exit__(self, *exc):
+        gc.collect()   # Windows: drop datasets that still map files
         shutil.rmtree(self.path, ignore_errors=True)
 
 

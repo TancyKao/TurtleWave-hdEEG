@@ -29,6 +29,12 @@ import sys
 import tempfile
 import time
 
+# Windows consoles and CI pipes default to cp1252, which cannot encode some
+# glyphs these checks print; replace rather than crash.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(errors='replace')
+
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))

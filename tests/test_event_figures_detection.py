@@ -36,6 +36,12 @@ import sys
 import time
 import traceback
 
+# Windows consoles and CI pipes default to cp1252, which cannot encode some
+# glyphs these checks print; replace rather than crash.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(errors='replace')
+
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
