@@ -638,6 +638,86 @@ def region_from_label(label):
     return _REGION_BY_PREFIX.get(prefix, 'other')
 
 
+def interpolated_channels(header, channels=None):
+    """The selected channels the recording marks as interpolated.
+
+    Parameters
+    ----------
+    header : dict or None
+        A dataset header, as set by
+        :func:`turtlewave_hdEEG.eeglab_io.open_dataset`. Its
+        ``interp_channels`` key (list of str) names the channels whose signal
+        the cleaning pipeline reconstructed from neighbours; a missing key,
+        ``None`` or a header without it means none.
+    channels : iterable of str or None, optional
+        The selected channels. ``None`` (default) selects every channel.
+
+    Returns
+    -------
+    list of str
+        The interpolated channels among ``channels``, each once, in file
+        order (the order of ``header['chan_name']``); a selected name absent
+        from ``chan_name`` follows in selection order. ``[]`` when none.
+    """
+    if not header:
+        return []
+    interp = set(str(c) for c in (header.get('interp_channels') or []))
+    if not interp:
+        return []
+    file_order = [str(c) for c in (header.get('chan_name') or [])]
+    if channels is None:
+        selected = list(file_order) or sorted(interp)
+    else:
+        selected = [str(channels)] if isinstance(channels, str) else \
+            [str(c) for c in channels]
+    wanted = set(selected) & interp
+    ordered = [c for c in file_order if c in wanted]
+    seen = set(ordered)
+    for c in selected:
+        if c in wanted and c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    return ordered
+
+
+def warn_interpolated_channels(dataset, channels, logger_=None):
+    """Log one WARNING naming the selected channels that are interpolated.
+
+    Called once per run by each detector and by PAC, right after the channel
+    list is resolved, so a density or coupling value computed on a channel
+    whose signal was reconstructed from its neighbours is never silent.
+
+    Parameters
+    ----------
+    dataset : object or None
+        Anything with a ``header`` dict (a Wonambi ``Dataset``).
+    channels : iterable of str or None
+        The run's selected channels. ``None`` logs nothing.
+    logger_ : logging.Logger or None, optional
+        Where to log; default this module's logger.
+
+    Returns
+    -------
+    list of str
+        :func:`interpolated_channels` for the selection (``[]`` when none,
+        when ``channels`` is ``None`` or when the dataset has no header).
+    """
+    if channels is None:
+        return []
+    if isinstance(channels, str):
+        channels = [channels]
+    channels = list(channels)
+    header = getattr(dataset, 'header', None)
+    found = interpolated_channels(header if isinstance(header, dict) else None,
+                                  channels)
+    if found:
+        (logger_ or logger).warning(
+            "%d of %d selected channels are interpolated in the file "
+            "(signal reconstructed from neighbours): %s",
+            len(found), len(channels), ', '.join(found))
+    return found
+
+
 def _merge_intervals(intervals):
     """Merge overlapping/adjacent ``(start, end)`` spans into disjoint sorted spans.
 
@@ -797,7 +877,8 @@ def _annotation_overrun(annotations, fallback=0.0):
 def compute_analysed_seconds(annotations, stage, chan=None,
                              reject_types=DEFAULT_REJECT_TYPES,
                              s_freq=None, epoch_len=30,
-                             extra_artefact_intervals=None, logger_=None):
+                             extra_artefact_intervals=None, logger_=None,
+                             cycle=None):
     """Compute the artefact-free in-stage time actually fed to a detector.
 
     This reproduces the segmentation that Wonambi's :func:`wonambi.trans.select.fetch`
@@ -873,6 +954,14 @@ def compute_analysed_seconds(annotations, stage, chan=None,
         messages. ``None`` (default) uses this module's
         ``turtlewave_hdEEG.utils`` logger. Passing ``None`` never silences the
         warning: a data-integrity condition is always reported somewhere.
+    cycle : (float, float) or None, optional
+        Restrict to epochs wholly inside ``[start, end]`` seconds (Wonambi
+        ``get_times(cycle=...)`` containment), e.g. one sleep cycle's span on
+        the file's time base. Bounds should sit on epoch edges, otherwise the
+        epoch they cut is left out. Artefact spans, including
+        ``extra_artefact_intervals``, are subtracted only from the kept
+        epochs, so they are clipped to the cycle. ``None`` (default) is the
+        whole recording.
 
     Returns
     -------
@@ -929,7 +1018,9 @@ def compute_analysed_seconds(annotations, stage, chan=None,
     # Step 1: in-stage Good epochs (exclude=True mirrors reject_epoch=True).
     try:
         bundles = get_times(annotations, evt_type=None, stage=[stage],
-                            cycle=None, chan=None, exclude=True)
+                            cycle=None if cycle is None
+                            else [(float(cycle[0]), float(cycle[1]))],
+                            chan=None, exclude=True)
     except Exception:
         return 0.0, 0.0
 

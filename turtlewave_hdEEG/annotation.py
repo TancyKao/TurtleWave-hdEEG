@@ -9,12 +9,15 @@ import tempfile
 import os
 import time
 import logging
+from collections import namedtuple
+from xml.etree.ElementTree import SubElement
 import numpy as np
 from wonambi.attr import Annotations as WonambiAnnotations
 from wonambi.attr.annotations import create_empty_annotations
 
 from .timeline import (RecordingTimeline, stage_events_from_header,
-                       stage_event_intervals, regrid_stages, sidecar_path)
+                       stage_event_intervals, exact_cut_epochs,
+                       stage_name_for_code, sidecar_path)
 
 logger = logging.getLogger('turtlewave_hdEEG.annotation')
 
@@ -34,6 +37,19 @@ STAGE_EVENT_DISAGREEMENT_WARN = 0.01
 #: full-night hypnogram, but a boundary table that misstates the removed time
 #: shifts every epoch after the error and disagrees wholesale.
 STAGE_EVENT_DISAGREEMENT_REJECT = 0.20
+
+#: The staging chosen by :meth:`XLAnnotations._choose_staging_source`.
+#: ``codes`` (one per 30 s epoch from time 0) is set for the as-stored header
+#: source and goes through Wonambi's grid import; ``epochs`` (exact
+#: ``(start, end, code, orig_epoch)`` tuples) is set for the time-map and
+#: stage-event sources and goes through :meth:`XLAnnotations._write_exact_epochs`.
+#: ``timeline`` is the map written to the sidecar with exact epochs.
+StagingChoice = namedtuple('StagingChoice', 'source codes epochs timeline')
+
+#: Numeric hypnogram codes used by :meth:`CustomAnnotations.get_hypnogram`.
+HYPNOGRAM_CODES = {'Wake': 0, 'NREM1': 1, 'NREM2': 2, 'NREM3': 3, 'REM': 4,
+                   'Artefact': -1, 'Movement': -1, 'Unknown': -1,
+                   'Undefined': -1}
 
 class XLAnnotations:
     """Simplified annotations for large datasets"""
@@ -317,24 +333,26 @@ class XLAnnotations:
 
     def add_stages_from_header(self):
         """
-        Import sleep stages into the annotations on a 30 s grid over the signal.
+        Import sleep stages into the annotations.
 
         The staging source is chosen from the header and logged at INFO with
         its numbers (``turtlewave_hdEEG.annotation`` logger):
 
-        | Condition | Staging source |
-        |---|---|
-        | no removed time, and ``30 * len(etc.stages) - T <= 30`` s, or ``T`` unknown | ``etc.stages`` as stored (unchanged behaviour) |
-        | boundary events removed data (any amount) | full-night reading through the time map, or the as-stored reading, whichever the stage events support (ties and no events: time map when consistent); see :meth:`_choose_reading` |
-        | stage events present, and no usable map or no ``etc.stages`` | stage events, each ending at the next onset |
-        | longer, and neither usable | nothing imported, ERROR logged, returns ``False`` |
+        | Condition | Staging source | Epochs written |
+        |---|---|---|
+        | no removed time, and ``30 * len(etc.stages) - T <= 30`` s, or ``T`` unknown | ``etc.stages`` as stored (unchanged behaviour) | 30 s grid, Wonambi ``import_staging`` |
+        | boundary events removed data (any amount) | full-night reading through the time map, or the as-stored reading, whichever the stage events support (ties and no events: time map when consistent); see :meth:`_choose_reading` | time map: exact epochs; as stored: 30 s grid |
+        | stage events present, and no usable map or no ``etc.stages`` | stage events, each ending at the next onset or the next splice | exact epochs, Undefined in gaps (including data after a splice whose stage event was cut) |
+        | longer, and neither usable | nothing imported, ERROR logged, returns ``False`` | none |
 
-        ``T`` is the signal length (``n_samples / sampling rate``). The chosen
-        codes go through Wonambi's ``import_staging(source='compumedics')``.
-        On the time-map path the map is also written to
-        ``<annotation xml stem>_timeline.json`` beside the annotation file
-        (see :class:`~turtlewave_hdEEG.timeline.RecordingTimeline`) so that
-        sleep cycles and stage durations can be computed on the full night.
+        ``T`` is the signal length (``n_samples / sampling rate``). Exact
+        epochs are whole-second, variable-length epochs tiling
+        ``[0, int(T))`` (see :func:`~turtlewave_hdEEG.timeline.exact_cut_epochs`),
+        written by :meth:`_write_exact_epochs`. With exact epochs the map and
+        the epochs are also written to ``<annotation xml stem>_timeline.json``
+        beside the annotation file (see
+        :func:`~turtlewave_hdEEG.timeline.load_sidecar_for`) so that sleep
+        cycles and stage durations can be computed on the full night.
 
         The rater name applied to the imported staging is taken from the instance
         attribute ``self.rater_name`` set at construction, not from an argument.
@@ -349,10 +367,12 @@ class XLAnnotations:
         A cut recording keeps its full-night ``etc.stages`` while the signal
         loses the removed data, so importing ``etc.stages`` as stored would put
         every stage after the first splice on the wrong signal. The time map
-        adds back the data removed at each ``boundary`` event, reads the
-        full-night stage at that original time, and gives each 30 s grid epoch
-        the stage covering most of it (ties to the earlier stage; under half
-        covered, or the final partial epoch, is Undefined).
+        adds back the data removed at each ``boundary`` event and cuts every
+        surviving original epoch at the splices, so each exact epoch is one
+        piece of one original epoch with that epoch's stage. Edges are rounded
+        to whole seconds (halves up); a piece under about 0.5 s is dropped and
+        its time goes to a neighbour. Never multiply an epoch count by 30 on
+        such a file: use the epoch durations.
         """
         try:
             # Make sure we have a header with stages (or stage events)
@@ -375,19 +395,23 @@ class XLAnnotations:
             choice = self._choose_staging_source(header, stage_events)
             if choice is None:
                 return False
-            source, stages, timeline = choice
 
-            ok = self._import_stage_codes(stages)
-            if ok and timeline is not None:
-                self._write_timeline_sidecar(timeline, source, stages)
-            elif ok:
+            if choice.epochs is not None:
+                ok = self._write_exact_epochs(choice.epochs)
+                if ok:
+                    self._write_timeline_sidecar(choice.timeline, choice.source,
+                                                 choice.epochs)
+                return ok
+
+            ok = self._import_stage_codes(choice.codes)
+            if ok:
                 stale = sidecar_path(self.annot_file)
                 if stale.exists():
                     logger.warning(
                         f"{stale.name} exists beside the annotation file but "
-                        f"this staging came from '{source}', not the time map; "
-                        f"the sidecar is stale. Delete it before computing "
-                        f"sleep cycles.")
+                        f"this staging came from '{choice.source}' on a 30 s "
+                        f"grid; the sidecar is stale. Delete it before "
+                        f"computing sleep cycles.")
             return ok
 
         except Exception as e:
@@ -447,14 +471,14 @@ class XLAnnotations:
         stage_events : list of (float, str) or None
             Pre-computed stage events, or ``None`` to read them when needed.
         epoch_length : float
-            Epoch length of ``etc.stages`` and of the output grid.
+            Epoch length of ``etc.stages`` (and of the as-stored grid).
 
         Returns
         -------
-        (str, list, RecordingTimeline or None) or None
-            Source name, stage codes to import (one per epoch from time 0)
-            and the time map when it was used; ``None`` (ERROR logged) when
-            no source gives aligned staging.
+        StagingChoice or None
+            ``codes`` for the as-stored source, ``epochs`` and ``timeline``
+            for the time-map and stage-event sources; ``None`` (ERROR logged)
+            when no source gives aligned staging.
         """
         L = float(epoch_length)
         T, n_samples = self._signal_seconds()
@@ -469,7 +493,7 @@ class XLAnnotations:
                 logger.info(
                     f"Staging source: {STAGING_SOURCE_HEADER} "
                     f"({n_stages} epochs; signal length unknown)")
-                return STAGING_SOURCE_HEADER, stages, None
+                return StagingChoice(STAGING_SOURCE_HEADER, stages, None, None)
 
             try:
                 timeline = RecordingTimeline.from_header(
@@ -491,7 +515,8 @@ class XLAnnotations:
                         stage_events = self._header_stage_events()
                     self._warn_if_events_disagree(stages, stage_events, s_freq,
                                                   n_samples, L)
-                    return STAGING_SOURCE_HEADER, stages, None
+                    return StagingChoice(STAGING_SOURCE_HEADER, stages, None,
+                                         None)
             else:
                 chosen = self._choose_reading(timeline, stages, fits_signal,
                                               stage_events, s_freq, n_samples,
@@ -509,12 +534,29 @@ class XLAnnotations:
         if stage_events is None:
             stage_events = self._header_stage_events()
         if stage_events and T is not None:
-            codes = regrid_stages(stage_event_intervals(stage_events, T, L), T, L)
+            # The map is kept for its boundary table only: etc.stages was not
+            # used, so it must not reach the sidecar as the full night.
+            ev_timeline = RecordingTimeline.from_header(
+                {'event': header.get('event')}, s_freq, n_samples,
+                epoch_length=L)
+            # Each event's interval also ends at the next splice: the data
+            # after it belongs to a later part of the night, and when its own
+            # stage event went with the cut it has no stage (Undefined).
+            plain = stage_event_intervals(stage_events, T, L)
+            clipped = stage_event_intervals(stage_events, T, L,
+                                            splices=ev_timeline.cut_onsets)
+            lost = (sum(e - s for s, e, _ in plain)
+                    - sum(e - s for s, e, _ in clipped))
+            epochs = exact_cut_epochs(clipped, ev_timeline.last_second)
+            n_undef = sum(1 for e in epochs if e[2] == '?')
             logger.info(
                 f"Staging source: {STAGING_SOURCE_EVENTS} "
-                f"({len(stage_events)} stage events -> {len(codes)} epochs over "
-                f"{T:.1f} s; {reason})")
-            return STAGING_SOURCE_EVENTS, codes, None
+                f"({len(stage_events)} stage events -> {len(epochs)} exact "
+                f"epochs over {ev_timeline.last_second} s, {n_undef} of them "
+                f"Undefined; {lost:.1f} s after a splice and before the next "
+                f"stage event left Undefined; {reason})")
+            return StagingChoice(STAGING_SOURCE_EVENTS, None, epochs,
+                                 ev_timeline)
 
         logger.error(
             f"Staging not imported: {reason}, and there are no stage events "
@@ -553,9 +595,9 @@ class XLAnnotations:
 
         Returns
         -------
-        (str, list, RecordingTimeline or None) or None
-            The chosen source, codes and time map (``None`` for as stored),
-            or ``None`` when neither reading is usable.
+        StagingChoice or None
+            Time map: exact ``epochs`` and the ``timeline``; as stored:
+            ``codes`` only. ``None`` when neither reading is usable.
 
         Notes
         -----
@@ -624,14 +666,15 @@ class XLAnnotations:
         chosen_cmp = map_cmp if chosen == 'map' else stored_cmp
 
         if chosen == 'map':
-            codes = timeline.cut_hypnogram()
+            epochs = timeline.exact_epochs()
             timeline.meta.update({'stage_events_compared': map_cmp[0],
                                   'stage_events_disagreeing': map_cmp[1]})
             logger.info(
                 f"Staging source: {STAGING_SOURCE_TIME_MAP} "
                 f"({n_stages} full-night epochs, {timeline.n_boundaries} "
                 f"boundary events removing {removed:.1f} s, signal {T:.1f} s "
-                f"-> {len(codes)} epochs; {scores})")
+                f"-> {len(epochs)} exact epochs over {timeline.last_second} s; "
+                f"{scores})")
             if not have_evidence and fits_signal and removed >= L / 2:
                 logger.warning(
                     f"etc.stages fits both the full night and the cut signal "
@@ -639,7 +682,8 @@ class XLAnnotations:
                     f"to tell them apart; read as the full night through the "
                     f"time map. Check the staging if etc.stages was rescored "
                     f"after the cut.")
-            result = (STAGING_SOURCE_TIME_MAP, codes, timeline)
+            result = StagingChoice(STAGING_SOURCE_TIME_MAP, None, epochs,
+                                   timeline)
         else:
             msg = (f"Staging source: {STAGING_SOURCE_HEADER} ({n_stages} epochs "
                    f"taken to be on the cut time base although "
@@ -649,7 +693,7 @@ class XLAnnotations:
                 logger.info(msg)
             else:
                 logger.warning(msg)
-            result = (STAGING_SOURCE_HEADER, stages, None)
+            result = StagingChoice(STAGING_SOURCE_HEADER, stages, None, None)
 
         if chosen_cmp[0] and share_bad(chosen_cmp) > STAGE_EVENT_DISAGREEMENT_REJECT:
             logger.warning(
@@ -766,17 +810,64 @@ class XLAnnotations:
             except Exception as e:
                 print(f"Warning: Could not delete temporary file {temp_filename}: {e}")
 
-    def _write_timeline_sidecar(self, timeline, source, cut_stages):
-        """Write ``<annotation xml stem>_timeline.json`` for a cut recording.
+    def _write_exact_epochs(self, epochs, poor=('Artefact',)):
+        """Replace this rater's epochs with exact variable-length epochs.
+
+        Wonambi's ``import_staging`` can only write a fixed grid, so the
+        ``<epoch>`` elements are written directly, in the same layout
+        ``import_staging`` produces (integer ``epoch_start`` / ``epoch_end``,
+        ``stage``, ``quality``).
+
+        Parameters
+        ----------
+        epochs : sequence of tuple
+            ``(start, end, code, orig_epoch)`` from
+            :func:`~turtlewave_hdEEG.timeline.exact_cut_epochs`; ``start`` and
+            ``end`` are whole seconds, ``code`` a Compumedics stage code
+            (named through ``COMPUMEDICS_STAGE_KEY`` exactly as the grid import
+            names it; unrecognised codes become ``Unknown``).
+        poor : sequence of str
+            Stage names whose epochs get quality ``Poor``; all others ``Good``.
+
+        Returns
+        -------
+        bool
+            True once the file is saved.
+        """
+        if self.rater_name not in self.annotations.raters:
+            self.annotations.add_rater(self.rater_name)
+        self.annotations.get_rater(self.rater_name)
+        stages = self.annotations.rater.find('stages')
+        for old in list(stages):
+            stages.remove(old)
+        for start, end, code, _orig in epochs:
+            epoch = SubElement(stages, 'epoch')
+            SubElement(epoch, 'epoch_start').text = str(int(start))
+            SubElement(epoch, 'epoch_end').text = str(int(end))
+            name = stage_name_for_code(code)
+            SubElement(epoch, 'stage').text = name
+            SubElement(epoch, 'quality').text = 'Poor' if name in poor else 'Good'
+        self.annotations.save()
+        durations = [int(e[1]) - int(e[0]) for e in epochs]
+        logger.info(
+            f"Wrote {len(epochs)} exact epochs as rater '{self.rater_name}' "
+            f"({sum(d == 30 for d in durations)} of 30 s, "
+            f"{sum(d == 1 for d in durations)} of 1 s, "
+            f"{sum(durations)} s in total)")
+        return True
+
+    def _write_timeline_sidecar(self, timeline, source, epochs):
+        """Write ``<annotation xml stem>_timeline.json`` (schema 2).
 
         Parameters
         ----------
         timeline : RecordingTimeline
-            The time map used for staging.
+            The time map (for the stage-event source, a map without
+            full-night stages).
         source : str
             Staging-source name.
-        cut_stages : list of str
-            The codes imported on the cut file's grid.
+        epochs : list of tuple
+            The exact epochs written to the XML, stored as ``cut_epochs``.
 
         Returns
         -------
@@ -789,6 +880,10 @@ class XLAnnotations:
             tw_version = None
         header = getattr(self.dataset, 'header', {}) or {}
         start = header.get('start_time')
+        timeline.cut_epochs = [(int(e[0]), int(e[1]), str(e[2]), int(e[3]))
+                               for e in epochs]
+        if epochs:
+            timeline.last_second = int(epochs[-1][1])
         timeline.meta.update({
             'source': source,
             'turtlewave_version': tw_version,
@@ -797,7 +892,6 @@ class XLAnnotations:
             'data_file': str(getattr(self.dataset, 'filename', '') or ''),
             'annotation_file': str(Path(self.annot_file).name),
             'rater': self.rater_name,
-            'cut_stages': [str(c) for c in cut_stages],
         })
         path = sidecar_path(self.annot_file)
         try:
@@ -1060,29 +1154,104 @@ class CustomAnnotations:
         return self.wonb_annot.add_rater(rater)
     
     def get_stages(self):
-        """Extract just the stages from the epochs"""
+        """Stage name of every epoch, in file order.
+
+        Returns
+        -------
+        list of str
+            One name per epoch. Epochs may differ in length (exact epochs on
+            a cut recording), so never turn a count of these into time by
+            multiplying by 30; use :meth:`get_stage_intervals` or
+            :meth:`epoch_durations`.
+        """
         epochs = self.epochs
         if epochs:
             return [epoch['stage'] for epoch in epochs]
         return []
-    
+
     def get_hypnogram(self):
-        """Convert stages to numeric values for hypnogram plotting"""
-        stage_map = {
-            'Wake': 0,
-            'NREM1': 1,
-            'NREM2': 2, 
-            'NREM3': 3,
-            'REM': 4,
-            'Artefact': -1,
-            'Movement': -1,
-            'Unknown': -1,
-            'Undefined': -1
-        }
-        
+        """Numeric stage code of every epoch, in file order.
+
+        Returns
+        -------
+        list of int
+            Wake 0, NREM1/2/3 1/2/3, REM 4, anything else -1. Codes only:
+            epochs may differ in length, so never multiply a count by 30; use
+            :meth:`get_hypnogram_intervals` or :meth:`epoch_durations`.
+        """
         stages = self.get_stages()
-        return [stage_map.get(stage, -1) for stage in stages]
-    
+        return [HYPNOGRAM_CODES.get(stage, -1) for stage in stages]
+
+    def get_stage_intervals(self):
+        """Every epoch as ``(start, end, stage)``, the canonical hypnogram.
+
+        Returns
+        -------
+        list of (float, float, str)
+            Seconds from the recording start and the Wonambi stage name,
+            sorted by start. Epoch lengths are whatever the file holds: 30 s
+            on a grid import, variable on a cut recording's exact epochs.
+        """
+        return sorted(((float(e['start']), float(e['end']), str(e['stage']))
+                       for e in self.epochs), key=lambda x: x[0])
+
+    def get_hypnogram_intervals(self):
+        """Every epoch as ``(start, end, code)`` with numeric stage codes.
+
+        Returns
+        -------
+        list of (float, float, int)
+            As :meth:`get_stage_intervals`, with the codes of
+            :meth:`get_hypnogram`.
+        """
+        return [(s, e, HYPNOGRAM_CODES.get(st, -1))
+                for s, e, st in self.get_stage_intervals()]
+
+    def epoch_durations(self):
+        """Length of every epoch in seconds, in the order of :meth:`get_stage_intervals`.
+
+        Returns
+        -------
+        list of float
+        """
+        return [e - s for s, e, _ in self.get_stage_intervals()]
+
+    def has_uniform_epochs(self, tol=1e-6):
+        """Whether every epoch has the same length.
+
+        Parameters
+        ----------
+        tol : float
+            Allowed difference in seconds.
+
+        Returns
+        -------
+        bool
+            True for a grid import (and for a file with no epochs); False for
+            a cut recording's exact epochs.
+        """
+        d = self.epoch_durations()
+        return not d or (max(d) - min(d)) <= tol
+
+    def recording_seconds(self):
+        """Length of the recording in seconds.
+
+        Returns
+        -------
+        float
+            The annotation file's ``last_second`` (``int(n_samples /
+            s_freq)`` when Wonambi created it), else the end of the last
+            epoch, else 0.0.
+        """
+        try:
+            last = self.wonb_annot.last_second
+            if last:
+                return float(last)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        ivals = self.get_stage_intervals()
+        return float(ivals[-1][1]) if ivals else 0.0
+
     def save(self, filename=None):
         """Save the annotations as Wonambi XML.
 

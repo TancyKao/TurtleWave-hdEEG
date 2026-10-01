@@ -6,9 +6,11 @@ samples together and leaves a ``boundary`` event at each splice whose
 ``duration`` is the number of samples removed there. The signal file then
 runs on a *cut* time base while a hypnogram scored on the full night (for
 example ``EEG.etc.stages`` from a Compumedics export) runs on the *original*
-time base. This module converts between the two, relabels a regular 30 s
-grid on the cut file, and saves the map as a JSON sidecar so steps that have
-no dataset (sleep cycles, stage durations) can still use the full night.
+time base. This module converts between the two, turns the full-night
+stages into exact whole-second epochs on the cut file
+(:func:`exact_cut_epochs`), and saves the map and those epochs as a JSON
+sidecar so steps that have no dataset (sleep cycles, stage durations) can
+still use the full night (:func:`load_sidecar_for`).
 
 Pure numpy; no Wonambi, no Qt.
 """
@@ -63,7 +65,7 @@ def canonical_stage_code(code):
 
 
 #: Version of the sidecar JSON layout written by :meth:`RecordingTimeline.to_json`.
-SIDECAR_SCHEMA = 1
+SIDECAR_SCHEMA = 2
 
 
 def _event_fields(event_info):
@@ -154,7 +156,7 @@ def stage_events_from_header(event_info, s_freq):
     return out
 
 
-def stage_event_intervals(stage_events, T, epoch_length=30.0):
+def stage_event_intervals(stage_events, T, epoch_length=30.0, splices=None):
     """Label intervals from stage events, each ending at the next onset.
 
     Parameters
@@ -165,13 +167,21 @@ def stage_event_intervals(stage_events, T, epoch_length=30.0):
         Cut-file duration in seconds.
     epoch_length : float
         Nominal stage-event length in seconds.
+    splices : sequence of float or None
+        Cut-file seconds of the splices (``boundary`` events). An interval is
+        also ended at the first splice strictly inside it: the data after a
+        splice comes from a later part of the night, and when its own stage
+        event was removed with the cut it has no stage. ``None`` (default)
+        clips nothing.
 
     Returns
     -------
     list of (float, float, str)
-        ``[onset_i, min(onset_i + epoch_length, onset_{i+1}, T))`` with its
-        code; empty intervals are dropped.
+        ``[onset_i, min(onset_i + epoch_length, onset_{i+1}, next splice, T))``
+        with its code; empty intervals are dropped.
     """
+    cuts = np.sort(np.asarray([] if splices is None else list(splices),
+                              dtype=float))
     out = []
     for i, (onset, code) in enumerate(stage_events):
         end = onset + epoch_length
@@ -179,64 +189,94 @@ def stage_event_intervals(stage_events, T, epoch_length=30.0):
             end = min(end, stage_events[i + 1][0])
         end = min(end, T)
         start = max(onset, 0.0)
+        k = np.searchsorted(cuts, start + 1e-6, side='left')
+        if k < cuts.size and cuts[k] < end:
+            end = float(cuts[k])
         if end > start:
             out.append((start, end, code))
     return out
 
 
-def regrid_stages(label_intervals, T, epoch_length=30.0, undefined=UNDEFINED_CODE):
-    """Label a regular epoch grid on ``[0, T)`` from arbitrary label intervals.
+def round_edge(t):
+    """Round an epoch edge to a whole second, halves up.
+
+    The one rounding rule for every exact-epoch edge, so two pieces that
+    share a raw edge always share the rounded edge.
 
     Parameters
     ----------
-    label_intervals : iterable of (float, float, str)
-        ``(start, end, label)`` in seconds on the grid's time base.
-    T : float
-        Recording duration in seconds.
-    epoch_length : float
-        Grid epoch length in seconds.
-    undefined : str
-        Label for epochs that cannot be labelled.
+    t : float
+        Edge in seconds.
 
     Returns
     -------
-    list of str
-        One label per epoch, ``ceil(T / epoch_length)`` of them. Each full
-        epoch takes the label with the largest total overlap; a tie goes to
-        the label whose overlap starts earlier in the epoch; an epoch less
-        than half covered by any label is ``undefined``. The final partial
-        epoch (when ``T`` is not a multiple of ``epoch_length``) is always
-        ``undefined``.
+    int
+        ``floor(t + 0.5)``, with a 1e-9 s allowance so an edge computed as
+        ``x.4999999999`` from a sample-level round trip still rounds up.
     """
-    L = float(epoch_length)
-    n_full = int(np.floor(T / L + 1e-9))
-    n_total = int(np.ceil(T / L - 1e-9))
-    acc = [dict() for _ in range(n_full)]
-    for start, end, label in sorted(label_intervals, key=lambda x: x[0]):
-        s = max(float(start), 0.0)
-        e = min(float(end), n_full * L)
+    return int(np.floor(float(t) + 0.5 + 1e-9))
+
+
+def exact_cut_epochs(intervals, last_second, undefined=UNDEFINED_CODE):
+    """Whole-second, variable-length epochs tiling ``[0, last_second)``.
+
+    Parameters
+    ----------
+    intervals : iterable of tuple
+        ``(start, end, code)`` or ``(start, end, code, orig_epoch)`` label
+        intervals in cut-file seconds, as from
+        :meth:`RecordingTimeline.stage_intervals_cut` or
+        :func:`stage_event_intervals`. A missing ``orig_epoch`` is ``-1``.
+    last_second : int
+        End of the last epoch, ``int(n_samples / s_freq)``; the same value
+        Wonambi writes as the annotation file's ``last_second``.
+    undefined : str
+        Code for gap-filling epochs.
+
+    Returns
+    -------
+    list of (int, int, str, int)
+        ``(start, end, code, orig_epoch)`` sorted, contiguous, starting at 0
+        and ending at ``last_second``. Gap fillers carry ``undefined`` and
+        ``orig_epoch = -1``.
+
+    Notes
+    -----
+    Every edge goes through :func:`round_edge` and is clipped to
+    ``[0, last_second]``, so an edge at or past the end of the signal becomes
+    ``last_second``. A piece whose rounded end is not after its rounded start
+    (a sliver under about 0.5 s) is dropped, never merged: its time goes to
+    whichever neighbour the rounding gives it, at most 0.5 s per edge.
+    Pieces that overlap after rounding (only possible when the input
+    overlaps) are trimmed to start where the previous one ended.
+    """
+    last = int(last_second)
+    pieces = []
+    for iv in intervals:
+        start, end, code = iv[0], iv[1], iv[2]
+        orig = int(iv[3]) if len(iv) > 3 else -1
+        s = min(max(round_edge(start), 0), last)
+        e = min(max(round_edge(end), 0), last)
+        pieces.append((s, e, str(code), orig))
+    pieces.sort(key=lambda p: (p[0], p[1]))
+
+    out = []
+    cursor = 0
+    for s, e, code, orig in pieces:
+        s = max(s, cursor)
         if e <= s:
             continue
-        for k in range(int(s // L), min(int(np.ceil(e / L)), n_full)):
-            lo, hi = max(s, k * L), min(e, (k + 1) * L)
-            if hi <= lo:
-                continue
-            total, first = acc[k].get(label, (0.0, lo))
-            acc[k][label] = (total + (hi - lo), min(first, lo))
-    out = []
-    for k in range(n_total):
-        if k >= n_full or not acc[k]:
-            out.append(undefined)
-            continue
-        covered = sum(v[0] for v in acc[k].values())
-        if covered < 0.5 * L - 1e-9:
-            out.append(undefined)
-            continue
-        best = max(acc[k].items(),
-                   key=lambda kv: (round(kv[1][0], 9), -kv[1][1]))
-        out.append(best[0])
+        if s > cursor:
+            out.append((cursor, s, undefined, -1))
+        out.append((s, e, code, orig))
+        cursor = e
+    if cursor < last:
+        out.append((cursor, last, undefined, -1))
     return out
 
+
+class SidecarMismatchError(ValueError):
+    """The timeline sidecar is missing, outdated, or disagrees with its XML."""
 
 class RecordingTimeline:
     """Map between the cut signal's time base and the original night.
@@ -257,6 +297,12 @@ class RecordingTimeline:
         Epoch length of ``stages`` in seconds.
     meta : dict or None
         Extra fields carried into the sidecar (source, versions, paths).
+    last_second : int or None
+        End of the cut file's exact epochs; ``int(n_samples / s_freq)`` when
+        ``None``.
+    cut_epochs : list of tuple or None
+        The exact epochs written to the annotation file,
+        ``(start, end, code, orig_epoch)``; ``None`` until staging sets it.
 
     Attributes
     ----------
@@ -271,7 +317,8 @@ class RecordingTimeline:
     """
 
     def __init__(self, cut_onsets, removed, s_freq, n_samples, stages=None,
-                 epoch_length=30.0, meta=None):
+                 epoch_length=30.0, meta=None, last_second=None,
+                 cut_epochs=None):
         self.cut_onsets = np.asarray(cut_onsets, dtype=float).ravel()
         self.removed = np.asarray(removed, dtype=float).ravel()
         if self.cut_onsets.shape != self.removed.shape:
@@ -281,6 +328,10 @@ class RecordingTimeline:
         self.stages = None if stages is None else [str(s) for s in stages]
         self.epoch_length = float(epoch_length)
         self.meta = dict(meta or {})
+        self.last_second = (int(self.n_samples / self.s_freq)
+                            if last_second is None else int(last_second))
+        self.cut_epochs = None if cut_epochs is None else [
+            (int(e[0]), int(e[1]), str(e[2]), int(e[3])) for e in cut_epochs]
         # removed before each splice, and each splice's position in original time
         self._removed_before = np.concatenate(([0.0], np.cumsum(self.removed)[:-1])) \
             if self.removed.size else np.array([])
@@ -411,11 +462,12 @@ class RecordingTimeline:
 
         Returns
         -------
-        list of (float, float, str)
+        list of (float, float, str, int)
             For each continuous stretch of cut signal between splices, the
             parts of each original epoch that survived, as cut-file
-            ``(start, end, code)``. Removed data contributes nothing, and an
-            original time past the last stage has no label.
+            ``(start, end, code, orig_epoch)`` where ``orig_epoch`` indexes
+            :meth:`fullnight_hypnogram`. Removed data contributes nothing, and
+            an original time past the last stage has no label.
         """
         if not self.stages:
             return []
@@ -436,20 +488,19 @@ class RecordingTimeline:
                 lo = max(a, i * L - shift)
                 hi = min(b, (i + 1) * L - shift)
                 if hi > lo:
-                    out.append((lo, hi, self.stages[i]))
+                    out.append((lo, hi, self.stages[i], i))
         return out
 
-    def cut_hypnogram(self):
-        """Full-night stages relabelled onto the cut file's 30 s grid.
+    def exact_epochs(self):
+        """Exact whole-second epochs of the full-night stages on the cut file.
 
         Returns
         -------
-        list of str
-            ``ceil(cut_seconds / epoch_length)`` codes, from
-            :func:`regrid_stages` over :meth:`stage_intervals_cut`.
+        list of (int, int, str, int)
+            :func:`exact_cut_epochs` over :meth:`stage_intervals_cut`, ending
+            at :attr:`last_second`.
         """
-        return regrid_stages(self.stage_intervals_cut(), self.cut_seconds,
-                             self.epoch_length)
+        return exact_cut_epochs(self.stage_intervals_cut(), self.last_second)
 
     def compare_stage_events(self, stage_events):
         """Check stage events against the full-night hypnogram.
@@ -485,7 +536,15 @@ class RecordingTimeline:
         return n_compared, n_disagree
 
     def to_dict(self):
-        """Serialisable form; the keys :meth:`to_json` writes."""
+        """Serialisable form; the keys :meth:`to_json` writes.
+
+        Returns
+        -------
+        dict
+            JSON-serialisable: schema, signal and removal totals,
+            ``boundaries``, ``fullnight_stages``, ``last_second`` and
+            ``cut_epochs``, plus everything in ``meta``.
+        """
         d = {
             'schema': SIDECAR_SCHEMA,
             's_freq': self.s_freq,
@@ -501,22 +560,38 @@ class RecordingTimeline:
                 for c, o, r in zip(self.cut_onsets, self.original_onsets,
                                    self.removed)],
             'fullnight_stages': self.fullnight_hypnogram(),
+            'last_second': self.last_second,
+            'cut_epochs': [list(e) for e in (self.cut_epochs or [])],
         }
         d.update(self.meta)
         return d
 
     @classmethod
     def from_dict(cls, d):
-        """Rebuild from :meth:`to_dict` output; unknown keys go to ``meta``."""
+        """Rebuild from :meth:`to_dict` output; unknown keys go to ``meta``.
+
+        Parameters
+        ----------
+        d : dict
+            A dictionary as returned by :meth:`to_dict` or read from a
+            sidecar JSON.
+
+        Returns
+        -------
+        RecordingTimeline
+        """
         known = {'schema', 's_freq', 'n_samples', 'epoch_length', 'cut_seconds',
                  'removed_seconds', 'original_seconds', 'n_boundaries',
-                 'boundaries', 'fullnight_stages'}
+                 'boundaries', 'fullnight_stages', 'last_second',
+                 'cut_epochs'}
         b = d.get('boundaries', [])
         return cls([x['cut_onset_s'] for x in b], [x['removed_s'] for x in b],
                    d['s_freq'], d['n_samples'],
                    stages=d.get('fullnight_stages'),
                    epoch_length=d.get('epoch_length', 30.0),
-                   meta={k: v for k, v in d.items() if k not in known})
+                   meta={k: v for k, v in d.items() if k not in known},
+                   last_second=d.get('last_second'),
+                   cut_epochs=d.get('cut_epochs'))
 
     def to_json(self, path):
         """Write the sidecar JSON.
@@ -549,7 +624,7 @@ class RecordingTimeline:
         -------
         RecordingTimeline
             The map; keys other than the map's own (``source``,
-            ``turtlewave_version``, ``cut_stages``...) are in ``meta``.
+            ``turtlewave_version``, ``annotation_file``...) are in ``meta``.
         """
         with open(path, 'r', encoding='utf-8') as fh:
             return cls.from_dict(json.load(fh))
@@ -570,3 +645,153 @@ def sidecar_path(annot_file):
     """
     p = Path(annot_file)
     return p.with_name(f'{p.stem}_timeline.json')
+
+
+def stage_name_for_code(code):
+    """Wonambi stage name for a Compumedics stage code.
+
+    Reads the code exactly as Wonambi's ``import_staging(source='compumedics')``
+    reads one line of a staging file (the first two characters of
+    ``code + newline``, looked up in ``COMPUMEDICS_STAGE_KEY``), so exact and
+    grid imports name every code the same way.
+
+    Parameters
+    ----------
+    code : object
+        Stage code, e.g. ``'2'``, ``'N2'``, ``'R'``, ``'?'``.
+
+    Returns
+    -------
+    str
+        ``'Wake'``, ``'NREM1'``, ``'NREM2'``, ``'NREM3'``, ``'REM'``,
+        ``'Undefined'``, or ``'Unknown'`` for an unrecognised code.
+    """
+    from wonambi.attr.annotations import COMPUMEDICS_STAGE_KEY
+    key = (str(code).strip() + '\n')[0:2]
+    return COMPUMEDICS_STAGE_KEY.get(key, 'Unknown')
+
+
+def load_sidecar_for(annot_file, annotations=None, require=True):
+    """Load the timeline sidecar of an annotation file and check it.
+
+    Parameters
+    ----------
+    annot_file : str or Path
+        The Wonambi annotation XML.
+    annotations : object or None
+        An annotation wrapper exposing ``get_stage_intervals()``
+        (:class:`~turtlewave_hdEEG.annotation.CustomAnnotations`) already open
+        on ``annot_file``. ``None`` opens one, on the sidecar's rater when the
+        file has it.
+    require : bool
+        When True a missing sidecar raises; when False it returns ``None``.
+
+    Returns
+    -------
+    RecordingTimeline or None
+        The map with ``cut_epochs`` and ``last_second`` set, or ``None`` when
+        the sidecar is absent and ``require`` is False.
+
+    Raises
+    ------
+    SidecarMismatchError
+        The sidecar is missing (``require`` True), unreadable, older than
+        schema 2, written for a different annotation file, or its
+        ``cut_epochs`` / ``last_second`` differ from the XML's epochs. The
+        message lists up to three differing epochs and says to re-run the
+        annotation step.
+    """
+    annot_file = Path(annot_file)
+    path = sidecar_path(annot_file)
+    redo = (f"Re-run the annotation step (XLAnnotations.add_stages_from_header) "
+            f"to rewrite {annot_file.name} and its sidecar together.")
+    if not path.exists():
+        if require:
+            raise SidecarMismatchError(
+                f"No timeline sidecar {path.name} beside {annot_file.name}. "
+                f"{redo}")
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise SidecarMismatchError(
+            f"Timeline sidecar {path} cannot be read ({e}). {redo}") from e
+
+    schema = data.get('schema')
+    if not isinstance(schema, int) or schema < 2:
+        raise SidecarMismatchError(
+            f"Timeline sidecar {path.name} has schema {schema!r}; schema 2 or "
+            f"later (exact epochs) is required. {redo}")
+    named = data.get('annotation_file')
+    if named != annot_file.name:
+        raise SidecarMismatchError(
+            f"Timeline sidecar {path.name} was written for {named!r}, not "
+            f"{annot_file.name!r}. {redo}")
+
+    if annotations is None:
+        from .annotation import CustomAnnotations
+        annotations = CustomAnnotations(str(annot_file))
+        rater = data.get('rater')
+        if rater and rater in (annotations.raters or []):
+            annotations.get_rater(rater)
+    xml = [(int(round(s)), int(round(e)), str(st))
+           for s, e, st in annotations.get_stage_intervals()]
+    side = [(int(e[0]), int(e[1]), stage_name_for_code(e[2]))
+            for e in data.get('cut_epochs') or []]
+
+    problems = []
+    if len(side) != len(xml):
+        problems.append(f"{len(side)} epochs in the sidecar, {len(xml)} in "
+                        f"the XML")
+    diffs = [(i, a, b) for i, (a, b) in enumerate(zip(side, xml)) if a != b]
+    for i, a, b in diffs[:3]:
+        problems.append(f"epoch {i}: sidecar {a[0]}-{a[1]} s {a[2]}, XML "
+                        f"{b[0]}-{b[1]} s {b[2]}")
+    if len(diffs) > 3:
+        problems.append(f"... {len(diffs) - 3} more differing epochs")
+    last = data.get('last_second')
+    xml_last = xml[-1][1] if xml else None
+    if last is None or (xml_last is not None and int(last) != xml_last):
+        problems.append(f"last_second {last} in the sidecar, last epoch end "
+                        f"{xml_last} in the XML")
+    if problems:
+        raise SidecarMismatchError(
+            f"Timeline sidecar {path.name} does not match {annot_file.name}: "
+            f"{'; '.join(problems)}. The XML was probably rescored or "
+            f"re-annotated without the sidecar. {redo}")
+    tl = RecordingTimeline.from_dict(data)
+    logger.debug(f"Timeline sidecar {path.name} matches {annot_file.name} "
+                 f"({len(xml)} epochs)")
+    return tl
+
+
+def nominal_epoch_length(annotations, default=30.0):
+    """Epoch length to report for an annotation file.
+
+    Parameters
+    ----------
+    annotations : object
+        Annotation wrapper; read through ``has_uniform_epochs()`` and
+        ``epoch_durations()`` when it has them.
+    default : float
+        Returned for uniform epochs, an empty file, or an object without
+        those methods.
+
+    Returns
+    -------
+    float
+        ``default`` for a uniform grid; for variable-length epochs (a cut
+        recording's exact epochs) the median epoch duration, which is a
+        description of the file, not a length any epoch count may be
+        multiplied by.
+    """
+    if annotations is None or not hasattr(annotations, 'has_uniform_epochs'):
+        return float(default)
+    try:
+        if annotations.has_uniform_epochs():
+            return float(default)
+        durations = annotations.epoch_durations()
+    except Exception:
+        return float(default)
+    return float(np.median(durations)) if durations else float(default)

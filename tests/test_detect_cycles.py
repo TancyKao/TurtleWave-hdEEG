@@ -198,3 +198,95 @@ def test_epoch_starts_respected():
     c = detect_cycles([2] * 40 + [4] * 12, epoch_length=20, epoch_starts=starts)
     assert c[0]['nrem_end_sec'] == 800.0 and c[0]['rem_end_sec'] == 1040.0
     assert c[0]['nrem_dur_min'] == pytest.approx(40 * 20 / 60, abs=1e-3)
+
+
+# --------------------------------------------------------------------------
+# compute_stage_durations(durations=...) and plot_hypnogram_cycles(epoch_ends=...)
+# --------------------------------------------------------------------------
+
+from turtlewave_hdEEG.cycleprocessor import compute_stage_durations  # noqa: E402
+
+
+def test_stage_durations_grid_unchanged_by_the_durations_argument():
+    hyp = [0, 1, 2, 2, 3, 4, -1, 4]
+    grid = compute_stage_durations(hyp)
+    same = compute_stage_durations(hyp, durations=[30.0] * len(hyp))
+    assert grid == same
+    assert grid['epoch_length'] == 30 and grid['total_min'] == 4.0
+    assert (grid['wake_min'], grid['n1_min'], grid['n2_min'], grid['n3_min'],
+            grid['rem_min'], grid['artefact_min']) == (0.5, 0.5, 1.0, 0.5, 1.0, 0.5)
+
+
+def test_stage_durations_sum_real_durations_not_counts():
+    hyp = [0, 2, 2, 3, 4, -1]
+    durs = [30.0, 30.0, 1.0, 5.0, 12.0, 2.0]
+    out = compute_stage_durations(hyp, epoch_length=22.0, durations=durs)
+    assert out['wake_min'] == 0.5
+    assert math.isclose(out['n2_min'], 31.0 / 60.0)
+    assert math.isclose(out['n3_min'], 5.0 / 60.0)
+    assert math.isclose(out['rem_min'], 12.0 / 60.0)
+    assert math.isclose(out['artefact_min'], 2.0 / 60.0)
+    assert math.isclose(out['total_min'], sum(durs) / 60.0)
+    # epoch_length is only reported; it must not enter the minutes.
+    assert out['epoch_length'] == 22.0
+
+
+def test_stage_durations_reconcile_with_durations():
+    hyp = [0, 1, 2, 3, 4, -1, 7]            # 7 is an unexpected code
+    durs = [30, 7, 30, 13, 30, 4, 9]
+    out = compute_stage_durations(hyp, durations=durs)
+    parts = (out['wake_min'] + out['n1_min'] + out['n2_min'] + out['n3_min']
+             + out['rem_min'] + out['artefact_min'])
+    assert math.isclose(parts, out['total_min'])
+    assert math.isclose(out['artefact_min'], 13.0 / 60.0)
+
+
+def test_stage_durations_empty_with_durations():
+    out = compute_stage_durations([], durations=[])
+    assert out['total_min'] == 0 and out['artefact_min'] == 0
+
+
+def _capture_figure(monkeypatch):
+    from matplotlib.figure import Figure
+    seen = []
+    real = Figure.savefig
+
+    def spy(self, *a, **k):
+        seen.append(self)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Figure, 'savefig', spy)
+    return seen
+
+
+def _one_cycle():
+    return {'2022': [dict(cycle_number=1, nrem_start_sec=0.0, nrem_end_sec=60.0,
+                          rem_end_sec=90.0, nrem_start_epoch=0, nrem_end_epoch=1,
+                          rem_start_epoch=2, rem_end_epoch=2)]}
+
+
+def test_plot_epoch_ends_set_the_right_edge(tmp_path, monkeypatch):
+    pytest.importorskip('matplotlib')
+    from turtlewave_hdEEG.cycleplot import plot_hypnogram_cycles
+    seen = _capture_figure(monkeypatch)
+    hyp = [2, 2, 4]
+    starts = [0.0, 30.0, 60.0]
+    ends = [30.0, 60.0, 65.0]                # last epoch is 5 s, not 30 s
+    out = tmp_path / 'ends.png'
+    assert plot_hypnogram_cycles(hyp, _one_cycle(), str(out), epoch_starts=starts,
+                                 epoch_ends=ends) == str(out)
+    assert out.stat().st_size > 0
+    assert math.isclose(seen[-1].axes[-1].get_xlim()[1], 65.0 / 3600.0)
+
+    plot_hypnogram_cycles(hyp, _one_cycle(), str(tmp_path / 'noends.png'),
+                          epoch_starts=starts)
+    assert math.isclose(seen[-1].axes[-1].get_xlim()[1], 90.0 / 3600.0)
+
+
+def test_plot_epoch_ends_length_must_match(tmp_path):
+    pytest.importorskip('matplotlib')
+    from turtlewave_hdEEG.cycleplot import plot_hypnogram_cycles
+    with pytest.raises(ValueError, match='epoch_ends'):
+        plot_hypnogram_cycles([2, 2, 4], _one_cycle(), str(tmp_path / 'x.png'),
+                              epoch_starts=[0, 30, 60], epoch_ends=[30, 60])
+    assert not (tmp_path / 'x.png').exists()

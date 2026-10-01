@@ -25,7 +25,8 @@ from matplotlib.figure import Figure
 import pandas as pd
 from datetime import datetime
 
-from .utils import derive_subject, normalize_subject, resolve_reject_types
+from .utils import (derive_subject, normalize_subject, resolve_reject_types,
+                    warn_interpolated_channels)
 from . import dbwrite
 
 
@@ -506,7 +507,12 @@ class ParalPAC:
         # 2. Process channel input
         if isinstance(chan, str):
             chan = [chan]
-        
+
+        # Channels whose signal the cleaning pipeline reconstructed from
+        # neighbours: flagged once per run, never dropped. PAC has no
+        # detection_runs row, so the warning is the only record here.
+        warn_interpolated_channels(self.dataset, chan, logger)
+
         # 3. Process stage input
         if isinstance(stage, str):
             stage = [stage]

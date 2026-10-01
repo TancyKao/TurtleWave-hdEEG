@@ -113,15 +113,13 @@ def check_output_files(results_dir):
 def main():
     """Main function to run all debugging steps."""
     
-    # Default directory - user can modify this
-    default_dir = "/Volumes/Sleep/Sleep/2. STAFF/Tancy/OSA CPAP Events/sub-15DC/BL/wonambi/pac_results/Staresina2015_paired_Moelle2011/NREM2NREM3"
-    
+    # No default directory: this step writes a summary CSV into the folder,
+    # so it must be named explicitly.
     if len(sys.argv) > 1:
         results_dir = sys.argv[1]
     else:
-        results_dir = default_dir
-        print(f"Using default directory: {results_dir}")
-        print("To use a different directory, run: python test_pac_debug.py /path/to/your/directory")
+        print("Usage: python test_pac_debug.py /path/to/pac_results/<method>/<stages>")
+        return
     
     if not os.path.exists(results_dir):
         print(f"Error: Directory does not exist: {results_dir}")

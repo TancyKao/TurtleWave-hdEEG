@@ -1113,3 +1113,59 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         "artefact-free analysed time, subject=%s)",
         len(rows), os.path.basename(db_path), resolved_subject)
     return rows
+
+
+#: Column order of the frame returned by :func:`read_cycle_analysed_time`.
+CYCLE_ANALYSED_TIME_COLUMNS = (
+    'subject', 'method', 'cycle_number', 'stage', 'reject_types',
+    'fullnight_seconds', 'removed_seconds', 'masked_seconds',
+    'analysed_seconds', 'coverage', 'low_coverage', 'coverage_floor_seconds',
+    'annotation_file', 'turtlewave_version', 'processing_timestamp',
+)
+
+
+def read_cycle_analysed_time(db_path, subject=None):
+    """Read the per-cycle coverage of cut recordings.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to ``neural_events.db``.
+    subject : str or None, optional
+        Restrict to one subject (normalised, so ``'10sd'`` finds
+        ``'sub-10sd'``). ``None`` (default) returns every subject.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per subject x method x cycle x stage x reject set, columns
+        :data:`CYCLE_ANALYSED_TIME_COLUMNS`, sorted by subject, method,
+        reject set, cycle and stage; ``low_coverage`` as bool. Empty (same
+        columns) when the table is absent: only cut recordings with a
+        full-night hypnogram have rows.
+
+    Notes
+    -----
+    ``coverage`` is ``analysed_seconds / fullnight_seconds``: how much of the
+    cycle's full-night time in that stage the detectors actually analysed.
+    Rows with ``low_coverage`` hold under ``coverage_floor_seconds`` of
+    analysed time, too little for a per-cycle density.
+    """
+    conn = sqlite3.connect(db_path, timeout=60.0)
+    try:
+        if not _table_exists(conn, 'analysed_time_cycles'):
+            return pd.DataFrame(columns=list(CYCLE_ANALYSED_TIME_COLUMNS))
+        sql = (f"SELECT {', '.join(CYCLE_ANALYSED_TIME_COLUMNS)} "
+               f"FROM analysed_time_cycles")
+        params = []
+        if subject is not None:
+            from .utils import normalize_subject
+            sql += " WHERE subject = ?"
+            params.append(str(normalize_subject(str(subject))))
+        sql += (" ORDER BY subject, method, reject_types, cycle_number, "
+                "stage")
+        df = pd.read_sql_query(sql, conn, params=params)
+    finally:
+        conn.close()
+    df['low_coverage'] = df['low_coverage'].astype(bool)
+    return df

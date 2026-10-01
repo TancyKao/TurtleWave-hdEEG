@@ -285,8 +285,126 @@ def _h5_scalar(obj):
         return None
 
 
+def _h5_is_char(obj):
+    """True for an HDF5 dataset MATLAB wrote as a ``char`` array."""
+    try:
+        cls = obj.attrs.get('MATLAB_class', b'')
+    except AttributeError:
+        return False
+    if isinstance(cls, bytes):
+        cls = cls.decode('ascii', 'replace')
+    return str(cls) == 'char'
+
+
+def _h5_interp_channels(f, eeg):
+    """Names listed in ``etc.interp_channels`` of an HDF5 struct.
+
+    Parameters
+    ----------
+    f : h5py.File
+        The open file (needed to dereference cell elements).
+    eeg : h5py.Group
+        The EEGLAB struct located by :func:`find_eeg_struct`.
+
+    Returns
+    -------
+    list of str
+        The names as stored (a cell of char arrays, or a single char array),
+        stripped, empty entries dropped; ``[]`` when the field is absent or
+        empty. Non-text entries (e.g. channel indices) are skipped with an
+        INFO message, because an index cannot be mapped to a label safely.
+    """
+    etc = eeg.get('etc')
+    if not isinstance(etc, h5py.Group) or 'interp_channels' not in etc:
+        return []
+    obj = etc['interp_channels']
+    if not isinstance(obj, h5py.Dataset) or _h5_is_empty(obj):
+        return []
+    names, skipped = [], 0
+    if h5py.check_ref_dtype(obj.dtype) is not None:
+        for ref in np.ravel(obj[()]):
+            try:
+                item = f[ref] if ref else None
+            except (TypeError, ValueError, KeyError):
+                item = None
+            if item is None or _h5_is_empty(item):
+                continue
+            if _h5_is_char(item):
+                names.append(_h5_text(item).strip())
+            else:
+                skipped += 1
+    elif _h5_is_char(obj):
+        names.append(_h5_text(obj).strip())
+    else:
+        skipped += int(obj.size)
+    if skipped:
+        logger.info("etc.interp_channels holds %d non-text entries; they were "
+                    "ignored", skipped)
+    return [n for n in names if n]
+
+
+def _scipy_interp_channels(eeg):
+    """Names listed in ``etc.interp_channels`` of a scipy-loaded struct.
+
+    Parameters
+    ----------
+    eeg : object
+        The EEGLAB struct (``mat_struct`` or ``SimpleNamespace``).
+
+    Returns
+    -------
+    list of str
+        Same meaning as :func:`_h5_interp_channels`. Handles a cell array of
+        char (an object array, or a bare ``str`` when ``squeeze_me`` reduced a
+        one-element cell) and a char matrix (an array of ``str``).
+    """
+    value = getattr(getattr(eeg, 'etc', None), 'interp_channels', None)
+    if value is None:
+        return []
+    names, skipped = [], 0
+    for item in np.ravel(np.atleast_1d(np.asarray(value, dtype=object))):
+        if isinstance(item, (str, np.str_)):
+            names.append(str(item).strip())
+        elif isinstance(item, np.ndarray) and item.size == 0:
+            continue
+        else:
+            skipped += 1
+    if skipped:
+        logger.info("etc.interp_channels holds %d non-text entries; they were "
+                    "ignored", skipped)
+    return [n for n in names if n]
+
+
+def _match_interp_channels(interp, labels, filename):
+    """Keep the listed interpolated names that are channels, in file order.
+
+    Parameters
+    ----------
+    interp : list of str
+        Names from ``etc.interp_channels``.
+    labels : list of str
+        Channel labels in file order (after :func:`dedupe_channel_labels`).
+    filename : str or Path
+        The ``.set``, for the log message.
+
+    Returns
+    -------
+    list of str
+        The labels that ``interp`` names, each once, in channel (file) order.
+        A listed name that is not a channel is left out and logged at INFO.
+    """
+    listed = set(interp)
+    unknown = [n for n in dict.fromkeys(interp) if n not in set(labels)]
+    if unknown:
+        logger.info("%s lists %d interpolated channel(s) that are not channels "
+                    "in the file, ignored: %s", Path(str(filename)).name,
+                    len(unknown), ', '.join(unknown))
+    return [lab for lab in labels if lab in listed]
+
+
 def _h5_channel_info(f, eeg):
-    """Channel types, reference and good-channel count from an HDF5 struct.
+    """Channel types, reference, good-channel count and interpolated channels
+    from an HDF5 struct.
 
     Parameters
     ----------
@@ -304,6 +422,9 @@ def _h5_channel_info(f, eeg):
         The struct's ``ref`` field (e.g. ``'average'``), ``None`` if absent.
     n_good : int or None
         ``etc.reference.n_good``, ``None`` if absent.
+    interp : list of str
+        Names in ``etc.interp_channels`` as stored (not yet matched against
+        the channel labels), ``[]`` if absent.
     """
     chan_types = None
     chanlocs = eeg.get('chanlocs')
@@ -326,7 +447,7 @@ def _h5_channel_info(f, eeg):
         value = _h5_scalar(etc['reference'].get('n_good'))
         if value is not None and np.isfinite(value):
             n_good = int(value)
-    return chan_types, ref, n_good
+    return chan_types, ref, n_good, _h5_interp_channels(f, eeg)
 
 
 def _scipy_text(value):
@@ -341,7 +462,8 @@ def _scipy_text(value):
 
 
 def _scipy_channel_info(eeg):
-    """Channel types, reference and good-channel count from a scipy struct.
+    """Channel types, reference, good-channel count and interpolated channels
+    from a scipy struct.
 
     Parameters
     ----------
@@ -351,7 +473,7 @@ def _scipy_channel_info(eeg):
     Returns
     -------
     tuple
-        ``(types, ref, n_good)`` with the same meaning as
+        ``(types, ref, n_good, interp)`` with the same meaning as
         :func:`_h5_channel_info`.
     """
     chan_types = None
@@ -372,7 +494,7 @@ def _scipy_channel_info(eeg):
             n_good = int(float(value))
     except (TypeError, ValueError):
         n_good = None
-    return chan_types, ref, n_good
+    return chan_types, ref, n_good, _scipy_interp_channels(eeg)
 
 
 class TurtleEEGLAB(EEGLAB):
@@ -392,6 +514,10 @@ class TurtleEEGLAB(EEGLAB):
         The file's ``ref`` field.
     reference_n_good : int or None
         ``etc.reference.n_good``: how many channels formed the reference.
+    interp_channels : list of str
+        Channels named in ``etc.interp_channels`` (signal reconstructed from
+        neighbours by the cleaning pipeline), in channel order; ``[]`` when
+        the file lists none.
     """
 
     def return_hdr(self):
@@ -423,6 +549,8 @@ class TurtleEEGLAB(EEGLAB):
         self.chan_type = None
         self.reference = None
         self.reference_n_good = None
+        self.interp_channels = []
+        interp = []
 
         try:
             mat = _load_mat(self.filename)
@@ -453,8 +581,8 @@ class TurtleEEGLAB(EEGLAB):
             else:
                 self.data = self.EEG.data
 
-            (self.chan_type, self.reference,
-             self.reference_n_good) = _scipy_channel_info(self.EEG)
+            (self.chan_type, self.reference, self.reference_n_good,
+             interp) = _scipy_channel_info(self.EEG)
 
         else:
             with _open_h5(self.filename) as f:
@@ -490,10 +618,12 @@ class TurtleEEGLAB(EEGLAB):
                 else:
                     self.fdtfile = datfile
 
-                (self.chan_type, self.reference,
-                 self.reference_n_good) = _h5_channel_info(f, EEG)
+                (self.chan_type, self.reference, self.reference_n_good,
+                 interp) = _h5_channel_info(f, EEG)
 
         chan_name = dedupe_channel_labels(chan_name)
+        self.interp_channels = _match_interp_channels(
+            interp, chan_name, self.filename)
         if self.chan_type is not None and len(self.chan_type) != len(chan_name):
             logger.warning(f"{len(self.chan_type)} channel types for "
                            f"{len(chan_name)} channels; channel types ignored")
@@ -577,8 +707,11 @@ def read_eeglab_channel_info(filename):
         ``labels`` (list of str, made unique as in :func:`open_dataset`),
         ``types`` (list of str parallel to ``labels``, or ``None`` when the
         file has no channel types), ``ref`` (str or ``None``, e.g.
-        ``'average'``) and ``n_good`` (int or ``None``, from
-        ``etc.reference.n_good``).
+        ``'average'``), ``n_good`` (int or ``None``, from
+        ``etc.reference.n_good``) and ``interp_channels`` (list of str, the
+        channels named in ``etc.interp_channels`` in channel order, ``[]``
+        when none are listed; a listed name that is not a channel is dropped
+        and logged at INFO).
 
     Raises
     ------
@@ -598,7 +731,7 @@ def read_eeglab_channel_info(filename):
         _require_fields(filename, eeg, is_hdf5=False, required=('chanlocs',))
         eeg = _as_struct(eeg)
         labels = [chan.labels for chan in np.ravel(np.atleast_1d(eeg.chanlocs))]
-        chan_types, ref, n_good = _scipy_channel_info(eeg)
+        chan_types, ref, n_good, interp = _scipy_channel_info(eeg)
     except NotImplementedError:
         with _open_h5(filename) as f:
             eeg = find_eeg_struct(f)
@@ -606,12 +739,13 @@ def read_eeglab_channel_info(filename):
                 raise _no_struct_error(filename, f, is_hdf5=True)
             _require_fields(filename, eeg, is_hdf5=True, required=('chanlocs',))
             labels = read_hdf5_chan_name(f, eeg['chanlocs']['labels'])
-            chan_types, ref, n_good = _h5_channel_info(f, eeg)
+            chan_types, ref, n_good, interp = _h5_channel_info(f, eeg)
 
     labels = dedupe_channel_labels(labels)
     if chan_types is not None and len(chan_types) != len(labels):
         chan_types = None
-    return {'labels': labels, 'types': chan_types, 'ref': ref, 'n_good': n_good}
+    return {'labels': labels, 'types': chan_types, 'ref': ref, 'n_good': n_good,
+            'interp_channels': _match_interp_channels(interp, labels, filename)}
 
 
 def open_dataset(filename):
@@ -630,11 +764,15 @@ def open_dataset(filename):
     wonambi.Dataset
         The dataset. Its ``header`` gains three keys for every format:
         ``chan_type`` (list of str parallel to ``chan_name``, or ``None`` when
-        the file has no channel types; ``''`` for a channel without a type)
-        and ``reference`` (``None`` when the file states no reference,
+        the file has no channel types; ``''`` for a channel without a type),
+        ``reference`` (``None`` when the file states no reference,
         otherwise ``{'ref': str, 'n_good': int or None}``, e.g.
         ``{'ref': 'average', 'n_good': 220}``, where ``n_good`` is
-        ``etc.reference.n_good``, the number of channels that formed it).
+        ``etc.reference.n_good``, the number of channels that formed it) and
+        ``interp_channels`` (list of str: the channels the file's
+        ``etc.interp_channels`` names as interpolated, in ``chan_name``
+        order; ``[]`` when the file lists none and for every non-``.set``
+        format).
 
     Raises
     ------
@@ -653,8 +791,11 @@ def open_dataset(filename):
         ds.header['reference'] = (
             None if not ref else
             {'ref': ref, 'n_good': getattr(io, 'reference_n_good', None)})
+        ds.header['interp_channels'] = list(
+            getattr(io, 'interp_channels', None) or [])
     else:
         ds = WonambiDataset(filename)
         ds.header.setdefault('chan_type', None)
         ds.header.setdefault('reference', None)
+        ds.header.setdefault('interp_channels', [])
     return ds

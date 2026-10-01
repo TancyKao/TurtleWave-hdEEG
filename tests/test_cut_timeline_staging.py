@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Cut recordings: the time map, the regular-grid relabelling and the choice of
-staging source.
+"""Cut recordings: the time map, exact variable-length epochs and the choice
+of staging source.
 
 A recording with data removed upstream (EEGLAB ``boundary`` events) keeps its
 full-night hypnogram in ``etc.stages`` while the signal is shorter.
@@ -20,14 +20,12 @@ sources:
 Layout of the file:
 
 * time-map tests (pure numpy, no files);
-* ``regrid_stages`` tests;
 * source-choice tests, driven through ``XLAnnotations`` on fixture ``.set``
   files. These assert which source was used, the return value, the sidecar
-  and that epochs were written, but not the exact epoch layout;
-* ``test_grid_*``: the exact epoch layout. Staging is currently a regular
-  30 s grid over the cut file (final partial epoch Undefined). If the layout
-  changes to exact variable-length epochs, replace these tests and leave the
-  rest.
+  and that epochs were written;
+* ``test_exact_*``: the epoch layout. The time-map and stage-event sources
+  write exact whole-second epochs tiling ``[0, int(T))`` (Undefined in gaps);
+  the as-stored source keeps Wonambi's 30 s grid.
 
 Run standalone: ``python tests/test_cut_timeline_staging.py``. Exits non-zero
 if any test fails.
@@ -53,8 +51,9 @@ from turtlewave_hdEEG.annotation import (  # noqa: E402
     XLAnnotations)
 from turtlewave_hdEEG.dataset import LargeDataset  # noqa: E402
 from turtlewave_hdEEG.timeline import (  # noqa: E402
-    RecordingTimeline, boundaries_from_events, canonical_stage_code,
-    regrid_stages, sidecar_path, stage_event_intervals, stage_events_from_header)
+    RecordingTimeline, SidecarMismatchError, boundaries_from_events,
+    canonical_stage_code, exact_cut_epochs, load_sidecar_for, sidecar_path,
+    stage_event_intervals, stage_events_from_header)
 
 FS = 100.0
 
@@ -180,9 +179,9 @@ def test_time_map_splice_at_time_zero():
     # stage intervals start at the original 10 s: epoch 0 survives 20 s of 30
     tl = _timeline([0.0], [10.0], 6000, stages=['W', '1', '2'])      # 60 s cut, 70 s night
     ivals = tl.stage_intervals_cut()
-    assert ivals[0] == (0.0, 20.0, 'W'), ivals[0]
-    assert ivals[1] == (20.0, 50.0, '1'), ivals[1]
-    assert ivals[2] == (50.0, 60.0, '2'), ivals[2]
+    assert ivals[0] == (0.0, 20.0, 'W', 0), ivals[0]
+    assert ivals[1] == (20.0, 50.0, '1', 1), ivals[1]
+    assert ivals[2] == (50.0, 60.0, '2', 2), ivals[2]
     assert len(ivals) == 3, ivals
     print(f"   [ok] stage_intervals_cut with a splice at 0: {ivals}")
 
@@ -204,9 +203,9 @@ def test_time_map_two_splices_at_same_cut_onset():
     tl = _timeline([100.0, 100.0], [10.0, 5.0], 12000, stages=['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'])
     ivals = tl.stage_intervals_cut()
     # cut 0-100 <- original 0-100; cut 100-120 <- original 115-135
-    assert ivals[0][:2] == (0.0, 30.0) and ivals[3] == (90.0, 100.0, 'D'), ivals
-    assert ivals[4] == (100.0, 105.0, 'D'), ivals[4]         # original 115-120, still epoch 3
-    assert ivals[5] == (105.0, 120.0, 'E'), ivals[5]         # original 120-135
+    assert ivals[0][:2] == (0.0, 30.0) and ivals[3] == (90.0, 100.0, 'D', 3), ivals
+    assert ivals[4] == (100.0, 105.0, 'D', 3), ivals[4]      # original 115-120, still epoch 3
+    assert ivals[5] == (105.0, 120.0, 'E', 4), ivals[5]      # original 120-135
     print("   [ok] stage_intervals_cut resumes at original 115 after the double splice")
 
 
@@ -331,11 +330,11 @@ def test_stage_intervals_cut_index_arithmetic():
         for t in np.arange(0.125, T, 0.25):
             o = next(o0 + (t - c0) for c0, c1, o0 in seg if c0 <= t < c1)
             want = stages[int(o // 30)]
-            hit = [s for a, b, s in ivals if a <= t < b]
-            assert hit == [want], (label, t, o, hit, want)
+            hit = [(s, i) for a, b, s, i in ivals if a <= t < b]
+            assert hit == [(want, int(o // 30))], (label, t, o, hit, want)
             n_checked += 1
         # intervals never overlap and stay inside the file
-        flat = sorted((a, b) for a, b, _ in ivals)
+        flat = sorted((a, b) for a, b, _, _ in ivals)
         assert all(b1 <= a2 + 1e-9 for (_, b1), (a2, _) in zip(flat, flat[1:])), (label, flat)
         assert flat[0][0] >= 0 and flat[-1][1] <= T + 1e-9, (label, flat)
         print(f"   [ok] {label}: {n_checked} sample points, {len(ivals)} intervals")
@@ -343,7 +342,7 @@ def test_stage_intervals_cut_index_arithmetic():
     # original time past the last stage has no label
     tl = _timeline([], [], 12000, stages=['W', '1'])          # 120 s of signal, 60 s of stages
     ivals = tl.stage_intervals_cut()
-    assert ivals == [(0.0, 30.0, 'W'), (30.0, 60.0, '1')], ivals
+    assert ivals == [(0.0, 30.0, 'W', 0), (30.0, 60.0, '1', 1)], ivals
     print("   [ok] signal longer than etc.stages: nothing labelled past the last stage")
 
 
@@ -434,56 +433,6 @@ def test_timeline_json_round_trip():
         print("   [ok] sidecar_path: <xml stem>_timeline.json beside the annotation")
 
 
-# ---------------------------------------------------------------- regrid_stages
-
-def test_regrid_majority_tie_undefined_final_epoch():
-    """Grid labelling rules (independent of the epoch layout in the XML)."""
-    print("\n12. regrid_stages:")
-    # majority: N2 20 s, N3 10 s in epoch 0
-    got = regrid_stages([(0, 20, 'N2'), (20, 30, 'N3'), (30, 60, 'W')], T=60)
-    assert got == ['N2', 'W'], got
-    print("   [ok] the label with the largest overlap wins")
-
-    # a label split into pieces counts as its total
-    got = regrid_stages([(0, 8, 'A'), (8, 18, 'B'), (18, 30, 'A')], T=30)
-    assert got == ['A'], got
-    print("   [ok] pieces of one label add up (A 20 s vs B 10 s)")
-
-    # tie -> the label that starts earlier in the epoch, whatever the list order
-    for ivals in ([(0, 15, 'N2'), (15, 30, 'N3')], [(15, 30, 'N3'), (0, 15, 'N2')]):
-        assert regrid_stages(ivals, T=30) == ['N2'], ivals
-    assert regrid_stages([(0, 15, 'N2'), (15, 30, 'N3')], T=30) == ['N2']
-    # N3 in two pieces (0-5, 20-30) ties N2 (5-20); N3 starts first
-    assert regrid_stages([(0, 5, 'N3'), (5, 20, 'N2'), (20, 30, 'N3')], T=30) == ['N3']
-    print("   [ok] tie goes to the label that starts earlier (either input order)")
-
-    # under 50 % labelled -> undefined; exactly 50 % keeps the label
-    assert regrid_stages([(0, 14.9, 'N2')], T=30) == ['?']
-    assert regrid_stages([(0, 15.0, 'N2')], T=30) == ['N2']
-    assert regrid_stages([(0, 7, 'N2'), (20, 27, 'N3')], T=30) == ['?'], "two labels, 14 s labelled in total"
-    assert regrid_stages([(0, 10, 'N2'), (20, 30, 'N3')], T=30) == ['N2']
-    assert regrid_stages([], T=60) == ['?', '?']
-    print("   [ok] < 15 s labelled -> Undefined; 15 s keeps the label; no labels -> all Undefined")
-
-    # final partial epoch is always undefined, even when fully labelled
-    got = regrid_stages([(0, 75, 'N2')], T=75)
-    assert got == ['N2', 'N2', '?'], got
-    got = regrid_stages([(0, 61, 'N2')], T=61)
-    assert got == ['N2', 'N2', '?'], got
-    got = regrid_stages([(0, 60, 'N2')], T=60)
-    assert got == ['N2', 'N2'], got
-    got = regrid_stages([(0, 10, 'N2')], T=10)
-    assert got == ['?'], got
-    assert len(regrid_stages([], T=340.0)) == 12 and len(regrid_stages([], T=360.0)) == 12
-    print("   [ok] final partial epoch Undefined; count is ceil(T / 30)")
-
-    # intervals beyond T or before 0 are clipped; epoch_length and undefined are parameters
-    assert regrid_stages([(-10, 5, 'W'), (5, 500, 'N2')], T=60) == ['N2', 'N2']
-    assert regrid_stages([(0, 20, 'A'), (20, 40, 'B')], T=40, epoch_length=20, undefined='U') == ['A', 'B']
-    assert regrid_stages([(0, 5, 'A')], T=40, epoch_length=20, undefined='U') == ['U', 'U']
-    print("   [ok] clipping to [0, T); epoch_length and undefined arguments")
-
-
 # ------------------------------------------------- fixture recordings on disk
 
 #: Original night: 13 epochs (390 s) plus a 10 s tail. A gap of 60 s was cut at
@@ -569,23 +518,38 @@ WONAMBI_NAME = {'W': 'Wake', '1': 'NREM1', '2': 'NREM2', '3': 'NREM3', 'R': 'REM
                 'N1': 'NREM1', 'N2': 'NREM2', 'N3': 'NREM3', '?': 'Undefined'}
 
 
-def _oracle_time_map_grid(night):
-    """Expected 30 s grid for the fixture cut, worked out by hand.
+def _intervals(annot_file):
+    """``(start, end, stage)`` of every epoch in the XML, as integers."""
+    return [(int(a), int(b), st) for a, b, st in _epochs(annot_file)]
 
-    Cut epochs 0-2 are original epochs 0-2. Cut epoch 3 (90-120 s) holds 10 s
-    of original epoch 3 (90-100 s) and 20 s of original epoch 5 (160-180 s), so
-    it takes epoch 5. From cut epoch 4 on the shift is exactly two epochs, so
-    cut epoch k is original epoch k + 2. The last cut epoch is a 10 s
-    remainder and is Undefined.
+
+def _oracle_time_map_exact(night):
+    """Expected exact epochs for the fixture cut, worked out by hand.
+
+    Cut 0-90 s is original epochs 0-2. Original epoch 3 (90-120 s) keeps only
+    90-100 s before the splice; original 100-160 s was removed, so after the
+    splice cut 100-120 s is the end of original epoch 5 (160-180 s) and cut
+    epoch k*30-(k+1)*30 from 120 s is original epoch k + 2. Original 390-400 s
+    has no stage, so cut 330-340 s is Undefined.
     """
-    return [night[0], night[1], night[2], night[5]] + [night[k + 2] for k in range(4, 11)] + ['?']
+    out = [(0, 30, 0), (30, 60, 1), (60, 90, 2), (90, 100, 3), (100, 120, 5)]
+    out += [(120 + 30 * j, 150 + 30 * j, 6 + j) for j in range(7)]
+    rows = [(a, b, WONAMBI_NAME[canonical_stage_code(night[i])]) for a, b, i in out]
+    return rows + [(330, 340, 'Undefined')]
 
 
-def _oracle_events_grid(night):
-    """Expected grid from the stage events alone: the event of original epoch
-    3 (cut 90 s) runs to the next surviving onset (cut 120 s), so cut epoch 3
-    keeps original epoch 3, whereas the time map gives it original epoch 5."""
-    return [night[0], night[1], night[2], night[3]] + [night[k + 2] for k in range(4, 11)] + ['?']
+def _oracle_events_exact(night):
+    """Expected exact epochs from the stage events alone: the event of
+    original epoch 3 (cut 90 s) ends at the splice (cut 100 s). Cut 100-120 s
+    is the end of original epoch 5, whose stage event was cut, so it is
+    Undefined (the time map gives it original epoch 5's stage)."""
+    rows = [(30 * k, 30 * (k + 1), WONAMBI_NAME[canonical_stage_code(night[k])])
+            for k in range(3)]
+    rows += [(90, 100, WONAMBI_NAME[canonical_stage_code(night[3])]),
+             (100, 120, 'Undefined')]
+    rows += [(120 + 30 * j, 150 + 30 * j, WONAMBI_NAME[canonical_stage_code(night[6 + j])])
+             for j in range(7)]
+    return rows + [(330, 340, 'Undefined')]
 
 
 # ------------------------------------------------------- source choice tests
@@ -691,9 +655,13 @@ def test_source_time_map_writes_sidecar():
         assert data['rater'] == 'tester' and data['annotation_file'] == 'cut.xml'
         assert data['data_file'].endswith('cut.set')
         assert data['recording_start'] == '2022-09-12T22:28:52', data['recording_start']
-        for key in ('schema', 'turtlewave_version', 'created', 'cut_stages'):
+        for key in ('schema', 'turtlewave_version', 'created', 'cut_epochs', 'last_second'):
             assert key in data, key
-        assert len(data['cut_stages']) == len(_epochs(annot_file)) > 0
+        assert 'cut_stages' not in data
+        assert data['schema'] == 2 and data['last_second'] == 340
+        assert [(a, b, WONAMBI_NAME[canonical_stage_code(c)] if c != '?' else 'Undefined')
+                for a, b, c, _ in data['cut_epochs']] == _intervals(annot_file), data['cut_epochs']
+        assert load_sidecar_for(annot_file).cut_epochs == [tuple(e) for e in data['cut_epochs']]
         print(f"   [ok] sidecar keys: {sorted(data)}")
 
         # the sidecar loads back into a working time map
@@ -756,12 +724,15 @@ def test_source_small_removal_uses_time_map():
             assert xl.add_stages_from_header() is True
         assert any(STAGING_SOURCE_TIME_MAP in m for m in log.messages(logging.INFO)), log.messages()
         assert os.path.exists(sidecar_path(annot_file))
-        # cut epoch k covers original [30k + 25, 30k + 55) after the splice at 100 s
-        expected = ['Wake', 'NREM1', 'NREM2', 'REM', 'Wake', 'NREM2', 'NREM2',
-                    'NREM3', 'REM', 'Wake', 'NREM1', 'Undefined']
-        got = [st for _, _, st in _epochs(annot_file)]
+        # original epoch 3 keeps 90-100 s; after the splice at 100 s cut t is
+        # original t + 25, so original epoch k (k >= 4) is cut [30k - 25, 30k + 5)
+        expected = [(0, 30, 'Wake'), (30, 60, 'NREM1'), (60, 90, 'NREM2'), (90, 100, 'NREM3'),
+                    (100, 125, 'REM')]
+        expected += [(30 * k - 25, 30 * k + 5, WONAMBI_NAME[stages[k]]) for k in range(5, 12)]
+        expected += [(335, 345, 'Undefined')]
+        got = _intervals(annot_file)
         assert got == expected, got
-        print("   [ok] time map, sidecar written, stages after the splice shifted by the 25 s cut")
+        print("   [ok] time map, sidecar written, epochs after the splice shifted by the 25 s cut")
 
 
 def test_source_no_removed_time_stays_as_stored():
@@ -809,8 +780,9 @@ def test_source_scorer_stopped_early_uses_time_map():
         info = log.messages(logging.INFO)
         assert any(STAGING_SOURCE_TIME_MAP in m for m in info), log.messages()
         assert os.path.exists(sidecar_path(annot_file))
-        expected = [WONAMBI_NAME[c] for c in tl.cut_hypnogram()]
+        expected = [WONAMBI_NAME[c] for _, _, c, _ in tl.exact_epochs()]
         assert _stage_names(annot_file) == expected, _stage_names(annot_file)
+        assert _intervals(annot_file)[-1] == (690, 840, 'Undefined'), _intervals(annot_file)[-3:]
         as_stored = [WONAMBI_NAME[c] for c in night]
         assert _stage_names(annot_file)[:len(night)] != as_stored
         print(f"   [ok] time map chosen ({[m for m in info if 'agree' in m][0].split('; ')[-1]})")
@@ -890,12 +862,16 @@ def test_source_misstated_boundary_falls_back_to_events():
         warns = log.messages(logging.WARNING)
         assert any('9 of 13 stage events' in m and 'Falling back' in m for m in warns), log.messages()
         assert any(STAGING_SOURCE_EVENTS in m for m in log.messages(logging.INFO)), log.messages()
-        assert not os.path.exists(sidecar_path(annot_file))
+        data = json.load(open(sidecar_path(annot_file)))
+        assert data['source'] == STAGING_SOURCE_EVENTS and data['fullnight_stages'] == [], \
+            "the rejected etc.stages must not reach the sidecar as the full night"
         se = stage_events_from_header(xl.dataset.header['event'], FS)
-        expected = [WONAMBI_NAME[c] for c in regrid_stages(stage_event_intervals(se, T), T)]
+        expected = [WONAMBI_NAME[c] for _, _, c, _ in exact_cut_epochs(stage_event_intervals(se, T), int(T))]
         got = _stage_names(annot_file)
         assert got == expected, got
-        assert got[:len(night)] != [WONAMBI_NAME[c] for c in night]
+        # as stored would put epoch 4 at 120 s; the events put it at the splice (100 s)
+        assert _intervals(annot_file)[3:5] == [(90, 100, 'NREM2'), (100, 130, 'NREM3')], \
+            _intervals(annot_file)[3:5]
         print(f"   [ok] {[m for m in warns if 'Falling back' in m][0][:60]}... -> stage events")
 
 
@@ -955,8 +931,10 @@ def test_source_stage_events_when_no_usable_map():
         assert ok is True
         line = next(m for m in log.messages(logging.INFO) if STAGING_SOURCE_EVENTS in m)
         assert 'the header has no etc.stages' in line, line
-        assert not os.path.exists(sidecar_path(annot_file)), "the events path writes no sidecar"
-        assert len(_epochs(annot_file)) == 12
+        data = json.load(open(sidecar_path(annot_file)))
+        assert data['source'] == STAGING_SOURCE_EVENTS and data['fullnight_stages'] == []
+        assert len(_epochs(annot_file)) == 13
+        assert '20.0 s after a splice' in line, line
         print(f"   [ok] (a) no etc.stages: {line}")
 
         # (b) etc.stages from a different night: too long, and the map cannot explain it
@@ -969,7 +947,7 @@ def test_source_stage_events_when_no_usable_map():
         assert ok is True
         line = next(m for m in log.messages(logging.INFO) if STAGING_SOURCE_EVENTS in m)
         assert 'etc.stages has 26 epochs' in line and '400.0 s' in line, line
-        assert not os.path.exists(sidecar_path(annot_file))
+        assert json.load(open(sidecar_path(annot_file)))['fullnight_stages'] == []
         print(f"   [ok] (b) inconsistent map: {line[:120]}...")
 
         # (c) etc.stages over-long but no boundary events, stage events present
@@ -980,7 +958,8 @@ def test_source_stage_events_when_no_usable_map():
             ok = xl.add_stages_from_header()
         assert ok is True
         assert any(STAGING_SOURCE_EVENTS in m for m in log.messages(logging.INFO))
-        assert not os.path.exists(sidecar_path(annot_file))
+        data = json.load(open(sidecar_path(annot_file)))
+        assert data['n_boundaries'] == 0 and data['last_second'] == 360
         print("   [ok] (c) 14 epochs over 360 s, no boundaries, events present -> stage events")
 
         # (d) no etc.stages, no boundary: header['stages'] absent, events only
@@ -993,8 +972,16 @@ def test_source_stage_events_when_no_usable_map():
         assert len(_epochs(annot_file)) == 12
         print("   [ok] (d) header without 'stages' key, events only")
 
-        # a stale sidecar from an earlier time-map run is called out, not deleted
-        path = _write_cut(tmp, name='stale.set', with_stages=False)
+        # an exact-epoch source overwrites an earlier sidecar
+        path = _write_cut(tmp, name='rewrite.set', with_stages=False)
+        xl, annot_file = _annotate(path, 'rewrite.xml', tmp)
+        sidecar_path(annot_file).write_text('{}')
+        assert xl.add_stages_from_header() is True
+        assert json.load(open(sidecar_path(annot_file)))['schema'] == 2
+        print("   [ok] the stage-event source rewrites an old sidecar")
+
+        # a stale sidecar beside an as-stored (grid) import is called out, not deleted
+        path, _ = _write_uncut(tmp, 12, name='stale.set')
         xl, annot_file = _annotate(path, 'stale.xml', tmp)
         sidecar_path(annot_file).write_text('{}')
         with LogCapture() as log:
@@ -1123,43 +1110,131 @@ def _strip_times(text):
 
 # ------------------------------------------------------------ epoch layout
 
-# Everything below asserts the regular 30 s grid over the cut file. If staging
-# moves to exact variable-length epochs, replace these functions.
+def _assert_tiles(epochs, last_second):
+    """Contiguous whole-second epochs from 0 to ``last_second``."""
+    assert epochs[0][0] == 0 and epochs[-1][1] == last_second, (epochs[0], epochs[-1])
+    for (a0, b0, *_), (a1, b1, *_) in zip(epochs, epochs[1:]):
+        assert b0 == a1, (a0, b0, a1, b1)
+    assert all(b > a and a == int(a) and b == int(b) for a, b, *_ in epochs), epochs
 
-def test_grid_time_map_epochs():
-    """GRID: time-map staging gives one 30 s epoch per grid step over the cut file."""
-    print("\n22. GRID layout, time-map source:")
+
+def test_exact_cut_epochs_rules():
+    """exact_cut_epochs: rounding, slivers, gaps, final edge."""
+    print("\n22. exact_cut_epochs rules:")
+    ivals = [(0.0, 100.0, 'W', 0), (100.0, 100.4, 'N1', 1), (100.4, 130.6, 'N2', 2),
+             (130.6, 131.2, 'N3', 3), (140.0, 149.9, 'R', 4)]
+    got = exact_cut_epochs(ivals, 150)
+    assert got == [(0, 100, 'W', 0), (100, 131, 'N2', 2), (131, 140, '?', -1),
+                   (140, 150, 'R', 4)], got
+    _assert_tiles(got, 150)
+    print("   [ok] 0.4 s sliver dropped (not merged), 0.6 s piece -> 1 s edge kept adjacent, "
+          "gap -> Undefined, end -> last_second")
+    got = exact_cut_epochs([(0.0, 10.0, 'W'), (10.0, 10.6, 'N1'), (10.6, 20.0, 'N2')], 20)
+    assert got == [(0, 10, 'W', -1), (10, 11, 'N1', -1), (11, 20, 'N2', -1)], got
+    print("   [ok] 0.6 s piece becomes a 1 s epoch; 3-tuples get orig_epoch -1")
+    assert exact_cut_epochs([(0.0, 10.5, 'W'), (10.5, 20.0, 'N2')], 20)[0] == (0, 11, 'W', -1)
+    assert exact_cut_epochs([(0.0, 10.4999999999, 'W'), (10.4999999999, 20.0, 'N2')], 20)[0][1] == 11
+    print("   [ok] halves round up, including 1e-10 below the half")
+    got = exact_cut_epochs([(0.0, 19.8, 'W')], 19)
+    assert got == [(0, 19, 'W', -1)], got
+    assert exact_cut_epochs([], 30) == [(0, 30, '?', -1)]
+    assert exact_cut_epochs([(5.0, 10.0, 'W')], 10, undefined='U')[0] == (0, 5, 'U', -1)
+    print("   [ok] edge past the end clips to last_second; empty input -> one Undefined epoch")
+
+
+def test_stage_event_intervals_splice_clipping():
+    """stage_event_intervals(splices=): an interval ends at the first splice inside it."""
+    print("\n21a. stage_event_intervals, splice clipping:")
+    ev = [(0.0, 'W'), (30.0, 'N2'), (100.0, 'N3')]
+    plain = stage_event_intervals(ev, T=200.0)
+    assert plain == [(0.0, 30.0, 'W'), (30.0, 60.0, 'N2'), (100.0, 130.0, 'N3')], plain
+    assert stage_event_intervals(ev, 200.0, splices=None) == plain
+    assert stage_event_intervals(ev, 200.0, splices=[]) == plain
+    got = stage_event_intervals(ev, 200.0, splices=[45.0, 115.0])
+    assert got == [(0.0, 30.0, 'W'), (30.0, 45.0, 'N2'), (100.0, 115.0, 'N3')], got
+    print("   [ok] N2 and N3 cut at the splices inside them; W untouched")
+    # several splices in one interval: the first wins, order of input is irrelevant
+    got = stage_event_intervals(ev, 200.0, splices=[55.0, 40.0])
+    assert got[1] == (30.0, 40.0, 'N2'), got
+    # a splice exactly at an onset or at an interval end clips nothing
+    got = stage_event_intervals(ev, 200.0, splices=[30.0, 60.0, 100.0, 130.0])
+    assert got == plain, got
+    # a splice 1e-7 s after the onset is within the tolerance and does not empty it
+    got = stage_event_intervals(ev, 200.0, splices=[30.0 + 1e-7])
+    assert got[1] == (30.0, 60.0, 'N2'), got
+    # a splice before the first onset and one past T change nothing
+    assert stage_event_intervals(ev, 200.0, splices=[-5.0, 500.0]) == plain
+    # the splice and T together: T still bounds the interval
+    assert stage_event_intervals([(190.0, 'W')], 200.0, splices=[250.0]) == [(190.0, 200.0, 'W')]
+    print("   [ok] first splice wins; splices on an onset/end, 1e-7 s after an onset, "
+          "before the first onset or past T clip nothing")
+    # data after the splice is Undefined once the intervals become exact epochs
+    epochs = exact_cut_epochs(stage_event_intervals(ev, 200.0, splices=[45.0]), 200)
+    assert (45, 100, '?', -1) in epochs, epochs
+    print("   [ok] the clipped remainder (45-100 s) becomes one Undefined epoch")
+
+
+def test_exact_cut_epochs_edge_cases():
+    """exact_cut_epochs: overlap after rounding, edges beyond last_second, long fill."""
+    print("\n22a. exact_cut_epochs edge cases:")
+    # overlap after rounding: the second piece is trimmed to start where the first ended
+    got = exact_cut_epochs([(0.0, 10.6, 'W'), (10.4, 20.0, 'N2')], 20)
+    assert got == [(0, 11, 'W', -1), (11, 20, 'N2', -1)], got
+    _assert_tiles(got, 20)
+    # a piece wholly inside an earlier one vanishes
+    got = exact_cut_epochs([(0.0, 20.0, 'W'), (5.0, 8.0, 'N2')], 20)
+    assert got == [(0, 20, 'W', -1)], got
+    # unsorted input
+    got = exact_cut_epochs([(10.0, 20.0, 'N2'), (0.0, 10.0, 'W')], 20)
+    assert got == [(0, 10, 'W', -1), (10, 20, 'N2', -1)], got
+    print("   [ok] overlap trimmed, contained piece dropped, unsorted input sorted")
+    # edges beyond last_second
+    got = exact_cut_epochs([(0.0, 10.0, 'W'), (10.0, 500.0, 'N2')], 25)
+    assert got == [(0, 10, 'W', -1), (10, 25, 'N2', -1)], got
+    assert exact_cut_epochs([(30.0, 40.0, 'W')], 25) == [(0, 25, '?', -1)]
+    assert exact_cut_epochs([(-10.0, 5.0, 'W')], 25) == [(0, 5, 'W', -1), (5, 25, '?', -1)]
+    # a piece that starts 0.3 s before last_second rounds to nothing
+    got = exact_cut_epochs([(0.0, 24.7, 'W'), (24.7, 25.0, 'N2')], 25)
+    assert got == [(0, 25, 'W', -1)], got
+    _assert_tiles(got, 25)
+    print("   [ok] ends clipped to last_second; a piece wholly past it is dropped; "
+          "negative start clipped to 0")
+    # long Undefined fill: one epoch, however long, not 30 s chunks
+    got = exact_cut_epochs([(0.0, 30.0, 'W'), (400.0, 430.0, 'N2')], 450)
+    assert got == [(0, 30, 'W', -1), (30, 400, '?', -1), (400, 430, 'N2', -1),
+                   (430, 450, '?', -1)], got
+    _assert_tiles(got, 450)
+    assert exact_cut_epochs([], 3600) == [(0, 3600, '?', -1)]
+    print("   [ok] a 370 s gap and a 3600 s empty file are single Undefined epochs")
+    # orig_epoch survives trimming; fillers carry -1
+    got = exact_cut_epochs([(0.0, 10.6, 'W', 4), (10.4, 20.0, 'N2', 5)], 30)
+    assert got == [(0, 11, 'W', 4), (11, 20, 'N2', 5), (20, 30, '?', -1)], got
+    print("   [ok] orig_epoch kept on pieces, -1 on fillers")
+
+
+def test_exact_time_map_epochs():
+    """EXACT: the time-map source writes one epoch per surviving piece of each original epoch."""
+    print("\n23. EXACT layout, time-map source:")
     with Workdir() as tmp:
         for style, night in (('numeric', NIGHT_NUMERIC), ('named', NIGHT_NAMED)):
-            path = _write_cut(tmp, name=f'g_{style}.set', stages=night)
-            xl, annot_file = _annotate(path, f'g_{style}.xml', tmp)
+            path = _write_cut(tmp, name=f'x_{style}.set', stages=night)
+            xl, annot_file = _annotate(path, f'x_{style}.xml', tmp)
             assert xl.add_stages_from_header() is True
-            epochs = _epochs(annot_file)
-            assert len(epochs) == 12, len(epochs)                      # ceil(340 / 30)
-            assert (epochs[0][2], epochs[-1][2]) != ('Unknown', 'Unknown')
-            assert [e[0] for e in epochs] == [30.0 * k for k in range(12)], [e[0] for e in epochs]
-            assert all(abs(e[1] - e[0] - 30.0) < 1e-6 for e in epochs), epochs
-            want = [WONAMBI_NAME[canon] for canon in
-                    (canonical_stage_code(c) if c != '?' else '?' for c in _oracle_time_map_grid(night))]
-            got = [e[2] for e in epochs]
-            assert got == want, (style, got, want)
+            got = _intervals(annot_file)
+            assert got == _oracle_time_map_exact(night), (style, got)
+            _assert_tiles(got, 340)
             data = json.load(open(sidecar_path(annot_file)))
-            assert len(data['cut_stages']) == 12 and data['cut_stages'][-1] == '?'
+            assert [e[3] for e in data['cut_epochs']] == [0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, -1]
+            for a, b, code, orig in data['cut_epochs']:
+                assert orig == -1 or code == data['fullnight_stages'][orig], (a, b, code, orig)
             print(f"   [ok] {style}: {got}")
-
-        # cut epoch 3 (90-120 s) is 10 s of original epoch 3 ('2') and 20 s of
-        # original epoch 5 ('3'), so the time map labels it NREM3
-        assert got[3] == 'NREM3' and got[-1] == 'Undefined'
-        print("   [ok] cut epoch 3 straddles the splice and takes the majority (NREM3); last is Undefined")
-
-        # after the splice cut epoch k is original epoch k + 2: cut 4 -> 6 ('2'), cut 10 -> 12 ('2')
-        assert got[4] == 'NREM2' and got[8] == 'Wake' and got[10] == 'NREM2'
-        print("   [ok] cut epochs after the splice read original epoch k + 2")
+        assert got[3] == (90, 100, 'NREM2') and got[4] == (100, 120, 'NREM3')
+        print("   [ok] the splice at 100 s splits original epoch 3 (10 s kept) from epoch 5 (20 s)")
 
 
-def test_grid_splice_at_time_zero_file():
-    """GRID: a file whose first 60 s of night were removed (splice at cut 0)."""
-    print("\n22a. GRID layout, splice at cut time 0:")
+def test_exact_splice_at_time_zero_file():
+    """EXACT: a file whose first 60 s of night were removed (splice at cut 0)."""
+    print("\n23a. EXACT layout, splice at cut time 0:")
     with Workdir() as tmp:
         path = _write_cut(tmp, name='zero.set', cut_at=0.0)
         xl, annot_file = _annotate(path, 'zero.xml', tmp)
@@ -1168,36 +1243,73 @@ def test_grid_splice_at_time_zero_file():
         assert any(STAGING_SOURCE_TIME_MAP in m for m in log.messages(logging.INFO)), log.messages()
         data = json.load(open(sidecar_path(annot_file)))
         assert data['boundaries'] == [{'cut_onset_s': 0.0, 'original_onset_s': 0.0, 'removed_s': 60.0}]
-        got = _stage_names(annot_file)
-        want = [WONAMBI_NAME[c] for c in [NIGHT_NUMERIC[k + 2] for k in range(11)] + ['?']]
+        got = _intervals(annot_file)
+        want = [(30 * k, 30 * k + 30, WONAMBI_NAME[NIGHT_NUMERIC[k + 2]]) for k in range(11)]
+        want += [(330, 340, 'Undefined')]
         assert got == want, (got, want)
-        # stage events for the two removed epochs are gone, the rest agree with the map
         assert data['stage_events_compared'] == 11 and data['stage_events_disagreeing'] == 0, data
-        print(f"   [ok] cut epoch k = original epoch k + 2 from the first epoch: {got}")
+        print(f"   [ok] cut epoch k = original epoch k + 2 from the first epoch")
 
 
-def test_grid_stage_event_epochs():
-    """GRID: the stage-event source on the same file, over the same grid."""
-    print("\n23. GRID layout, stage-event source:")
+def test_exact_stage_event_epochs():
+    """EXACT: the stage-event source on the same file."""
+    print("\n24. EXACT layout, stage-event source:")
     with Workdir() as tmp:
-        path = _write_cut(tmp, name='g_ev.set', with_stages=False)
-        xl, annot_file = _annotate(path, 'g_ev.xml', tmp)
+        path = _write_cut(tmp, name='x_ev.set', with_stages=False)
+        xl, annot_file = _annotate(path, 'x_ev.xml', tmp)
         assert xl.add_stages_from_header() is True
-        epochs = _epochs(annot_file)
-        assert len(epochs) == 12 and [e[0] for e in epochs] == [30.0 * k for k in range(12)]
-        want = [WONAMBI_NAME[c if c == '?' else canonical_stage_code(c)]
-                for c in _oracle_events_grid(NIGHT_NUMERIC)]
-        got = [e[2] for e in epochs]
-        assert got == want, (got, want)
+        got = _intervals(annot_file)
+        assert got == _oracle_events_exact(NIGHT_NUMERIC), got
+        _assert_tiles(got, 340)
         print(f"   [ok] {got}")
-        assert got[3] == 'NREM2' and got[3] != 'NREM3'
-        print("   [ok] the event before the gap runs to the next onset, so cut epoch 3 "
-              "keeps original epoch 3 (NREM2), unlike the time map (NREM3)")
+
+        # stage events with a hole: the hole is an Undefined epoch
+        ev = [fx.event(1, 'wake', 30 * FS), fx.event(30 * FS + 1, 'n2', 30 * FS),
+              fx.event(120 * FS + 1, 'n3', 30 * FS)]
+        path = os.path.join(tmp, 'hole.set')
+        fx.write_set(path, 'root', True, n_samples=int(170.5 * FS), srate=FS, labels=['Cz'],
+                     types=None, ref=None, n_good=None, stages=None, events=ev)
+        xl, annot_file = _annotate(path, 'hole.xml', tmp)
+        assert xl.add_stages_from_header() is True
+        got = _intervals(annot_file)
+        assert got == [(0, 30, 'Wake'), (30, 60, 'NREM2'), (60, 120, 'Undefined'),
+                       (120, 150, 'NREM3'), (150, 170, 'Undefined')], got
+        print(f"   [ok] gaps between stage events and after the last one are Undefined: {got}")
+
+
+def test_exact_sidecar_check():
+    """load_sidecar_for accepts the matching XML and rejects a rescored one."""
+    print("\n24a. load_sidecar_for:")
+    with Workdir() as tmp:
+        path = _write_cut(tmp, name='sc.set')
+        xl, annot_file = _annotate(path, 'sc.xml', tmp)
+        assert xl.add_stages_from_header() is True
+        tl = load_sidecar_for(annot_file)
+        assert tl.last_second == 340 and len(tl.cut_epochs) == 13
+        print("   [ok] matching sidecar loads")
+
+        xl.annotations.set_stage_for_epoch(100, 'Wake')
+        try:
+            load_sidecar_for(annot_file)
+        except SidecarMismatchError as e:
+            assert 'epoch 4' in str(e) and 'Re-run the annotation step' in str(e), e
+            print(f"   [ok] rescored epoch -> {str(e)[:100]}...")
+        else:
+            raise AssertionError("a rescored epoch must not pass")
+
+        os.remove(sidecar_path(annot_file))
+        assert load_sidecar_for(annot_file, require=False) is None
+        try:
+            load_sidecar_for(annot_file)
+        except SidecarMismatchError:
+            print("   [ok] missing sidecar: None with require=False, raises otherwise")
+        else:
+            raise AssertionError("a missing sidecar must raise when required")
 
 
 def test_grid_as_stored_epochs():
     """GRID: as-stored staging writes one 30 s epoch per etc.stages entry."""
-    print("\n24. GRID layout, as-stored source:")
+    print("\n25. GRID layout, as-stored source (unchanged):")
     with Workdir() as tmp:
         path, stages = _write_uncut(tmp, 12)
         xl, annot_file = _annotate(path, 'g_st.xml', tmp)
@@ -1217,7 +1329,7 @@ def test_reference_recording_if_reachable():
 
     Read-only on the recording; the annotation and sidecar go to a temp folder.
     """
-    print("\n25. Reference Compumedics recording:")
+    print("\n26. Reference Compumedics recording:")
     if not os.path.exists(REFERENCE_FILE):
         print(f"   [skip] {REFERENCE_FILE} is not reachable")
         return
@@ -1238,16 +1350,29 @@ def test_reference_recording_if_reachable():
         with LogCapture() as log:
             assert xl.add_stages_from_header() is True
         assert any(STAGING_SOURCE_TIME_MAP in m for m in log.messages(logging.INFO))
-        names = _stage_names(os.path.join(tmp, 'ref.xml'))
-        assert len(names) == 644, len(names)
-        counts = {n: names.count(n) for n in sorted(set(names))}
-        assert names[-1] == 'Undefined'
-        plan = {'NREM2': 269, 'NREM3': 141, 'REM': 110, 'NREM1': 84, 'Wake': 35}
-        for stage, n in plan.items():
-            assert abs(counts.get(stage, 0) - n) <= 1, (stage, counts.get(stage), n)
-        data = json.load(open(sidecar_path(os.path.join(tmp, 'ref.xml'))))
+        annot_file = os.path.join(tmp, 'ref.xml')
+        got = _intervals(annot_file)
+        _assert_tiles(got, 19308)
+        durs = [b - a for a, b, _ in got]
+        assert len(got) == 755 and durs.count(30) == 569 and durs.count(1) == 31, \
+            (len(got), durs.count(30), durs.count(1))
+        seconds = {}
+        for a, b, st in got:
+            seconds[st] = seconds.get(st, 0) + (b - a)
+        plan = {'Wake': 1074, 'NREM1': 2574, 'NREM2': 8012, 'NREM3': 4223, 'REM': 3288,
+                'Undefined': 137}
+        assert seconds == plan, seconds
+        data = json.load(open(sidecar_path(annot_file)))
         assert data['n_boundaries'] == 189 and len(data['fullnight_stages']) == 858
-        print(f"   [ok] time-map staging: 644 epochs {counts}; stage events disagree on "
+        assert data['last_second'] == 19308
+        full = data['fullnight_stages']
+        for a, b, st in got:
+            idx = int(np.floor(tl.cut_to_original((a + b) / 2.0) / 30.0))
+            want = WONAMBI_NAME[canonical_stage_code(full[idx])] if idx < len(full) else 'Undefined'
+            assert st == want, (a, b, st, want)
+        assert load_sidecar_for(annot_file).cut_epochs == [tuple(e) for e in data['cut_epochs']]
+        print(f"   [ok] time-map staging: 755 exact epochs, seconds {seconds}; every epoch's "
+              f"stage is the full-night stage at its midpoint; stage events disagree on "
               f"{data['stage_events_disagreeing']} of {data['stage_events_compared']}")
 
 
@@ -1263,7 +1388,6 @@ TESTS = [
     test_compare_stage_events,
     test_stage_event_helpers,
     test_timeline_json_round_trip,
-    test_regrid_majority_tie_undefined_final_epoch,
     test_source_as_stored_for_uncut_files,
     test_source_threshold_between_stored_and_time_map,
     test_source_time_map_writes_sidecar,
@@ -1280,9 +1404,13 @@ TESTS = [
     test_source_none_usable_returns_false,
     test_stage_code_styles_agree,
     test_as_stored_path_matches_the_old_import,
-    test_grid_time_map_epochs,
-    test_grid_splice_at_time_zero_file,
-    test_grid_stage_event_epochs,
+    test_stage_event_intervals_splice_clipping,
+    test_exact_cut_epochs_rules,
+    test_exact_cut_epochs_edge_cases,
+    test_exact_time_map_epochs,
+    test_exact_splice_at_time_zero_file,
+    test_exact_stage_event_epochs,
+    test_exact_sidecar_check,
     test_grid_as_stored_epochs,
     test_reference_recording_if_reachable,
 ]

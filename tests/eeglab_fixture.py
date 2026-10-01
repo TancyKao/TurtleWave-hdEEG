@@ -79,7 +79,7 @@ def write_set(path, layout='root', v73=True, n_samples=1000, srate=100.0,
               stages=None, T0=DEFAULT_T0, rec_startdate=DEFAULT_REC_STARTDATE,
               events=None, embed_data=False, data=None, seed=0,
               subject='sub-test', omit=(), datfile=None, fdt_name=None,
-              empty_datfile=False):
+              empty_datfile=False, interp_channels=None):
     """Write a small EEGLAB ``.set`` (and ``.fdt``) and return what it holds.
 
     Parameters
@@ -132,6 +132,11 @@ def write_set(path, layout='root', v73=True, n_samples=1000, srate=100.0,
         ``.set``/``.fdt`` pair that was renamed together.
     empty_datfile : bool
         With ``embed_data``, also store ``datfile = ''`` (some writers do).
+    interp_channels : list or None
+        ``etc.interp_channels``, written as an ``(n, 1)`` cell as the
+        Compumedics cleaning pipeline does; items are normally str (a number
+        is stored as a numeric cell element). ``[]`` writes MATLAB's empty
+        cell; ``None`` (default) leaves the field out.
 
     Returns
     -------
@@ -164,7 +169,7 @@ def write_set(path, layout='root', v73=True, n_samples=1000, srate=100.0,
                 types=types, ref=ref, n_good=n_good, stages=stages, T0=T0,
                 rec_startdate=rec_startdate, events=events,
                 embed_data=embed_data, data=data, fdt_name=stored_name,
-                empty_datfile=empty_datfile,
+                empty_datfile=empty_datfile, interp_channels=interp_channels,
                 subject=subject, omit=omit)
     if v73:
         _write_v73(path, spec)
@@ -247,6 +252,12 @@ class _H5Writer:
         ds.attrs['MATLAB_class'] = np.bytes_('cell')
         return ds
 
+    def empty_cell(self, group, name):
+        ds = group.create_dataset(name, data=np.array([0, 0], dtype=np.uint64))
+        ds.attrs['MATLAB_class'] = np.bytes_('cell')
+        ds.attrs['MATLAB_empty'] = np.uint32(1)
+        return ds
+
     def struct(self, parent, name):
         g = parent.create_group(name)
         g.attrs['MATLAB_class'] = np.bytes_('struct')
@@ -299,6 +310,11 @@ def _write_fields_h5(w, top, s):
         reference = w.struct(etc, 'reference')
         w.scalar(reference, 'n_good', s['n_good'])
         w.string(reference, 'method', 'average')
+    if s['interp_channels'] is not None:
+        if s['interp_channels']:
+            w.cell(etc, 'interp_channels', s['interp_channels'], column=True)
+        else:
+            w.empty_cell(etc, 'interp_channels')
 
     if s['events'] is not None:
         ev = w.struct(top, 'event')
@@ -372,6 +388,12 @@ def _write_v7(path, s):
         etc['stages'] = cell
     if s['n_good'] is not None:
         etc['reference'] = {'n_good': _mat_num(s['n_good']), 'method': 'average'}
+    if s['interp_channels'] is not None:
+        names = list(s['interp_channels'])
+        cell = np.empty((len(names), 1) if names else (0, 0), dtype=object)
+        for i, name in enumerate(names):
+            cell[i, 0] = name if isinstance(name, str) else _mat_num(name)
+        etc['interp_channels'] = cell
     eeg['etc'] = etc
 
     if s['events'] is not None:

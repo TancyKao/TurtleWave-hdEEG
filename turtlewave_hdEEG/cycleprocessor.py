@@ -483,7 +483,7 @@ def _feinberg_groups(is_nrem, is_n23, is_rem, nrem_min, rem_min, rem_gap,
     return cycles
 
 
-def compute_stage_durations(hypnogram, epoch_length=30):
+def compute_stage_durations(hypnogram, epoch_length=30, durations=None):
     """Sum per-epoch sleep-stage minutes from a hypnogram.
 
     Counts how many epochs fall in each numeric stage code and converts to
@@ -497,7 +497,13 @@ def compute_stage_durations(hypnogram, epoch_length=30):
         ``CustomAnnotations.get_hypnogram()`` (Wake=0, NREM1/2/3=1/2/3, REM=4,
         artefact/undefined=-1).
     epoch_length : float, optional
-        Epoch duration in seconds (default 30).
+        Epoch duration in seconds (default 30). Ignored when ``durations``
+        is given, except as the reported ``epoch_length``.
+    durations : sequence of float, optional
+        Length in seconds of each epoch, same length as ``hypnogram`` (for
+        example ``CustomAnnotations.epoch_durations()`` on a cut recording's
+        exact epochs). When given, stage minutes are sums of these durations
+        rather than epoch counts times ``epoch_length``.
 
     Returns
     -------
@@ -505,7 +511,8 @@ def compute_stage_durations(hypnogram, epoch_length=30):
         Duration summary with keys ``epoch_length`` (seconds), ``wake_min``,
         ``n1_min``, ``n2_min``, ``n3_min``, ``rem_min``, ``artefact_min`` (all
         non-sleep-stage epochs; see Notes), and ``total_min``. ``total_min`` is
-        ``n_epochs * epoch_length / 60`` (the hypnogram span), so the stage
+        ``n_epochs * epoch_length / 60`` (or the summed ``durations``: the
+        hypnogram span), so the stage
         parts reconcile exactly by construction: ``wake + n1 + n2 + n3 + rem +
         artefact == total``.
 
@@ -521,17 +528,30 @@ def compute_stage_durations(hypnogram, epoch_length=30):
     """
     hyp = np.asarray(list(hypnogram), dtype=float)
     n = hyp.size
-    per_epoch_min = epoch_length / 60.0
+    if durations is None:
+        per_epoch_min = epoch_length / 60.0
 
-    def stage_min(code):
-        return float(np.count_nonzero(hyp == code)) * per_epoch_min
+        def stage_min(code):
+            return float(np.count_nonzero(hyp == code)) * per_epoch_min
+
+        total_min = float(n) * per_epoch_min
+    else:
+        minutes = np.asarray(list(durations), dtype=float) / 60.0
+        if minutes.size != n:
+            raise ValueError(
+                f"durations has {minutes.size} entries but the hypnogram has "
+                f"{n} epochs")
+
+        def stage_min(code):
+            return float(minutes[hyp == code].sum())
+
+        total_min = float(minutes.sum())
 
     wake_min = stage_min(0)
     n1_min = stage_min(1)
     n2_min = stage_min(2)
     n3_min = stage_min(3)
     rem_min = stage_min(_REM_STAGE)
-    total_min = float(n) * per_epoch_min
     # Fold every non-sleep-stage epoch (typically code -1, but also any
     # unexpected code) into the remainder so the parts always sum to total.
     artefact_min = total_min - (wake_min + n1_min + n2_min + n3_min + rem_min)
@@ -546,6 +566,88 @@ def compute_stage_durations(hypnogram, epoch_length=30):
         'artefact_min': artefact_min,
         'total_min': total_min,
     }
+
+
+#: Stages given an ``analysed_time_cycles`` row per cycle when the caller
+#: names none.
+DEFAULT_CYCLE_STAGES = ('NREM1', 'NREM2', 'NREM3', 'REM')
+
+#: ``time_base`` values in ``sleep_cycles`` and ``stage_durations``.
+#: ``'original'``: seconds and minutes are on the recording's own time base,
+#: which is the full night (an uncut file, or a cut file's full-night
+#: hypnogram). ``'cut'``: seconds are on the cut file; ``*_orig`` columns hold
+#: the original-night values.
+TIME_BASE_ORIGINAL = 'original'
+TIME_BASE_CUT = 'cut'
+
+
+def fullnight_hypnogram_codes(timeline):
+    """Numeric hypnogram of a timeline's full-night stages.
+
+    Parameters
+    ----------
+    timeline : RecordingTimeline
+        Map whose ``stages`` are the full-night Compumedics codes.
+
+    Returns
+    -------
+    list of int
+        One code per original ``timeline.epoch_length`` epoch, numbered as
+        ``CustomAnnotations.get_hypnogram()`` numbers stages.
+    """
+    from .annotation import HYPNOGRAM_CODES
+    from .timeline import stage_name_for_code
+    return [HYPNOGRAM_CODES.get(stage_name_for_code(c), -1)
+            for c in timeline.fullnight_hypnogram()]
+
+
+def _cycles_to_cut(cycles, timeline, annotations):
+    """Move full-night cycles onto the cut file's time base.
+
+    Parameters
+    ----------
+    cycles : list of dict
+        Cycles from :func:`detect_cycles` on the full-night hypnogram, seconds
+        on the original night.
+    timeline : RecordingTimeline
+        The cut file's time map.
+    annotations : object
+        The cut file's annotations, exposing ``get_stage_intervals()``.
+
+    Returns
+    -------
+    list of dict
+        Copies of ``cycles``. ``nrem_start_orig``, ``nrem_end_orig`` and
+        ``rem_end_orig`` keep the original-night seconds; ``nrem_start_sec``,
+        ``nrem_end_sec`` and ``rem_end_sec`` become cut-file seconds, each
+        ``original_to_cut(t)`` snapped to the nearest exact-epoch edge so that
+        ``get_epochs(time=...)`` containment and the XML cycle markers work.
+        ``*_min`` and the ``*_epoch`` indices stay full-night (the indices
+        count original 30 s epochs, not XML epochs). ``time_base`` is
+        ``'cut'``.
+    """
+    ivals = annotations.get_stage_intervals()
+    if not ivals:
+        raise ValueError("the annotation file has no epochs to place cycle "
+                         "bounds on")
+    edges = np.array(sorted({float(s) for s, _, _ in ivals}
+                            | {float(ivals[-1][1])}))
+
+    def snap(t):
+        c = float(timeline.original_to_cut(float(t)))
+        return float(edges[int(np.argmin(np.abs(edges - c)))])
+
+    out = []
+    for cyc in cycles:
+        new = dict(cyc)
+        for key, okey in (('nrem_start_sec', 'nrem_start_orig'),
+                          ('nrem_end_sec', 'nrem_end_orig'),
+                          ('rem_end_sec', 'rem_end_orig')):
+            new[okey] = float(cyc[key])
+            new[key] = snap(cyc[key])
+        new['time_base'] = TIME_BASE_CUT
+        out.append(new)
+    return out
 
 
 def _require_existing_db(db_path):
@@ -606,6 +708,7 @@ class ParalCycles:
         self.annotations = annotations
         self.subject = subject
         self.logger = self._setup_logger(log_level, log_file)
+        self._logged = set()
 
     def _setup_logger(self, log_level, log_file=None):
         """Set up a dedicated logger for this processor."""
@@ -645,6 +748,87 @@ class ParalCycles:
             return [float(ep['start']) for ep in epochs]
         except (KeyError, TypeError, ValueError):
             return None
+
+    def _log_once(self, key, level, msg):
+        """Log ``msg`` the first time ``key`` is seen by this instance."""
+        if key in self._logged:
+            return
+        self._logged.add(key)
+        self.logger.log(level, msg)
+
+    def _resolve_timeline(self, timeline='auto'):
+        """The timeline to compute cycles with, or ``None`` for the XML grid.
+
+        Parameters
+        ----------
+        timeline : {'auto', 'none'} or RecordingTimeline
+            ``'auto'`` reads the sidecar beside ``annotations.annot_file``
+            when it exists (:func:`~turtlewave_hdEEG.timeline.load_sidecar_for`
+            with ``require=False``); ``'none'`` ignores it; a
+            ``RecordingTimeline`` is used as given.
+
+        Returns
+        -------
+        RecordingTimeline or None
+
+        Raises
+        ------
+        ValueError
+            The annotation file has variable-length epochs and no timeline
+            was found or ``'none'`` was asked for: cycle detection counts
+            30 s epochs of the full night and must never run on exact epochs.
+            Also for an unknown ``timeline`` value.
+        timeline.SidecarMismatchError
+            ``'auto'`` found a sidecar that no longer matches the XML.
+        """
+        from .timeline import RecordingTimeline, load_sidecar_for, sidecar_path
+        ann = self.annotations
+        annot_file = getattr(ann, 'annot_file', None)
+        if isinstance(timeline, RecordingTimeline):
+            tl = timeline
+        elif timeline == 'auto':
+            tl = (load_sidecar_for(annot_file, ann, require=False)
+                  if annot_file else None)
+        elif timeline in ('none', None):
+            tl = None
+        else:
+            raise ValueError(f"timeline={timeline!r}; use 'auto', 'none' or a "
+                             f"RecordingTimeline")
+        variable = (hasattr(ann, 'has_uniform_epochs')
+                    and not ann.has_uniform_epochs())
+        if tl is None and variable:
+            where = (sidecar_path(annot_file).name if annot_file
+                     else '<annotation xml stem>_timeline.json')
+            why = ("timeline='none' was passed" if timeline in ('none', None)
+                   else f"there is no timeline sidecar {where}")
+            raise ValueError(
+                f"The annotation file has variable-length epochs (a cut "
+                f"recording's exact epochs) and {why}, so sleep cycles cannot "
+                f"be computed: cycle detection counts 30 s epochs of the full "
+                f"night, which only the sidecar holds. Nothing was written. "
+                f"Re-run the annotation step "
+                f"(XLAnnotations.add_stages_from_header) to write the XML and "
+                f"its sidecar together.")
+        if tl is not None:
+            if tl.stages:
+                self._log_once(
+                    'timeline', logging.INFO,
+                    f"Cycles and stage durations from the full-night "
+                    f"hypnogram in the timeline sidecar ({len(tl.stages)} "
+                    f"epochs of {tl.epoch_length:g} s, {tl.n_boundaries} "
+                    f"splices removing {tl.removed_seconds:.1f} s); cycle "
+                    f"bounds are moved onto the cut file's epoch edges.")
+            else:
+                self._log_once(
+                    'no_fullnight', logging.ERROR,
+                    "Sleep cycles NOT computed: this recording was staged from "
+                    "its stage events, so the full-night hypnogram is "
+                    "unavailable (the sidecar's fullnight_stages is empty) and "
+                    "cycle detection cannot run on the cut file's variable-"
+                    "length epochs. Stage durations are stored from the cut "
+                    "file's epoch durations (time_base='cut'); sleep_cycles, "
+                    "events.cycle and analysed_time_cycles are left empty.")
+        return tl
 
     def detect(self, method='2022', epoch_length=30, wake_thresh=10,
                nrem_min=30, rem_min=10, hypnogram=None, nrem_onset='n2n3'):
@@ -741,6 +925,37 @@ class ParalCycles:
             return False
         n = len(epoch_starts)
 
+        if cycles[0].get('time_base') == TIME_BASE_CUT:
+            # Cut-file cycles: the epoch indices count full-night epochs, so
+            # place the markers from the cut seconds, which _cycles_to_cut
+            # snapped onto exact-epoch edges.
+            starts = sorted({int(round(t)) for t in epoch_starts})
+            start_set = set(starts)
+            written = 0
+            for cyc in cycles:
+                lo = int(round(cyc['nrem_start_sec']))
+                hi = int(round(cyc['rem_end_sec']))
+                if hi not in start_set:          # the recording end
+                    hi = starts[-1]
+                if lo not in start_set or hi <= lo:
+                    self.logger.warning(
+                        f"Cycle {cyc['cycle_number']} has no cut-file span "
+                        f"to mark (cut {cyc['nrem_start_sec']:g}-"
+                        f"{cyc['rem_end_sec']:g} s; most of it was removed "
+                        f"from the recording); no XML markers for it.")
+                    continue
+                try:
+                    self.annotations.set_cycle_mrkr(lo)
+                    self.annotations.set_cycle_mrkr(hi, end=True)
+                    written += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not mark cycle {cyc['cycle_number']}: {e}")
+            self.logger.info(
+                f"Wrote markers for {written} cycle(s) to XML (cut-file "
+                f"time base).")
+            return written > 0
+
         written = 0
         for cyc in cycles:
             start_i = cyc['nrem_start_epoch']
@@ -786,13 +1001,21 @@ class ParalCycles:
             cycle_dur_min REAL,
             PRIMARY KEY (subject, method, cycle_number)
         )''')
-        # Additive migration for tables made before nrem_n23_dur_min existed.
+        # Additive migration for tables made before these columns existed.
+        # nrem_*_orig / rem_end_orig: the bounds on the original night (equal
+        # to nrem_start/nrem_end/rem_end unless time_base is 'cut');
+        # time_base: 'original' or 'cut' (see TIME_BASE_*). NULL on rows
+        # written before 4.5.
         existing = {r[1] for r in conn.execute(
             'PRAGMA table_info(sleep_cycles)').fetchall()}
-        for col in ('nrem_n23_dur_min',):
+        for col, sql_type in (('nrem_n23_dur_min', 'REAL'),
+                              ('nrem_start_orig', 'REAL'),
+                              ('nrem_end_orig', 'REAL'),
+                              ('rem_end_orig', 'REAL'),
+                              ('time_base', 'TEXT')):
             if col not in existing:
                 conn.execute(
-                    f'ALTER TABLE sleep_cycles ADD COLUMN {col} REAL')
+                    f'ALTER TABLE sleep_cycles ADD COLUMN {col} {sql_type}')
         conn.execute(
             'CREATE INDEX IF NOT EXISTS idx_cycle ON events(cycle)')
 
@@ -801,7 +1024,10 @@ class ParalCycles:
         """Replace this subject's rows in the ``sleep_cycles`` table.
 
         Existing rows for the same ``(subject, method)`` are deleted, then the
-        new cycles are inserted, so reruns stay idempotent.
+        new cycles are inserted, so reruns stay idempotent. Every
+        ``analysed_time_cycles`` row of the same ``(subject, method)`` is
+        deleted with them, under every stage and reject set, since those rows
+        describe the cycles being replaced.
 
         The delete runs even when ``cycles`` is empty. That is what makes a
         re-run finding no cycles (a raised ``nrem_min``, an all-Wake night,
@@ -902,22 +1128,36 @@ class ParalCycles:
                                            self.logger)
             placeholders = ",".join("?" * len(spellings))
             deleted = 0
+            # Coverage rows describe the cycles being replaced, under every
+            # stage and reject set: drop them all with the cycles.
+            has_cov = bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                "name='analysed_time_cycles'").fetchone())
             for m in method_vals:
                 deleted += conn.execute(
                     f'DELETE FROM sleep_cycles WHERE subject IN ({placeholders}) '
                     f'AND method=?', (*spellings, m)).rowcount
+                if has_cov:
+                    conn.execute(
+                        f'DELETE FROM analysed_time_cycles WHERE subject IN '
+                        f'({placeholders}) AND method=?', (*spellings, m))
             conn.executemany('''
                 INSERT INTO sleep_cycles
                     (subject, method, cycle_number, nrem_start, nrem_end,
                      rem_start, rem_end, nrem_dur_min, nrem_n23_dur_min,
-                     rem_dur_min, cycle_dur_min)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     rem_dur_min, cycle_dur_min, nrem_start_orig,
+                     nrem_end_orig, rem_end_orig, time_base)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', [
                 (subject, c['method'], c['cycle_number'],
                  c['nrem_start_sec'], c['nrem_end_sec'],
                  c['nrem_end_sec'], c['rem_end_sec'],
                  c['nrem_dur_min'], c['nrem_n23_dur_min'],
-                 c['rem_dur_min'], c['cycle_dur_min'])
+                 c['rem_dur_min'], c['cycle_dur_min'],
+                 c.get('nrem_start_orig', c['nrem_start_sec']),
+                 c.get('nrem_end_orig', c['nrem_end_sec']),
+                 c.get('rem_end_orig', c['rem_end_sec']),
+                 c.get('time_base', TIME_BASE_ORIGINAL))
                 for c in cycles])
             conn.commit()
             if cycles:
@@ -957,6 +1197,14 @@ class ParalCycles:
             total_min REAL,
             PRIMARY KEY (subject)
         )''')
+        # time_base: 'original' (full-night hypnogram, or an uncut file) or
+        # 'cut' (summed from a cut file's exact epochs because no full-night
+        # hypnogram exists). NULL on rows written before 4.5.
+        existing = {r[1] for r in conn.execute(
+            'PRAGMA table_info(stage_durations)').fetchall()}
+        if 'time_base' not in existing:
+            conn.execute(
+                'ALTER TABLE stage_durations ADD COLUMN time_base TEXT')
 
     def store_stage_durations(self, stage_durations, db_path, subject=None,
                               conn=None):
@@ -968,7 +1216,12 @@ class ParalCycles:
         Parameters
         ----------
         stage_durations : dict
-            Duration summary as returned by :func:`compute_stage_durations`.
+            Duration summary as returned by :func:`compute_stage_durations`,
+            optionally with ``time_base`` (default ``'original'``). Its
+            ``epoch_length`` is stored as given: 30 for a grid or a full-night
+            hypnogram, the median epoch duration when the minutes were summed
+            from a cut file's variable-length epochs. That median describes
+            the file; never multiply an epoch count by it.
         db_path : str
             Path to the ``neural_events.db`` SQLite database.
         subject : str, optional
@@ -1006,8 +1259,8 @@ class ParalCycles:
             conn.execute('''
                 INSERT INTO stage_durations
                     (subject, epoch_length, wake_min, n1_min, n2_min, n3_min,
-                     rem_min, artefact_min, total_min)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     rem_min, artefact_min, total_min, time_base)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 subject,
                 stage_durations['epoch_length'],
@@ -1017,7 +1270,8 @@ class ParalCycles:
                 stage_durations['n3_min'],
                 stage_durations['rem_min'],
                 stage_durations['artefact_min'],
-                stage_durations['total_min']))
+                stage_durations['total_min'],
+                stage_durations.get('time_base', TIME_BASE_ORIGINAL)))
             conn.commit()
             self.logger.info(
                 f"Stored stage durations for subject '{subject}' in {db_path} "
@@ -1128,7 +1382,9 @@ class ParalCycles:
 
     def run(self, db_path, method='2022', write_xml=True, subject=None,
             epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
-            conn=None, run_id=None, tag_events=True, nrem_onset='n2n3'):
+            conn=None, run_id=None, tag_events=True, nrem_onset='n2n3',
+            timeline='auto', coverage_floor_min=5.0, stages=None,
+            reject_types=None):
         """Detect cycles, then persist to XML and the database.
 
         This single entry point serves both backfilling an existing
@@ -1144,6 +1400,24 @@ class ParalCycles:
         values, if any, go in. A re-run that finds no cycles therefore leaves
         all three empty and agreeing, instead of an emptied ``events.cycle``
         beside a stale ``sleep_cycles`` table and stale XML markers.
+
+        On a cut recording (a timeline sidecar beside the annotation file, see
+        ``timeline``) cycles and stage durations come from the full-night
+        hypnogram at 30 s: :func:`detect_cycles` and
+        :func:`compute_stage_durations` run on ``fullnight_stages``, and the
+        cycle bounds are then moved onto the cut file (:func:`_cycles_to_cut`:
+        ``nrem_start_sec`` / ``nrem_end_sec`` / ``rem_end_sec`` in cut seconds
+        on exact-epoch edges, ``*_orig`` on the original night, ``*_min`` and
+        ``*_epoch`` full-night, ``time_base='cut'``). XML markers and
+        ``events.cycle`` use the cut seconds, and one ``analysed_time_cycles``
+        row per cycle x stage records how much of each cycle's full-night
+        stage time survived the cut and the artefact masks
+        (:func:`turtlewave_hdEEG.dbwrite.store_cycle_analysed_time`). A cut
+        recording staged from its stage events has no full-night hypnogram:
+        its stage durations are summed from the cut file's epoch durations
+        (``time_base='cut'``, ``epoch_length`` the median epoch duration), no
+        cycles are detected (logged at ERROR) and the cycle stores are
+        cleared.
 
         Parameters
         ----------
@@ -1166,10 +1440,29 @@ class ParalCycles:
             yet, and tagging then would rewrite an earlier run's. Default
             ``True``.
 
+        timeline : {'auto', 'none'} or RecordingTimeline, optional
+            ``'auto'`` (default) uses the sidecar beside the annotation file
+            when there is one and raises
+            :class:`~turtlewave_hdEEG.timeline.SidecarMismatchError` when it
+            no longer matches the XML; ``'none'`` ignores any sidecar (only
+            valid for uniform epochs); a ``RecordingTimeline`` is used as
+            given.
+        coverage_floor_min : float, optional
+            ``analysed_time_cycles.low_coverage`` is set when a cycle x stage
+            has less than this many analysed minutes. Default 5.0.
+        stages : sequence of str or None, optional
+            Stages given ``analysed_time_cycles`` rows. ``None`` uses
+            :data:`DEFAULT_CYCLE_STAGES`.
+        reject_types : sequence of str or None, optional
+            Reject set for ``analysed_time_cycles`` (part of its key). ``None``
+            uses the library default
+            (:func:`turtlewave_hdEEG.utils.resolve_reject_types`).
+
         Returns
         -------
         list of dict
-            The detected cycles (also stored in the DB).
+            The detected cycles (also stored in the DB); cut-file seconds and
+            ``*_orig`` keys on a cut recording.
 
         Raises
         ------
@@ -1186,47 +1479,59 @@ class ParalCycles:
             loudly and writes nothing -- silently continuing would clear every
             existing ``events.cycle`` tag, store a 100%-artefact
             ``stage_durations`` row, and report success with zero cycles. A
-            scored night with no cycles (all Wake) is not refused.
+            scored night with no cycles (all Wake) is not refused. Also when
+            the epochs vary in length and there is no usable timeline (see
+            :meth:`_resolve_timeline`).
+        timeline.SidecarMismatchError
+            ``timeline='auto'`` found a sidecar that does not match the XML.
         """
         if self.annotations is None:
             raise ValueError("annotations are required for cycle detection")
 
-        # Read the hypnogram once and reuse it for both cycle detection and
-        # stage-duration accounting.
-        hypnogram = self.annotations.get_hypnogram()
-        # Refuse an unscorable hypnogram rather than proceed. Two shapes mean
-        # "the wrong or an unscored annotation file", not "a night without
-        # cycles": no epochs at all, and epochs that are all -1. The second is
-        # the epoched-but-unscored case -- get_hypnogram maps Undefined,
-        # Unknown, Artefact and Movement (and anything unrecognised) to -1, so
-        # a file with an epoch grid and no scoring returns [-1] * n_epochs.
-        # Proceeding on either would clear every existing events.cycle tag
-        # (tagging clears before it writes) and, for the all -1 case, also
-        # store a stage_durations row reading 100% artefact, while reporting
-        # success with zero cycles. Raising leaves the database untouched and
-        # makes the caller's per-subject handler count it as a failure.
-        # A genuinely scored night that happens to contain no cycles -- all
-        # Wake, say -- contains 0s, passes this guard, and goes on to clear
-        # its stale tags, which is the correct outcome there.
-        if not hypnogram:
-            raise ValueError(
-                "the annotation file has an empty hypnogram, so no cycles or "
-                "stage durations can be computed; nothing was written and "
-                "any existing events.cycle tags were left alone. Check that "
-                "this is the right XML and that it has been scored.")
-        if all(stage == -1 for stage in hypnogram):
-            raise ValueError(
-                f"none of the {len(hypnogram)} epochs in the annotation file "
-                f"carries a sleep stage (every epoch reads as "
-                f"Undefined/Unknown/Artefact/Movement), so no cycles or stage "
-                f"durations can be computed; nothing was written and any "
-                f"existing events.cycle tags were left alone. Check that this "
-                f"is the right XML and that its scoring has been saved.")
+        tl = self._resolve_timeline(timeline)
 
-        cycles = self.detect(
-            method=method, epoch_length=epoch_length, wake_thresh=wake_thresh,
-            nrem_min=nrem_min, rem_min=rem_min, hypnogram=hypnogram,
-            nrem_onset=nrem_onset)
+        if tl is not None and tl.stages:
+            # Full-night path: cycles and durations on the original night.
+            hypnogram = fullnight_hypnogram_codes(tl)
+            self._refuse_unscorable(hypnogram, 'the full-night hypnogram in '
+                                    'the timeline sidecar')
+            cycles_full = detect_cycles(
+                hypnogram, epoch_length=tl.epoch_length,
+                wake_thresh=wake_thresh, nrem_min=nrem_min, method=method,
+                rem_min=rem_min, nrem_onset=nrem_onset)
+            self.logger.info(
+                f"Detected {len(cycles_full)} cycle(s) using method "
+                f"'{method}' on the full-night hypnogram.")
+            cycles = _cycles_to_cut(cycles_full, tl, self.annotations)
+            stage_durations = compute_stage_durations(
+                hypnogram, epoch_length=tl.epoch_length)
+            stage_durations['time_base'] = TIME_BASE_ORIGINAL
+        else:
+            # Read the hypnogram once and reuse it for both cycle detection
+            # and stage-duration accounting.
+            hypnogram = self.annotations.get_hypnogram()
+            self._refuse_unscorable(hypnogram, 'the annotation file')
+            if tl is None:
+                cycles = self.detect(
+                    method=method, epoch_length=epoch_length,
+                    wake_thresh=wake_thresh, nrem_min=nrem_min,
+                    rem_min=rem_min, hypnogram=hypnogram,
+                    nrem_onset=nrem_onset)
+                stage_durations = compute_stage_durations(
+                    hypnogram, epoch_length=epoch_length)
+                stage_durations['time_base'] = TIME_BASE_ORIGINAL
+            else:
+                # Staged from stage events: no full-night hypnogram, so no
+                # cycles (logged once by _resolve_timeline) and stage
+                # durations from the cut file's own epochs.
+                from .timeline import nominal_epoch_length
+                cycles = []
+                stage_durations = compute_stage_durations(
+                    hypnogram,
+                    epoch_length=nominal_epoch_length(self.annotations,
+                                                      epoch_length),
+                    durations=self.annotations.epoch_durations())
+                stage_durations['time_base'] = TIME_BASE_CUT
 
         own = conn is None
         if own:
@@ -1236,14 +1541,12 @@ class ParalCycles:
             _require_existing_db(db_path)
             conn = dbwrite.open_write_connection(db_path)
         try:
-            # Both writes are REPLACEMENTS and both run unconditionally, so
-            # sleep_cycles, events.cycle and the XML markers always describe
-            # the same run. Gating them on `cycles` was the defect fixed here:
-            # a re-run detecting none (nrem_min raised, an all-Wake night,
-            # rescored epochs) cleared every events.cycle tag while leaving the
-            # previous run's sleep_cycles rows and XML markers in place --
-            # three stores disagreeing, with nothing recording which was
-            # current.
+            # Every write is a REPLACEMENT and runs unconditionally, so
+            # sleep_cycles, events.cycle, the XML markers and
+            # analysed_time_cycles always describe the same run. Gating them
+            # on `cycles` was the 4.3.1 defect: a re-run detecting none
+            # cleared events.cycle while the previous run's sleep_cycles rows
+            # and XML markers stayed in place.
             if write_xml:
                 try:
                     self.write_cycle_markers(cycles)
@@ -1265,18 +1568,64 @@ class ParalCycles:
                 self.tag_events_with_cycles(cycles, db_path, conn=conn,
                                             run_id=run_id)
 
-            # Stage durations are written regardless of the cycle count; an
-            # empty hypnogram was already refused above.
-            stage_durations = compute_stage_durations(
-                hypnogram, epoch_length=epoch_length)
             self.store_stage_durations(
                 stage_durations, db_path, subject=subject, conn=conn)
+
+            if tl is not None:
+                dbwrite.store_cycle_analysed_time(
+                    conn, normalize_subject(
+                        subject if subject is not None
+                        else (self.subject or '')),
+                    method, cycles, tl, self.annotations,
+                    stages=list(stages) if stages else
+                    list(DEFAULT_CYCLE_STAGES),
+                    reject_types=reject_types,
+                    coverage_floor_min=coverage_floor_min,
+                    annotation_file=getattr(self.annotations, 'annot_file',
+                                            None),
+                    logger=self.logger)
         finally:
             if own:
                 conn.close()
 
         return cycles
 
+    @staticmethod
+    def _refuse_unscorable(hypnogram, what):
+        """Raise on an empty or entirely unscored hypnogram.
+
+        Two shapes mean "the wrong or an unscored annotation file", not "a
+        night without cycles": no epochs at all, and epochs that are all -1
+        (``get_hypnogram`` maps Undefined, Unknown, Artefact and Movement to
+        -1). Proceeding would clear every existing events.cycle tag (tagging
+        clears before it writes) and store a 100 % artefact stage_durations
+        row while reporting success. A scored night with no cycles (all Wake)
+        contains 0s and passes.
+
+        Parameters
+        ----------
+        hypnogram : sequence of int
+        what : str
+            Where the hypnogram came from, for the message.
+
+        Raises
+        ------
+        ValueError
+        """
+        if not hypnogram:
+            raise ValueError(
+                f"{what} has an empty hypnogram, so no cycles or stage "
+                f"durations can be computed; nothing was written and any "
+                f"existing events.cycle tags were left alone. Check that this "
+                f"is the right XML and that it has been scored.")
+        if all(stage == -1 for stage in hypnogram):
+            raise ValueError(
+                f"none of the {len(hypnogram)} epochs in {what} carries a "
+                f"sleep stage (every epoch reads as Undefined/Unknown/"
+                f"Artefact/Movement), so no cycles or stage durations can be "
+                f"computed; nothing was written and any existing events.cycle "
+                f"tags were left alone. Check that this is the right XML and "
+                f"that its scoring has been saved.")
 
 def finalize_cycles_and_durations(
         annotations, db_path, subject=None,
@@ -1284,7 +1633,8 @@ def finalize_cycles_and_durations(
         write_xml=True, plot=False, plot_path=None,
         epoch_length=30, wake_thresh=10, nrem_min=30, rem_min=10,
         log_level=logging.INFO, conn=None, run_id=None, tag_events=True,
-        nrem_onset='n2n3'):
+        nrem_onset='n2n3', timeline='auto', coverage_floor_min=5.0,
+        stages=None, reject_types=None):
     """Populate ``neural_events.db`` with sleep cycles + stage durations.
 
     The explicit post-detection finalize step. Run it once after event
@@ -1363,6 +1713,19 @@ def finalize_cycles_and_durations(
     tag_events : bool, optional
         When False, cycles and stage durations are stored but ``events.cycle``
         is not touched. Default ``True``.
+    timeline : {'auto', 'none'} or RecordingTimeline, optional
+        Resolved once for all methods; see :meth:`ParalCycles.run`. With a
+        full-night timeline the plot shows the full-night hypnogram and the
+        cycles on the original night. Default ``'auto'``.
+    coverage_floor_min : float, optional
+        Low-coverage floor for ``analysed_time_cycles``, in minutes. Default
+        5.0.
+    stages : sequence of str or None, optional
+        Stages given ``analysed_time_cycles`` rows; ``None`` uses
+        :data:`DEFAULT_CYCLE_STAGES`.
+    reject_types : sequence of str or None, optional
+        Reject set for ``analysed_time_cycles``. ``None`` uses the library
+        default.
 
     Returns
     -------
@@ -1428,6 +1791,10 @@ def finalize_cycles_and_durations(
     # (six connect/close cycles for the default two methods), and on a WAL
     # database each close deletes and each connect recreates the -wal/-shm
     # sidecars -- the operation that fails on a network share.
+    # One timeline for every method, so the sidecar is read and checked once
+    # and its notice is logged once per run, not once per method.
+    tl = pc._resolve_timeline(timeline)
+
     cycles_by_method = {}
     own_conn = conn is None
     if own_conn:
@@ -1445,7 +1812,10 @@ def finalize_cycles_and_durations(
                 wake_thresh=wake_thresh, nrem_min=nrem_min, rem_min=rem_min,
                 conn=conn, run_id=run_id,
                 tag_events=(tag_events and m == tag_method),
-                nrem_onset=nrem_onset)
+                nrem_onset=nrem_onset,
+                timeline=tl if tl is not None else 'none',
+                coverage_floor_min=coverage_floor_min, stages=stages,
+                reject_types=reject_types)
             cycles_by_method[m] = cycles
     finally:
         if own_conn:
@@ -1465,8 +1835,20 @@ def finalize_cycles_and_durations(
         # Imported lazily so cycleprocessor stays matplotlib-free at module
         # load (headless-safe library import).
         from .cycleplot import plot_from_annotations
-        plot_from_annotations(annotations, cycles_by_method, plot_path,
-                              epoch_length=epoch_length, subject=subject)
+        if tl is not None and tl.stages:
+            # Full-night picture: the hypnogram the cycles were detected on,
+            # with the bounds back on the original night.
+            orig = {m: [dict(c, nrem_start_sec=c['nrem_start_orig'],
+                             nrem_end_sec=c['nrem_end_orig'],
+                             rem_end_sec=c['rem_end_orig']) for c in cyc]
+                    for m, cyc in cycles_by_method.items()}
+            plot_from_annotations(annotations, orig, plot_path,
+                                  epoch_length=tl.epoch_length,
+                                  subject=subject,
+                                  hypnogram=fullnight_hypnogram_codes(tl))
+        else:
+            plot_from_annotations(annotations, cycles_by_method, plot_path,
+                                  epoch_length=epoch_length, subject=subject)
         pc.logger.info("Cycle plot written to %s", plot_path)
 
     return cycles_by_method
