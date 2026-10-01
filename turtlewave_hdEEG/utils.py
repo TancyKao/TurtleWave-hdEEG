@@ -183,6 +183,50 @@ def reject_key(reject_types):
                             if str(t).strip()}))
 
 
+#: Default concatenation for detection: concatenate cycles, stages and
+#: discontinuous signal, keep event types separate. What the GUI and the Gadi
+#: drivers pass, and the only value under which a channel gets ONE threshold.
+DEFAULT_CAT = (1, 1, 1, 0)
+
+
+def resolve_cat(cat):
+    """Validate Wonambi's ``cat`` argument, filling in the default.
+
+    ``wonambi.trans.fetch`` indexes ``cat`` and raises a bare ``TypeError``
+    on ``None``, which the processors used to catch per channel and record as
+    a failure on every channel.
+
+    Parameters
+    ----------
+    cat : tuple or list or None
+        Four 0/1 flags ``(cycle, stage, discontinuous, evt_type)``. ``None``
+        means :data:`DEFAULT_CAT`.
+
+    Returns
+    -------
+    tuple of int
+        Four ints, each 0 or 1.
+
+    Raises
+    ------
+    ValueError
+        If ``cat`` is not ``None`` and not a length-4 tuple/list of 0/1.
+    """
+    if cat is None:
+        return DEFAULT_CAT
+    if not isinstance(cat, (tuple, list)) or len(cat) != 4:
+        raise ValueError(
+            f"cat must be a tuple of four 0/1 flags (cycle, stage, "
+            f"discontinuous, evt_type), e.g. {DEFAULT_CAT}; got {cat!r}")
+    # `c in (0, 1)` accepts 0/1 ints, floats and bools and rejects strings.
+    if not all(isinstance(c, (int, float, np.integer)) and c in (0, 1)
+               for c in cat):
+        raise ValueError(
+            f"cat must hold only 0/1 flags (cycle, stage, discontinuous, "
+            f"evt_type); got {cat!r}")
+    return tuple(int(c) for c in cat)
+
+
 def missing_json_message(json_dir, file_pattern, max_listed=25):
     """Build the error text for a ``file_pattern`` that matched no JSON file.
 

@@ -11,6 +11,7 @@ from turtlewave_hdEEG.extensions import ImprovedDetectKComplex
 from turtlewave_hdEEG.swprocessor import ParalSWA
 from turtlewave_hdEEG import dbwrite
 from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
+                                    resolve_cat,
                                     warn_interpolated_channels)
 from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
                                              assert_scoring_covers_stages)
@@ -68,7 +69,7 @@ class ParalKC:
                           detrend=False, polar='normal',
                           reject_artifacts=None, reject_arousals=None,
                           reject_types=None,
-                          stage=None, cat=None,
+                          stage=None, cat=(1, 1, 1, 0),
                           save_to_annotations=False, json_dir=None,
                           *, write_db=None, db_path=None, subject=None,
                           resume=False,
@@ -181,6 +182,9 @@ class ParalKC:
         :func:`turtlewave_hdEEG.density.event_density` can derive K-complex
         density from the database without re-reading any file.
         """
+        # Wonambi fetch() raises on cat=None; validate up front (default
+        # (1, 1, 1, 0), as the GUI and the Gadi drivers pass).
+        cat = resolve_cat(cat)
         if ref_chan is None:
             ref_chan = []
 
@@ -477,6 +481,9 @@ class ParalKC:
                 channel_json_kcs = []
                 channel_db_events = []
                 channel_param_segments = []
+                # Run-wide criteria (incl. min_isolation) per method, written
+                # in the same transaction as this channel's events.
+                channel_thresholds = []
 
                 for meth in methods:
                     self.logger.info(f"Applying method: {meth}")
@@ -522,6 +529,13 @@ class ParalKC:
                         )
 
                         kcs = detector(processed_seg['data'])
+
+                        if write_db:
+                            spec = dbwrite.detection_threshold_spec(
+                                detector, kcs, ch, segment_idx=i,
+                                data=processed_seg['data'])
+                            if spec is not None:
+                                channel_thresholds.append(spec)
 
                         if kcs and save_to_annotations and new_annotations is not None:
                             kcs.to_annot(new_annotations, self.EVENT_TYPE)
@@ -605,7 +619,8 @@ class ParalKC:
                         frequency[0], frequency[1], stages_key,
                         channel_db_events, batched, rec_start,
                         n_fft_sec, self.logger,
-                        replace=(ch in replace_set), replace_methods=methods)
+                        replace=(ch in replace_set), replace_methods=methods,
+                        thresholds=channel_thresholds)
                     self.logger.info(
                         f"Wrote {len(channel_db_events)} K-complex rows for "
                         f"channel {ch} to the database")

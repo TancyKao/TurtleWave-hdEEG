@@ -1506,3 +1506,244 @@ class ImprovedDetectKComplex(ImprovedDetectSlowWave):
                 last_trough = t
         events.events = isolated
         return events
+
+# ---------------------------------------------------------------------------
+# Detection thresholds: units, ratio semantics and extraction (4.6)
+# ---------------------------------------------------------------------------
+
+#: Per-method description of the thresholds a detection run resolves, keyed
+#: by method name as stored in ``events.method``.
+#:
+#: Each entry holds
+#:
+#: ``units``
+#:     ``{threshold name: units}`` for every name the method can store in
+#:     ``detection_thresholds``.
+#: ``ratio_allowed``
+#:     ``{threshold name: bool}``. True only where the event's stored detector
+#:     value lives on the SAME signal, in the same LINEAR units, as that
+#:     threshold, so ``value / threshold`` means "how far above the bar the
+#:     event went" (>= 1 by construction). The pairing value is named in
+#:     ``ratio_value``. Taken from the Method Spec M4 table
+#:     (``_scratch/research/event-review/method_spec.md``) and checked against
+#:     Wonambi 7.15 ``detect/spindle.py``: the peak index stored as
+#:     ``peak_val_det`` is re-picked by ``_merge_close(dat, ...)`` on the
+#:     signal handed to it, which is the thresholded signal for Moelle2011,
+#:     Ferrarelli2007 and Nir2011 but the band-passed signal for Martin2013,
+#:     the sigma-filtered signal for Lacourse2018 and ``abs(wavelet)`` for
+#:     Wamsley2012 (thresholded on ``real(w**2)**2``). Ray2015 thresholds and
+#:     peaks on the same z-scored signal, but a ratio of z values is not a
+#:     scale ratio, so it is not allowed. ``sel_value`` never takes a ratio:
+#:     for Ferrarelli2007 and Nir2011 it is the lower threshold that sets the
+#:     event's boundaries, not the bar the event had to clear, so
+#:     ``peak / sel_value`` does not say how far above the bar it went (it is
+#:     stored and shown as a value); Moelle2011's is always NaN.
+#: ``ratio_value``
+#:     ``{threshold name: events column}`` naming the stored per-event value a
+#:     ratio is formed from.
+#: ``det_signal``
+#:     Plain description of the signal ``peak_val_det`` / ``rms_det`` are
+#:     measured on, which is method-specific: those two columns carry the
+#:     units of this signal, NOT microvolts in general.
+#: ``scope``
+#:     ``'channel'`` when the value is resolved per channel and segment (the
+#:     spindle detectors' ``Spindles.det_values``), ``'run'`` when it is a
+#:     run-wide criterion stored once under ``channel='*'``.
+#:
+#: Ngo2015 and Staresina2015 compute their per-channel cut-offs as local
+#: variables inside Wonambi and do not return them, so only the FACTOR /
+#: PERCENTILE is recorded. CIRUS returns no thresholds at all.
+THRESHOLD_UNITS = {
+    'Ferrarelli2007': {
+        'units': {'det_value_lo': 'uV', 'sel_value': 'uV'},
+        'ratio_allowed': {'det_value_lo': True, 'sel_value': False},
+        'ratio_value': {'det_value_lo': 'peak_val_det'},
+        'det_signal': 'abs(remez band-pass), uV',
+        'scope': 'channel',
+    },
+    'Moelle2011': {
+        'units': {'det_value_lo': 'uV', 'sel_value': 'uV'},
+        'ratio_allowed': {'det_value_lo': True, 'sel_value': False},
+        'ratio_value': {'det_value_lo': 'peak_val_det'},
+        'det_signal': 'remez band-pass -> moving RMS -> flat smooth, uV',
+        'scope': 'channel',
+    },
+    'Nir2011': {
+        'units': {'det_value_lo': 'uV', 'sel_value': 'uV'},
+        'ratio_allowed': {'det_value_lo': True, 'sel_value': False},
+        'ratio_value': {'det_value_lo': 'peak_val_det'},
+        'det_signal': 'Butterworth band-pass -> Hilbert envelope -> '
+                      'Gaussian smooth, uV',
+        'scope': 'channel',
+    },
+    'Ray2015': {
+        'units': {'det_value_lo': 'z', 'sel_value': 'z'},
+        'ratio_allowed': {'det_value_lo': False, 'sel_value': False},
+        'ratio_value': {},
+        'det_signal': 'complex demodulation amplitude, moving z-score (z)',
+        'scope': 'channel',
+    },
+    'Wamsley2012': {
+        'units': {'det_value_lo': 'uV^4', 'sel_value': 'uV^4'},
+        'ratio_allowed': {'det_value_lo': False, 'sel_value': False},
+        'ratio_value': {},
+        'det_signal': 'abs(complex Morlet wavelet), uV; the threshold is on '
+                      'smoothed real(w**2)**2 instead',
+        'scope': 'channel',
+    },
+    'Martin2013': {
+        'units': {'det_value_lo': 'uV', 'sel_value': 'uV'},
+        'ratio_allowed': {'det_value_lo': False, 'sel_value': False},
+        'ratio_value': {},
+        'det_signal': 'remez band-passed sample, uV; the threshold is a '
+                      'percentile of the 0.25 s moving RMS instead',
+        'scope': 'channel',
+    },
+    'Lacourse2018': {
+        'units': {'abs_pow_thresh': 'log10(uV^2)', 'rel_pow_thresh': 'z',
+                  'covar_thresh': 'z', 'corr_thresh': 'r'},
+        'ratio_allowed': {'abs_pow_thresh': False, 'rel_pow_thresh': False,
+                          'covar_thresh': False, 'corr_thresh': False},
+        'ratio_value': {},
+        'det_signal': 'sigma band-passed sample, uV; the four thresholds are '
+                      'on four other features',
+        'scope': 'channel',
+    },
+    'CIRUS': {
+        'units': {},
+        'ratio_allowed': {},
+        'ratio_value': {},
+        'det_signal': 'none stored (CIRUS returns no detector values)',
+        'scope': 'channel',
+    },
+}
+
+_MASSIMINI_THRESHOLDS = {
+    'units': {'max_trough_amp': 'uV', 'min_ptp': 'uV',
+              'trough_duration_lo': 's', 'trough_duration_hi': 's',
+              'duration_lo': 's', 'duration_hi': 's', 'min_isolation': 's'},
+    'ratio_allowed': {'max_trough_amp': True, 'min_ptp': True,
+                      'trough_duration_lo': False, 'trough_duration_hi': False,
+                      'duration_lo': False, 'duration_hi': False,
+                      'min_isolation': False},
+    'ratio_value': {'max_trough_amp': 'det_trough', 'min_ptp': 'det_ptp'},
+    'det_signal': 'det_filt band-passed signal (double Butterworth), uV',
+    'scope': 'run',
+}
+THRESHOLD_UNITS['Massimini2004'] = _MASSIMINI_THRESHOLDS
+THRESHOLD_UNITS['AASM/Massimini2004'] = _MASSIMINI_THRESHOLDS
+THRESHOLD_UNITS['Ngo2015'] = {
+    'units': {'peak_thresh_factor': 'x mean trough (per channel)',
+              'ptp_thresh_factor': 'x mean ptp of trough-selected waves '
+                                   '(per channel)',
+              'duration_lo': 's', 'duration_hi': 's'},
+    'ratio_allowed': {'peak_thresh_factor': False, 'ptp_thresh_factor': False,
+                      'duration_lo': False, 'duration_hi': False},
+    'ratio_value': {},
+    'det_signal': 'low-pass Butterworth, uV',
+    'scope': 'run',
+}
+THRESHOLD_UNITS['Staresina2015'] = {
+    'units': {'ptp_percentile': 'percentile of ptp (per channel)',
+              'duration_lo': 's', 'duration_hi': 's'},
+    'ratio_allowed': {'ptp_percentile': False, 'duration_lo': False,
+                      'duration_hi': False},
+    'ratio_value': {},
+    'det_signal': 'Kaiser FIR low-pass, uV',
+    'scope': 'run',
+}
+
+
+def _finite_items(values):
+    """Keep the entries of ``values`` that are finite real numbers.
+
+    Parameters
+    ----------
+    values : dict
+        ``{name: value}``.
+
+    Returns
+    -------
+    dict
+        ``{name: float}``; ``None``, NaN, inf and non-numeric entries dropped.
+    """
+    out = {}
+    for name, value in values.items():
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(v):
+            out[str(name)] = v
+    return out
+
+
+def detection_threshold_values(detector, result=None):
+    """Resolved thresholds of one detection call, ready for the database.
+
+    Spindle detectors (Wonambi methods) return their per-channel thresholds in
+    ``Spindles.det_values``; only the first channel's dict is read, because
+    the processors detect one channel at a time. Slow-wave and K-complex
+    criteria are detector attributes and run-wide: the Massimini family's
+    absolute criteria, and for Ngo2015 / Staresina2015 the factor or
+    percentile only (their per-channel cut-offs are local variables inside
+    Wonambi and are not returned).
+
+    Parameters
+    ----------
+    detector : ImprovedDetectSpindle or ImprovedDetectSlowWave
+        The configured detector (its ``method`` attribute selects the branch).
+    result : wonambi.graphoelement.Spindles or None
+        What the detector returned. Needed for spindles; ignored otherwise.
+
+    Returns
+    -------
+    values : dict
+        ``{name: float}``, finite values only. Empty for CIRUS, for a result
+        without ``det_values``, and for an unknown method.
+    units : dict
+        ``{name: units}`` for the names in ``values``, from
+        :data:`THRESHOLD_UNITS`.
+    run_wide : bool
+        True when the values are run-wide criteria to be stored under
+        ``channel='*'``.
+    """
+    method = getattr(detector, 'method', None)
+    spec = THRESHOLD_UNITS.get(method)
+    if spec is None:
+        return {}, {}, False
+
+    if spec['scope'] == 'channel':
+        det_values = getattr(result, 'det_values', None)
+        if det_values is None or len(det_values) == 0:
+            return {}, {}, False
+        first = det_values[0]
+        if not isinstance(first, dict):
+            return {}, {}, False
+        values = _finite_items(first)
+        run_wide = False
+    else:
+        raw = {}
+        if method in ImprovedDetectSlowWave.MASSIMINI_METHODS:
+            raw['max_trough_amp'] = getattr(detector, 'max_trough_amp', None)
+            raw['min_ptp'] = getattr(detector, 'min_ptp', None)
+            lo, hi = getattr(detector, 'trough_duration', (None, None))
+            raw['trough_duration_lo'], raw['trough_duration_hi'] = lo, hi
+            if hasattr(detector, 'min_isolation'):
+                raw['min_isolation'] = detector.min_isolation
+        elif method == 'Ngo2015':
+            raw['peak_thresh_factor'] = getattr(detector, 'peak_thresh', None)
+            raw['ptp_thresh_factor'] = getattr(detector, 'ptp_thresh', None)
+        elif method == 'Staresina2015':
+            raw['ptp_percentile'] = getattr(detector, 'ptp_thresh', None)
+        # Wonambi's whole-wave gate (find_intervals / within_duration reads
+        # self.duration), recorded as applied -- see
+        # ImprovedDetectSlowWave._set_method_params for why Ngo2015 and
+        # Staresina2015 keep their constructor-time value.
+        dur = getattr(detector, 'duration', None) or (None, None)
+        raw['duration_lo'], raw['duration_hi'] = dur[0], dur[1]
+        values = _finite_items(raw)
+        run_wide = True
+
+    units = {name: spec['units'].get(name) for name in values}
+    return values, units, run_wide

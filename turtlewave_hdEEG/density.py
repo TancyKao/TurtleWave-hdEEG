@@ -451,7 +451,8 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                   channel=None, freq_lower=None, freq_upper=None,
                   subject=None, reject_artifacts=None, reject_arousals=None,
                   combine_stages=False, include_zero_channels=True,
-                  missing='raise', logger_=None, reject_types=None):
+                  missing='raise', logger_=None, reject_types=None,
+                  exclude_rejected=False, reviewer=None):
     """Per-channel event density derived from the database.
 
     The numerator is a ``GROUP BY`` count over ``events`` for the requested
@@ -531,6 +532,17 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         written before 4.4 therefore still reads correctly with no argument,
         while a database holding two runs' sets never pools them silently.
         Default ``None``.
+    exclude_rejected : bool, optional
+        Leave every event a reviewer rejected (``event_reviews.decision =
+        'reject'``) out of the numerator, including the NULL-stage rows. The
+        denominator is unchanged: rejecting an event does not change which
+        seconds were analysed. A channel whose every event was rejected keeps
+        its zero row through ``include_zero_channels``. Default False, which
+        counts every detected event.
+    reviewer : str or None, optional
+        With ``exclude_rejected``, count only this reviewer's rejections.
+        ``None`` (default) excludes an event any reviewer rejected, the same
+        rule as the ``events_reviewed`` view.
 
     Returns
     -------
@@ -556,7 +568,8 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         If ``db_path`` does not exist.
     ValueError
         If ``missing='raise'`` and a stage in scope has no stored denominator,
-        or if the subject cannot be resolved unambiguously.
+        or if the subject cannot be resolved unambiguously, or if ``reviewer``
+        is given without ``exclude_rejected``.
 
     Examples
     --------
@@ -573,6 +586,9 @@ def event_density(db_path, event_type=None, method=None, stage=None,
             f"raw hypnogram time (stage_durations) for the artefact-free "
             f"denominator is not offered: it biases density by each "
             f"recording's artefact load.")
+
+    if reviewer is not None and not exclude_rejected:
+        raise ValueError("reviewer only applies with exclude_rejected=True")
 
     if not db_path or not os.path.exists(db_path):
         raise FileNotFoundError(
@@ -655,6 +671,31 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                 # No stored token lies inside the requested stages. Match
                 # nothing: dropping the predicate would count every stage.
                 where.append("1 = 0")
+        # Reviewer rejections. Applied to the counts (here and the NULL-stage
+        # queries below) only: the token resolution above must still see
+        # every stored token, or a fully-rejected identity would read as
+        # "fired under no token" and lose its zero rows.
+        rej_where, rej_params = [], []
+        if exclude_rejected:
+            from .dbwrite import review_exclusion_clause
+            rej_sql, rej_params = review_exclusion_clause(
+                conn, 'events.uuid', reviewer)
+            if rej_sql is None:
+                log.info("exclude_rejected: %s has no event_reviews table, so "
+                         "no event has been rejected.", db_path)
+            else:
+                rej_where = [rej_sql]
+                n_rej = conn.execute(
+                    "SELECT COUNT(*) FROM events"
+                    + (" WHERE " + " AND ".join(where) if where else "")
+                    + (" AND " if where else " WHERE ") + "NOT " + rej_sql,
+                    params + rej_params).fetchone()[0]
+                log.info("exclude_rejected: %d event(s) in scope rejected by "
+                         "%s are left out of the counts.", int(n_rej),
+                         f"reviewer {reviewer!r}" if reviewer
+                         else "any reviewer")
+        where = where + rej_where
+        params = params + rej_params
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
         sql = (
@@ -670,11 +711,13 @@ def event_density(db_path, event_type=None, method=None, stage=None,
         # they have no denominator and no density. They must never be
         # silently dropped -- that turns a complete run into "nothing
         # detected".
-        base_clause = (" WHERE " + " AND ".join(base_where)) if base_where else ""
+        null_where = base_where + rej_where
+        null_params = base_params + rej_params
+        base_clause = (" WHERE " + " AND ".join(null_where)) if null_where else ""
         null_sql = (f"SELECT COUNT(*), COUNT(DISTINCT channel) FROM events"
                     f"{base_clause}"
-                    f"{' AND' if base_where else ' WHERE'} stage IS NULL")
-        n_null, n_null_chan = conn.execute(null_sql, base_params).fetchone()
+                    f"{' AND' if null_where else ' WHERE'} stage IS NULL")
+        n_null, n_null_chan = conn.execute(null_sql, null_params).fetchone()
         if n_null:
             log.error(
                 "%d event(s) across %d channel(s) in this scope have a NULL "
@@ -693,9 +736,9 @@ def event_density(db_path, event_type=None, method=None, stage=None,
                     "SELECT channel, event_type, method, stage, "
                     "COUNT(*) AS n_events, AVG(duration) AS mean_duration_sec "
                     f"FROM events{base_clause}"
-                    f"{' AND' if base_where else ' WHERE'} stage IS NULL "
+                    f"{' AND' if null_where else ' WHERE'} stage IS NULL "
                     "GROUP BY channel, event_type, method",
-                    conn, params=base_params)
+                    conn, params=null_params)
                 counts = _concat_rows(counts, null_rows)
 
         # Channel roster for honest zeros: every channel this scope actually

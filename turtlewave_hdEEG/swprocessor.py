@@ -8,6 +8,7 @@ from wonambi.attr import Annotations
 from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave as DetectSlowWave
 from turtlewave_hdEEG import dbwrite
 from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
+                                    resolve_cat,
                                     warn_interpolated_channels)
 from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
                                              _json_event_stages,
@@ -137,8 +138,8 @@ class ParalSWA:
                      polar='normal', # normal vs opposite 
                      reject_artifacts=None, reject_arousals=None,
                      reject_types=None,
-                     stage=None, 
-                     cat=None,
+                     stage=None,
+                     cat=(1, 1, 1, 0),
                      peak_thresh_sigma=None,
                      ptp_thresh_sigma=None,
                      save_to_annotations=False, json_dir=None,
@@ -219,8 +220,10 @@ class ParalSWA:
             Deprecated shim for ``'Arousal'``; same semantics.
         stage : list or str
             Sleep stage(s) to analyze
-        cat : tuple
-            Category specification for data selection
+        cat : tuple, optional
+            Wonambi ``fetch`` concatenation flags ``(cycle, stage,
+            discontinuous, evt_type)``. Default ``(1, 1, 1, 0)``. ``None``
+            means the default; any other non-tuple raises ``ValueError``.
         peak_thresh_sigma : float or None
             Peak threshold in standard deviations (for Ngo2015 method)
         ptp_thresh_sigma : float or None
@@ -295,6 +298,9 @@ class ParalSWA:
         :func:`turtlewave_hdEEG.density.event_density` can derive density from
         the database without re-reading any file.
         """
+        # Wonambi fetch() raises on cat=None; validate up front (default
+        # (1, 1, 1, 0), as the GUI and the Gadi drivers pass).
+        cat = resolve_cat(cat)
         import uuid
        
         self.logger.info(r"""
@@ -635,6 +641,9 @@ class ParalSWA:
                     # Direct-write accumulators (populated only when write_db).
                     channel_db_events = []
                     channel_param_segments = []
+                    # Run-wide criteria / factors per method, written in the
+                    # same transaction as this channel's events.
+                    channel_thresholds = []
 
                     ## Loop through methods
                     for m, meth in enumerate(method):
@@ -735,6 +744,16 @@ class ParalSWA:
                             # Run detection
                             slow_waves = detection(processed_seg['data'])
 
+                            # Criteria as applied (Massimini family: absolute
+                            # uV/s; Ngo2015/Staresina2015: the factor or
+                            # percentile only), stored under channel '*'.
+                            if write_db:
+                                spec = dbwrite.detection_threshold_spec(
+                                    detection, slow_waves, ch, segment_idx=i,
+                                    data=processed_seg['data'])
+                                if spec is not None:
+                                    channel_thresholds.append(spec)
+
                             if slow_waves and save_to_annotations and new_annotations is not None:
                                 slow_waves.to_annot(new_annotations, 'slow_wave')
                             
@@ -828,7 +847,8 @@ class ParalSWA:
                             frequency[0], frequency[1], stages_key,
                             channel_db_events, batched, rec_start,
                             n_fft_sec, self.logger,
-                            replace=(ch in replace_set), replace_methods=method)
+                            replace=(ch in replace_set), replace_methods=method,
+                            thresholds=channel_thresholds)
                         self.logger.info(
                             f"Wrote {len(channel_db_events)} {event_type} rows for "
                             f"channel {ch} to the database")

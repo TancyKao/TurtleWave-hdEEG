@@ -19,6 +19,9 @@ from .cycleprocessor import (ParalCycles, detect_cycles,
                              finalize_cycles_and_durations)
 from .extensions import (ImprovedDetectSpindle, ImprovedDetectSlowWave,
                          ImprovedDetectKComplex)
+from .extensions import THRESHOLD_UNITS
+from .dbwrite import (ensure_detection_thresholds_schema,
+                      store_detection_thresholds, read_detection_thresholds)
 from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
                       set_journal_mode, VALID_JOURNAL_MODES,
                       resolve_db_target, read_analysed_time,
@@ -27,6 +30,12 @@ from .dbwrite import (export_events_to_csv, default_csv_path, fmt_freq_token,
                       stage_tokens_covering, resolve_stage_tokens,
                       pooled_denominator, stage_format,
                       assert_stage_format_compatible)
+from .dbwrite import (ensure_event_reviews_schema, store_event_review,
+                      delete_event_review,
+                      read_event_reviews, ensure_reviewed_view,
+                      rematch_orphaned_reviews, review_exclusion_clause,
+                      review_category, REVIEW_DECISIONS, REVIEW_REASONS,
+                      REVIEW_REASON_CATEGORY)
 from .density import event_density, format_density_table
 from .utils import (derive_subject, normalize_subject, read_channels_from_csv,
                     region_from_label,

@@ -81,6 +81,26 @@ _RUN_ID_COLUMN = ('run_id', 'TEXT')
 # annotation XML still existing and being unedited.
 _EPOCH_STAGE_COLUMN = ('epoch_stage', 'TEXT')
 
+# Detector-own per-event values added in 4.6, additive and nullable, in no key
+# and no index. Spindles: Wonambi's make_spindles fields. peak_val_det and
+# rms_det are in the units of the method's DETECTION signal (see
+# extensions.THRESHOLD_UNITS[method]['det_signal']), not microvolts in
+# general; peak_freq is Wonambi's first-difference periodogram argmax over
+# 0-50 Hz and power_orig its in-band mean power of the first difference.
+# Slow waves / K-complexes: det_zero_time, the detector's zero crossing inside
+# the wave (Massimini family: the down-going crossing, so the negative
+# half-wave is end_time - det_zero_time; Ngo2015/Staresina2015: the up-going
+# crossing, so it is det_zero_time - start_time). NULL when the detector does
+# not produce the field (CIRUS, pre-4.6 rows).
+_DET_VALUE_COLUMNS = (
+    ('peak_freq', 'REAL'),
+    ('peak_val_det', 'REAL'),
+    ('rms_det', 'REAL'),
+    ('rms_orig', 'REAL'),
+    ('power_orig', 'REAL'),
+    ('det_zero_time', 'REAL'),
+)
+
 # Column order used by the direct-write INSERT. Kept in one place so the SQL and
 # the value tuple never drift.
 EVENT_INSERT_COLUMNS = (
@@ -1505,11 +1525,14 @@ def ensure_analysed_time_schema(conn, logger=None):
         # (the view is derived, so nothing is lost; ensure_direct_write_schema
         # recreates it unconditionally too, but this function is also called
         # on its own by store_analysed_time).
-        had_view = bool(conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='view' "
-            "AND name='v_event_density'").fetchall())
-        if had_view:
-            conn.execute('DROP VIEW IF EXISTS v_event_density')
+        # The same holds for its reviewed twin (v_event_density_reviewed),
+        # which also reads analysed_time.
+        had_views = [src for src, view in _DENSITY_VIEW_SOURCES.items()
+                     if conn.execute(
+                         "SELECT name FROM sqlite_master WHERE type='view' "
+                         "AND name=?", (view,)).fetchall()]
+        for src in had_views:
+            conn.execute(f'DROP VIEW IF EXISTS {_DENSITY_VIEW_SOURCES[src]}')
         conn.execute('''
         CREATE TABLE analysed_time_new (
             subject TEXT NOT NULL,
@@ -1558,11 +1581,11 @@ def ensure_analysed_time_schema(conn, logger=None):
                     conn.execute(stmt)
                 except Exception:
                     pass
-            if had_view:
-                ensure_density_view(conn)
+            for src in had_views:
+                ensure_density_view(conn, source=src)
             raise
-        if had_view:
-            ensure_density_view(conn)
+        for src in had_views:
+            ensure_density_view(conn, source=src)
 
     conn.execute('CREATE INDEX IF NOT EXISTS idx_analysed_time_subject '
                  'ON analysed_time(subject)')
@@ -2690,8 +2713,10 @@ def ensure_direct_write_schema(conn, logger=None):
     Idempotent and safe on an already-current database. Every step below is
     guarded, and none touches existing rows or unrelated tables:
 
-    1. Add detector-own morphology columns (``det_trough`` etc.), ``run_id``
-       and ``epoch_stage`` to ``events`` (only the absent ones, via
+    1. Add detector-own morphology columns (``det_trough`` etc.), ``run_id``,
+       ``epoch_stage`` and the 4.6 detector values (``peak_freq``,
+       ``peak_val_det``, ``rms_det``, ``rms_orig``, ``power_orig``,
+       ``det_zero_time``) to ``events`` (only the absent ones, via
        ``PRAGMA table_info``), and create ``idx_events_run`` on ``run_id`` so
        cycle tagging visits one run's rows rather than every run's events in
        the same time span.
@@ -2707,11 +2732,16 @@ def ensure_direct_write_schema(conn, logger=None):
        reader never hits a missing table on a database where PAC has not run.
     5. Create the ``analysed_time`` table via
        :func:`ensure_analysed_time_schema`, which holds the density
-       denominator (artefact-free analysed seconds per stage).
+       denominator (artefact-free analysed seconds per stage), and the
+       ``detection_thresholds`` table via
+       :func:`ensure_detection_thresholds_schema`.
     6. Create ``db_meta`` and the ``v_event_density`` view, and stamp
        ``stage_format='joint'`` only on a database holding no events — an
        existing one keeps its unmarked state, which is the only evidence that
        it predates 4.3 and must be migrated before it is re-detected into.
+    7. Create the ``event_reviews`` table (:func:`ensure_event_reviews_schema`)
+       and the ``events_reviewed`` / ``v_event_density_reviewed`` views
+       (:func:`ensure_reviewed_view`).
 
     Parameters
     ----------
@@ -2727,8 +2757,9 @@ def ensure_direct_write_schema(conn, logger=None):
     existing = _table_columns(conn, 'events')
     if existing:  # events table exists (fresh DBs get it via initialize_*)
         added = []
-        for col, col_type in _DET_MORPH_COLUMNS + (_RUN_ID_COLUMN,
-                                                   _EPOCH_STAGE_COLUMN):
+        for col, col_type in (_DET_MORPH_COLUMNS
+                              + (_RUN_ID_COLUMN, _EPOCH_STAGE_COLUMN)
+                              + _DET_VALUE_COLUMNS):
             if col not in existing:
                 cur.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type}")
                 added.append(col)
@@ -2866,6 +2897,11 @@ def ensure_direct_write_schema(conn, logger=None):
     # reject_types key.
     ensure_analysed_time_schema(conn, logger=logger)
 
+    # (5a) detection_thresholds: each run's resolved detector thresholds,
+    # written by write_channel_events from 4.6 on. A run without rows
+    # predates 4.6 (or used CIRUS, which returns none).
+    ensure_detection_thresholds_schema(conn)
+
     # (6) db_meta + the stage_format marker -------------------------------
     # Seeded 'joint' ONLY for a database with no events yet. An existing
     # database full of per-epoch rows must stay UNMARKED: the absence of the
@@ -2917,6 +2953,12 @@ def ensure_direct_write_schema(conn, logger=None):
     # (8) v_event_density: density in plain SQL, for R and sqlite3 callers.
     ensure_density_view(conn, logger=logger)
 
+    # (8b) event_reviews + events_reviewed + v_event_density_reviewed. Its
+    # own table, never columns on events: write_channel_events' scoped DELETE
+    # and INSERT OR REPLACE rewrite events rows and would erase a decision.
+    ensure_event_reviews_schema(conn, logger=logger)
+    ensure_reviewed_view(conn, logger=logger)
+
     # (9) Which library version last touched this database. Overwritten on
     # every call by design: the question it answers is "what wrote the rows I
     # am looking at now", and a database opened by several releases is
@@ -2952,8 +2994,16 @@ _SQL_STAGE_N_COMPONENTS = (
     + _SQL_STAGE_REST + ", 'Wake', ''))) / 4)")
 
 
-def ensure_density_view(conn, logger=None):
-    """(Re)create the ``v_event_density`` SQL view.
+# Event sources a density view may read, and the view each one produces. A
+# closed map rather than free text: the name is interpolated into DDL.
+_DENSITY_VIEW_SOURCES = {
+    'events': 'v_event_density',
+    'events_reviewed': 'v_event_density_reviewed',
+}
+
+
+def ensure_density_view(conn, logger=None, source='events'):
+    """(Re)create the ``v_event_density`` SQL view (or its reviewed twin).
 
     Density without Python: joins ``events`` to ``analysed_time`` and does the
     joint-token component pooling in SQL, so R, ``sqlite3`` and any BI tool can
@@ -2989,11 +3039,23 @@ def ensure_density_view(conn, logger=None):
         Open write connection. Commits, does not close.
     logger : logging.Logger or None, optional
         Logger for a failure to create the view. Default ``None``.
+    source : {'events', 'events_reviewed'}, optional
+        Event rows the counts are taken from. ``'events'`` (default) builds
+        ``v_event_density`` over every detected event. ``'events_reviewed'``
+        builds ``v_event_density_reviewed`` over the ``events_reviewed`` view
+        (:func:`ensure_reviewed_view`), so any event a reviewer rejected is
+        left out of the count. The denominator is the same ``analysed_time``
+        in both: a rejection removes an event, not analysed time.
 
     Returns
     -------
     bool
         True when the view exists on return.
+
+    Raises
+    ------
+    ValueError
+        If ``source`` is not one of the two names above.
 
     Notes
     -----
@@ -3013,11 +3075,16 @@ def ensure_density_view(conn, logger=None):
     has no ``analysed_time`` row (``denominator_complete = 0``). Rows with a
     NULL ``stage`` are excluded: they have no denominator at all.
     """
+    if source not in _DENSITY_VIEW_SOURCES:
+        raise ValueError(
+            f"source must be one of {sorted(_DENSITY_VIEW_SOURCES)}, "
+            f"got {source!r}")
+    view = _DENSITY_VIEW_SOURCES[source]
     n_comp = _SQL_STAGE_N_COMPONENTS.format(col='e.stage')
     try:
-        conn.execute("DROP VIEW IF EXISTS v_event_density")
+        conn.execute(f"DROP VIEW IF EXISTS {view}")
         conn.execute(f'''
-        CREATE VIEW v_event_density AS
+        CREATE VIEW {view} AS
         SELECT
             d.subject                                   AS subject,
             e.channel                                   AS channel,
@@ -3045,7 +3112,7 @@ def ensure_density_view(conn, logger=None):
             d.reject_arousals                           AS reject_arousals,
             CASE WHEN d.n_components = d.n_expected THEN 1 ELSE 0 END
                                                         AS denominator_complete
-        FROM events e
+        FROM {source} e
         JOIN (
             SELECT
                 t.stage       AS token,
@@ -3060,7 +3127,7 @@ def ensure_density_view(conn, logger=None):
             FROM (
                 SELECT DISTINCT e.stage AS stage,
                        {n_comp} AS n_expected
-                FROM events e WHERE e.stage IS NOT NULL
+                FROM {source} e WHERE e.stage IS NOT NULL
             ) t
             JOIN analysed_time a
               ON (CASE a.stage
@@ -3081,10 +3148,849 @@ def ensure_density_view(conn, logger=None):
         # A view is a convenience: never lose a detection run over one.
         if logger is not None:
             logger.warning(
-                "Could not create the v_event_density SQL view (%s). Density "
+                "Could not create the %s SQL view (%s). Density "
                 "from Python (turtlewave_hdEEG.density.event_density) is "
-                "unaffected.", e)
+                "unaffected.", view, e)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Per-event review decisions
+# ---------------------------------------------------------------------------
+#
+# A reviewer's accept / reject / unsure call on one detected event. Kept in its
+# own table, keyed by the event's uuid5, and never in ``events`` itself: the
+# scoped DELETE in write_channel_events and every INSERT OR REPLACE rewrite
+# ``events`` rows wholesale, and would erase a decision stored on the row. A
+# same-parameter re-detection reproduces the same uuid5 (event_uuid5), so a
+# review stays attached to the event it was made on.
+
+REVIEW_DECISIONS = ('accept', 'reject', 'unsure')
+"""tuple of str : The values ``event_reviews.decision`` accepts."""
+
+REVIEW_REASONS = ('artefact', 'eye-movement', 'not-in-raw', 'filter-ringing',
+                  'off-band', 'too-short', 'arousal', 'single-channel',
+                  'not-isolated', 'wrong-morphology', 'other')
+"""tuple of str : The values ``event_reviews.reason`` accepts (or NULL).
+``'other'`` requires a non-empty comment."""
+
+REVIEW_REASON_CATEGORY = {
+    reason: ('FP-artifact' if reason in ('artefact', 'eye-movement')
+             else 'FP-other')
+    for reason in REVIEW_REASONS
+}
+"""dict : RA-protocol category of a REJECT, by reason. A reject with no
+reason is ``'FP-other'``; accept is ``'TP'`` and unsure ``'Ambiguous'``
+whatever the reason (:func:`review_category`)."""
+
+
+def review_category(decision, reason=None):
+    """RA-protocol category of one review decision.
+
+    Parameters
+    ----------
+    decision : {'accept', 'reject', 'unsure'}
+        The stored decision.
+    reason : str or None, optional
+        The stored reason. Read only for a reject. Default ``None``.
+
+    Returns
+    -------
+    str
+        ``'TP'`` (accept), ``'Ambiguous'`` (unsure), ``'FP-artifact'``
+        (reject for ``artefact`` or ``eye-movement``) or ``'FP-other'``
+        (reject for any other reason, or none).
+
+    Raises
+    ------
+    ValueError
+        For a decision not in :data:`REVIEW_DECISIONS` or a reason not in
+        :data:`REVIEW_REASONS`.
+    """
+    if decision not in REVIEW_DECISIONS:
+        raise ValueError(f"decision must be one of {REVIEW_DECISIONS}, "
+                         f"got {decision!r}")
+    if reason is not None and reason not in REVIEW_REASONS:
+        raise ValueError(f"reason must be None or one of {REVIEW_REASONS}, "
+                         f"got {reason!r}")
+    if decision == 'accept':
+        return 'TP'
+    if decision == 'unsure':
+        return 'Ambiguous'
+    return REVIEW_REASON_CATEGORY.get(reason, 'FP-other')
+
+# Columns of event_reviews, in DDL order. One place, so the INSERT and the
+# readers cannot drift from the table.
+REVIEW_COLUMNS = (
+    'uuid', 'reviewer', 'run_id', 'subject', 'event_type', 'channel',
+    'start_time', 'method', 'freq_lower', 'freq_upper',
+    'decision', 'reason', 'comment', 'reviewed_at', 'turtlewave_version',
+)
+
+# Columns added after event_reviews first existed (pre-release 4.6 tables),
+# with their types, for the additive ALTER in ensure_event_reviews_schema.
+_REVIEW_ADDED_COLUMNS = (
+    ('method', 'TEXT'), ('freq_lower', 'REAL'), ('freq_upper', 'REAL'),
+)
+
+
+def _sql_in_list(values):
+    """Quoted SQL literal list for a CHECK constraint (closed vocabulary)."""
+    return ', '.join("'" + v.replace("'", "''") + "'" for v in values)
+
+
+def ensure_event_reviews_schema(conn, logger=None):
+    """Create or bring up to date ``event_reviews`` and the views over it.
+
+    One row per (event, reviewer). The event columns (``run_id``, ``subject``,
+    ``event_type``, ``channel``, ``start_time``, ``method``, ``freq_lower``,
+    ``freq_upper``) are copied from ``events`` at review time, so a review
+    whose event later disappears -- a re-detection with a different band or
+    method yields a different uuid5 -- can still be reported and matched to
+    its successor (:func:`rematch_orphaned_reviews`).
+
+    When the database also has ``events``, the ``events_reviewed`` and
+    ``v_event_density_reviewed`` views are created here too, so a database a
+    review GUI touched carries them before the next detection run.
+
+    Idempotent, additive, and touches no other table. Unlike
+    :func:`ensure_direct_write_schema` it does not stamp
+    ``db_meta.turtlewave_version``, so a review GUI may call it on its own
+    write connection without claiming to have written the events.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. Does not close.
+    logger : logging.Logger or None, optional
+        Logger for migration messages. Default ``None``.
+
+    Returns
+    -------
+    bool
+        True when the table was created by this call, False when it already
+        existed.
+
+    Notes
+    -----
+    **No write and no commit when everything is current** (the check reads
+    ``sqlite_master`` and ``PRAGMA table_info`` only), so calling it inside a
+    caller's open transaction -- :func:`store_event_review` with
+    ``commit=False`` -- does not commit that transaction. Creating or
+    migrating anything does commit.
+
+    ``decision`` and ``reason`` carry CHECK constraints built from
+    :data:`REVIEW_DECISIONS` and :data:`REVIEW_REASONS`, so a raw SQL writer
+    that bypasses :func:`store_event_review` still cannot store a value the
+    readers do not know. SQLite cannot alter a CHECK in place, so a table
+    whose CHECK predates the current vocabulary is rebuilt here
+    (:func:`_rebuild_event_reviews_if_stale`); that step never raises.
+    """
+    cols = _table_columns(conn, 'event_reviews')
+    if cols and _event_reviews_current(conn, cols):
+        return False
+
+    existed = bool(cols)
+    if existed:
+        _rebuild_event_reviews_if_stale(conn, logger=logger)
+    conn.execute(_event_reviews_ddl('event_reviews'))
+    present = _table_columns(conn, 'event_reviews')
+    added = []
+    for col, col_type in _REVIEW_ADDED_COLUMNS:
+        if col not in present:
+            conn.execute(f"ALTER TABLE event_reviews ADD COLUMN {col} {col_type}")
+            added.append(col)
+    conn.execute(_EVENT_REVIEWS_INDEX_SQL)
+    conn.commit()
+    if logger is not None:
+        if not existed:
+            logger.info("Created table event_reviews")
+        elif added:
+            logger.info("Migrated event_reviews: added columns %s", added)
+    if _table_columns(conn, 'events'):
+        _create_reviewed_views(conn, logger=logger)
+    return not existed
+
+
+def _event_reviews_current(conn, cols):
+    """True when ``event_reviews`` needs nothing: columns, CHECK, index and
+    (when ``events`` exists) both views are in place. Reads only."""
+    if any(c not in cols for c in REVIEW_COLUMNS):
+        return False
+    names = {}
+    for name, sql in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE name IN "
+            "('event_reviews', 'idx_event_reviews_reviewer', 'events', "
+            "'events_reviewed', 'v_event_density_reviewed')"):
+        names[name] = sql or ''
+    ddl = names.get('event_reviews', '')
+    if (_sql_in_list(REVIEW_REASONS) not in ddl
+            or _sql_in_list(REVIEW_DECISIONS) not in ddl):
+        return False
+    if 'idx_event_reviews_reviewer' not in names:
+        return False
+    if 'events' in names and not ('events_reviewed' in names
+                                  and 'v_event_density_reviewed' in names):
+        return False
+    return True
+
+
+# The primary key serves lookups by uuid. A GUI showing one reviewer's
+# decisions only (the blind view) filters by reviewer, which the key cannot
+# serve; this index does.
+_EVENT_REVIEWS_INDEX_SQL = ('CREATE INDEX IF NOT EXISTS '
+                            'idx_event_reviews_reviewer '
+                            'ON event_reviews(reviewer, uuid)')
+
+# Reasons renamed between a table's CHECK and the current vocabulary. Applied
+# to stored rows when a stale table is rebuilt.
+_REVIEW_REASON_RENAMES = {'arousal-alpha': 'arousal'}
+
+
+def _event_reviews_ddl(name):
+    """CREATE TABLE statement for ``event_reviews`` under ``name``."""
+    return f'''
+    CREATE TABLE IF NOT EXISTS {name} (
+        uuid TEXT NOT NULL,          -- events.uuid (uuid5 of the detection scope)
+        reviewer TEXT NOT NULL,
+        run_id TEXT,                 -- detection_runs row the event came from
+        subject TEXT,                -- detection_runs.subject of that run
+        event_type TEXT,
+        channel TEXT,
+        start_time REAL,             -- s from recording start, as in events
+        method TEXT,                 -- the event's OWN method (events.method)
+        freq_lower REAL,             -- the event's detection band
+        freq_upper REAL,
+        decision TEXT NOT NULL
+            CHECK (decision IN ({_sql_in_list(REVIEW_DECISIONS)})),
+        reason TEXT
+            CHECK (reason IS NULL OR reason IN ({_sql_in_list(REVIEW_REASONS)})),
+        comment TEXT,
+        reviewed_at TEXT,            -- ISO 8601 with UTC offset
+        turtlewave_version TEXT,
+        PRIMARY KEY (uuid, reviewer)
+    )'''
+
+
+def _rebuild_event_reviews_if_stale(conn, logger=None):
+    """Rebuild ``event_reviews`` when its CHECK predates the vocabulary.
+
+    SQLite cannot alter a CHECK in place, so a table created under an older
+    :data:`REVIEW_REASONS` is copied into a fresh one inside one transaction.
+    Every row is kept:
+
+    * a renamed reason is mapped (:data:`_REVIEW_REASON_RENAMES`);
+    * any other reason outside the vocabulary becomes NULL, and its old value
+      is appended to ``comment`` as ``[former reason '<value>']``;
+    * a decision outside :data:`REVIEW_DECISIONS` becomes ``'unsure'`` with
+      ``[former decision '<value>']`` appended, because the column is
+      NOT NULL and keeping the reviewer's row beats dropping it.
+
+    Every unmapped value is logged at WARNING. The two views that read the
+    table are dropped for the swap (a table rename re-parses every view);
+    the caller recreates them.
+
+    Never raises: this runs inside :func:`ensure_direct_write_schema`, and a
+    failure here must not stop a detection run. A failed rebuild is rolled
+    back, logged at ERROR, and leaves the table exactly as it was.
+
+    Returns
+    -------
+    bool
+        True when the table was rebuilt.
+    """
+    log = logger or logging.getLogger('turtlewave_hdEEG.dbwrite')
+    ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                       "AND name='event_reviews'").fetchone()
+    if not ddl or (_sql_in_list(REVIEW_REASONS) in ddl[0]
+                   and _sql_in_list(REVIEW_DECISIONS) in ddl[0]):
+        return False
+    old_cols = _table_columns(conn, 'event_reviews')
+    vocab = _sql_in_list(REVIEW_REASONS)
+    decisions = _sql_in_list(REVIEW_DECISIONS)
+    mapped = 'reason'
+    for old, new in _REVIEW_REASON_RENAMES.items():
+        mapped = (f"CASE WHEN {mapped} = '{old}' THEN '{new}' "
+                  f"ELSE {mapped} END")
+    reason_sql = (f"CASE WHEN ({mapped}) IN ({vocab}) THEN ({mapped}) "
+                  f"ELSE NULL END")
+    reason_lost = f"(reason IS NOT NULL AND ({mapped}) NOT IN ({vocab}))"
+    decision_lost = f"(decision IS NULL OR decision NOT IN ({decisions}))"
+    comment_sql = (
+        "CASE WHEN " + reason_lost + " OR " + decision_lost + " THEN "
+        "trim(COALESCE(comment, '') "
+        "|| CASE WHEN " + reason_lost + " THEN ' [former reason ''' "
+        "|| reason || ''']' ELSE '' END "
+        "|| CASE WHEN " + decision_lost + " THEN ' [former decision ''' "
+        "|| COALESCE(decision, 'NULL') || ''']' ELSE '' END) "
+        "ELSE comment END")
+    decision_sql = f"CASE WHEN {decision_lost} THEN 'unsure' ELSE decision END"
+    exprs = {'reason': reason_sql, 'comment': comment_sql,
+             'decision': decision_sql}
+    copy_cols = [c for c in REVIEW_COLUMNS if c in old_cols]
+    select = ', '.join(exprs.get(c, c) for c in copy_cols)
+    try:
+        n_before = conn.execute(
+            "SELECT COUNT(*) FROM event_reviews").fetchone()[0]
+        lost = conn.execute(
+            f"SELECT reason, decision, COUNT(*) FROM event_reviews WHERE "
+            f"{reason_lost} OR {decision_lost} GROUP BY reason, decision"
+        ).fetchall()
+        conn.commit()
+        conn.execute('BEGIN')
+        conn.execute('DROP VIEW IF EXISTS v_event_density_reviewed')
+        conn.execute('DROP VIEW IF EXISTS events_reviewed')
+        conn.execute('DROP TABLE IF EXISTS event_reviews_new')
+        conn.execute(_event_reviews_ddl('event_reviews_new'))
+        conn.execute(f"INSERT INTO event_reviews_new ({', '.join(copy_cols)}) "
+                     f"SELECT {select} FROM event_reviews")
+        conn.execute('DROP TABLE event_reviews')
+        conn.execute('ALTER TABLE event_reviews_new RENAME TO event_reviews')
+        conn.commit()
+    except Exception as err:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.error("Could not rebuild event_reviews for the current reason "
+                  "vocabulary (%s); the table is unchanged and decisions "
+                  "using a new reason will be refused by its old CHECK.", err)
+        return False
+    log.info("Rebuilt event_reviews for the current reason vocabulary "
+             "(%d row(s) kept; renamed %s)", n_before, _REVIEW_REASON_RENAMES)
+    for reason, decision, n in lost:
+        log.warning("event_reviews rebuild: %d row(s) with reason=%r, "
+                    "decision=%r are outside the current vocabulary; kept with "
+                    "the unknown value moved into comment (reason -> NULL, "
+                    "decision -> 'unsure').", n, reason, decision)
+    return True
+
+
+def review_exclusion_clause(conn, uuid_col='events.uuid', reviewer=None):
+    """SQL predicate that keeps only events no reviewer rejected.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Connection to the database being queried.
+    uuid_col : str, optional
+        Qualified uuid column of the outer query. Default ``'events.uuid'``.
+    reviewer : str or None, optional
+        Count only this reviewer's rejections. ``None`` (default) excludes an
+        event that ANY reviewer rejected.
+
+    Returns
+    -------
+    tuple of (str or None, list)
+        ``(sql, params)`` to AND into a WHERE clause, or ``(None, [])`` when
+        the database has no ``event_reviews`` table (nothing can be rejected).
+    """
+    if not _table_columns(conn, 'event_reviews'):
+        return None, []
+    sql = ("NOT EXISTS (SELECT 1 FROM event_reviews r "
+           f"WHERE r.uuid = {uuid_col} AND r.decision = 'reject'")
+    params = []
+    if reviewer is not None:
+        sql += " AND r.reviewer = ?"
+        params.append(str(reviewer))
+    return sql + ")", params
+
+
+def _reviewed_at_now():
+    """Current local time, ISO 8601 to the second, with its UTC offset."""
+    return datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def store_event_review(conn, uuid, decision, reviewer, reason=None,
+                       comment=None, event_type=None, channel=None,
+                       start_time=None, run_id=None, subject=None,
+                       reviewed_at=None, commit=True, method=None,
+                       freq_lower=None, freq_upper=None):
+    """Store one reviewer's decision on one event.
+
+    Writes with ``INSERT OR REPLACE`` on ``(uuid, reviewer)``: a reviewer who
+    changes their mind overwrites their own row, and never another
+    reviewer's. Creates the table first when it is missing.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection.
+    uuid : str
+        ``events.uuid`` of the event reviewed.
+    decision : {'accept', 'reject', 'unsure'}
+        The call (:data:`REVIEW_DECISIONS`).
+    reviewer : str
+        Who made it. Must be non-empty after stripping whitespace.
+    reason : str or None, optional
+        One of :data:`REVIEW_REASONS`, or ``None``. Not required by the
+        library for any decision; whether a reject must carry one is a GUI
+        policy. Default ``None``.
+    comment : str or None, optional
+        Free text. Required (non-empty) when ``reason`` is ``'other'``.
+        Default ``None``.
+    event_type, channel, start_time, run_id, subject : optional
+        Event identity. Each one not given is copied from the ``events`` row
+        (``subject`` from that row's ``detection_runs`` entry, when that
+        table has the column). ``event_type``, ``channel`` and ``start_time``
+        are required only when the uuid is not in ``events``.
+    reviewed_at : str or None, optional
+        ISO 8601 timestamp to store. ``None`` (default) stamps the current
+        time. Pass the original value to restore a decision exactly (undo).
+    commit : bool, optional
+        Commit after the write. Default True. With False nothing is
+        committed (unless the table had to be created or migrated first), so
+        the caller can batch decisions or roll them back.
+    method, freq_lower, freq_upper : optional
+        The event's own detecting method (``events.method``, never a run's
+        joined method set) and band, copied from ``events`` when not given.
+        :func:`rematch_orphaned_reviews` matches only on these.
+
+    Returns
+    -------
+    dict
+        The stored row, keyed by :data:`REVIEW_COLUMNS`.
+
+    Raises
+    ------
+    ValueError
+        For an unknown decision or reason, ``reason='other'`` without a
+        comment, an empty reviewer, or a uuid that
+        is not in ``events`` when ``event_type``, ``channel`` and
+        ``start_time`` are not all given (such a review could never be
+        re-matched to an event).
+    """
+    if decision not in REVIEW_DECISIONS:
+        raise ValueError(f"decision must be one of {REVIEW_DECISIONS}, "
+                         f"got {decision!r}")
+    if reason is not None and reason not in REVIEW_REASONS:
+        raise ValueError(f"reason must be None or one of {REVIEW_REASONS}, "
+                         f"got {reason!r}")
+    if reason == 'other' and (comment is None or not str(comment).strip()):
+        raise ValueError("reason 'other' requires a non-empty comment saying "
+                         "what the other reason is")
+    if reviewer is None or not str(reviewer).strip():
+        raise ValueError("reviewer must be a non-empty name")
+    if not uuid:
+        raise ValueError("uuid must be given")
+    reviewer = str(reviewer).strip()
+
+    ensure_event_reviews_schema(conn)
+
+    event = None
+    ev_cols = _table_columns(conn, 'events')
+    if ev_cols:
+        has_run = 'run_id' in ev_cols
+        # detection_runs.subject only arrives through ensure_direct_write_schema,
+        # which a review GUI must not call; a database written before it has
+        # the table without the column, and the subject is then left NULL.
+        has_runs_subject = 'subject' in _table_columns(conn, 'detection_runs')
+        sel = ', '.join(
+            f"e.{c}" if c in ev_cols else 'NULL'
+            for c in ('event_type', 'channel', 'start_time', 'run_id',
+                      'method', 'freq_lower', 'freq_upper'))
+        if has_run and has_runs_subject:
+            sql = (f"SELECT {sel}, d.subject FROM events e "
+                   f"LEFT JOIN detection_runs d ON d.run_id = e.run_id "
+                   f"WHERE e.uuid = ?")
+        else:
+            sql = f"SELECT {sel}, NULL FROM events e WHERE e.uuid = ?"
+        event = conn.execute(sql, (str(uuid),)).fetchone()
+
+    if event is None and (event_type is None or channel is None
+                          or start_time is None):
+        raise ValueError(
+            f"Event {uuid} is not in the events table, and event_type, "
+            f"channel and start_time were not all given, so the review could "
+            f"never be matched back to an event.")
+    if event is not None:
+        (ev_type, ev_chan, ev_start, ev_run, ev_meth, ev_lo, ev_hi,
+         ev_subj) = event
+        event_type = ev_type if event_type is None else event_type
+        channel = ev_chan if channel is None else channel
+        start_time = ev_start if start_time is None else start_time
+        run_id = ev_run if run_id is None else run_id
+        subject = ev_subj if subject is None else subject
+        method = ev_meth if method is None else method
+        freq_lower = ev_lo if freq_lower is None else freq_lower
+        freq_upper = ev_hi if freq_upper is None else freq_upper
+
+    row = {
+        'uuid': str(uuid), 'reviewer': reviewer, 'run_id': run_id,
+        'subject': subject, 'event_type': event_type, 'channel': channel,
+        'start_time': None if start_time is None else float(start_time),
+        'method': None if method is None else str(method),
+        'freq_lower': None if freq_lower is None else float(freq_lower),
+        'freq_upper': None if freq_upper is None else float(freq_upper),
+        'decision': decision, 'reason': reason, 'comment': comment,
+        'reviewed_at': reviewed_at or _reviewed_at_now(),
+        'turtlewave_version': provenance()['turtlewave_version'],
+    }
+    conn.execute(
+        f"INSERT OR REPLACE INTO event_reviews ({', '.join(REVIEW_COLUMNS)}) "
+        f"VALUES ({', '.join(['?'] * len(REVIEW_COLUMNS))})",
+        [row[c] for c in REVIEW_COLUMNS])
+    if commit:
+        conn.commit()
+    return row
+
+
+def delete_event_review(conn, uuid, reviewer, commit=True):
+    """Remove one reviewer's decision on one event.
+
+    Other reviewers' rows on the same event are untouched. Used to clear a
+    decision and to undo a first decision; to undo a changed decision,
+    re-store the previous row with :func:`store_event_review`, passing its
+    original ``reviewed_at``.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection.
+    uuid : str
+        ``event_reviews.uuid`` of the decision.
+    reviewer : str
+        Whose decision to remove (stripped, as :func:`store_event_review`
+        stores it).
+    commit : bool, optional
+        Commit after the delete. Default True.
+
+    Returns
+    -------
+    bool
+        True when a row was removed, False when there was none (including a
+        database without the ``event_reviews`` table).
+    """
+    if not _table_columns(conn, 'event_reviews'):
+        return False
+    cur = conn.execute(
+        "DELETE FROM event_reviews WHERE uuid = ? AND reviewer = ?",
+        (str(uuid), str(reviewer).strip()))
+    if commit:
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def _review_filter_values(value):
+    """``None`` -> None; a scalar -> [str]; an iterable -> [str, ...]."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def read_event_reviews(db, uuid=None, reviewer=None, decision=None,
+                       include_orphaned=False):
+    """Read stored review decisions.
+
+    Parameters
+    ----------
+    db : str or sqlite3.Connection
+        Database path (opened, read, and closed again) or an open
+        connection (left open).
+    uuid, reviewer, decision : str or list of str or None, optional
+        Filters; each accepts one value or a list. Default ``None`` (all).
+        ``reviewer=name`` alone is the blind view (one reviewer's own
+        decisions) and is served by an index on ``reviewer``.
+    include_orphaned : bool, optional
+        Also return reviews whose uuid is no longer in ``events`` -- the
+        event was re-detected under a different band, method or stage set,
+        or deleted. Default False, which returns only reviews of events
+        that exist.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns :data:`REVIEW_COLUMNS` plus ``orphaned`` (bool), ordered by
+        ``channel, start_time, reviewer``. Empty, with those columns, when the
+        database has no ``event_reviews`` table.
+    """
+    import pandas as pd
+
+    columns = list(REVIEW_COLUMNS) + ['orphaned']
+    own = not isinstance(db, sqlite3.Connection)
+    if own:
+        if not db or not os.path.exists(db):
+            raise FileNotFoundError(f"No database at {db!r}")
+        # Plain connect, as the other readers here: a file: URI would
+        # misread a path holding '?' or '#'. Nothing below writes.
+        conn = sqlite3.connect(db, timeout=60.0)
+    else:
+        conn = db
+    try:
+        if not _table_columns(conn, 'event_reviews'):
+            return pd.DataFrame(columns=columns)
+        has_events = bool(_table_columns(conn, 'events'))
+        orphan_sql = ("(NOT EXISTS (SELECT 1 FROM events e "
+                      "WHERE e.uuid = r.uuid))" if has_events else "1")
+        where, params = [], []
+        for col, val in (('uuid', uuid), ('reviewer', reviewer),
+                         ('decision', decision)):
+            vals = _review_filter_values(val)
+            if vals is not None:
+                where.append(f"r.{col} IN ({', '.join(['?'] * len(vals))})")
+                params.extend(vals)
+        if not include_orphaned:
+            where.append(f"NOT {orphan_sql}")
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = (f"SELECT {', '.join('r.' + c for c in REVIEW_COLUMNS)}, "
+               f"{orphan_sql} AS orphaned FROM event_reviews r{clause} "
+               f"ORDER BY r.channel, r.start_time, r.reviewer")
+        df = pd.read_sql_query(sql, conn, params=params)
+        df['orphaned'] = df['orphaned'].astype(bool)
+        return df
+    finally:
+        if own:
+            conn.close()
+
+
+def ensure_reviewed_view(conn, logger=None):
+    """(Re)create the ``events_reviewed`` view and its density twin.
+
+    ``events_reviewed`` is every ``events`` column plus a per-event review
+    summary (``n_reviews``, ``n_accept``, ``n_reject``, ``n_unsure``, all 0
+    for an unreviewed event), keeping only events that NO reviewer rejected.
+    Unreviewed and ``unsure`` events stay in. ``v_event_density_reviewed`` is
+    :func:`ensure_density_view` over this view.
+
+    Creates ``event_reviews`` first when it is missing. Dropped and recreated
+    on every call, like ``v_event_density``.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection. Commits, does not close.
+    logger : logging.Logger or None, optional
+        Logger for a failure to create a view. Default ``None``.
+
+    Returns
+    -------
+    bool
+        True when both views exist on return. False when the database has no
+        ``events`` table yet or a view could not be created (logged).
+
+    Notes
+    -----
+    The rule is "any reviewer rejected". For one reviewer's view of the data
+    use ``event_density(..., exclude_rejected=True, reviewer=name)`` or
+    :func:`review_exclusion_clause` directly.
+    """
+    ensure_event_reviews_schema(conn, logger=logger)
+    return _create_reviewed_views(conn, logger=logger)
+
+
+def _create_reviewed_views(conn, logger=None):
+    """Drop and recreate ``events_reviewed`` and ``v_event_density_reviewed``.
+
+    Assumes ``event_reviews`` exists. Returns False (logged) when ``events``
+    is missing or a view cannot be created.
+    """
+    if not _table_columns(conn, 'events'):
+        return False
+    try:
+        conn.execute("DROP VIEW IF EXISTS events_reviewed")
+        conn.execute('''
+        CREATE VIEW events_reviewed AS
+        SELECT e.*,
+               COALESCE(s.n_reviews, 0) AS n_reviews,
+               COALESCE(s.n_accept, 0)  AS n_accept,
+               COALESCE(s.n_reject, 0)  AS n_reject,
+               COALESCE(s.n_unsure, 0)  AS n_unsure
+        FROM events e
+        LEFT JOIN (
+            SELECT uuid,
+                   COUNT(*)                                       AS n_reviews,
+                   SUM(CASE WHEN decision = 'accept' THEN 1 ELSE 0 END) AS n_accept,
+                   SUM(CASE WHEN decision = 'reject' THEN 1 ELSE 0 END) AS n_reject,
+                   SUM(CASE WHEN decision = 'unsure' THEN 1 ELSE 0 END) AS n_unsure
+            FROM event_reviews
+            GROUP BY uuid
+        ) s ON s.uuid = e.uuid
+        WHERE COALESCE(s.n_reject, 0) = 0
+        ''')
+        conn.commit()
+    except sqlite3.Error as e:
+        if logger is not None:
+            logger.warning(
+                "Could not create the events_reviewed SQL view (%s). "
+                "exclude_rejected in density and CSV export is unaffected.", e)
+        return False
+    return ensure_density_view(conn, logger=logger, source='events_reviewed')
+
+
+def rematch_orphaned_reviews(conn, tolerance_s=0.1, dry_run=True,
+                             logger=None):
+    """Propose (or apply) a new event for each orphaned review.
+
+    A review is orphaned when its uuid is no longer in ``events``. Its
+    successor must be the SAME detection: an event of the same
+    ``event_type``, on the same ``channel``, detected by the review's own
+    method (any of its :func:`method_spellings`, so ``AASM/Massimini2004``
+    and ``AASM_Massimini2004`` match, but plain ``Massimini2004`` does not),
+    in the same band, starting within ``tolerance_s``. Events that are near
+    in time but differ in method or band are REPORTED, never applied: a
+    decision made on a Massimini2004 wave says nothing about an Ngo2015
+    detection at the same time, and a band change changes what the detector
+    found.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open connection (a write connection when ``dry_run`` is False).
+    tolerance_s : float, optional
+        Largest start-time difference accepted, in seconds. Default 0.1.
+    dry_run : bool, optional
+        True (default) only reports. False re-keys every review whose status
+        is ``'proposed'`` onto its candidate: ``uuid``, ``run_id`` and
+        ``start_time`` take the new event's values, ``reviewed_at``, the
+        decision, method and band are kept, and ``comment`` gains a
+        ``[rematched from <old uuid>, dt=<s>]`` note. Nothing else is written.
+    logger : logging.Logger or None, optional
+        Logger for the summary. Default ``None``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per orphaned review: ``old_uuid``, ``reviewer``, ``decision``,
+        ``event_type``, ``channel``, ``old_start_time``, ``old_method``,
+        ``old_freq_lower``, ``old_freq_upper``, ``new_uuid``,
+        ``new_start_time``, ``new_method``, ``new_freq_lower``,
+        ``new_freq_upper``, ``dt`` (new minus old start, s),
+        ``n_candidates`` (same method and band, within tolerance),
+        ``status`` and ``applied``. ``status`` is one of:
+
+        * ``'proposed'`` -- exactly one same-method, same-band candidate,
+          not yet reviewed by this reviewer and not claimed by another of
+          their orphans. The only status ever applied.
+        * ``'ambiguous'`` -- several such candidates; the nearest is shown.
+        * ``'conflict'`` -- the reviewer already reviewed the candidate, or
+          two of their orphans point at it.
+        * ``'band_changed'`` -- same method within tolerance, other band.
+        * ``'method_changed'`` -- only other methods within tolerance.
+        * ``'method_unknown'`` -- the review predates the stored method and
+          band, so no successor can be verified.
+        * ``'no_match'`` -- nothing within tolerance.
+
+        For the three non-matching statuses the nearest event is shown in
+        the ``new_*`` columns for information.
+
+    Notes
+    -----
+    A start-time match is evidence, not proof, that two detections are the
+    same event. Read the dry run before applying, and keep ``tolerance_s``
+    well under a typical event duration.
+    """
+    import pandas as pd
+
+    cols = ['old_uuid', 'reviewer', 'decision', 'event_type', 'channel',
+            'old_start_time', 'old_method', 'old_freq_lower',
+            'old_freq_upper', 'new_uuid', 'new_start_time', 'new_method',
+            'new_freq_lower', 'new_freq_upper', 'dt', 'n_candidates',
+            'status', 'applied']
+    orphans = read_event_reviews(conn, include_orphaned=True)
+    orphans = orphans[orphans['orphaned']]
+    if orphans.empty or not _table_columns(conn, 'events'):
+        return pd.DataFrame(columns=cols)
+
+    def _missing(value):
+        return value is None or (isinstance(value, float) and np.isnan(value))
+
+    def _same_band(a_lo, a_hi, b_lo, b_hi):
+        for a, b in ((a_lo, b_lo), (a_hi, b_hi)):
+            if _missing(a) != _missing(b):
+                return False
+            if not _missing(a) and abs(float(a) - float(b)) > 1e-6:
+                return False
+        return True
+
+    out = []
+    for rv in orphans.itertuples(index=False):
+        rec = dict.fromkeys(cols)
+        rec.update(old_uuid=rv.uuid, reviewer=rv.reviewer,
+                   decision=rv.decision, event_type=rv.event_type,
+                   channel=rv.channel, old_start_time=rv.start_time,
+                   old_method=None if _missing(rv.method) else rv.method,
+                   old_freq_lower=rv.freq_lower, old_freq_upper=rv.freq_upper,
+                   n_candidates=0, status='no_match', applied=False)
+        if _missing(rv.start_time):
+            out.append(rec)
+            continue
+        near = conn.execute(
+            "SELECT uuid, start_time, method, freq_lower, freq_upper "
+            "FROM events WHERE event_type IS ? AND channel IS ? "
+            "AND start_time BETWEEN ? AND ? ORDER BY ABS(start_time - ?)",
+            (rv.event_type, rv.channel, float(rv.start_time) - tolerance_s,
+             float(rv.start_time) + tolerance_s,
+             float(rv.start_time))).fetchall()
+        if near:
+            best = near[0]
+        if rec['old_method'] is None:
+            rec['status'] = 'method_unknown' if near else 'no_match'
+            cands = []
+        else:
+            spellings = method_spellings(rec['old_method'])
+            same_m = [c for c in near if c[2] in spellings]
+            cands = [c for c in same_m if _same_band(
+                c[3], c[4], rv.freq_lower, rv.freq_upper)]
+            if cands:
+                best = cands[0]
+            elif same_m:
+                rec['status'] = 'band_changed'
+                best = same_m[0]
+            elif near:
+                rec['status'] = 'method_changed'
+        rec['n_candidates'] = len(cands)
+        if near:
+            rec.update(new_uuid=best[0], new_start_time=best[1],
+                       new_method=best[2], new_freq_lower=best[3],
+                       new_freq_upper=best[4],
+                       dt=float(best[1]) - float(rv.start_time))
+        if cands:
+            taken = conn.execute(
+                "SELECT 1 FROM event_reviews WHERE uuid = ? AND reviewer = ?",
+                (best[0], rv.reviewer)).fetchone()
+            if taken:
+                rec['status'] = 'conflict'
+            elif len(cands) > 1:
+                rec['status'] = 'ambiguous'
+            else:
+                rec['status'] = 'proposed'
+        out.append(rec)
+
+    result = pd.DataFrame(out, columns=cols)
+    # Two orphans of one reviewer pointing at the same new event cannot both
+    # move there ((uuid, reviewer) is the key), and which one is right is not
+    # decidable here: demote both.
+    prop = result['status'] == 'proposed'
+    dup = result.loc[prop].duplicated(['new_uuid', 'reviewer'], keep=False)
+    result.loc[dup.index[dup.values], 'status'] = 'conflict'
+    if not dry_run:
+        has_run = 'run_id' in _table_columns(conn, 'events')
+        for i, rec in result.iterrows():
+            if rec['status'] != 'proposed':
+                continue
+            new_run = None
+            if has_run:
+                new_run = conn.execute(
+                    "SELECT run_id FROM events WHERE uuid = ?",
+                    (rec['new_uuid'],)).fetchone()[0]
+            note = f"[rematched from {rec['old_uuid']}, dt={rec['dt']:.3f}s]"
+            conn.execute(
+                "UPDATE event_reviews SET uuid = ?, run_id = ?, "
+                "start_time = ?, comment = CASE WHEN comment IS NULL OR "
+                "comment = '' THEN ? ELSE comment || ' ' || ? END "
+                "WHERE uuid = ? AND reviewer = ?",
+                (rec['new_uuid'], new_run, float(rec['new_start_time']),
+                 note, note, rec['old_uuid'], rec['reviewer']))
+            result.at[i, 'applied'] = True
+        conn.commit()
+    if logger is not None:
+        counts = result['status'].value_counts().to_dict()
+        logger.info("Orphaned reviews: %d (%s); %s", len(result), counts,
+                    'dry run, nothing written' if dry_run else
+                    f"{int(result['applied'].sum())} re-keyed")
+    return result
 
 
 def record_run(conn, run_id, event_type, method, citation, params_json,
@@ -3433,14 +4339,29 @@ def event_det_morphology(ev):
     -------
     dict
         Keys ``det_trough``, ``det_peak``, ``det_ptp``, ``det_trough_time``,
-        ``det_peak_time`` (each ``float`` or ``None``).
+        ``det_peak_time`` (each ``float`` or ``None``), plus the 4.6 detector
+        values ``peak_freq``, ``peak_val_det``, ``rms_det``, ``rms_orig``,
+        ``power_orig`` (spindles) and ``det_zero_time`` (slow waves and
+        K-complexes), each ``float`` or ``None``. A non-finite value (Wonambi
+        returns NaN ``peak_freq`` for an event at the edge of the data) is
+        ``None`` too, so it lands as NULL rather than as a number.
     """
+    def _finite(*keys):
+        value = _get(ev, *keys)
+        return value if value is not None and np.isfinite(value) else None
+
     return {
         'det_trough': _get(ev, 'trough_val'),
         'det_peak': _get(ev, 'peak_val'),
         'det_ptp': _get(ev, 'ptp', 'ptp_det'),
         'det_trough_time': _get(ev, 'trough_time'),
         'det_peak_time': _get(ev, 'peak_time'),
+        'peak_freq': _finite('peak_freq'),
+        'peak_val_det': _finite('peak_val_det'),
+        'rms_det': _finite('rms_det'),
+        'rms_orig': _finite('rms_orig'),
+        'power_orig': _finite('power_orig'),
+        'det_zero_time': _finite('zero_time'),
     }
 
 
@@ -3842,7 +4763,8 @@ def upsert_processing_status(conn, event_type, channel, method, freq_lower,
 def write_channel_events(conn, run_id, event_type, channel, method,
                          freq_lower, freq_upper, stage_key, events, batched,
                          recording_start_time, n_fft_sec, logger=None,
-                         replace=False, replace_methods=None):
+                         replace=False, replace_methods=None,
+                         thresholds=None):
     """Write one channel's events + status in a single transaction.
 
     Opens an explicit transaction, ``INSERT OR REPLACE`` s every event row
@@ -3913,6 +4835,16 @@ def write_channel_events(conn, run_id, event_type, channel, method,
         because events store their per-event method and a joined string would
         never match them (leaving stale rows). Defaults to ``[method]`` when
         ``None``. Ignored unless ``replace`` is True.
+    thresholds : list of dict or None, optional
+        The run's resolved detector thresholds for this channel, written to
+        ``detection_thresholds`` inside the same transaction as the events
+        (so a channel never has events without its thresholds or the
+        reverse). Each dict holds the keyword arguments of
+        :func:`store_detection_thresholds` other than ``conn`` and
+        ``run_id``: ``channel`` (this channel, or ``'*'`` for a run-wide
+        criterion), ``method``, ``values``, ``units`` and optionally
+        ``segment_idx``, ``seg_start``, ``seg_end``. ``None`` or empty writes
+        nothing (CIRUS, or a caller that has none).
 
     Returns
     -------
@@ -3927,9 +4859,14 @@ def write_channel_events(conn, run_id, event_type, channel, method,
     # database whose schema was never ensured (a direct call on a legacy file)
     # must still take the write, minus the column it does not have.
     insert_columns = list(EVENT_INSERT_COLUMNS)
-    has_epoch_stage = _EPOCH_STAGE_COLUMN[0] in _table_columns(conn, 'events')
+    present_columns = _table_columns(conn, 'events')
+    has_epoch_stage = _EPOCH_STAGE_COLUMN[0] in present_columns
     if has_epoch_stage:
         insert_columns.append(_EPOCH_STAGE_COLUMN[0])
+    # The 4.6 detector values, gated the same way and for the same reason.
+    det_value_columns = [col for col, _ in _DET_VALUE_COLUMNS
+                         if col in present_columns]
+    insert_columns.extend(det_value_columns)
     placeholders = ', '.join(['?'] * len(insert_columns))
     sql = (f"INSERT OR REPLACE INTO events ({', '.join(insert_columns)}) "
            f"VALUES ({placeholders})")
@@ -3993,7 +4930,16 @@ def write_channel_events(conn, run_id, event_type, channel, method,
                 # joint token in `stage`. None when no scored epoch contains
                 # the event (the detectors count and report those).
                 row = row + (ev.get('epoch_stage'),)
+            row = row + tuple(ev.get(col) for col in det_value_columns)
             conn.execute(sql, row)
+
+        if thresholds:
+            # Created on demand so a database whose schema was never ensured
+            # still takes the write (CREATE TABLE IF NOT EXISTS is a no-op on
+            # a current one and runs inside this transaction).
+            ensure_detection_thresholds_schema(conn)
+            for spec in thresholds:
+                store_detection_thresholds(conn, run_id, **spec)
 
         upsert_processing_status(
             conn, event_type, channel, method, freq_lower, freq_upper,
@@ -4037,6 +4983,225 @@ def record_channel_failure(conn, event_type, channel, method, freq_lower,
         conn.commit()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Detection thresholds (4.6)
+# ---------------------------------------------------------------------------
+
+#: Column order of ``detection_thresholds`` as returned by
+#: :func:`read_detection_thresholds`.
+THRESHOLD_COLUMNS = ('run_id', 'channel', 'method', 'segment_idx', 'name',
+                     'value', 'units', 'seg_start', 'seg_end')
+
+#: ``channel`` value of a run-wide criterion (the Massimini family's absolute
+#: µV/s criteria, the Ngo2015/Staresina2015 factors), stored once per run
+#: rather than once per channel.
+RUN_WIDE_CHANNEL = '*'
+
+
+def ensure_detection_thresholds_schema(conn):
+    """Create the ``detection_thresholds`` table if it is missing.
+
+    One row per resolved threshold of one detection call. Spindle thresholds
+    are per channel AND per segment: Wonambi resolves them from the data it is
+    handed, and with ``cat`` other than ``(1, 1, 1, 0)`` every contiguous bout
+    is its own segment with its own threshold, so ``segment_idx`` is in the
+    key and ``seg_start`` / ``seg_end`` (first and last sample time of that
+    segment, seconds from recording start) let an event find its own
+    segment's row. Run-wide criteria use ``channel = '*'`` and
+    ``segment_idx = 0`` with NULL segment bounds.
+
+    Idempotent; touches no other table.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection.
+    """
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS detection_thresholds (
+        run_id TEXT NOT NULL,      -- detection_runs.run_id
+        channel TEXT NOT NULL,     -- channel, or '*' for a run-wide criterion
+        method TEXT NOT NULL,      -- per-event method, as in events.method
+        segment_idx INTEGER NOT NULL DEFAULT 0,
+        name TEXT NOT NULL,        -- e.g. det_value_lo, abs_pow_thresh, min_ptp
+        value REAL,
+        units TEXT,                -- extensions.THRESHOLD_UNITS[method]
+        seg_start REAL,            -- first sample time of the segment (s)
+        seg_end REAL,              -- last sample time of the segment (s)
+        PRIMARY KEY (run_id, channel, method, segment_idx, name)
+    )''')
+
+
+def store_detection_thresholds(conn, run_id, channel, method, values, units,
+                               segment_idx=0, seg_start=None, seg_end=None):
+    """Store one detection call's resolved thresholds.
+
+    Does NOT commit: :func:`write_channel_events` calls it inside the
+    per-channel transaction. A standalone caller commits itself. Rows are
+    ``INSERT OR REPLACE`` d on the primary key, so writing the same run-wide
+    criteria once per channel is idempotent.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection; the table must exist
+        (:func:`ensure_detection_thresholds_schema`).
+    run_id : str
+        The run the thresholds belong to.
+    channel : str
+        Channel name, or ``'*'`` (:data:`RUN_WIDE_CHANNEL`) for a run-wide
+        criterion.
+    method : str
+        Per-event detection method, the same string stored in
+        ``events.method``.
+    values : dict
+        ``{name: value}``. ``None`` and non-finite values are skipped (for
+        example Moelle2011's NaN ``sel_value``), so a stored row is always a
+        real number.
+    units : dict or str or None
+        ``{name: units}``, one string applied to every name, or ``None``.
+    segment_idx : int, optional
+        Index of the detection segment within the channel. Default ``0``.
+    seg_start, seg_end : float or None, optional
+        First and last sample time of that segment, seconds from recording
+        start.
+
+    Returns
+    -------
+    int
+        Number of rows written.
+    """
+    rows = []
+    for name, value in (values or {}).items():
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(v):
+            continue
+        u = units.get(name) if isinstance(units, dict) else units
+        rows.append((str(run_id), str(channel), str(method), int(segment_idx),
+                     str(name), v, u,
+                     None if seg_start is None else float(seg_start),
+                     None if seg_end is None else float(seg_end)))
+    conn.executemany(
+        f"INSERT OR REPLACE INTO detection_thresholds "
+        f"({', '.join(THRESHOLD_COLUMNS)}) "
+        f"VALUES ({', '.join(['?'] * len(THRESHOLD_COLUMNS))})", rows)
+    return len(rows)
+
+
+def detection_threshold_spec(detector, result, channel, segment_idx=0,
+                             data=None):
+    """Build one ``thresholds=`` entry for :func:`write_channel_events`.
+
+    Parameters
+    ----------
+    detector : ImprovedDetectSpindle or ImprovedDetectSlowWave
+        The detector that produced ``result``.
+    result : object
+        What the detector returned (``Spindles`` or ``SlowWaves``).
+    channel : str
+        The channel detected on. Replaced by ``'*'`` for run-wide criteria.
+    segment_idx : int, optional
+        Segment index within the channel. Default ``0``.
+    data : wonambi.datatype.ChanTime or None, optional
+        The segment's data, for ``seg_start`` / ``seg_end``. Ignored for
+        run-wide criteria.
+
+    Returns
+    -------
+    dict or None
+        Keyword arguments for :func:`store_detection_thresholds` (without
+        ``conn`` / ``run_id``), or ``None`` when the detector resolved no
+        thresholds (CIRUS).
+    """
+    from .extensions import detection_threshold_values
+
+    values, units, run_wide = detection_threshold_values(detector, result)
+    if not values:
+        return None
+    if run_wide:
+        return {'channel': RUN_WIDE_CHANNEL, 'method': detector.method,
+                'values': values, 'units': units, 'segment_idx': 0}
+    seg_start = seg_end = None
+    if data is not None:
+        try:
+            times = [np.asarray(t) for t in data.axis['time'] if len(t)]
+            if times:
+                seg_start = float(min(t[0] for t in times))
+                seg_end = float(max(t[-1] for t in times))
+        except (AttributeError, KeyError, TypeError, IndexError):
+            seg_start = seg_end = None
+    return {'channel': str(channel), 'method': detector.method,
+            'values': values, 'units': units, 'segment_idx': int(segment_idx),
+            'seg_start': seg_start, 'seg_end': seg_end}
+
+
+def read_detection_thresholds(db_or_conn, run_id, channel=None, method=None,
+                              at_time=None):
+    """Read one run's stored detector thresholds.
+
+    Parameters
+    ----------
+    db_or_conn : str or sqlite3.Connection
+        Database path or an open connection (not closed).
+    run_id : str
+        The run to read. Thresholds must be looked up by an event's OWN
+        ``events.run_id``: two runs on one scope have different thresholds.
+    channel : str or None, optional
+        When given, rows for this channel AND the run-wide ``'*'`` rows.
+    method : str or None, optional
+        When given, rows for this method under any of its spellings
+        (:func:`method_spellings`).
+    at_time : float or None, optional
+        An event time in seconds. When given, per-segment rows are kept only
+        if ``seg_start <= at_time <= seg_end`` (rows without bounds, and
+        run-wide rows, are always kept), which selects the segment the event
+        was detected in.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns :data:`THRESHOLD_COLUMNS`, ordered by ``method, channel,
+        segment_idx, name``. Empty, with those columns, for a run detected
+        before 4.6, a CIRUS run, or a database without the table.
+    """
+    import pandas as pd
+
+    columns = list(THRESHOLD_COLUMNS)
+    own = not isinstance(db_or_conn, sqlite3.Connection)
+    if own:
+        if not db_or_conn or not os.path.exists(db_or_conn):
+            raise FileNotFoundError(f"No database at {db_or_conn!r}")
+        # Plain connect, as the other readers here; nothing below writes.
+        conn = sqlite3.connect(db_or_conn, timeout=60.0)
+    else:
+        conn = db_or_conn
+    try:
+        if not _table_columns(conn, 'detection_thresholds'):
+            return pd.DataFrame(columns=columns)
+        where, params = ['run_id = ?'], [str(run_id)]
+        if channel is not None:
+            where.append('channel IN (?, ?)')
+            params.extend([str(channel), RUN_WIDE_CHANNEL])
+        if method is not None:
+            spellings = method_spellings(method)
+            where.append(f"method IN ({', '.join(['?'] * len(spellings))})")
+            params.extend(spellings)
+        if at_time is not None:
+            where.append('(channel = ? OR seg_start IS NULL OR seg_end IS NULL '
+                         'OR (seg_start <= ? AND ? <= seg_end))')
+            params.extend([RUN_WIDE_CHANNEL, float(at_time), float(at_time)])
+        sql = (f"SELECT {', '.join(columns)} FROM detection_thresholds "
+               f"WHERE {' AND '.join(where)} "
+               f"ORDER BY method, channel, segment_idx, name")
+        return pd.read_sql_query(sql, conn, params=params)
+    finally:
+        if own:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -4099,6 +5264,16 @@ _EXPORT_COLUMNS = [
     ('det_ptp (uV)', ('db', 'det_ptp', True)),
     ('det_trough_time (s)', ('db', 'det_trough_time', True)),
     ('det_peak_time (s)', ('db', 'det_peak_time', True)),
+    # 4.6 detector values. peak_val_det / rms_det are in the units of the
+    # method's detection signal (extensions.THRESHOLD_UNITS), hence no unit in
+    # the header; power_orig is Wonambi's in-band power of the first
+    # difference. All ignored by the importer.
+    ('peak_freq (Hz)', ('db', 'peak_freq', True)),
+    ('peak_val_det', ('db', 'peak_val_det', True)),
+    ('rms_det', ('db', 'rms_det', True)),
+    ('rms_orig (uV)', ('db', 'rms_orig', True)),
+    ('power_orig', ('db', 'power_orig', True)),
+    ('det_zero_time (s)', ('db', 'det_zero_time', True)),
 ]
 
 # Canonical sleep-stage vocabulary, matching the rest of the codebase
@@ -5244,7 +6419,7 @@ def default_csv_path(output_dir, event_type, method, frequency, stage):
 
 def export_events_to_csv(db_path, event_type, method, frequency, stage,
                          csv_file=None, output_dir=None, append=False,
-                         logger=None):
+                         logger=None, exclude_rejected=False, reviewer=None):
     """Export events for one detection scope from the DB to a parameter CSV.
 
     On-demand DB -> CSV export for the direct-write path (``write_db=True``).
@@ -5299,13 +6474,21 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
         Default ``False`` (overwrite).
     logger : logging.Logger or None
         Optional logger for progress/warnings.
+    exclude_rejected : bool, optional
+        Leave out every event a reviewer rejected in ``event_reviews``.
+        Default False, which exports every detected event as before. The
+        default filename is the same either way, so pass ``csv_file`` when
+        keeping both exports side by side.
+    reviewer : str or None, optional
+        With ``exclude_rejected``, count only this reviewer's rejections.
+        ``None`` (default) excludes an event any reviewer rejected.
 
     Returns
     -------
     str or None
         Path to the written CSV, or ``None`` when the scope is genuinely empty
-        (no events of this type/method/band exist at all). No file is written in
-        that case.
+        (no events of this type/method/band exist at all), or when
+        ``exclude_rejected`` left no row. No file is written in that case.
 
     Raises
     ------
@@ -5313,7 +6496,8 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
         When the stage filter excludes every row but the same type/method/band
         DOES have events under other stages -- i.e. a stage-token mismatch,
         surfaced loudly instead of silently writing nothing. Also propagates
-        :func:`split_stage_token`'s error for a malformed stage token.
+        :func:`split_stage_token`'s error for a malformed stage token. Also
+        when ``reviewer`` is given without ``exclude_rejected``.
 
     Notes
     -----
@@ -5326,6 +6510,8 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
     the single :data:`_EXPORT_COLUMNS` layout, so they cannot drift apart.
     """
     stage_list = split_stage_token(stage)  # may raise on a malformed token
+    if reviewer is not None and not exclude_rejected:
+        raise ValueError("reviewer only applies with exclude_rejected=True")
 
     # Read-only, 60 s busy timeout. This is the reader most likely to meet a
     # writer: it runs straight after detection, and under DELETE journal mode
@@ -5372,14 +6558,37 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
                 # whole scope under a filename claiming a narrower one.
                 where.append("1 = 0")
 
+        # Reviewer rejections, applied last so the stage resolution above and
+        # the mismatch diagnosis below still see every detected row.
+        n_rejected = 0
+        if exclude_rejected:
+            rej_sql, rej_params = review_exclusion_clause(
+                conn, 'events.uuid', reviewer)
+            if rej_sql is not None:
+                n_scope = conn.execute(
+                    f"SELECT COUNT(*) FROM events WHERE {' AND '.join(where)}",
+                    params).fetchone()[0]
+                where = where + [rej_sql]
+                params = params + rej_params
+            else:
+                n_scope = None
+
         sql = (f"SELECT {', '.join(db_columns)} FROM events "
                f"WHERE {' AND '.join(where)} ORDER BY channel, start_time")
         col_index = {name: i for i, name in enumerate(db_columns)}
         rows = conn.execute(sql, params).fetchall()
+        if exclude_rejected and n_scope is not None:
+            n_rejected = n_scope - len(rows)
+            if logger is not None:
+                logger.info(
+                    f"exclude_rejected: left out {n_rejected} of {n_scope} "
+                    f"{event_type} rows rejected by "
+                    f"{'reviewer ' + repr(reviewer) if reviewer else 'any reviewer'}")
 
         # Distinguish a genuinely-empty scope (return None) from a stage-token
-        # mismatch that would otherwise write nothing silently (raise).
-        if not rows and stage_list is not None:
+        # mismatch that would otherwise write nothing silently (raise). A
+        # scope emptied by review rejections is neither.
+        if not rows and stage_list is not None and not n_rejected:
             noscope_where = ["event_type = ?", "method = ?"]
             noscope_params = [str(event_type), str(method)]
             if frequency is not None:
@@ -5405,7 +6614,11 @@ def export_events_to_csv(db_path, event_type, method, frequency, stage,
         conn.close()
 
     if not rows:
-        if logger is not None:
+        if n_rejected and logger is not None:
+            logger.warning(
+                f"Every one of the {n_rejected} {event_type} rows in this "
+                f"scope was rejected by review; no CSV written")
+        elif logger is not None:
             logger.info(
                 f"No {event_type} rows for method={method}, freq={frequency}, "
                 f"stage={stage} in {db_path}; scope is empty, no CSV written")
