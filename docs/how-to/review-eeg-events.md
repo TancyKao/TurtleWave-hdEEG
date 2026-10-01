@@ -29,6 +29,32 @@ that database. By default they already are — detection writes straight into
 !!! tip
     The count strip above the table (HARD / SOFT / DEAD / OK) always reflects the full, unfiltered channel count for the current event type.
 
+## Find a Channel That Picks Up the Wrong Thing
+
+**Problem:** You suspect a region detects alpha or noise as events.
+
+**Solution:** On the Channels (QC) tab, switch the topography combo to
+`off-band (% of events)`, then read `low prom. %`, `at floor %`, `amp/bg ×` and
+`amp/thr ×`. Filter the table with `checks: hard` or `checks: soft`. See
+[Validate a detection run](validate-a-detection-run.md#run-the-population-checks-on-the-channels-tab).
+
+Runs detected with 4.5 or earlier show `—` in these columns.
+
+## Select an Event and Record a Decision
+
+**Problem:** You want to say whether one event is genuine.
+
+**Solution:**
+
+1. Set **Review ▸ Reviewer name…**.
+2. On the **2 · Epochs** tab, click an event band, or press `]` for the next
+   undecided event on the channel.
+3. Press `A` to accept, `R` and a digit `1`–`9` to reject with a reason, or `U`
+   to mark unsure. `Ctrl+Z` undoes.
+
+[Decide whether an event is genuine](decide-if-an-event-is-genuine.md) gives the
+six checks to apply and the reason codes. A decision never removes the event.
+
 ## Filter by Event Type, Method, or Frequency Band
 
 **Problem:** You need to focus on one detector's output at a time.
@@ -189,7 +215,10 @@ This writes a Markdown summary — channel count, dropped channels, global artef
 
 ## See Also
 
+- [Decide whether an event is genuine](decide-if-an-event-is-genuine.md) - The six checks and reason codes
+- [Validate a detection run](validate-a-detection-run.md) - Population checks, review sample and precision
 - [Tutorial: Your First EEG Event Review Session](../tutorials/eeg-review-gui-tutorial.md) - Learn the basics
 - [Reference: EEG Review GUI](../reference/eeg-review-gui.md) - Technical specifications
 - [Explanation: Review GUI Architecture](../explanation/eeg-review-gui-architecture.md) - Understand how it works
 - [How to Upgrade to turtlewave-hdEEG 4.0](upgrade-to-4.0.md#step-5-adjust-to-the-review-gui-workflow-change) - What changed from the pre-4.0 per-event review workflow
+- [How to Upgrade to turtlewave-hdEEG 4.6](upgrade-to-4.6.md) - Event decisions and the review sample

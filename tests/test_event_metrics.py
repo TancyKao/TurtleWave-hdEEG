@@ -25,8 +25,9 @@ output event.
 * F9 Massimini2004 at exactly 80 uV / -100 uV: negative half-wave 0.5 +- 0.03 s,
   det_trough -100 +- 5 uV; a +50 uV variant yields no event.
 
-Also: SW geometry, splice handling and the threshold-ratio helpers on direct
-inputs. Run standalone: ``python tests/test_event_metrics.py`` (< 30 s).
+Also: SW geometry, splice handling, the exact background window counts that
+the edge guard P produces next to a splice, and the threshold-ratio helpers on
+direct inputs. Run standalone: ``python tests/test_event_metrics.py`` (< 30 s).
 Exits non-zero if any test fails.
 """
 
@@ -258,6 +259,47 @@ def test_splice_and_sw_geometry():
           f"{f.bg_n_windows} background windows")
 
 
+def test_background_edge_guard():
+    """Background windows within P of a splice are dropped (exact counts).
+
+    120 s of noise with 70-80 s cut out leaves two runs, [0, 70) and [80, 120),
+    with a 2 s edge guard P for spindles. A spindle at 63-64 s is 6 s from the
+    run edge, so it keeps its figures, but its +-15 s surround reaches the
+    splice. Windows are 0.5 s on a 0.5 s grid, the event and its 0.25 s guard
+    exclude 4 of them (62.5-64.0 s), and:
+
+    * without the edge guard the surround would hold 44 windows (48-70 s)
+      minus 4 = 40;
+    * with it the last usable window starts at 67.5 s: 40 - 4 = 36.
+
+    After the splice, a spindle at 83-84 s keeps windows from 82 s on: 34
+    minus 4 = 30 (an unguarded count would be 38 - 4 = 34). An event far from
+    any splice keeps all 58 windows.
+    """
+    print("\n4b. Background edge guard at a splice (exact window counts):")
+    fs = 250
+    x, t, _, _ = fixture(fs, seed=9000, total=120.0)
+    keep = (t < 70) | (t >= 80)
+    xs, ts = x[keep], t[keep]
+
+    before = em.event_figures(xs, ts, fs, 63.0, 64.0, BAND)
+    after = em.event_figures(xs, ts, fs, 83.0, 84.0, BAND)
+    far = em.event_figures(xs, ts, fs, 30.0, 31.0, BAND)
+    for f in (before, after, far):
+        assert f.near_splice is False and f.bg_insufficient is False, f
+    assert far.bg_n_windows == 58, far.bg_n_windows
+    assert before.bg_n_windows == 36, before.bg_n_windows
+    assert before.bg_n_windows != 40, "edge guard on windows not applied"
+    assert before.bg_n_windows < far.bg_n_windows
+    # After the splice only 80-99 s exists; the guard keeps windows starting
+    # at 82 s or later (34), minus the 4 excluded around the event (82.5-84).
+    assert after.bg_n_windows == 30, after.bg_n_windows
+    assert after.bg_n_windows < far.bg_n_windows
+    print(f"[ok] windows: far {far.bg_n_windows}, before splice "
+          f"{before.bg_n_windows} (unguarded would be 40), after splice "
+          f"{after.bg_n_windows}")
+
+
 def test_threshold_and_bound_helpers():
     """thresh_ratio sign handling, method coverage and near_bound."""
     print("\n5. Threshold-ratio and duration-bound helpers:")
@@ -284,7 +326,8 @@ def test_threshold_and_bound_helpers():
 
 
 TESTS = [test_spindle_fixtures, test_noise_f7, test_f9_massimini_detector,
-         test_splice_and_sw_geometry, test_threshold_and_bound_helpers]
+         test_splice_and_sw_geometry, test_background_edge_guard,
+         test_threshold_and_bound_helpers]
 
 
 if __name__ == '__main__':

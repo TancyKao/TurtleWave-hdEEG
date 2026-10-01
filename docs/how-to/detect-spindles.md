@@ -144,6 +144,10 @@ discontinuities into one continuous run per channel before detection, rather
 than detecting cycle-by-cycle or stage-by-stage. Use `cat=(0, 0, 0, 0)` if you
 want cycles and stages kept separate instead.
 
+Since 4.6 `cat` defaults to `(1, 1, 1, 0)` in all three detectors, and passing
+`cat=None` means that default. Anything that is not a four-flag tuple of 0 and 1
+raises `ValueError` before detection starts.
+
 ## Interpreting Results
 
 Spindles are in `neural_events.db` (`events` table, `event_type = 'spindle'`)

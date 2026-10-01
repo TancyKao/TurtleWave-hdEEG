@@ -1,8 +1,9 @@
 # Explanation: EEG Review GUI Architecture
 
 This document explains the design principles behind the TurtleWave EEG
-Review GUI — why it's built around channel-level QC triage rather than
-per-event review.
+Review GUI — why it's built around channel-level QC triage, and why the
+per-event decisions added in 4.6 are a validation sample rather than a way to
+curate every event.
 
 ## Why QC-by-Outlier-Triage, Not Per-Event Review?
 
@@ -22,11 +23,14 @@ made that the actual workflow: the GUI computes an outlier score per
 channel (robust z-score against the rest of the montage, plus a dead-channel
 check) and reviewers triage at that granularity instead.
 
-**What this trades away:** there's no built-in mechanism for one reviewer to
-mark individual borderline events for a second opinion, and no per-event
-provenance trail. If your study design needs inter-rater agreement on
-individual events (rather than channel-level QC decisions), this GUI is not
-the right tool for that layer of review.
+**What this trades away:** per-event review at scale. A night holds about
+94,000 spindles, so no reviewer can decide each one. 4.6 adds per-event
+decisions back at a scale a person can do: a drawn sample of about 120 events
+per subject, labelled to estimate how often the detector is right, per region
+and stage, with a second rater on a shared subset for inter-rater agreement.
+It does not curate the output. Decisions are stored as evidence in their own
+table and never remove an event; see
+[Event figures and review sampling](event-figures-and-review-sampling.md).
 
 ## Design Principles
 
@@ -38,13 +42,16 @@ middle "event list" surface — once you've decided a channel needs a closer
 look, you go straight to its epochs, not to a filtered table of its
 individual events.
 
-**2. Channel Verdicts, Not Event Verdicts**
+**2. Channel Verdicts for Action, Event Decisions for Evidence**
 
-Decisions (keep / drop / mark-artefact / queue-for-re-detect) are recorded
-per channel, not per event. This matches how the decisions actually get
-used downstream: a dropped channel is excluded from analysis wholesale; a
-re-detect-queued channel gets re-run with different parameters, not
-individually corrected event-by-event.
+Decisions that change the analysis (keep / drop / mark-artefact /
+queue-for-re-detect) are recorded per channel. This matches how they get used
+downstream: a dropped channel is excluded wholesale; a re-detect-queued channel
+gets re-run with different parameters. Event decisions (accept / reject /
+unsure, with a reason) are different in kind. They are stored in
+`event_reviews`, keyed by the event's uuid and the reviewer, and feed a
+precision estimate. A rejected event stays in `events`, and density counts it
+unless a reader asks to leave rejected events out.
 
 **3. QC Triage Feeds Re-detection, Not Manual Correction**
 
@@ -53,7 +60,14 @@ missed event. Its output is a channel-level verdict and, optionally, a
 scoped re-detect request — the fix for a bad channel is better detection
 parameters or exclusion, not manual patching of individual events.
 
-**4. Performance Over Features**
+**4. Figures Computed Once, at Detection**
+
+The numbers in the Event panel and the Channels-tab population checks are
+stored with each event at detection time, not computed when you click. The GUI
+only reads them, which keeps the montage-wide dashboard fast. A run from before
+4.6 has none, and the GUI says so instead of computing something different.
+
+**5. Performance Over Features**
 
 Virtualized rendering, background waveform loading, and waveform caching
 keep navigation responsive on large datasets. Features that would compromise
@@ -79,9 +93,9 @@ neural_events.db  →  per-channel QC aggregates  →  Channels (QC) table
                                                              Package…
 ```
 
-QC verdicts and artefact ranges are written straight back into
-`neural_events.db`, alongside the detected events they describe — there's no
-separate reviews file to keep in sync.
+QC verdicts, artefact ranges, event decisions and sample data are written
+straight back into `neural_events.db`, alongside the detected events they
+describe — there's no separate reviews file to keep in sync.
 
 ## Key Components
 
@@ -99,6 +113,23 @@ outlier flag) are computed from the events table on load and on threshold
 change, not stored — so adjusting the outlier `z`-thresholds (**View →
 Outlier threshold…**) recomputes flags immediately without touching the
 database.
+
+### Population Checks
+
+Five per-channel columns (off-band share, low-prominence share, share at the
+duration floor, median amplitude against background and against threshold) are
+aggregated from the stored figures in one query per refresh, in a background
+thread. They are flagged against the rest of the montage with the same robust z
+as the amplitude columns, so a problem shared by every channel is not flagged
+there and shows up in the precision estimate instead.
+
+### Event Decisions and the Review Sample
+
+Selecting an event, deciding it and undoing a decision are handled on the
+Epochs tab; a sample of events is drawn and scored by the library
+(`turtlewave_hdEEG.review_sampling`), so the sampling and the estimator can be
+tested and run without Qt. Other reviewers' decisions are hidden by default so a
+second rater stays independent.
 
 ### Epoch-Level Inspection
 
@@ -128,10 +159,11 @@ Epochs progression reduces cognitive load and lets muscle memory develop,
 at the cost of flexibility for workflows this GUI wasn't designed for.
 
 **Channel-level granularity vs. event-level control** — this is the
-central trade-off of the whole redesign (see "Why QC-by-Outlier-Triage,
-Not Per-Event Review?" above). It buys throughput on the common case
-(spotting bad channels across a high-density montage) at the cost of
-fine-grained, per-event manual correction.
+central trade-off of the redesign (see "Why QC-by-Outlier-Triage, Not
+Per-Event Review?" above). It buys throughput on the common case (spotting bad
+channels across a high-density montage) at the cost of per-event manual
+correction. The 4.6 sample recovers an honest per-event measure, precision,
+without that cost.
 
 ## Why PyQt5 and pyqtgraph?
 

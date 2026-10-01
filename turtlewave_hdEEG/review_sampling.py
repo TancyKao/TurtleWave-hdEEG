@@ -1240,6 +1240,13 @@ def compute_review_precision(conn, sample_id, reviewer=None,
         ``TRUSTWORTHY`` / ``NOT_TRUSTWORTHY``; region ``IN`` / ``EXCLUDE`` /
         ``TOP_UP``; any domain ``INCOMPLETE`` when a sub-cell has no label,
         ``NO_DATA`` when nothing was decided.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``label_source``, an unknown sample, or when
+        ``reviewer`` is ``None`` and the primary reviewer cannot be told from
+        the labels.
     """
     import pandas as pd
 
@@ -1434,6 +1441,12 @@ def label_agreement(a, b, subjects=None, flags=None, n_boot=2000, seed=0):
         ``positive_agreement`` and ``negative_agreement``, ``by_flag``,
         ``protocol_pass`` (kappa >= 0.60 and agreement >= 0.80),
         ``bootstrap_seed``.
+
+    Raises
+    ------
+    ValueError
+        When two sequences differ in length, or a label is not one of
+        ``accept``, ``reject`` or ``unsure``.
     """
     def _align(x, keys):
         if x is None:

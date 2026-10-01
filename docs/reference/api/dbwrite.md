@@ -75,6 +75,37 @@ A few of these primitives are worth knowing about even outside a detection call:
   as its `--mode` argparse `choices`, so a typo is rejected at the CLI before
   any database is touched.
 
+### Event reviews, thresholds and population figures (4.6)
+
+- **`ensure_event_reviews_schema` / `store_event_review` /
+  `delete_event_review` / `read_event_reviews`** create and use `event_reviews`,
+  one row per event and reviewer. It is separate from `events`, so a re-detection
+  cannot erase it. `store_event_review` copies the event's identity from
+  `events`, refuses an unknown decision or reason, and requires a comment for
+  reason `other`. `delete_event_review` and the `reviewed_at` argument are what
+  undo and Clear use.
+- **`REVIEW_DECISIONS`, `REVIEW_REASONS`, `REVIEW_REASON_CATEGORY`,
+  `review_category(decision, reason)`** are the vocabulary and the mapping to
+  the RA categories TP, Ambiguous, FP-artifact and FP-other. See
+  [Decide whether an event is genuine](../../how-to/decide-if-an-event-is-genuine.md#reason-codes-and-their-ra-categories).
+- **`ensure_reviewed_view`** creates the `events_reviewed` and
+  `v_event_density_reviewed` views: events no reviewer rejected, with review
+  counts. `review_exclusion_clause` returns the SQL predicate behind
+  `exclude_rejected`.
+- **`rematch_orphaned_reviews`** proposes (or, with `dry_run=False`, applies) a
+  new event for a review whose uuid disappeared. A change of method or band is
+  reported, never applied.
+- **`ensure_detection_thresholds_schema` / `store_detection_thresholds` /
+  `read_detection_thresholds`** hold the thresholds each run resolved, per
+  channel and segment. Read them with the event's own `run_id` and
+  `at_time=start_time`.
+- **`event_population_summary(db, run_id, event_type)`** returns one row per
+  channel and stage with the shares and medians behind the Channels-tab
+  population checks. Each share has its own count beside it, and rows without
+  stored figures return an empty frame.
+- **`export_events_to_csv`** gained `exclude_rejected` and `reviewer`, and 20 new
+  columns (see [Upgrade to 4.6](../../how-to/upgrade-to-4.6.md#what-changed)).
+
 ### Stage tokens
 
 Since 4.3, `events.stage` stores a run's canonical **joint** stage token

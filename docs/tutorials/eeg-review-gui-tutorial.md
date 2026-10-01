@@ -50,6 +50,9 @@ Channels (QC) tab populates with one row per channel.
 
 The **Channels (QC)** tab is the landing surface. Each row is a channel, not
 an individual event — this is a QC triage view, not a per-event review list.
+Beside the amplitude columns you'll also see `off-band %`, `low prom. %`,
+`at floor %`, `amp/bg ×` and `amp/thr ×`, and a `checks` flag. They summarise
+stored figures for every event on the channel.
 
 Use the left filter dock to switch event type (spindle / slow wave /
 K-complex / PAC) and to narrow by method or frequency band. Channels flagged
@@ -75,7 +78,28 @@ epochs, or the prev/next buttons to step one epoch at a time.
     confirm whether a flagged channel's events look like real detections or
     artefact.
 
-## Step 5: Flag a Channel for Re-detection
+## Step 5: Look at One Event and Record a Decision
+
+1. In the Epochs tab, click one of the shaded bands on the raw trace. We've
+   selected an event, and the **Event** panel in the right dock fills with its
+   duration, half-wave count, peak frequency and amplitude figures.
+2. Press **Review ▸ Reviewer name…** and enter your initials if the GUI hasn't
+   asked yet. Nothing is saved without a name.
+3. Look at the raw trace, then the figures, and press `A` to accept the event.
+4. Select another event, press `R`, then `1` to reject it as an artefact.
+5. Press `Ctrl+Z` (`Cmd+Z` on macOS) to undo the last decision.
+
+!!! success "What you should see"
+    The accepted band turns green with a ✓. The `Current` line in the dock reads
+    `Accepted by` and your name. The rejected band shows a dashed edge and a ✗,
+    and after the undo it goes back to its previous style.
+
+These decisions are stored in the database beside the events, and no event is
+removed. A handful of decisions only teaches the keys; to measure how often the
+detector is right, work through a drawn sample (see the
+[how-to guides](../how-to/validate-a-detection-run.md)).
+
+## Step 6: Flag a Channel for Re-detection
 
 Once you've decided a channel needs re-running with different parameters
 (or dropped from analysis):
@@ -87,7 +111,7 @@ The channel is added to the re-detect queue shown in the status bar. Repeat
 for as many channels as needed, then use **Analysis → Build re-detect
 request…** to hand them off to a re-run.
 
-## Step 6: Export a QC Report
+## Step 7: Export a QC Report
 
 When you're done triaging:
 
@@ -108,14 +132,17 @@ Congratulations! You now know how to:
 ✅ Launch the GUI and load your data files
 ✅ Read the Channels (QC) dashboard and spot outlier channels
 ✅ Drill into a channel's epochs to inspect individual windows
+✅ Select an event, record a decision and undo it
 ✅ Flag a channel for re-detection with `F`
 ✅ Export a QC report
 
 ## Next Steps
 
 - **Solve specific QC tasks** — see the [How-to Guide](../how-to/review-eeg-events.md)
+- **Judge an event** — [Decide whether an event is genuine](../how-to/decide-if-an-event-is-genuine.md)
+- **Validate a run** — [Validate a detection run](../how-to/validate-a-detection-run.md)
 - **Understand the design** — see the [Explanation](../explanation/eeg-review-gui-architecture.md)
-- **Upgrading from a pre-4.0 project** — the workflow above replaced the old
-  per-event review GUI; see
+- **Upgrading from a pre-4.0 project** — the 4.0 workflow replaced the old
+  per-event review GUI (4.6 added event decisions back as validation); see
   [How to Upgrade to turtlewave-hdEEG 4.0](../how-to/upgrade-to-4.0.md#step-5-adjust-to-the-review-gui-workflow-change)
   for what changed and why.

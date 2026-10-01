@@ -207,7 +207,23 @@ def cycles_nominal(y_event):
 
 
 class PeakFreq(NamedTuple):
-    """M2 result for one event."""
+    """M2 result for one event.
+
+    Attributes
+    ----------
+    freq : float
+        Interior residual peak in Hz; NaN when ``no_peak``.
+    prominence_db : float
+        Residual at the peak in dB; NaN when ``no_peak``.
+    in_band : bool
+        ``band[0] <= freq <= band[1]``; False when ``no_peak``.
+    low_prominence : bool
+        ``prominence_db`` is under the cutoff (10 dB); False when ``no_peak``.
+    coarse : bool
+        The event is shorter than 1 s, so its frequency resolution is coarse.
+    no_peak : bool
+        The residual has no interior maximum.
+    """
 
     freq: float            #: interior residual peak (Hz), NaN when no_peak
     prominence_db: float   #: residual at the peak (dB), NaN when no_peak
@@ -361,6 +377,8 @@ def threshold_ratio(method, event_values, thresholds):
     Returns
     -------
     float or None
+        The ratio, or ``None`` when the method allows none or a value is
+        missing.
     """
     comps = threshold_components(method, event_values, thresholds)
     return min(comps.values()) if comps else None
@@ -626,7 +644,33 @@ def background_rms(track, start, end, event_type='spindle', others=None,
 
 @dataclass
 class EventFigures:
-    """All figures for one event. ``None`` means not computable."""
+    """All figures for one event. ``None`` means not computable.
+
+    Attributes
+    ----------
+    halfwaves_above_bg : int or None
+        Band-passed extrema at least 2.5 times the background RMS (spindles).
+    cycles_nominal : float or None
+        Sign changes of the band-passed event divided by 2 (spindles).
+    peak_freq_ap, prominence_db : float or None
+        1/f-corrected peak frequency (Hz) and its prominence (dB), spindles.
+    in_band, low_prominence : bool or None
+        Peak inside the run band; prominence under 10 dB.
+    bg_rms, bg_n_windows, bg_stage_mixed
+        Background band RMS (µV), windows kept, and whether an otherwise usable
+        window was dropped because it lay outside the run's stages.
+    amp_ratio, thresh_ratio : float or None
+        Event band RMS over background RMS; detector peak over its threshold.
+    near_bound : int or None
+        -1 near the duration floor, +1 near the ceiling, 0 neither.
+    near_splice : bool or None
+        Within the edge guard of a splice or spanning one; signal figures are
+        then ``None``.
+    wave_freq : float or None
+        1 / (2 x negative half-wave duration) in Hz (slow waves, K-complexes).
+    coarse, no_peak, bg_insufficient, neg_halfwave_dur, thresh_components, ref_note
+        Display-only values, not stored.
+    """
 
     halfwaves_above_bg: Optional[int] = None
     cycles_nominal: Optional[float] = None
@@ -805,6 +849,8 @@ def event_figures(x, t, fs, start, end, band, others=(), stage_epochs=None,
     Returns
     -------
     EventFigures
+        The figures of this event; fields that cannot be computed are
+        ``None``.
     """
     track = _Track(x, t, fs, band)
     return _figures_on_track(
