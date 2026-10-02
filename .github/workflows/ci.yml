@@ -177,6 +177,16 @@ jobs:
         run: |
           python tests/test_review_gui_sample.py
 
+      - name: Run Wonambi warning-silencing tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_quiet_warnings.py
+
+      - name: Run GUI warning-silencing tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_gui_quiet_warnings.py
+
       - name: Run cycle detection unit tests
         if: ${{ !cancelled() }}
         run: |

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.0] — 2026-10-01
+## [4.6.0] — 2026-10-02
 
 Per-event review is sample-based validation of a detection run. Review decisions are evidence about the detector and never remove events unless `exclude_rejected` is asked for.
 
@@ -22,17 +22,28 @@ Per-event figures and detection thresholds are not recorded for runs made before
 - `review_sampling`: stratified review samples, precision estimates and label agreement between reviewers.
 - `event_population_summary` for per-channel, per-stage population checks.
 - Review GUI: population checks and a stage toggle on the Channels tab.
-- Review GUI: event selection and an Event panel for recording decisions.
+- Review GUI: event selection and an Event panel for recording decisions, with four rows: Signal vs background, Duration, Peak freq and Amplitude outlier.
 - Review GUI: reason grids per event type.
-- Review GUI: neighbouring-channel view and an EOG/EMG/ECG strip.
+- Review GUI: neighbouring-channel view and an EOG/EMG/ECG strip, both scaled from the data.
 - Review GUI: reviewer name recorded with every decision.
 - Review GUI: review-sample mode, blind to flags until a decision is made, and a precision report.
+- `quiet_wonambi_warnings` and the `TURTLEWAVE_QUIET_WONAMBI` variable silence two Wonambi deprecation warnings; the GUIs and example scripts turn it on by default.
 
 ### Changed
 
 - Detectors' `cat` defaults to `(1, 1, 1, 0)`; the previous `None` default failed every channel.
 - The review GUI no longer adds review columns to the `events` table.
 - CSV exports gain the per-event figure and detector-value columns.
+- Review GUI: one "Exclude channel" toggle replaces "Drop channel" and "Mark channel artefact".
+- Review GUI: "Mark as artefact" is now "Exclude time range…".
+- Review GUI: excluded channels are left out of the flag statistics and the topography.
+- Review GUI: the re-detect queue is saved in the database.
+- Review GUI: regions come from electrode names for 10-20 and 10-5 labels.
+- Review GUI: the amplitude flag names the measure that triggered it.
+
+### Removed
+
+- Review GUI: the Selection area and "Build re-detect request…".
 
 ## [4.5.0] — 2026-10-01
 
