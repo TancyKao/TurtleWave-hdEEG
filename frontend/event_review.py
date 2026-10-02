@@ -32,9 +32,10 @@ REASON_LABEL = {
 #: Lower-case words for status lines (``Rejected … (arousal)``).
 REASON_SHORT = {t: l.lower() for t, l in REASON_LABEL.items()}
 REASON_TIP = {
-    'artefact': ('Movement, electrode or muscle artefact. Rejects this event '
-                 'only; to also remove the time from the density denominator, '
-                 'brush it on the trace and use Mark as artefact.'),
+    'artefact': ('Movement, electrode or muscle artefact. This labels this '
+                 'one event only. To leave the time out of analysis for '
+                 'every channel, brush it on the trace and use "Exclude '
+                 'time range…".'),
     'eye-movement': 'The deflection follows the EOG.',
     'not-in-raw': 'Not visible in the raw trace.',
     'filter-ringing': 'Ringing from a step or spike in the raw trace.',
@@ -355,14 +356,16 @@ def population_from_summary(summary, stage=None):
     return out[POP_COLUMNS].sort_values('channel').reset_index(drop=True)
 
 
-def _one_sided_z(x, higher_is_bad):
-    """Robust one-sided z of each finite value against the finite median."""
+def _one_sided_z(x, higher_is_bad, include=None):
+    """Robust one-sided z of each finite value against the median and scale
+    of the finite values in ``include`` (a boolean mask; default all)."""
     x = np.asarray(x, dtype=float)
     z = np.zeros(len(x))
     ok = np.isfinite(x)
-    if ok.sum() < 3:
-        return z, (float(np.median(x[ok])) if ok.any() else np.nan)
-    v = x[ok]
+    ref = ok if include is None else ok & np.asarray(include, dtype=bool)
+    if ref.sum() < 3:
+        return z, (float(np.median(x[ref])) if ref.any() else np.nan)
+    v = x[ref]
     med = float(np.median(v))
     scale = 1.4826 * float(np.median(np.abs(v - med)))
     if not scale > 0:
@@ -375,7 +378,7 @@ def _one_sided_z(x, higher_is_bad):
 
 
 def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
-                     ratio_allowed=True):
+                     ratio_allowed=True, excluded=None):
     """Add ``z_*``, ``flag_*``, ``checks_flag`` and montage medians.
 
     The four :data:`FLAG_COLUMNS` are flagged on a one-sided robust z above
@@ -385,7 +388,9 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
     than :data:`CHECK_MIN_N` events with a value get NaN (shown ``—``) and
     no flag. ``pct_low_prom`` (spindles only) keeps its value and montage
     median and never flags; ``med_thresh_ratio`` is NaN when the method
-    allows no ratio.
+    allows no ratio. ``excluded`` channels (a set of labels) are left out of
+    the montage median and scale and are not flagged; their values and z
+    (against the other channels) stay.
 
     Returns
     -------
@@ -393,6 +398,9 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
         The frame, and ``{column: montage median}``.
     """
     df = pop.copy()
+    excluded = {str(c) for c in (excluded or ())}
+    inc = (~df['channel'].astype(str).isin(excluded).to_numpy()
+           if len(df) else np.array([], dtype=bool))
     medians = {}
     reasons = [[] for _ in range(len(df))]
     for col in CHECK_COLUMNS:
@@ -406,14 +414,14 @@ def population_flags(pop, hard_z=3.5, soft_z=2.0, event_type='spindle',
         vals = np.where(n >= CHECK_MIN_N, vals, np.nan)
         df[col] = vals
         higher_bad = col in SHARE_COLUMNS
-        z, med = _one_sided_z(vals, higher_bad)
+        z, med = _one_sided_z(vals, higher_bad, inc)
         medians[col] = med
         flag = np.array([''] * len(df), dtype=object)
         if col in FLAG_COLUMNS:
             guard = SHARE_GUARD if higher_bad else RATIO_GUARD
             diff = (np.abs(vals - med) if np.isfinite(med)
                     else np.zeros(len(df)))
-            ok = np.isfinite(vals) & (diff >= guard - 1e-9)
+            ok = np.isfinite(vals) & (diff >= guard - 1e-9) & inc
             flag[ok & (z > soft_z)] = 'soft'
             flag[ok & (z > hard_z)] = 'hard'
             for i, f in enumerate(flag):
@@ -549,64 +557,98 @@ def flagged_tooltip(row):
 
 
 def footer_text(hard_z, soft_z, event_type='spindle', ratio=True):
-    """Footer rule text from the live z limits (spec section 1)."""
-    ratios = 'amp/bg or amp/thr' if ratio else 'amp/bg'
-    text = ("Checks compare each channel with the rest of the montage. A "
-            "channel is flagged when its off-band or at-floor share is well "
-            f"above the montage median, or its median {ratios} is well below "
-            f"it: hard when the robust z is above {hard_z:.1f}, soft above "
-            f"{soft_z:.1f}, and only if the difference is at least 10 "
-            "percentage points (shares) or 0.3× (ratios) and the channel has "
-            "at least 20 events.")
+    """The one-line footer under the Channels table (spec R4.0 / R4.3), with
+    the live z limits. ``ratio`` is accepted for the tooltip's signature and
+    does not change the line."""
+    text = ("× hard / ▲ soft: the channel stands out from the others (robust "
+            f"z above {hard_z:g} / {soft_z:g}).")
     if event_type == 'spindle':
-        text += " Low prominence is shown for context and never flags."
-    text += (" A problem every channel shares is not flagged; see the "
-             "Precision report.")
-    return text
+        text += " Low prominence never flags."
+    return text + " Hover for the full rule."
+
+
+def footer_tooltip(hard_z, soft_z, event_type='spindle', ratio=True):
+    """The footer's full rule (six lines; five without the low-prominence
+    line for slow waves and K-complexes)."""
+    ratios = 'amp/bg or amp/thr' if ratio else 'amp/bg'
+    lines = [
+        "Both flags compare a channel with the other channels in view. "
+        "Excluded channels are left out of the comparison.",
+        "Amp flag: the channel's mean event amplitude, its 95th percentile "
+        "or its largest event is far from the montage median: hard when the "
+        f"robust z is above {hard_z:g}, soft above {soft_z:g}. Dead: fewer "
+        "than 15 % of the median event count.",
+        "Checks: the off-band or at-floor share is well above the montage "
+        f"median, or the median {ratios} is well below it. Same z limits, "
+        "and only if the difference is at least 10 percentage points "
+        "(shares) or 0.3× (ratios) and the channel has at least 20 events.",
+    ]
+    if event_type == 'spindle':
+        lines.append("Low prominence is shown for context and never flags.")
+    lines += ["A problem every channel shares is not flagged; see the "
+              "Precision report.",
+              "Change the limits in View ▸ Outlier threshold…."]
+    return '\n'.join(lines)
+
+
+def excluded_mask(qc):
+    """Rows of the QC frame whose channel is excluded (``verdict`` 'drop',
+    or 'channel_artefact' from an older version)."""
+    if not len(qc) or 'verdict' not in qc.columns:
+        return pd.Series(False, index=qc.index)
+    return qc['verdict'].isin(['drop', 'channel_artefact'])
 
 
 def header_count_line(qc, recorded=True, sample=False):
-    """``8 checks flagged · 3 amp flagged · 1 dead`` (+ `` · n dropped``);
-    ``— checks flagged`` during live sample review."""
+    """``8 checks flagged · 3 amp flagged · 1 dead`` (+ `` · n excluded``);
+    ``checks hidden · …`` during live sample review. Excluded channels are
+    counted only in `` · n excluded``."""
+    exc = excluded_mask(qc)
+    inc = qc[~exc] if len(qc) else qc
+
     def count(mask):
-        return int(mask.sum()) if len(qc) else 0
-    amp = count(qc['flag'].isin(['hard', 'soft'])) if len(qc) else 0
-    dead = count(qc['flag'] == 'dead') if len(qc) else 0
-    dropped = count(qc['verdict'].isin(['drop', 'channel_artefact'])) \
-        if len(qc) and 'verdict' in qc.columns else 0
+        return int(mask.sum()) if len(inc) else 0
+    amp = count(inc['flag'].isin(['hard', 'soft'])) if len(inc) else 0
+    dead = count(inc['flag'] == 'dead') if len(inc) else 0
+    excluded = int(exc.sum()) if len(qc) else 0
     if sample:
-        head = '— checks flagged'
+        head = 'checks hidden'
     elif recorded:
-        chk = count(qc['checks_flag'].isin(['hard', 'soft'])) \
-            if len(qc) and 'checks_flag' in qc.columns else 0
+        chk = count(inc['checks_flag'].isin(['hard', 'soft'])) \
+            if len(inc) and 'checks_flag' in inc.columns else 0
         head = f"{chk} checks flagged"
     else:
         head = 'checks not recorded'
     text = f"{head} · {amp} amp flagged · {dead} dead"
-    if dropped:
-        text += f" · {dropped} dropped"
+    if excluded:
+        text += f" · {excluded} excluded"
     return text
 
 
-SHOW_ITEMS = ('All channels', 'Flagged', 'Dropped', 'Dead')
+SHOW_ITEMS = ('All channels', 'Flagged', 'Excluded', 'Queued for re-detect',
+              'Dead')
 
 
 def show_mask(qc, item, sample=False):
     """Rows of the QC frame kept by a Show item (``Flagged`` counts the
-    amplitude flag only during live sample review)."""
+    amplitude flag only during live sample review; an excluded channel is
+    never ``Flagged`` or ``Dead``)."""
     if not len(qc):
         return pd.Series([], dtype=bool)
+    exc = excluded_mask(qc)
     if item == 'Flagged' and sample:
-        return qc['flag'].isin(['hard', 'soft'])
+        return qc['flag'].isin(['hard', 'soft']) & ~exc
     if item == 'Flagged':
         chk = qc['checks_flag'] if 'checks_flag' in qc.columns else ''
-        return qc['flag'].isin(['hard', 'soft']) | pd.Series(
-            chk, index=qc.index).isin(['hard', 'soft'])
-    if item == 'Dropped':
-        return qc['verdict'].isin(['drop', 'channel_artefact']) \
-            if 'verdict' in qc.columns else pd.Series(False, index=qc.index)
+        return (qc['flag'].isin(['hard', 'soft']) | pd.Series(
+            chk, index=qc.index).isin(['hard', 'soft'])) & ~exc
+    if item == 'Excluded':
+        return exc
+    if item == 'Queued for re-detect':
+        return (qc['redetect'].astype(bool) if 'redetect' in qc.columns
+                else pd.Series(False, index=qc.index))
     if item == 'Dead':
-        return qc['flag'] == 'dead'
+        return (qc['flag'] == 'dead') & ~exc
     return pd.Series(True, index=qc.index)
 
 
@@ -960,6 +1002,190 @@ def rereference(data, labels, target, ref):
     return np.nan_to_num(x)
 
 
+# ---------------------------------------------------------------------------
+# Trace scaling (spec R4.9 - R4.11): pure functions, no Qt
+# ---------------------------------------------------------------------------
+
+def round_up_125(x):
+    """The smallest 1-2-5 number (…, 0.5, 1, 2, 5, 10, 20, …) not below
+    ``x``; 1 for a value that is zero, negative or not finite."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(x) or x <= 0:
+        return 1.0
+    exp = np.floor(np.log10(x))
+    base = 10.0 ** exp
+    for m in (1.0, 2.0, 5.0, 10.0):
+        if x <= m * base * (1 + 1e-9):
+            return float(m * base)
+    return float(10.0 * base)
+
+
+def physio_range(x):
+    """``(centre, half_range)`` of one physiology row in the epoch (R4.9):
+    centre = median, half-range = 1.25 × the larger of the distances from
+    the median to the 1st and the 99th percentile, rounded up to a 1-2-5
+    number; a flat or empty row gets 1 (in its own unit)."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if not x.size:
+        return 0.0, 1.0
+    med = float(np.median(x))
+    lo, hi = np.percentile(x, [1, 99])
+    spread = 1.25 * max(abs(lo - med), abs(hi - med))
+    if not spread > 0:
+        return med, 1.0
+    return med, round_up_125(spread)
+
+
+def physio_scale_label(half, unit):
+    """``±50 µV``, ``±0.5 mV`` or ``±0.05 · no unit in file`` (R4.0)."""
+    if unit:
+        return f"±{half:g} {unit}"
+    return f"±{half:g} · no unit in file"
+
+
+#: floors of the shared neighbours half-range, µV (R4.10)
+NEIGHBOUR_FLOOR = {'spindle': 25.0, 'slow_wave': 75.0, 'k_complex': 75.0}
+NEIGHBOUR_FLOOR_FILTERED = 5.0
+
+
+def neighbour_half_range(data, event_type='spindle', filtered=False):
+    """The one half-range all neighbour rows share (R4.10): 1.25 × the 99th
+    percentile of the distance from each row's median, over all rows,
+    rounded up to a 1-2-5 number, and never below the floor (25 µV spindles,
+    75 µV slow waves and K-complexes, 5 µV with the band filter on)."""
+    floor = (NEIGHBOUR_FLOOR_FILTERED if filtered
+             else NEIGHBOUR_FLOOR.get(str(event_type), 75.0))
+    x = np.asarray(data, dtype=float)
+    if x.ndim == 1:
+        x = x[None, :]
+    dev = np.abs(x - np.nanmedian(x, axis=1, keepdims=True))
+    dev = dev[np.isfinite(dev)]
+    if not dev.size:
+        return float(floor)
+    # the floor is applied as it is (25 / 75 / 5), not rounded up
+    return max(float(floor),
+               round_up_125(1.25 * float(np.percentile(dev, 99))))
+
+
+#: floors of the trace half-range, µV (R4.11)
+RAW_FLOOR, FILTERED_FLOOR = 50.0, 10.0
+
+
+def trace_range(x, floor):
+    """``(centre, half_range, largest)`` of a trace in the epoch (R4.11).
+
+    Centre = median; half-range = the larger of ``floor`` and 8 × 1.4826 ×
+    MAD, but no larger than the largest distance from the median, rounded up
+    to a 1-2-5 number. ``largest`` is that largest distance, so samples are
+    clipped exactly when ``largest > half_range``. One large event therefore
+    does not flatten the trace.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if not x.size:
+        return 0.0, round_up_125(floor), 0.0
+    med = float(np.median(x))
+    dev = np.abs(x - med)
+    largest = float(dev.max())
+    sd = 1.4826 * float(np.median(dev))
+    half = max(float(floor), 8.0 * sd)
+    if largest > 0:
+        half = min(half, largest)
+    return med, round_up_125(half), largest
+
+
+def clip_note(half, largest):
+    """``clipped at ±200 µV · largest 984 µV`` (R4.0)."""
+    return f"clipped at ±{half:g} µV · largest {round(float(largest)):g} µV"
+
+
+def neighbours_legend(half):
+    """The Neighbours legend line (R4.0)."""
+    return ("blue lines = the selected event · bar under a trace = an event "
+            "detected on that channel · all rows share one scale "
+            f"(±{half:g} µV)")
+
+
+PHYSIO_KIND_NAMES = {'eog': 'EOG', 'emg': 'chin EMG', 'ecg': 'ECG'}
+
+
+def physio_legend(kinds, no_unit_kinds=()):
+    """The Physiology legend (R4.0): the filters of the kinds shown, the
+    own-scale clause, and the kinds whose unit the file does not state."""
+    parts = []
+    if 'eog' in kinds:
+        parts.append('EOG 0.3–15 Hz')
+    if 'emg' in kinds:
+        parts.append('chin EMG above 10 Hz')
+    if 'ecg' in kinds:
+        parts.append('ECG unfiltered')
+    parts.append('each row scaled to its own signal in this epoch')
+    named = [PHYSIO_KIND_NAMES[k] for k in ('eog', 'emg', 'ecg')
+             if k in no_unit_kinds]
+    if named:
+        parts.append('no unit stated in this file for ' + ', '.join(named))
+    return ' · '.join(parts)
+
+
+def excluded_any_type_line(excluded):
+    """``Excluded for any event type: E29, E62`` (``none`` when empty): the
+    channels the re-run export and the QC report leave out. Exclusion is
+    stored per event type; these two use the channels excluded for any."""
+    names = ', '.join(sorted(str(c) for c in excluded)) or 'none'
+    return f"Excluded for any event type: {names}"
+
+
+def rerun_summary(n_kept, excluded, queued_excluded):
+    """The channel lines of the re-run package summary."""
+    text = (f"channels.csv: {int(n_kept)} kept\n"
+            f"{excluded_any_type_line(excluded)}\n")
+    if queued_excluded:
+        text += ("Queued but excluded, not re-detected: "
+                 + ', '.join(sorted(str(c) for c in queued_excluded)) + "\n")
+    return text
+
+
+def detector_text(view):
+    """Top-bar detector text: ``Moelle2011 · 11–16 Hz`` for the one run in
+    view, ``—`` when several runs (or none) are in view or the run's method
+    is not recorded.
+
+    Parameters
+    ----------
+    view : dict or None
+        The window's population view (``res`` with ``runs_in_view``,
+        ``method``, ``band``).
+
+    Returns
+    -------
+    str
+    """
+    return detector_label(view)[0]
+
+
+DETECTOR_SEVERAL_TIP = ('Several detection runs are in view. Choose a method '
+                        'and band in the Filters dock.')
+DETECTOR_NONE_TIP = 'No events in view.'
+
+
+def detector_label(view):
+    """``(text, tooltip)`` of the top-bar detector label (spec R4.7)."""
+    runs = ((view or {}).get('res') or {}).get('runs_in_view') or []
+    if not runs:
+        return '—', DETECTOR_NONE_TIP
+    method = str(view.get('method') or '')
+    if len(runs) != 1 or not method:
+        return '—', DETECTOR_SEVERAL_TIP
+    band = view.get('band')
+    if not band:
+        return method, ''
+    return f"{method} · {band[0]:g}–{band[1]:g} Hz", ''
+
+
 def run_label(run, run_id):
     """``run 2026-09-14 (3f2a9c1)`` or ``run not recorded``.
 
@@ -997,8 +1223,7 @@ FIGURES_OFF_RUN = ('Event checks were switched off when this run was '
                    'detected. Figures are stored by detection runs made with '
                    'event figures on; re-detect this run to get them.')
 LOAD_EEG_NOTE = 'Load the EEG file to compute these figures for this older run.'
-FIGURE_KEYS = ('halfwaves', 'cycles_nominal', 'peak_freq', 'amp_bg',
-               'wave_freq')
+FIGURE_KEYS = ('signal_bg', 'peak_freq', 'wave_freq')
 
 _LACOURSE_NAMES = (('abs_pow_thresh', 'absolute sigma power'),
                    ('rel_pow_thresh', 'relative sigma power'),
@@ -1127,45 +1352,164 @@ def threshold_row(method, ev, thresholds, run_recorded, ratio=None):
 
 HIDDEN_LABELS_NOTE = 'Labels hidden until you accept or reject this sample event.'
 
-_HIDE_SUBSTRINGS = (' · low prominence (unreliable under 1 s)',
-                    ' · low prominence', ' · barely above background',
-                    ' · barely crossed', ' · meets', ' · fails')
+# ---------------------------------------------------------------------------
+# Event panel: a header line and four rows (spec R4.8)
+# ---------------------------------------------------------------------------
+
+HELP_LINK_TEXT = 'What do these mean?'
+HELP_TITLE = 'What the event figures mean'
+HELP_BODY = (
+    "Signal vs background: how many times bigger the event is than the "
+    "signal just before and after it, in the band the detector searched. "
+    "About 1× means it does not stand out from its surroundings.\n\n"
+    "Duration: how long the event lasts. The detection run only keeps "
+    "events between its shortest and longest allowed length. An event right "
+    "at the shortest length only just qualified.\n\n"
+    "Peak freq: the rhythm that dominates the event. \"In band\" means it "
+    "lies inside the band the detector searched. \"Off band\" means the "
+    "strongest rhythm in the event is a different one. Slow waves and "
+    "K-complexes show Wave freq instead: one wave per event length.\n\n"
+    "Amplitude outlier: whether the event is much larger than the other "
+    "events on the same channel. Very large events deserve a look at the "
+    "raw trace.\n\n"
+    "None of these decides for you. Look at the raw trace first, then the "
+    "neighbouring channels and the EOG and EMG rows. Hover any figure for "
+    "the numbers behind it.")
+HELP_GUIDE_TEXT = ('Full guide: Decide if an event is genuine (opens in your '
+                   'browser)')
+HELP_GUIDE_URL = ('https://turtlewave-hdeeg.readthedocs.io/en/latest/how-to/'
+                  'decide-if-an-event-is-genuine/')
+
+#: compact states of a figure row: value text and tooltip first line
+NOT_RECORDED_TIP = ('Not recorded for this run (detected with 4.5 or '
+                    'earlier). Load the EEG file to compute it now.')
+NEAR_SPLICE_TIP = 'Within 2 s of a recording splice; not computed.'
+TOO_LITTLE_BG_TIP = 'Fewer than {n} clean background windows near this event.'
+
+
+def event_header_line(ev, interpolated=False):
+    """``01:16:37.5 · PPOz · NREM2 · Moelle2011 11–16 Hz`` (R4.0); an
+    interpolated channel reads ``~PPOz``."""
+    ch = str(ev.get('channel') or '—')
+    st = ev.get('epoch_stage')
+    stage = str(st) if st not in (None, '') and st == st else '—'
+    lo, hi = _finite(ev.get('freq_lower')), _finite(ev.get('freq_upper'))
+    band = f" {lo:g}–{hi:g} Hz" if lo is not None and hi is not None else ''
+    return (f"{fmt_hms1(_finite(ev.get('start_time')))} · "
+            f"{'~' if interpolated else ''}{ch} · {stage} · "
+            f"{ev.get('method') or '—'}{band}")
+
+
+def event_header_tooltip(ev, run, run_id):
+    """``4597.50–4598.87 s · run 2026-10-02 (0322c41) · stages … · excluded:
+    … · reference … · TurtleWave …``; parts the run does not record are
+    left out."""
+    start, end = _finite(ev.get('start_time')), _finite(ev.get('end_time'))
+    parts = []
+    if start is not None and end is not None:
+        parts.append(f"{start:.2f}–{end:.2f} s")
+    parts.append(run_label(run, run_id))
+    if run:
+        if run.get('stages'):
+            st = run_stages(run)
+            parts.append('stages ' + (', '.join(st) if st
+                                      else str(run.get('stages'))))
+        if run.get('reject_types'):
+            parts.append(f"excluded: {run.get('reject_types')}")
+        ref = run_ref_chan(run)
+        parts.append('reference ' + (', '.join(ref) if ref else 'as stored'))
+        if run.get('turtlewave_version'):
+            parts.append(f"TurtleWave {run.get('turtlewave_version')}")
+    return ' · '.join(parts)
+
+
+def sample_line(pos, total, region, stage, flags_text=None):
+    """``Sample event 3 of 120 · central · NREM2`` (+ `` · flagged: …`` /
+    `` · not flagged`` when ``flags_text`` is given, i.e. only after this
+    reviewer's accept or reject)."""
+    text = f"Sample event {int(pos)} of {int(total)} · {region} · {stage}"
+    return text + (f" · {flags_text}" if flags_text else '')
+
+
+def _fig_row(key, label, number, word='', word_first=False, level=None,
+             tip=(), tip_neutral=None, muted=False):
+    """One Event-panel row. ``value`` is the whole text; ``number`` is the
+    text without the reading word (what live sample review shows), ``word``
+    the reading word, coloured by ``level`` ('warn' / 'bad') at weight 600;
+    ``muted`` marks a compact state shown in ``text_3``."""
+    tip = [t for t in tip if t]
+    neutral = [t for t in (tip if tip_neutral is None else tip_neutral) if t]
+    value = (word + number) if word_first else (number + word)
+    return {'key': key, 'label': label, 'value': value, 'number': number,
+            'word': word, 'word_first': bool(word_first), 'sub': [],
+            'tooltip': '\n'.join(tip), '_tip_neutral': '\n'.join(neutral),
+            'level': 'muted' if muted else level}
 
 
 def hide_flag_words(rows):
-    """The rows with every flag word and badge removed and no warn / bad
-    colour, numbers kept (UX spec revision 3, section 4, live sample review).
+    """The rows as live sample review shows them on an undecided sample
+    event (R4.8): every reading word removed (``in band``, ``OFF BAND``, the
+    three duration words, ``barely above background``, ``yes`` / ``no``),
+    nothing coloured or bold, the tooltips without judgement wording; all
+    numbers stay.
 
     Returns a new list; the input rows are not changed.
     """
-    import re
     out = []
     for r in rows:
-        r = dict(r, sub=list(r['sub']))
-        key = r['key']
-        if key == 'duration' and r.get('_neutral'):
-            r['sub'] = list(r['_neutral'])
-        if key in ('peak_freq', 'wave_freq'):
-            v = re.sub(r'   (in band|OFF BAND)( · )?', '   ', r['value'])
-            r['value'] = v.rstrip()
-        if key == 'amp_thr' and (r['value'] == 'meets both'
-                                 or r['value'].startswith('fails ')):
-            r['value'] = '2 criteria'
-        for i, t in enumerate(r['sub']):
-            for w in _HIDE_SUBSTRINGS:
-                t = t.replace(w, '')
-            r['sub'][i] = t
+        r = dict(r, sub=list(r.get('sub') or []))
+        if 'number' in r:
+            r['value'] = r['number']
+            r['word'] = ''
+            r['tooltip'] = r.get('_tip_neutral', r.get('tooltip', ''))
         if r.get('level') in ('warn', 'bad'):
             r['level'] = None
         out.append(r)
     return out
 
 
+def detector_line(method, ev, thresholds, run_recorded, ratio=None,
+                  neutral=False):
+    """The ``Detector threshold: …`` tooltip line of the outlier row, by
+    method, in one line (R4.8). ``neutral`` drops the judgement wording
+    (``meets`` / ``fails`` / ``only just crossed``) and keeps the numbers."""
+    row = threshold_row(method, ev, thresholds, run_recorded, ratio=ratio)
+    value, sub = str(row['value']), list(row['sub'])
+    head = 'Detector threshold: '
+    if value == THRESHOLD_NOT_RECORDED:
+        return head + ('not recorded for this run (detected with 4.5 or '
+                       'earlier).')
+    if value == 'Threshold not recorded for this run':
+        return head + 'not recorded for this run.'
+    if value == 'not available for CIRUS':
+        return head + 'no ratio for CIRUS.'
+    if value.endswith('×') and sub:
+        first = sub[0].replace(' · barely crossed', '').replace(' / ', ' ÷ ')
+        rest = ''.join(f" · {t}" for t in sub[1:])
+        tail = '' if neutral else ' (1.0× means it only just crossed)'
+        return f"{head}{first} = {value}{tail}{rest}."
+    if value == 'no ratio':
+        detail = f" ({' · '.join(sub)})" if sub else ''
+        return f"{head}no ratio for {method}{detail}."
+    if neutral:
+        if value == 'meets both' or value.startswith('fails '):
+            value = '2 criteria'
+        sub = [t.replace(' · meets', '').replace(' · fails', '') for t in sub]
+    detail = f" ({' · '.join(sub)})" if sub else ''
+    return f"{head}{value}{detail}."
+
+
 def build_event_rows(ev, *, event_type, run, run_id, thresholds=None,
                      figures=None, figure_state='stored', interpolated=False,
                      outlier_thr=None, amp_col='max_amp', ptp_units_uv=False,
-                     sample_row=None, figure_note=None):
-    """The Event panel rows for one event, in spec order.
+                     sample_row=None, figure_note=None, outlier_n=None):
+    """The four Event panel rows for one event (spec R4.8).
+
+    ``signal_bg``, ``duration``, ``peak_freq`` (``wave_freq`` for slow waves
+    and K-complexes) and ``outlier``. Everything else the panel used to
+    show (half-waves, nominal cycles, prominence, the detector threshold,
+    the slow-wave shape) is in the tooltips; time, channel, stage and
+    detection are the header line (:func:`event_header_line`).
 
     Parameters
     ----------
@@ -1184,20 +1528,26 @@ def build_event_rows(ev, *, event_type, run, run_id, thresholds=None,
         Where ``figures`` came from; ``'missing'`` = pre-4.6 run, no EEG;
         ``'unavailable'`` = not computable, the reason in ``figure_note``.
     figure_note : str or None
-        Reason shown on the figure rows when ``'unavailable'``.
+        Reason given in the tooltip when ``'unavailable'``.
     interpolated : bool
+        Unused here (the header line marks an interpolated channel).
     outlier_thr : float or None
+        The channel's outlier threshold (median + 3.5 × MAD).
     amp_col : str
     ptp_units_uv : bool
         ``db_meta.det_ptp_units`` is microvolts.
     sample_row : dict or None
-        Reserved for review-sample mode (``stratum``, ``flags``, ``pos``,
-        ``total``, ``weight``); ignored while that mode is not built.
+        Unused (the sample line is separate; see :func:`sample_line`).
+    outlier_n : int or None
+        Number of events behind ``outlier_thr``. Accepted for callers; the
+        rule sentence no longer names the count.
 
     Returns
     -------
     list of dict
-        ``key, label, value, sub, tooltip, level``.
+        Four rows: ``key, label, value, number, word, word_first, sub``
+        (always empty), ``tooltip``, ``level`` (``'warn'``, ``'bad'``,
+        ``'muted'`` or ``None``).
     """
     fig = dict(figures or {})
     m = str(ev.get('method') or '')
@@ -1206,240 +1556,207 @@ def build_event_rows(ev, *, event_type, run, run_id, thresholds=None,
     if dur is None and start is not None and end is not None:
         dur = end - start
     lo, hi = _finite(ev.get('freq_lower')), _finite(ev.get('freq_upper'))
+    band = (f"{lo:g}–{hi:g} Hz" if lo is not None and hi is not None
+            else 'the run band')
     version = (run or {}).get('turtlewave_version') or 'version unknown'
-    fig_tip = (STORED_TIP.format(version=version) if figure_state == 'stored'
-               else COMPUTED_TIP if figure_state == 'computed' else '')
+    prov = (STORED_TIP.format(version=version) if figure_state == 'stored'
+            else COMPUTED_TIP if figure_state == 'computed' else '')
     spindle = event_type == 'spindle'
+    have_figs = figure_state in ('stored', 'computed')
+    near_splice = have_figs and _finite(fig.get('near_splice')) == 1
+    n_min = 10 if spindle else 8
     rows = []
 
-    # time / channel / stage / detection
-    rows.append(_row('time', 'Time',
-                     f"{fmt_hms1(start)} · {fmt_num(start)}–{fmt_num(end)} s"))
-    ch = str(ev.get('channel') or '—')
-    rows.append(_row('channel', 'Channel', ('~' + ch) if interpolated else ch,
-                     tip=('Interpolated channel (reconstructed from '
-                          'neighbours by the cleaning pipeline)')
-                     if interpolated else ''))
-    st = ev.get('epoch_stage')
-    rows.append(_row('stage', 'Stage', str(st) if st not in (None, '') and
-                     st == st else '— (stage not stored with this event)'))
-    band = (f"{lo:g}–{hi:g} Hz" if lo is not None and hi is not None
-            else 'band not stored')
-    tip = ''
-    if run:
-        tip = (f"Stages: {run.get('stages') or '—'}\n"
-               f"Excluded: {run.get('reject_types') or '—'}\n"
-               f"Reference: {', '.join(run_ref_chan(run)) or 'as stored'}\n"
-               f"TurtleWave {run.get('turtlewave_version') or '—'}\n"
-               f"Run {run_id}")
-    rows.append(_row('detection', 'Detection',
-                     f"{m or '—'} · {band} · {run_label(run, run_id)}", tip=tip))
-
-    # duration
-    bounds = run_duration_bounds(run, m)
-    nb = ev.get('near_bound') if 'near_bound' in ev else fig.get('near_bound')
-    nb = _finite(nb)
-    if dur is None:
-        rows.append(_row('duration', 'Duration', '— (duration not stored)'))
-    elif bounds is None or (bounds[0] is None and bounds[1] is None):
-        rows.append(_row('duration', 'Duration', f"{dur:.2f} s",
-                         ['run limits not recorded']))
-    else:
-        bmin, bmax = bounds
-        if nb is None:
-            if bmin is not None and abs(dur - bmin) <= 0.05:
-                nb = -1
-            elif bmax is not None and abs(dur - bmax) <= 0.05:
-                nb = 1
-            else:
-                nb = 0
-        lim = (f"{bmin:g}–{bmax:g} s" if bmax is not None
-               else f"{bmin:g} s – no upper bound")
-        outside = ((bmin is not None and dur < bmin - 1e-9)
-                   or (bmax is not None and dur > bmax + 1e-9))
-        level = None
-        if outside:
-            sub = f"outside run limits {lim}"
-            level = 'warn'
-        elif nb == -1:
-            sub = f"at the floor of the run limits ({bmin:g} s)"
-            level = 'warn'
-        elif nb == 1:
-            sub = f"at the ceiling of the run limits ({bmax:g} s)"
-            level = 'warn'
-        elif bmax is None:
-            sub = f"{bmin:g} s – no upper bound · {dur - bmin:.2f} s above the floor"
-        else:
-            sub = f"within run limits {lim} · {dur - bmin:.2f} s above the floor"
-        drow = _row('duration', 'Duration', f"{dur:.2f} s", [sub],
-                    level=level)
-        # the same facts without a judgement, for live sample review
-        above = (f" · {dur - bmin:.2f} s above the floor"
-                 if bmin is not None else '')
-        drow['_neutral'] = [f"run limits {lim}{above}"]
-        rows.append(drow)
-
-    def figure_missing_row(key, label):
+    def compact(key, label, extra=()):
+        """The row in a compact state, or ``None`` when it has a value."""
         if figure_state == 'computing':
-            return _row(key, label, 'computing…')
+            return _fig_row(key, label, 'computing…', muted=True)
         if figure_state == 'unavailable':
-            return _row(key, label, '— ' + (figure_note or FIGURES_FAILED_FIG),
-                        level='muted')
-        return _row(key, label, '— ' + NOT_RECORDED_FIG, level='muted')
-
-    near_splice = _finite(fig.get('near_splice')) == 1
-    splice_txt = '— (within 2 s of a recording splice; not computed)'
-    have_figs = figure_state in ('stored', 'computed')
-    bg_insuff = bool(fig.get('bg_insufficient')) or (
-        have_figs and not near_splice and _finite(fig.get('amp_ratio')) is None)
-    n_min = 10 if spindle else 8
-
-    if spindle:
+            return _fig_row(key, label, 'not computed', muted=True,
+                            tip=[figure_note or FIGURES_FAILED_FIG, *extra])
         if not have_figs:
-            rows.append(figure_missing_row('halfwaves', 'Half-waves'))
-            rows.append(figure_missing_row('cycles_nominal', 'Cycles (nominal)'))
-            rows.append(figure_missing_row('peak_freq', 'Peak frequency'))
-        else:
-            h = _finite(fig.get('halfwaves_above_bg'))
-            if near_splice:
-                rows.append(_row('halfwaves', 'Half-waves', splice_txt))
-            elif h is None:
-                rows.append(_row('halfwaves', 'Half-waves',
-                                 '— (too little clean background to measure)',
-                                 tip=fig_tip))
-            else:
-                rows.append(_row(
-                    'halfwaves', 'Half-waves', f"{int(h)}",
-                    ['half-waves standing out from background (2.5× bg RMS)'],
-                    fig_tip))
-            c = _finite(fig.get('cycles_nominal'))
-            rows.append(_row(
-                'cycles_nominal', 'Cycles (nominal)',
-                splice_txt if near_splice else
-                ('—' if c is None else f"{c:.1f}"),
-                [] if near_splice else
-                ['zero crossings ÷ 2 on the band-passed event'], fig_tip))
-            rows.append(_peak_row(ev, fig, dur, lo, hi, near_splice,
-                                  splice_txt, fig_tip))
-    else:
-        if not have_figs:
-            rows.append(figure_missing_row('wave_freq', 'Wave frequency'))
-        else:
-            wf = _finite(fig.get('wave_freq'))
-            if wf is None:
-                rows.append(_row('wave_freq', 'Wave frequency',
-                                 '— (zero crossing not recorded for this run)'))
-            else:
-                ib = lo is not None and hi is not None and lo <= wf <= hi
-                rows.append(_row('wave_freq', 'Wave frequency',
-                                 f"{wf:.2f} Hz   {'in band' if ib else 'OFF BAND'}",
-                                 tip=fig_tip, level=None if ib else 'warn'))
+            return _fig_row(key, label, 'not recorded', muted=True,
+                            tip=[NOT_RECORDED_TIP, *extra])
+        if near_splice:
+            return _fig_row(key, label, 'near a splice', muted=True,
+                            tip=[NEAR_SPLICE_TIP, *extra, prov])
+        return None
 
-    # amplitude vs background
-    if not have_figs:
-        rows.append(figure_missing_row('amp_bg', 'Amp. vs background'))
-    elif near_splice:
-        rows.append(_row('amp_bg', 'Amp. vs background', splice_txt))
-    elif bg_insuff:
-        rows.append(_row('amp_bg', 'Amp. vs background',
-                         f"— too little clean background (fewer than "
-                         f"{n_min} windows)", tip=fig_tip))
-    else:
-        r = _finite(fig.get('amp_ratio'))
+    # ---- Signal vs background ---------------------------------------------
+    label = 'Signal vs background'
+    what = (f"How many times bigger the event is than the signal around it, "
+            f"in the detection band ({band}). About 1× means it does not "
+            f"stand out.")
+    row = compact('signal_bg', label, [what])
+    r = _finite(fig.get('amp_ratio'))
+    if row is None and (bool(_finite(fig.get('bg_insufficient'))) or r is None):
+        row = _fig_row('signal_bg', label, 'too little background',
+                       muted=True,
+                       tip=[TOO_LITTLE_BG_TIP.format(n=n_min), what, prov])
+    if row is None:
         bg = _finite(fig.get('bg_rms'))
         nwin = _finite(fig.get('bg_n_windows'))
-        e = r * bg if (r is not None and bg is not None) else None
-        sub = [f"band RMS {fmt_uv(e)} vs {fmt_uv(bg)} µV · "
-               f"{'—' if nwin is None else int(nwin)} background windows"]
-        level = None
-        if r is not None and r < 1.5:
-            sub[0] += ' · barely above background'
-            level = 'warn'
+        tip = [what]
+        if bg is not None:
+            windows = ('half-second windows in the surrounding 30 s'
+                       if spindle else
+                       '2-second windows in the surrounding 60 s')
+            count = '' if nwin is None else f"{int(nwin)} "
+            tip.append(
+                f"Event {fmt_uv(r * bg)} µV RMS · background {fmt_uv(bg)} µV "
+                f"RMS (the middle value of {count}{windows}; other events, "
+                f"excluded time and other stages are left out).")
         if _finite(fig.get('bg_stage_mixed')) == 1:
             stages = ', '.join(run_stages(run)) or 'the run stages'
-            sub.append(f"near a stage change: background outside {stages} "
-                       f"left out")
-        rows.append(_row('amp_bg', 'Amp. vs background',
-                         '—' if r is None else f"{r:.1f}×", sub, fig_tip, level))
+            tip.append(f"Near a stage change: background outside {stages} "
+                       f"was left out.")
+        tip.append(prov)
+        barely = r < 1.5
+        row = _fig_row('signal_bg', label, f"{r:.1f}×",
+                       ' · barely above background' if barely else '',
+                       level='warn' if barely else None, tip=tip)
+    rows.append(row)
 
-    # amplitude vs threshold
-    rows.append(threshold_row(m, ev, thresholds, run_is_46(run),
-                              ratio=fig.get('thresh_ratio')))
+    # ---- Duration (always a value: it comes from the event row) -----------
+    bounds = run_duration_bounds(run, m)
+    bmin, bmax = bounds if bounds else (None, None)
+    nb = ev.get('near_bound') if 'near_bound' in ev else fig.get('near_bound')
+    nb = _finite(nb)
+    tip = []
+    if bmin is not None and bmax is not None:
+        limits = f"limits {bmin:g}–{bmax:g} s"
+        tip.append(f"How long the event lasts. This run keeps events between "
+                   f"{bmin:g} and {bmax:g} s.")
+    elif bmin is not None:
+        limits = f"limits from {bmin:g} s"
+        tip.append(f"How long the event lasts. This run keeps events of "
+                   f"{bmin:g} s or longer.")
+    else:
+        limits = 'limits not recorded'
+        tip.append("How long the event lasts.")
+    if spindle and have_figs and not near_splice:
+        h = _finite(fig.get('halfwaves_above_bg'))
+        c = _finite(fig.get('cycles_nominal'))
+        bits = []
+        if h is not None:
+            bits.append(f"{int(h)} half-waves stand out from the background "
+                        f"(above 2.5× background RMS)")
+        if c is not None:
+            bits.append(f"{c:.1f} cycles counted from zero crossings")
+        if bits:
+            tip.append(' · '.join(bits) + '.')
+            tip.append(prov)
+    if dur is None:
+        rows.append(_fig_row('duration', 'Duration', f"not stored · {limits}",
+                             muted=True, tip=tip))
+    else:
+        word = ''
+        if bmin is not None or bmax is not None:
+            if nb is None:
+                nb = (-1 if bmin is not None and abs(dur - bmin) <= 0.05 else
+                      1 if bmax is not None and abs(dur - bmax) <= 0.05 else 0)
+            if ((bmin is not None and dur < bmin - 1e-9)
+                    or (bmax is not None and dur > bmax + 1e-9)):
+                word = ' · outside the limits'
+            elif nb == -1:
+                word = ' · at the shortest allowed'
+            elif nb == 1:
+                word = ' · at the longest allowed'
+        rows.append(_fig_row('duration', 'Duration',
+                             f"{dur:.2f} s · {limits}", word,
+                             level='warn' if word else None, tip=tip))
 
-    # slow-wave shape
-    if not spindle:
-        rows.append(_row('sw_trough', 'Trough',
-                         f"{fmt_uv(ev.get('det_trough'))} µV", tip=DETECTOR_TIP))
-        if ptp_units_uv:
-            rows.append(_row('sw_ptp', 'Peak-to-peak',
-                             f"{fmt_uv(ev.get('det_ptp'))} µV",
-                             tip=DETECTOR_TIP))
-        zt = _finite(ev.get('det_zero_time'))
-        if zt is None or start is None or end is None:
-            rows.append(_row('sw_neg_half', 'Negative half-wave',
-                             '— not recorded for this run'))
-        else:
-            if m in _MASSIMINI:
-                d = end - zt
-                th = _thresholds_dict(thresholds)
-                lo_c, hi_c = (th.get('trough_duration_lo'),
-                              th.get('trough_duration_hi'))
-                crit = ((lo_c, hi_c) if lo_c is not None and hi_c is not None
-                        else (0.3, 1.0) if m == 'Massimini2004'
-                        else (0.25, 1.0))
-                ok = crit[0] <= d <= crit[1]
-                rows.append(_row(
-                    'sw_neg_half', 'Negative half-wave', f"{d:.2f} s",
-                    [f"criterion {crit[0]:g}–{crit[1]:g} s · "
-                     f"{'meets' if ok else 'fails'}"], DETECTOR_TIP,
-                    None if ok else 'warn'))
+    # ---- Peak freq (spindles) / Wave freq (slow waves, K-complexes) --------
+    if spindle:
+        label = 'Peak freq'
+        what = (f"The rhythm that dominates the event, once the slow "
+                f"background that all EEG has (the \"1/f background\") is "
+                f"removed. The detector searched {band}.")
+        row = compact('peak_freq', label, [what])
+        if row is None:
+            f = _finite(fig.get('peak_freq_ap'))
+            coarse = dur is not None and dur < 1.0
+            tip = [what]
+            p = _finite(fig.get('prominence_db'))
+            if p is not None:
+                tip.append(f"The peak stands {p:.1f} dB above the "
+                           f"background. Under 10 dB is a weak peak, and for "
+                           f"events under 1 s that label is unreliable.")
+            if coarse and dur:
+                tip.append(f"This event is shorter than 1 s, so the "
+                           f"frequency is only accurate to about "
+                           f"{1.0 / dur:.1f} Hz.")
+            tip.append(prov)
+            if f is None:
+                row = _fig_row('peak_freq', label, 'no clear peak', tip=tip)
             else:
-                rows.append(_row('sw_neg_half', 'Negative half-wave',
-                                 f"{zt - start:.2f} s",
-                                 ['start to zero crossing · no criterion'],
-                                 DETECTOR_TIP))
+                ib = fig.get('in_band')
+                ib = (lo is not None and hi is not None and lo <= f <= hi) \
+                    if ib is None or _finite(ib) is None else bool(_finite(ib))
+                row = _fig_row('peak_freq', label,
+                               f"{'≈ ' if coarse else ''}{f:.1f} Hz",
+                               ' · in band' if ib else ' · OFF BAND',
+                               level=None if ib else 'warn', tip=tip)
+        rows.append(row)
+    else:
+        label = 'Wave freq'
+        tip = [f"One wave per event length (1 ÷ duration). The detector "
+               f"searched {band}."]
+        wf = _finite(fig.get('wave_freq')) if have_figs else None
+        if wf is None and dur:
+            wf = 1.0 / dur
+        if wf is None:
+            rows.append(_fig_row('wave_freq', label, 'not recorded',
+                                 muted=True, tip=tip))
+        else:
+            ib = lo is not None and hi is not None and lo <= wf <= hi
+            rows.append(_fig_row('wave_freq', label, f"{wf:.2f} Hz",
+                                 ' · in band' if ib else ' · OFF BAND',
+                                 level=None if ib else 'warn', tip=tip))
 
-    # amplitude outlier
+    # ---- Amplitude outlier (always a value) --------------------------------
     amp = _finite(ev.get(amp_col))
     thr = _finite(outlier_thr)
-    if amp is not None and thr is not None and amp > thr:
-        rows.append(_row('outlier', 'Amplitude outlier',
-                         f"yes   {fmt_uv(amp)} > {fmt_uv(thr)} µV "
-                         f"(median + 3.5·MAD)", level='bad'))
+    events = EVENT_PLURAL.get(event_type, 'events')
+    ch = str(ev.get('channel') or 'this channel')
+    tip = []
+    question = (f"Is this event much larger than the other {events} on "
+                f"{ch}? A very large event deserves a look at the raw trace.")
+    if thr is not None:
+        tip.append(f"Is this event much larger than the other {events} on "
+                   f"{ch}? Rule: amplitude above {fmt_uv(thr)} µV, which is "
+                   f"the typical event on this channel plus 3.5 times the "
+                   f"typical spread (median + 3.5 × MAD). A very large event "
+                   f"deserves a look at the raw trace.")
     else:
-        rows.append(_row('outlier', 'Amplitude outlier', 'no'))
+        tip.append(question)
+    det = {flag: detector_line(m, ev, thresholds, run_is_46(run),
+                               ratio=fig.get('thresh_ratio'), neutral=flag)
+           for flag in (False, True)}
+    shape = ''
+    if not spindle:
+        bits = []
+        if _finite(ev.get('det_trough')) is not None:
+            bits.append(f"trough {fmt_uv(ev.get('det_trough'))} µV")
+        if ptp_units_uv and _finite(ev.get('det_ptp')) is not None:
+            bits.append(f"peak-to-peak {fmt_uv(ev.get('det_ptp'))} µV")
+        zt = _finite(ev.get('det_zero_time'))
+        if zt is not None and start is not None and end is not None:
+            d = (end - zt) if m in _MASSIMINI else (zt - start)
+            bits.append(f"negative half-wave {d:.2f} s")
+        if bits:
+            shape = 'Shape: ' + ' · '.join(bits) + '.'
+    is_out = amp is not None and thr is not None and amp > thr
+    number = f"{fmt_uv(amp)} µV" if amp is not None else 'amplitude not stored'
+    rows.append(_fig_row(
+        'outlier', 'Amplitude outlier', number,
+        'yes · ' if is_out else 'no · ', word_first=True,
+        level='bad' if is_out else None,
+        # live sample review: the threshold stays out of the tooltip (with
+        # the amplitude shown beside it, it would give the answer away)
+        tip=tip + [det[False], shape],
+        tip_neutral=[question, det[True], shape]))
     return rows
-
-
-def _peak_row(ev, fig, dur, lo, hi, near_splice, splice_txt, fig_tip):
-    label = 'Peak frequency'
-    det = _finite(ev.get('peak_freq'))
-    det_line = (f"detector (first-difference, 0–50 Hz): {det:.1f} Hz"
-                if det is not None else
-                'detector: not recorded (detected with 4.5 or earlier)')
-    if near_splice:
-        return _row('peak_freq', label, splice_txt, [det_line])
-    f = _finite(fig.get('peak_freq_ap'))
-    coarse = dur is not None and dur < 1.0
-    if f is None:
-        return _row('peak_freq', label, '— no peak above the 1/f background',
-                    [det_line], fig_tip)
-    ib = fig.get('in_band')
-    ib = (lo is not None and hi is not None and lo <= f <= hi) \
-        if ib is None else bool(_finite(ib))
-    badge = 'in band' if ib else 'OFF BAND'
-    if coarse and dur:
-        badge += f" · coarse (resolution {1.0 / dur:.1f} Hz)"
-    value = f"{'≈ ' if coarse else ''}{f:.1f} Hz   {badge}"
-    p = _finite(fig.get('prominence_db'))
-    prom = f"prominence {p:.1f} dB" if p is not None else 'prominence —'
-    low = fig.get('low_prominence')
-    low = bool(_finite(low)) if low is not None else (p is not None and p < 10)
-    if low:
-        prom += (' · low prominence (unreliable under 1 s)' if coarse
-                 else ' · low prominence')
-    return _row('peak_freq', label, value, [prom, det_line], fig_tip,
-                None if ib else 'warn')
 
 
 def has_stored_figures(ev, event_type):
@@ -1527,16 +1844,19 @@ def neighbour_labels(target, chosen, source, interpolated=()):
 KEY_HINTS = {
     'epochs': ('A accept · R reject · U unsure · ] [ unreviewed · N P outlier '
                '· ? keys'),
-    'sample': ('A accept · R reject · U unsure · ] [ sample · N P outlier · '
-               '? keys'),
+    # no "N P outlier": outlier marks and hops are hidden in sample review
+    'sample': 'A accept · R reject · U unsure · ] [ sample · ? keys',
     'channels': 'F re-detect queue · ? keys',
 }
 REVIEW_STATUS_ITEMS = ('unreviewed', 'reviewed', 'accepted', 'rejected',
                        'unsure')
 REVIEW_STATUS_CAPTION = 'Your decisions only. Applies to the Epochs tab.'
 STRIP_LEGEND = ('grey bars = events per epoch · red = amplitude outliers · '
-                'purple dashes = marked artefact · white line = current epoch')
+                'purple dashes = excluded time · white line = current epoch')
 STRIP_LEGEND_SAMPLE = ' · blue ticks = sample events'
+#: the strip legend while a review sample is active: no outlier colour
+STRIP_LEGEND_NO_OUTLIERS = ('grey bars = events per epoch · purple dashes = '
+                            'excluded time · white line = current epoch')
 SAVE_LINE = 'Decisions save to {db} as you make them.'
 SAVE_LINE_NO_NAME = 'Set a reviewer name to save decisions.'
 SAVE_LINE_NO_STORE = ('Decisions cannot be saved: this TurtleWave library has '
@@ -1577,7 +1897,7 @@ def cheat_sheet_text(event_type='spindle', undo='Ctrl+Z'):
         '  N P      next / previous epoch with outliers', '',
         'CHANNELS',
         '  F        add the selected channel to the re-detect queue',
-        '  Shift+drag on the epoch strip   select epochs to mark as artefact',
+        '  Shift+drag on the epoch strip   select epochs to exclude',
     ])
 
 

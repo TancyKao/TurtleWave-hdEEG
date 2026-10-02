@@ -208,7 +208,7 @@ check('4.5', "strip bars are 95 % of each epoch, centred on it",
 panel._on_shift_drag(*panel.snap(60.3, 62), True)
 check('4.6', "shift-drag snaps to epoch edges and counts epochs",
       tuple(panel._strip_range.getRegion()) == (60.0, 91.0)
-      and panel.mark_n_btn.text() == 'Mark 2 epochs as artefact',
+      and panel.mark_n_btn.text() == 'Exclude 2 epochs…',
       repr((panel._strip_range.getRegion(), panel.mark_n_btn.text())))
 check('4.7', "the strip view box snaps with the panel's table",
       panel._strip_vb._snapped(91.5, 92.5) == (91.0, 93.0),

@@ -52,7 +52,8 @@ gui_settings_guard.isolate()     # before any frontend import
 import frontend.eeg_review_gui as rg                          # noqa: E402
 from frontend import event_review as er                       # noqa: E402
 from frontend.channel_types import (neighbour_channels,       # noqa: E402
-                                    physio_channels)
+                                    physio_channels, channel_units)
+import pyqtgraph as pg                                        # noqa: E402
 from turtlewave_hdEEG import dbwrite                          # noqa: E402
 import review_population_fixture as fx                        # noqa: E402
 
@@ -382,66 +383,145 @@ def text_of(rows, key):
     return None if r is None else '\n'.join([r['value']] + r['sub'])
 
 
+def tips_of(rows, key):
+    r = next((r for r in rows if r['key'] == key), None)
+    return None if r is None else r['tooltip']
+
+
+OLD_LABELS = ('Time', 'Channel', 'Stage', 'Detection', 'Half-waves',
+              'Cycles (nominal)', 'Amp. vs threshold', 'Trough',
+              'Peak-to-peak', 'Negative half-wave')
 r = rows_of(base, outlier_thr=38.2)
 keys = [x['key'] for x in r]
-check('5.1', "[25] spindle row keys in order", keys ==
-      ['time', 'channel', 'stage', 'detection', 'duration', 'halfwaves',
-       'cycles_nominal', 'peak_freq', 'amp_bg', 'amp_thr', 'outlier'],
+check('5.1', "[115] spindle: exactly four rows, keys and labels in order",
+      keys == ['signal_bg', 'duration', 'peak_freq', 'outlier']
+      and [x['label'] for x in r] == ['Signal vs background', 'Duration',
+                                      'Peak freq', 'Amplitude outlier'],
       repr(keys))
 sw = dict(base, method='Massimini2004', det_trough=-80.0, det_ptp=120.0,
           det_zero_time=6813.0, wave_freq=0.9, freq_lower=0.5,
           freq_upper=4.0)
 rsw = rows_of(sw, event_type='slow_wave', ptp_units_uv=True,
               thresholds={'max_trough_amp': -40.0, 'min_ptp': 75.0})
-check('5.2', "[25] slow-wave row keys in order", [x['key'] for x in rsw] ==
-      ['time', 'channel', 'stage', 'detection', 'duration', 'wave_freq',
-       'amp_bg', 'amp_thr', 'sw_trough', 'sw_ptp', 'sw_neg_half', 'outlier'],
+check('5.2', "[115] slow wave: third row is wave_freq / 'Wave freq'; no row "
+      "carries an old label",
+      [x['key'] for x in rsw] == ['signal_bg', 'duration', 'wave_freq',
+                                  'outlier']
+      and rsw[2]['label'] == 'Wave freq'
+      and not [x['label'] for x in r + rsw if x['label'] in OLD_LABELS],
       repr([x['key'] for x in rsw]))
-check('5.3', "[26] half-waves sub-line exact; cycles never an integer",
-      text_of(r, 'halfwaves').split('\n')[1]
-      == 'half-waves standing out from background (2.5× bg RMS)'
-      and not re.match(r'^\d+$', text_of(r, 'cycles_nominal').split('\n')[0]),
-      repr((text_of(r, 'halfwaves'), text_of(r, 'cycles_nominal'))))
-pf = text_of(r, 'peak_freq')
-check('5.4', "[27] 0.6 s, 7.2 dB: 'low prominence (unreliable under 1 s)' "
-      "and 'coarse (resolution 1.7 Hz)'",
-      'prominence 7.2 dB · low prominence (unreliable under 1 s)' in pf
-      and 'coarse (resolution 1.7 Hz)' in pf, repr(pf))
-long_ = dict(base, end_time=base['start_time'] + 1.2, duration=1.2)
-pf12 = text_of(rows_of(long_), 'peak_freq')
-pf15 = text_of(rows_of(dict(long_, prominence_db=15.0, low_prominence=0)),
-               'peak_freq')
-check('5.5', "[27] 1.2 s: 'low prominence' without 'unreliable'; 15 dB "
-      "still shows 'prominence 15.0 dB'", 'low prominence' in pf12
-      and 'unreliable' not in pf12 and 'prominence 15.0 dB' in pf15,
-      repr((pf12, pf15)))
-check('5.6', "[28] in_band false -> OFF BAND; no peak -> no-peak text",
-      'OFF BAND' in text_of(rows_of(dict(base, in_band=0, peak_freq_ap=8.0)),
-                            'peak_freq')
+# the spec's fixture event: PPOz, 01:16:37.5, 1.37 s, 12.2 Hz, 984 µV
+spec_ev = dict(base, start_time=4597.5, end_time=4598.87, duration=1.37,
+          freq_lower=11.0, freq_upper=16.0, peak_freq_ap=12.2,
+          prominence_db=9.1, amp_ratio=4.0, bg_rms=1.2, bg_n_windows=27,
+          max_amp=984.0, halfwaves_above_bg=32, cycles_nominal=17.5,
+          in_band=1)
+rf = rows_of(spec_ev, outlier_thr=47.0, outlier_n=405,
+             thresholds={'det_value_lo': 2.77})
+check('5.3', "[116] header line", er.event_header_line(spec_ev)
+      == '01:16:37.5 · PPOz · NREM2 · Moelle2011 11–16 Hz'
+      and er.event_header_line(spec_ev, interpolated=True)
+      == '01:16:37.5 · ~PPOz · NREM2 · Moelle2011 11–16 Hz',
+      repr(er.event_header_line(spec_ev)))
+vals = [x['value'] for x in rf]
+check('5.4', "[117] fixture values of the four rows", vals ==
+      ['4.0×', '1.37 s · limits 0.5–3 s', '12.2 Hz · in band',
+       'yes · 984 µV'], repr(vals))
+short = rows_of(dict(base, near_bound=-1, duration=0.52,
+                     end_time=base['start_time'] + 0.52))
+check('5.5', "[117] 0.52 s event: 'at the shortest allowed' and '≈ ' peak",
+      text_of(short, 'duration')
+      == '0.52 s · limits 0.5–3 s · at the shortest allowed'
+      and text_of(short, 'peak_freq').startswith('≈ '),
+      repr((text_of(short, 'duration'), text_of(short, 'peak_freq'))))
+check('5.5b', "duration words: longest allowed, outside the limits; limits "
+      "from / not recorded",
+      text_of(rows_of(dict(base, near_bound=1, duration=3.0)), 'duration')
+      == '3.00 s · limits 0.5–3 s · at the longest allowed'
+      and text_of(rows_of(dict(base, duration=3.4, near_bound=0)), 'duration')
+      == '3.40 s · limits 0.5–3 s · outside the limits'
+      and text_of(rows_of(base, run={'method': 'Moelle2011', 'params': {
+          'duration_by_method': {'Moelle2011': [0.5, None]}}}), 'duration')
+      == '0.60 s · limits from 0.5 s'
+      and text_of(rows_of(base, run={}), 'duration')
+      == '0.60 s · limits not recorded')
+dt, pt, st, ot = (tips_of(rf, k) for k in ('duration', 'peak_freq',
+                                           'signal_bg', 'outlier'))
+check('5.6', "[118] tooltips: half-waves and cycles on Duration; dB on Peak "
+      "freq; two RMS values and the window count on Signal; the rule and "
+      "the detector line on Amplitude outlier",
+      '32 half-waves stand out from the background' in dt
+      and '17.5 cycles counted from zero crossings' in dt
+      and 'This run keeps events between 0.5 and 3 s.' in dt
+      and '9.1 dB above the background' in pt
+      and st.count('µV RMS') == 2 and '27 half-second windows' in st
+      and 'Rule: amplitude above 47.0 µV, which is the typical event on '
+      'this channel plus 3.5 times the typical spread (median + 3.5 × MAD).'
+      in ot and 'other spindles on PPOz' in ot
+      and pt.split('\n')[0] == 'The rhythm that dominates the event, once '
+      'the slow background that all EEG has (the "1/f background") is '
+      'removed. The detector searched 11–16 Hz.'
+      and any(ln.startswith('Detector threshold: peak 5.16 ÷ threshold '
+                            '2.77 µV = 1.9× (1.0× means it only just '
+                            'crossed)') for ln in ot.split('\n')),
+      repr((dt, pt, st, ot)))
+swt = tips_of(rsw, 'outlier')
+check('5.7', "[118] slow wave: the outlier tooltip has the Shape line; the "
+      "wave-freq tooltip says one wave per event length",
+      'Shape: trough −80.0 µV · peak-to-peak 120 µV · negative half-wave'
+      in swt and 'One wave per event length (1 ÷ duration).'
+      in tips_of(rsw, 'wave_freq')
+      and '2-second windows in the surrounding 60 s' in tips_of(
+          rows_of(dict(sw, amp_ratio=2.0, bg_rms=10.0, bg_n_windows=20),
+                  event_type='slow_wave'), 'signal_bg'), repr(swt))
+check('5.8', "[28] in_band false -> ' · OFF BAND' (warn); no peak -> "
+      "'no clear peak'; ratio under 1.5 -> 'barely above background'",
+      text_of(rows_of(dict(base, in_band=0, peak_freq_ap=8.0)), 'peak_freq')
+      == '≈ 8.0 Hz · OFF BAND'
+      and next(x for x in rows_of(dict(base, in_band=0, peak_freq_ap=8.0))
+               if x['key'] == 'peak_freq')['level'] == 'warn'
       and text_of(rows_of(dict(base, peak_freq_ap=None, in_band=None)),
-                  'peak_freq').startswith('— no peak above the 1/f background'))
-check('5.7', "[29] stage mix and insufficient background",
-      'near a stage change' in text_of(rows_of(dict(base, bg_stage_mixed=1)),
-                                       'amp_bg')
-      and 'too little clean background' in text_of(
-          rows_of(dict(base, amp_ratio=None, bg_rms=None, bg_n_windows=6)),
-          'amp_bg'))
-check('5.8', "[30] near_bound -1 -> 'at the floor of the run limits'",
-      'at the floor of the run limits' in text_of(
-          rows_of(dict(base, near_bound=-1, duration=0.52,
-                       end_time=base['start_time'] + 0.52)), 'duration'))
-t45 = text_of(rows_of(dict(base, halfwaves_above_bg=None, cycles_nominal=None,
-                           peak_freq_ap=None, amp_ratio=None),
-                      run=run45, thresholds=pd.DataFrame(),
-                      figure_state='missing'), 'amp_thr')
-check('5.9', "[31] pre-4.6 run, no thresholds: exact not-recorded text",
-      t45 == 'Threshold not recorded for this run (detected with 4.5 or '
-             'earlier)', repr(t45))
-ta = text_of(rows_of(base, thresholds={'det_value_lo': 3.43}), 'amp_thr')
-tb = text_of(rows_of(base, thresholds={'det_value_lo': 5.16}), 'amp_thr')
-check('5.10', "[31] two runs on one scope give different amp_thr (1.5× vs "
-      "1.0× barely crossed)", ta.startswith('1.5×') and tb.startswith('1.0×')
-      and 'barely crossed' in tb, repr((ta, tb)))
+                  'peak_freq') == 'no clear peak'
+      and text_of(rows_of(dict(base, amp_ratio=1.2)), 'signal_bg')
+      == '1.2× · barely above background'
+      and 'Near a stage change: background outside NREM2, NREM3 was left '
+      'out.' in tips_of(rows_of(dict(base, bg_stage_mixed=1)), 'signal_bg'))
+# compact states [120]
+old45 = rows_of(dict(base, halfwaves_above_bg=None, cycles_nominal=None,
+                     peak_freq_ap=None, amp_ratio=None), run=run45,
+                thresholds=pd.DataFrame(), figure_state='missing',
+                outlier_thr=38.2)
+splice = rows_of(dict(base, near_splice=1), outlier_thr=38.2)
+nobg = rows_of(dict(base, amp_ratio=None, bg_rms=None, bg_n_windows=6,
+                    bg_insufficient=1), outlier_thr=38.2)
+comp = rows_of(base, figure_state='computing', outlier_thr=38.2)
+check('5.9', "[120] compact states: not recorded / near a splice / too "
+      "little background / computing…, each with its tooltip; Duration "
+      "and Amplitude outlier keep their values",
+      [text_of(old45, k) for k in ('signal_bg', 'peak_freq')]
+      == ['not recorded'] * 2
+      and tips_of(old45, 'signal_bg').split('\n')[0] == er.NOT_RECORDED_TIP
+      and [text_of(splice, k) for k in ('signal_bg', 'peak_freq')]
+      == ['near a splice'] * 2
+      and tips_of(splice, 'peak_freq').split('\n')[0] == er.NEAR_SPLICE_TIP
+      and text_of(nobg, 'signal_bg') == 'too little background'
+      and tips_of(nobg, 'signal_bg').split('\n')[0]
+      == 'Fewer than 10 clean background windows near this event.'
+      and [text_of(comp, k) for k in ('signal_bg', 'peak_freq')]
+      == ['computing…'] * 2
+      and all(text_of(rr, 'duration').startswith('0.60 s · limits')
+              and text_of(rr, 'outlier') == 'yes · 50.1 µV'
+              and next(x for x in rr if x['key'] == 'signal_bg')['level']
+              == 'muted' for rr in (old45, splice, nobg, comp)),
+      repr([[x['value'] for x in rr] for rr in (old45, splice, nobg, comp)]))
+check('5.9b', "[31] detector line: the 4.5 wording only for a 4.5 run",
+      'Detector threshold: not recorded for this run (detected with 4.5 or '
+      'earlier).' in tips_of(old45, 'outlier'), repr(tips_of(old45, 'outlier')))
+la = er.detector_line('Moelle2011', base, {'det_value_lo': 3.43}, True)
+lb = er.detector_line('Moelle2011', base, {'det_value_lo': 5.16}, True)
+check('5.10', "[31] two runs on one scope give different detector lines "
+      "(1.5× vs 1.0×)", '= 1.5× (1.0× means it only just crossed)' in la
+      and '= 1.0× (1.0× means it only just crossed)' in lb, repr((la, lb)))
 branches = {
     'Moelle2011': ({'det_value_lo': 3.43}, '1.5×'),
     'Ferrarelli2007': ({'det_value_lo': 3.43, 'sel_value': 2.0}, '1.5×'),
@@ -458,13 +538,22 @@ branches = {
     'Ngo2015': ({'peak_thresh_factor': 1.25}, 'relative'),
     'Staresina2015': ({'ptp_percentile': 75.0}, 'relative'),
 }
+lines = {}
 for m, (th, want) in branches.items():
     et = 'slow_wave' if m in ('Massimini2004', 'Ngo2015',
                               'Staresina2015') else 'spindle'
-    got = er.threshold_row(m, dict(sw if et == 'slow_wave' else base),
-                           th, True)['value']
-    check('5.11', f"[32] amp_thr value for {m}", got == want,
-          repr((got, want)))
+    e_ = dict(sw if et == 'slow_wave' else base)
+    got = er.threshold_row(m, e_, th, True)['value']
+    lines[m] = er.detector_line(m, e_, th, True)
+    check('5.11', f"[32] detector threshold value for {m}", got == want
+          and lines[m].startswith('Detector threshold: ')
+          and lines[m].endswith('.') and '\n' not in lines[m],
+          repr((got, want, lines[m])))
+check('5.11b', "detector line wording: ratio, no ratio, CIRUS, Massimini",
+      lines['Ray2015'].startswith('Detector threshold: no ratio for Ray2015')
+      and lines['CIRUS'] == 'Detector threshold: no ratio for CIRUS.'
+      and lines['Massimini2004'].startswith('Detector threshold: meets both '
+                                            '(trough'), repr(lines))
 fails = er.threshold_row('Massimini2004', dict(sw, det_ptp=60.0),
                          {'max_trough_amp': -40.0, 'min_ptp': 75.0}, True)
 check('5.12', "[32] Massimini failing one criterion: 'fails 1 of 2'",
@@ -494,35 +583,55 @@ check('5.16', "rereference keeps the target in an average reference "
           np.array([[1., 2, 3], [3, 3, 3], [5, 4, 3]]), ['Cz', 'Fz', 'Pz'],
           'Cz', ['Cz', 'Fz', 'Pz']), [-2., -1, 0]))
 off_run = dict(run46, params=dict(run46['params'], event_figures=None))
-toff = text_of(rows_of(dict(base, halfwaves_above_bg=None), run=off_run,
-                       thresholds=pd.DataFrame(), figure_state='unavailable',
-                       figure_note=er.FIGURES_OFF_FIG), 'amp_thr')
-hoff = text_of(rows_of(dict(base, halfwaves_above_bg=None), run=off_run,
-                       figure_state='unavailable',
-                       figure_note=er.FIGURES_OFF_FIG), 'halfwaves')
-check('5.17', "4.6 run with figures off: not the 4.5 wording, figures say "
-      "switched off", toff == 'Threshold not recorded for this run'
-      and hoff == '— ' + er.FIGURES_OFF_FIG, repr((toff, hoff)))
-crit = text_of(rows_of(sw, event_type='slow_wave', thresholds={
-    'max_trough_amp': -40.0, 'min_ptp': 75.0, 'trough_duration_lo': 0.25,
-    'trough_duration_hi': 1.0}), 'sw_neg_half')
-check('5.18', "negative half-wave criterion read from the stored "
-      "trough_duration_lo / hi", 'criterion 0.25–1 s' in crit, repr(crit))
+roff = rows_of(dict(base, halfwaves_above_bg=None), run=off_run,
+               thresholds=pd.DataFrame(), figure_state='unavailable',
+               figure_note=er.FIGURES_OFF_FIG)
+check('5.17', "4.6 run with figures off: 'not computed' with the switched-"
+      "off reason; the detector line is not the 4.5 wording",
+      text_of(roff, 'signal_bg') == 'not computed'
+      and tips_of(roff, 'signal_bg').split('\n')[0] == er.FIGURES_OFF_FIG
+      and 'Detector threshold: not recorded for this run.'
+      in tips_of(roff, 'outlier'), repr([x['value'] for x in roff]))
+# live sample review [121]: an off-band, at-floor, barely-above, outlier
+# event with every reading word removed and the numbers kept
+worst = rows_of(dict(base, in_band=0, peak_freq_ap=8.0, near_bound=-1,
+                     duration=0.52, end_time=base['start_time'] + 0.52,
+                     amp_ratio=1.2), outlier_thr=38.2,
+                thresholds={'det_value_lo': 5.16})
+hid = er.hide_flag_words(worst)
+alltext = ' | '.join(x['value'] + ' ' + x['tooltip'] for x in hid)
+check('5.18', "[121] hide_flag_words: no reading word, no warn / bad level, "
+      "no judgement wording in tooltips; the four numbers stay",
+      [x['value'] for x in hid] == ['1.2×', '0.52 s · limits 0.5–3 s',
+                                    '≈ 8.0 Hz', '50.1 µV']
+      and not [w for w in ('in band', 'OFF BAND', 'shortest allowed',
+                           'longest allowed', 'outside the limits', 'barely',
+                           'yes', 'no · ', 'meets', 'fails',
+                           'only just crossed') if w in alltext]
+      and all(x['level'] not in ('warn', 'bad') for x in hid)
+      and [x['value'] for x in worst][0].endswith('barely above background'),
+      repr([x['value'] for x in hid]))
 nulls = {k: None for k in base}
 nulls.update({'uuid': 'n', 'channel': 'Cz', 'method': 'Moelle2011'})
-bad = []
+bad, wonambi = [], []
 for et, run_ in (('spindle', run46), ('spindle', run45),
                  ('slow_wave', run46), ('slow_wave', {})):
-    for state in ('stored', 'missing', 'computing'):
-        for row in er.build_event_rows(nulls, event_type=et, run=run_,
-                                       run_id=None, figures=nulls,
-                                       figure_state=state):
-            for t in [row['value']] + row['sub']:
-                if (not str(t).strip() or re.search(r'\bnan\b|\bNone\b',
-                                                     str(t))):
-                    bad.append((et, state, row['key'], t))
-check('5.13', "[33] all-NULL rows: no nan / None / empty text anywhere",
-      not bad, repr(bad[:4]))
+    for state in ('stored', 'missing', 'computing', 'unavailable'):
+        for src in (nulls, base, sw):
+            for row in er.build_event_rows(src, event_type=et, run=run_,
+                                           run_id=None, figures=src,
+                                           figure_state=state):
+                for t in [row['value'], row['tooltip'], row['_tip_neutral']]:
+                    if re.search(r'\bnan\b|\bNone\b', str(t)):
+                        bad.append((et, state, row['key'], t))
+                    if 'first-difference' in str(t) or 'detector (' in str(t):
+                        wonambi.append((et, state, row['key'], t))
+                if not str(row['value']).strip():
+                    bad.append((et, state, row['key'], 'empty'))
+check('5.13', "[33, 120] all-NULL and full rows in every state: no nan / "
+      "None / empty value anywhere", not bad, repr(bad[:4]))
+check('5.19', "[119] no text or tooltip contains 'first-difference' or "
+      "'detector ('", not wonambi, repr(wonambi[:2]))
 
 # ======================================================================= 6
 say("\n== 6. Main window: reviewer, decisions, undo, keys [34-39]")
@@ -733,10 +842,17 @@ check('6.26', "selection status names stage and decision",
           ' — A accept · R reject · U unsure'),
       repr(win.status_bar.currentMessage()))
 check('6.27', "the dock panel shows the spindle rows for the selection",
-      evp.row_keys() == ['time', 'channel', 'stage', 'detection', 'duration',
-                         'halfwaves', 'cycles_nominal', 'peak_freq', 'amp_bg',
-                         'amp_thr', 'outlier']
-      and evp.row_text('amp_thr').startswith('1.5×'), repr(evp.row_keys()))
+      evp.row_keys() == ['signal_bg', 'duration', 'peak_freq', 'outlier']
+      and 'Detector threshold: peak' in evp.row('outlier')['tooltip']
+      and '= 1.5×' in evp.row('outlier')['tooltip']
+      and evp.event_line.text().startswith('00:00:12.0 · Cz · NREM2 · ')
+      and evp.event_line.isVisibleTo(evp), repr((evp.row_keys(),
+                                                 evp.event_line.text())))
+check('6.28', "[128] with empty settings both groups are closed and neither "
+      "has read data after an event is selected",
+      not ep.neighbours.is_open() and not ep.physio.is_open()
+      and ep.neighbours.n_reads == 0 and ep.physio.n_reads == 0,
+      repr((ep.neighbours.is_open(), ep.physio.is_open())))
 win.close()
 
 # ======================================================================= 7
@@ -892,34 +1008,39 @@ win._epoch_table = lambda: rg.EpochTable(
 win.on_qc_drill('Cz', switch_tab=True)
 ep.select_event('old-1')
 check('8.1', "pre-4.6 row without EEG: figures 'not recorded' and the load "
-      "note", evp.row_text('halfwaves').startswith('— not recorded for this run')
+      "note", evp.row_text('signal_bg') == 'not recorded'
+      and evp.row_text('peak_freq') == 'not recorded'
+      and evp.row('signal_bg')['tooltip'].split('\n')[0]
+      == er.NOT_RECORDED_TIP
       and evp.note_lbl.text() == er.LOAD_EEG_NOTE
-      and evp.row_text('amp_thr') == er.THRESHOLD_NOT_RECORDED,
-      repr((evp.row_text('halfwaves'), evp.row_text('amp_thr'))))
+      and 'Detector threshold: not recorded for this run (detected with 4.5 '
+      'or earlier).' in evp.row('outlier')['tooltip'],
+      repr((evp.row_text('signal_bg'), evp.row('outlier')['tooltip'])))
 win.eeg_data = SpindleData()
 ep.clear_selection()
 ep.select_event('old-1')
-check('8.2', "with EEG: the four figure rows show 'computing…' first",
+check('8.2', "with EEG: the two figure rows show 'computing…' first",
       all(evp.row_text(k) == 'computing…'
-          for k in ('halfwaves', 'cycles_nominal', 'peak_freq', 'amp_bg')),
-      repr([evp.row_text(k) for k in ('halfwaves', 'peak_freq')]))
+          for k in ('signal_bg', 'peak_freq')),
+      repr([evp.row_text(k) for k in ('signal_bg', 'peak_freq')]))
 for _ in range(5):
     app.processEvents()
-hw = evp.row_text('halfwaves')
+hw = evp.row('duration')['tooltip']
 pf = evp.row_text('peak_freq')
-check('8.3', "then computed: a half-wave count and a peak near 10.5 Hz, "
-      "labelled as computed now", re.match(r'^\d+\n', hw or '') is not None
+check('8.3', "then computed: a half-wave count (Duration tooltip) and a "
+      "peak near 10.5 Hz, labelled as computed now",
+      re.search(r'\d+ half-waves stand out', hw or '') is not None
       and re.search(r'1[01]\.\d Hz', pf or '') is not None
-      and evp.row('halfwaves')['tooltip'] == er.COMPUTED_TIP,
+      and evp.row('peak_freq')['tooltip'].endswith(er.COMPUTED_TIP),
       repr((hw, pf)))
 check('8.4', "the read included the run's reference channel (Fz) with Cz "
       "(parsed from the str(list) column)",
       any(set(c) == {'Cz', 'Fz'} for c in win.eeg_data.calls),
       repr(win.eeg_data.calls))
-bg = evp.row_text('amp_bg')
+bg = evp.row_text('signal_bg')
 check('8.5', "stages stored as \"['NREM2', 'NREM3']\" keep the background: "
-      "amp vs background is a ratio, not 'too little clean background'",
-      re.match(r'^\d+\.\d×\n', bg or '') is not None
+      "signal vs background is a ratio, not 'too little background'",
+      re.match(r'^\d+\.\d×', bg or '') is not None
       and 'too little' not in bg, repr(bg))
 win.eeg_data.calls.clear()
 ep.select_event('avg-1')
@@ -928,8 +1049,9 @@ for _ in range(5):
 check('8.6', "average reference including the target: the figure read is "
       "Cz, Fz, Pz in one call (target kept in the reference)",
       [c for c in win.eeg_data.calls if len(c) > 1] == [['Cz', 'Fz', 'Pz']]
-      and re.match(r'^\d+\n', evp.row_text('halfwaves') or ''),
-      repr((win.eeg_data.calls, evp.row_text('halfwaves'))))
+      and re.search(r'\d+ half-waves stand out',
+                    evp.row('duration')['tooltip']) is not None,
+      repr((win.eeg_data.calls, evp.row('duration')['tooltip'])))
 import logging as _logging                                    # noqa: E402
 caught = []
 h = _logging.Handler()
@@ -942,14 +1064,16 @@ rg.logger.removeHandler(h)
 check('8.7', "reference channel not in the recording: WARNING naming it, no "
       "silent fall-back to the stored reference",
       any(lv == _logging.WARNING and 'M1' in m for lv, m in caught)
-      and evp.row_text('halfwaves')
-      == '— not computed: reference channel M1 not in this recording',
-      repr((caught, evp.row_text('halfwaves'))))
+      and evp.row_text('signal_bg') == 'not computed'
+      and evp.row('signal_bg')['tooltip'].split('\n')[0]
+      == 'not computed: reference channel M1 not in this recording',
+      repr((caught, evp.row('signal_bg'))))
 ep.select_event('new-1')
 check('8.8', "4.6 run with figures, this row all NULL: 'figures not "
       "computed for this channel', not 'stored'",
-      evp.row_text('halfwaves') == '— ' + er.FIGURES_FAILED_FIG,
-      repr(evp.row_text('halfwaves')))
+      evp.row_text('signal_bg') == 'not computed'
+      and evp.row('signal_bg')['tooltip'].split('\n')[0]
+      == er.FIGURES_FAILED_FIG, repr(evp.row('signal_bg')))
 win.close()
 
 
@@ -1175,7 +1299,9 @@ check('9.77b', "[77] no reviewer name: save line asks for one",
 win.set_reviewer_name('TK')
 check('9.78', "[78] strip legend", ep.strip_legend.text() ==
       'grey bars = events per epoch · red = amplitude outliers · purple '
-      'dashes = marked artefact · white line = current epoch')
+      'dashes = excluded time · white line = current epoch'
+      and 'Shift+drag on the epoch strip   select epochs to exclude'
+      in er.cheat_sheet_text('spindle', 'Ctrl+Z'))
 win.tabs.setCurrentIndex(0)
 app.processEvents()
 check('9.75b', "[75] Channels tab hint", win.key_hint_lbl.text() ==
@@ -1283,6 +1409,282 @@ check('9.88', "[88] a stored filter-ringing reject on a slow wave shows "
       evp.current_lbl.text().startswith('Rejected by TK · ')
       and evp.current_lbl.text().endswith(' · Filter ringing'),
       repr(evp.current_lbl.text()))
+win.close()
+
+# ====================================================================== 10
+say("\n== 10. Revision 4: traces, groups, time exclusion, help [122-134]")
+
+
+class RangeData(FakeData):
+    """Signals with known sizes. EEG channels: a ±10 µV 10 Hz sine. Cz from
+    30 s on: noise of SD 15 µV with one 984 µV burst at 41.0-41.8 s. Pz from
+    60 s on: ±300 µV. VEOG / HEOG ±0.05, chin EMG ±0.01, ECG ±0.8 (the file
+    states µV for the ECG only)."""
+    AMP = {'VEOG': 0.05, 'HEOG': 0.05, 'EMGChin': 0.01, 'ECG': 0.8}
+    NOISE = np.random.default_rng(3).normal(0, 15, 20000)
+
+    def __init__(self, channels, types):
+        super().__init__(channels, types)
+        self.header['chan_unit'] = {'ECG': 'uV', 'VEOG': 'n/a'}
+
+    def read_data(self, chan, begtime, endtime):
+        self.n_reads += 1
+        n = max(2, int(round((endtime - begtime) * 100)))
+        ts = begtime + np.arange(n) / 100.0
+        rows = []
+        for c in chan:
+            x = np.sin(2 * np.pi * 10 * ts) * self.AMP.get(c, 10.0)
+            if c == 'Cz':
+                late = ts >= 30.0
+                # the same noise value for a given sample time on every read
+                noise = self.NOISE[np.round(ts * 100).astype(np.int64)
+                                   % len(self.NOISE)]
+                x = np.where(late, noise, x)
+                burst = (ts >= 41.0 - 1e-9) & (ts < 41.8)
+                x = np.where(burst, 984.0 * np.cos(
+                    2 * np.pi * 12.5 * (ts - 41.0)), x)
+            if c == 'Pz':
+                x = np.where(ts >= 60.0, x * 30.0, x)
+            rows.append(x)
+        return type('W', (), {'data': [np.vstack(rows)], 's_freq': 100.0,
+                              'axis': {'time': [ts],
+                                       'chan': [np.array(chan)]}})()
+
+
+P10 = os.path.join(TMP, 'rev4.db')
+con = fx.open_schema(P10)
+fx.add_run(con, RUN)
+rows10 = [ev_row(u, 'Cz', s_, d, 984.0 if u == 'u-g' else a, RUN)
+          for u, s_, d, a in zip(UUIDS, STARTS, DURS, AMPS)]
+rows10.append(ev_row('pz-1', 'Pz', 41.2, 0.7, 40.0, RUN))
+rows10.append(ev_row('pz-far', 'Pz', 110.0, 0.7, 40.0, RUN))
+fx.insert_rows(con, rows10)
+con.commit()
+con.close()
+win = rg.EventReviewGUI()
+win.db = rg.EventDatabase(P10)
+win.eeg_data = RangeData(CH, TYPES)
+win._refresh_physio_channels()
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+win.qc_widget.evt_combo.blockSignals(True)
+win.qc_widget.evt_combo.setCurrentText('spindle')
+win.qc_widget.evt_combo.blockSignals(False)
+win._qc_events_df = win.db.get_events(event_type='spindle',
+                                      columns=rg.QC_EVENT_COLS)
+win.detail_dock_w._coords = dict(coords)
+win.resize(1400, 900)
+win.show()
+win.on_qc_drill('Cz', switch_tab=True)
+app.processEvents()
+ep = win.epochs_panel
+evp = win.detail_dock_w.event_panel
+
+# ---- layout [127] -------------------------------------------------------
+ep.neighbours.set_open(True)
+ep.physio.set_open(True)
+ep.select_event('u-g')
+for _ in range(3):
+    app.processEvents()
+
+
+def inside(widget, ancestor):
+    p = widget.parentWidget()
+    while p is not None:
+        if p is ancestor:
+            return True
+        p = p.parentWidget()
+    return False
+
+
+check('10.1', "[127] raw >= 160 px and filtered >= 110 px minimum; at 900 "
+      "px high with both groups open both plots keep it; the groups sit in "
+      "a QScrollArea under a vertical QSplitter",
+      ep.raw_plot.minimumHeight() >= 160 and ep.filt_plot.minimumHeight()
+      >= 110 and ep.raw_plot.height() >= 160 and ep.filt_plot.height() >= 110
+      and isinstance(ep.groups_scroll, QtWidgets.QScrollArea)
+      and isinstance(ep.v_split, QtWidgets.QSplitter)
+      and ep.v_split.orientation() == Qt.Vertical
+      and inside(ep.groups_scroll, ep.v_split)
+      and inside(ep.neighbours, ep.groups_scroll)
+      and inside(ep.physio, ep.groups_scroll)
+      and not inside(ep.raw_plot, ep.groups_scroll),
+      repr((ep.raw_plot.height(), ep.filt_plot.height(), win.height())))
+
+# ---- raw range [129, 130] ------------------------------------------------
+note = ep.clip_note('raw') or ''
+mnote = re.match(r'^clipped at ±(\d+) µV · largest (\d+) µV$', note)
+shown = [it.toPlainText() for it in ep.raw_plot.getPlotItem().items
+         if isinstance(it, pg.TextItem)]
+half_clip = ep.raw_half_range
+ep.full_range_chk.setChecked(True)
+app.processEvents()
+half_full, note_full = ep.raw_half_range, ep.clip_note('raw')
+check('10.2', "[129] SD-15 background with one 984 µV event: half-range "
+      "under 300 µV, the clip note is on the plot, Full range shows >= 984",
+      half_clip is not None and half_clip < 300 and mnote is not None
+      and float(mnote.group(1)) == half_clip
+      and abs(int(mnote.group(2)) - 984) <= 2 and note in shown
+      and half_full >= 984 and note_full is None
+      and er.clip_note(200, 984) == 'clipped at ±200 µV · largest 984 µV',
+      repr((half_clip, note, half_full)))
+ep._goto_epoch(0)
+app.processEvents()
+check('10.3', "[129, 130] another epoch: Full range is unchecked again; a "
+      "±10 µV epoch has no clip note",
+      not ep.full_range_chk.isChecked() and ep.clip_note('raw') is None
+      and ep.raw_half_range == 10, repr((ep.full_range_chk.isChecked(),
+                                         ep.clip_note('raw'),
+                                         ep.raw_half_range)))
+
+# ---- physiology [123, 124] -----------------------------------------------
+sc = dict(ep.physio.row_scales)
+vr = {c: w.viewRange()[1] for _k, c, w in ep.physio.rows}
+check('10.4', "[123] VEOG spanning ±0.05: half-range between 0.05 and 0.1, "
+      "label '±h · no unit in file'; the ECG (file states µV) reads "
+      "'±h µV'; no fixed ±150 / ±40 scale; rows are 44 px",
+      set(sc) == {'VEOG', 'HEOG', 'EMGChin', 'ECG'}
+      and 0.05 <= sc['VEOG'][1] <= 0.1
+      and sc['VEOG'][2] == f"±{sc['VEOG'][1]:g} · no unit in file"
+      and sc['ECG'][2] == f"±{sc['ECG'][1]:g} µV" and sc['ECG'][1] <= 2
+      and sc['EMGChin'][2].endswith(' · no unit in file')
+      and not any('±150' in v[2] or '±40' in v[2] for v in sc.values())
+      and all(abs((vr[c][1] - vr[c][0]) / 2 - sc[c][1]) < 1e-9 for c in sc)
+      and all(w.height() == 44 for _k, _c, w in ep.physio.rows),
+      repr({c: v[2] for c, v in sc.items()}))
+check('10.5', "[124] physiology legend", ep.physio.legend.text() ==
+      'EOG 0.3–15 Hz · chin EMG above 10 Hz · ECG unfiltered · each row '
+      'scaled to its own signal in this epoch · no unit stated in this file '
+      'for EOG, chin EMG', repr(ep.physio.legend.text()))
+check('10.5b', "channel_units: header, 'n/a' -> None, BIDS sidecar",
+      channel_units({'chan_name': ['A', 'B'], 'chan_unit': ['uV', 'n/a']})
+      == {'A': 'µV', 'B': None} and channel_units(None) == {})
+
+# ---- neighbours [125, 126] -----------------------------------------------
+ep.select_event('u-a')                 # epoch 0: every row is a ±10 sine
+app.processEvents()
+h10 = ep.neighbours.half_range
+leg10 = ep.neighbours.legend.text()
+ep.select_event('u-g')                 # 41.0-41.8; Pz detected 41.2-41.9
+for _ in range(3):
+    app.processEvents()
+npl = ep.neighbours.plot
+items = npl.getPlotItem().items
+vlines = sorted(float(l.value()) for l in npl.sel_lines)
+pz = next(l for l in npl.row_labels() if l.startswith('Pz'))
+bars = npl.bars_for(pz.replace(' · detected', ''))
+check('10.6', "[125] two vertical lines at the event's start and end, no "
+      "region and no full-row rect; Pz has exactly one bar spanning its "
+      "own event, 3 px; the target row has none",
+      np.allclose(vlines, [41.0, 41.8])
+      and len([it for it in items if isinstance(it, pg.InfiniteLine)]) == 2
+      and not [it for it in items if isinstance(
+          it, (pg.LinearRegionItem, QtWidgets.QGraphicsRectItem))]
+      and len(bars) == 1 and np.allclose(bars[0], (41.2, 41.9))
+      and pz.endswith(' · detected')
+      and all(b['item'].opts['pen'].widthF() <= 4 for b in npl.bar_items)
+      and not npl.bars_for(npl.row_labels()[0])
+      and len(npl.bar_items) == 1, repr((vlines, pz, bars)))
+ep.select_event('u-i')                 # 95 s: Pz is ±300 µV
+for _ in range(3):
+    app.processEvents()
+h300 = ep.neighbours.half_range
+check('10.7', "[126] legend carries the applied half-range: 25 µV when "
+      "every row is ±10 µV, at least 300 µV with a 300 µV row",
+      h10 == 25 and leg10 == 'blue lines = the selected event · bar under a '
+      'trace = an event detected on that channel · all rows share one scale '
+      '(±25 µV)' and h300 >= 300
+      and ep.neighbours.legend.text() == er.neighbours_legend(h300),
+      repr((h10, leg10, h300)))
+
+# ---- renames [131-134] ----------------------------------------------------
+def all_texts(root):
+    out = []
+    for w in root.findChildren(QtWidgets.QWidget):
+        if isinstance(w, (QtWidgets.QAbstractButton, QtWidgets.QLabel)):
+            out.append(w.text())
+    for a in root.findChildren(QtWidgets.QAction):
+        out.append(a.text())
+    return out
+
+
+texts = all_texts(win)
+old = [t for t in texts if t == 'Mark as artefact (writes XML)'
+       or re.search(r'Mark \d+ epochs? as artefact', t)
+       or t in ('Drop channel', 'Mark channel artefact')]
+zero = ep.mark_n_btn.text()
+ep._on_shift_drag(*ep.snap(30.5, 119.0), True)
+three = ep.mark_n_btn.text()
+ep._on_shift_drag(*ep.snap(30.5, 59.0), True)
+one = ep.mark_n_btn.text()
+TIME_TIP = ('Excludes this time from analysis for every channel. It is '
+            'saved with the review and applied when detection is re-run. '
+            'Events already detected are not changed.')
+check('10.8', "[131] no 'Mark … as artefact' text anywhere; 'Exclude time "
+      "range…' and 'Exclude 0 / 3 epochs…' / 'Exclude 1 epoch…' with the "
+      "tooltip; the hint names the button",
+      not old and ep.mark_btn.text() == 'Exclude time range…'
+      and (zero, three, one) == ('Exclude 0 epochs…', 'Exclude 3 epochs…',
+                                 'Exclude 1 epoch…')
+      and ep.mark_btn.toolTip() == TIME_TIP
+      and ep.mark_n_btn.toolTip() == TIME_TIP
+      and ep.sel_lbl.text()
+      == 'Brush a range on the trace, then Exclude time range…',
+      repr((old, zero, three, one)))
+ep._clear_strip_range()
+ep._goto_epoch(1)
+ep.region.setRegion([35.0, 38.0])
+ep.mark_btn.click()
+app.processEvents()
+iv = win.db.get_qc_artefact_intervals()
+check('10.9', "[132] Exclude time range… stores the brushed range as "
+      "before (qc_artefact_intervals, evidence channel) and reports it",
+      len(iv) == 1 and abs(float(iv['start_time'].iloc[0]) - 35.0) < 1e-6
+      and abs(float(iv['end_time'].iloc[0]) - 38.0) < 1e-6
+      and str(iv['evidence_channel'].iloc[0]) == 'Cz'
+      and win.status_bar.currentMessage().startswith(
+          'Excluded 00:00:35–00:00:38 from analysis for every channel '
+          '(applied at re-detection).'),
+      repr((iv.to_dict('records'), win.status_bar.currentMessage())))
+ab = evp.reason_buttons['artefact']
+check('10.10', "[134] the '1  Artefact' button: R4.0 tooltip, token still "
+      "'artefact'", ab.text().split() == ['1', 'Artefact'] and ab.toolTip()
+      == 'Movement, electrode or muscle artefact. This labels this one '
+      'event only. To leave the time out of analysis for every channel, '
+      'brush it on the trace and use "Exclude time range…".',
+      repr((ab.text(), ab.toolTip())))
+
+# ---- help [122] and the panel's texts [119] -------------------------------
+ep.select_event('u-g')
+app.processEvents()
+evp.help_btn.click()
+app.processEvents()
+dlg = win._event_help
+help_actions = [a for a in win.findChildren(QtWidgets.QAction)
+                if a.text() == 'What the event figures mean']
+check('10.11', "[122] 'What do these mean?' on the EVENT header row opens "
+      "the built-in dialog (no file, no network); Help has the same item",
+      evp.help_btn.text() == 'What do these mean?'
+      and evp.help_btn.isVisibleTo(evp) and dlg.isVisible()
+      and not dlg.isModal()
+      and dlg.windowTitle() == 'What the event figures mean'
+      and dlg.body_lbl.text() == er.HELP_BODY
+      and all(w in dlg.body_lbl.text() for w in (
+          'Signal vs background', 'Duration', 'Peak freq',
+          'Amplitude outlier'))
+      and er.HELP_GUIDE_URL in dlg.link_lbl.text()
+      and len(help_actions) == 1, repr(dlg.windowTitle()))
+dlg.close()
+panel_text = ' | '.join(
+    [l.text() + ' ' + l.toolTip() for l in evp.findChildren(QtWidgets.QLabel)])
+check('10.12', "[119, 116] the panel: header line, four rows, nothing from "
+      "Wonambi's detector frequency",
+      'first-difference' not in panel_text and 'detector (' not in panel_text
+      and evp.row_keys() == ['signal_bg', 'duration', 'peak_freq', 'outlier']
+      and evp.event_line.text() == '00:00:41.0 · Cz · NREM2 · Moelle2011 '
+      '9–12 Hz' and 'run 2026-' in evp.event_line.toolTip()
+      and evp.row_text('outlier') == 'yes · 984 µV',
+      repr((evp.event_line.text(), evp.row_text('outlier'))))
 win.close()
 
 say("\n" + "=" * 78)

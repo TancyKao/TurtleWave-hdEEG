@@ -394,6 +394,103 @@ def physio_channels(channels, chan_type):
 
 
 # ---------------------------------------------------------------------------
+# Channel units (physiology strip scale labels)
+# ---------------------------------------------------------------------------
+
+_MICROVOLT = {'uv', 'µv', 'μv', 'microv', 'microvolt', 'microvolts'}
+
+
+def normalise_unit(unit):
+    """A unit string as the file states it, or ``None`` when it states none.
+
+    ``None``, ``''``, ``'n/a'``, ``'na'``, ``'none'`` and ``'unknown'`` give
+    ``None``; every spelling of microvolts gives ``'µV'``; anything else is
+    returned stripped.
+    """
+    if unit is None:
+        return None
+    text = str(unit).strip()
+    if text.lower() in ('', 'n/a', 'na', 'nan', 'none', 'unknown'):
+        return None
+    if text.lower() in _MICROVOLT:
+        return 'µV'
+    return text
+
+
+def _sidecar_units(eeg_path):
+    """``{channel: unit}`` from a BIDS ``*_channels.tsv`` beside the EEG
+    file (the one whose name stem the EEG file name starts with, else the
+    only one in the folder); ``{}`` when there is none."""
+    import csv
+    import glob
+    import os
+    if not eeg_path:
+        return {}
+    folder = os.path.dirname(os.path.abspath(str(eeg_path)))
+    stem = os.path.basename(str(eeg_path))
+    found = sorted(glob.glob(os.path.join(folder, '*_channels.tsv')))
+    match = [f for f in found
+             if stem.startswith(os.path.basename(f)[:-len('_channels.tsv')])]
+    pick = match[0] if match else (found[0] if len(found) == 1 else None)
+    if pick is None:
+        return {}
+    out = {}
+    try:
+        with open(pick, newline='', encoding='utf-8') as fh:
+            for row in csv.DictReader(fh, delimiter='\t'):
+                if row.get('name'):
+                    out[str(row['name'])] = row.get('units')
+    except (OSError, csv.Error, UnicodeDecodeError):
+        return {}
+    return out
+
+
+def channel_units(header, eeg_path=None):
+    """The unit the file states for each channel.
+
+    Sources, the first that states a unit for the channel wins: ``header['chan_unit']`` (a
+    ``{channel: unit}`` dict or a list aligned with ``header['chan_name']``),
+    an EDF header's ``orig['physical_dim']``, then a BIDS ``*_channels.tsv``
+    beside ``eeg_path``.
+
+    Parameters
+    ----------
+    header : dict or None
+        Dataset header.
+    eeg_path : str or None, optional
+        Path of the EEG file, for the sidecar lookup. Default ``None``.
+
+    Returns
+    -------
+    dict
+        ``{channel: unit or None}`` for every channel a source names;
+        ``None`` means the file states no unit (``'n/a'`` included). A
+        channel missing from the dict has no stated unit either. An EEGLAB
+        ``.set`` carries no unit, so without a sidecar every channel is
+        missing.
+    """
+    header = header if hasattr(header, 'get') else {}
+    names = [str(c) for c in (header.get('chan_name') or [])]
+    out = {}
+    sources = [header.get('chan_unit')]
+    orig = header.get('orig')
+    if hasattr(orig, 'get'):
+        sources.append(orig.get('physical_dim'))
+    sources.append(_sidecar_units(eeg_path))
+    for src in sources:
+        if src is None:
+            continue
+        pairs = (src.items() if hasattr(src, 'items')
+                 else zip(names, list(src)))
+        for ch, unit in pairs:
+            # an earlier source that names the channel without a unit
+            # ('' or 'n/a') does not block a later source that states one
+            if out.get(str(ch)) is None:
+                out[str(ch)] = normalise_unit(unit)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Setup tab: Dataset Information text
 # ---------------------------------------------------------------------------
 

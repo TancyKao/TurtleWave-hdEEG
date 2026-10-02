@@ -267,18 +267,22 @@ win._start_sample()
 app.processEvents()
 check('18j', "… also when the selection never left it",
       ep._selected_uuid == order[1], repr(order.index(ep._selected_uuid)))
-srow0 = (evp.row_text('sample') or '')
-check('20a', "[20] before this reviewer's accept/reject the sample row reads "
-      "only 'event i of N' (no stratum, flags or weight)",
-      evp.row_keys()[:1] == ['sample']
-      and re.match(r'^event \d+ of 120$', srow0) is not None
-      and not evp.row('sample')['tooltip']
+FOUR = ['signal_bg', 'duration', 'peak_freq', 'outlier']
+srow0 = evp.sample_lbl.text()
+check('20a', "[20, R4.0] before this reviewer's accept/reject the sample "
+      "line reads 'Sample event i of N · region · stage' (no flags, no "
+      "weight tooltip), under the header line; the rows are the four",
+      evp.row_keys() == FOUR and evp.sample_lbl.isVisibleTo(evp)
+      and re.match(r'^Sample event \d+ of 120 · [a-z-]+ · [A-Z0-9]+$',
+                   srow0) is not None
+      and not evp.sample_lbl.toolTip()
+      and evp.event_line.isVisibleTo(evp)
       and evp.hidden_lbl.isVisibleTo(evp)
       and evp.hidden_lbl.text() == 'Labels hidden until you accept or '
                                    'reject this sample event.',
-      repr((evp.row_keys()[:2], srow0)))
+      repr((evp.row_keys(), srow0)))
 check('75s', "[75] top-bar hint in sample mode", win.key_hint_lbl.text() ==
-      'A accept · R reject · U unsure · ] [ sample · N P outlier · ? keys',
+      'A accept · R reject · U unsure · ] [ sample · ? keys',
       repr(win.key_hint_lbl.text()))
 check('78s', "[78] strip legend in sample mode ends with the blue ticks",
       ep.strip_legend.text().endswith(' · blue ticks = sample events'))
@@ -295,12 +299,13 @@ ep.select_event(order[1]) if ep._channel == r1['channel'] else \
     win._goto_sample_event(order[1])
 app.processEvents()
 keys = evp.row_keys()
-srow = evp.row_text('sample') or ''
-check('20b', "after the decision the first row is 'sample' with the stratum",
-      keys[:1] == ['sample'] and re.match(
-          r'^[a-z-]+ · [A-Z0-9]+ · (not flagged|flagged: .+)$',
-          srow.split('\n')[0]) is not None
-      and srow.split('\n')[1] == 'event 2 of 120', repr(srow))
+srow = evp.sample_lbl.text()
+check('20b', "after the decision the sample line gains the flags and the "
+      "weight tooltip", keys == FOUR and re.match(
+          r'^Sample event 2 of 120 · [a-z-]+ · [A-Z0-9]+ · (not flagged|'
+          r'flagged: .+)$', srow) is not None
+      and evp.sample_lbl.toolTip().startswith('Sampling weight '),
+      repr(srow))
 check('20c', "is_shared is never shown", 'shared' not in srow.lower())
 check('20d', "progress line in sample mode",
       evp.progress_lbl.text() == 'Progress  1 of 120 in sample · 1 accepted '
@@ -360,9 +365,11 @@ for _ in range(4):
     press(win, Qt.Key_BracketRight)
     visited.add(ep._selected_uuid)
 check('21f', "[81] an unsure sample event keeps its flags hidden (revisit "
-      "stays unprimed)", re.match(r'^event \d+ of 120$',
-                                  evp.row_text('sample') or '') is not None
-      and evp.hidden_lbl.isVisibleTo(evp), repr(evp.row_text('sample')))
+      "stays unprimed)", re.match(
+          r'^Sample event \d+ of 120 · [a-z-]+ · [A-Z0-9]+$',
+          evp.sample_lbl.text()) is not None
+      and not evp.sample_lbl.toolTip()
+      and evp.hidden_lbl.isVisibleTo(evp), repr(evp.sample_lbl.text()))
 check('21d', "after Revisit, ] visits only the unsure events",
       visited == unsure and bar.label.text() ==
       'REVIEW SAMPLE · revisiting 3 unsure', repr((len(visited),
@@ -702,45 +709,66 @@ check('dock-s', "sample active: no channel flag words in the dock, the "
       and '\n' not in dk.facts_line.text(),
       repr((rings_before, rows_before, leak)))
 qw = win.qc_widget
-cells = [col_cell(win, 'O2', k) for k in ('checks_flag', 'pct_off_band',
-                                          'pct_low_prom', 'pct_dur_floor',
-                                          'med_amp_ratio', 'med_thresh_ratio')]
+SIX = ('checks_flag', 'pct_off_band', 'pct_low_prom', 'pct_dur_floor',
+       'med_amp_ratio', 'med_thresh_ratio')
+hidden_cols = [qw.table.isColumnHidden(rg._QC_COL_INDEX[k]) for k in SIX]
 tops = [(dk.topo_combo.itemText(i), dk.topo_combo.model().item(i).isEnabled(),
          dk.topo_combo.itemData(i, Qt.ToolTipRole))
         for i in range(3, dk.topo_combo.count())]
-check('tbl-s', "sample active: Checks and population cells read — with the "
-      "tooltip; header '— checks flagged'; Topo check items disabled",
-      cells == ['—'] * 6
-      and col_cell(win, 'O2', 'pct_off_band', Qt.ToolTipRole)
-      == 'Hidden while you review the sample.'
-      and qw.counts_lbl.text().startswith('— checks flagged · ')
+check('95', "[95] sample active: the Channels tab shows the banner with "
+      "its exact text and an 'Exit sample' button",
+      qw.sample_banner.isVisibleTo(qw) and qw.banner_lbl.text() ==
+      'Review sample in progress: channel checks are hidden. Exit sample to '
+      'see them.' and qw.banner_exit_btn.text() == 'Exit sample',
+      repr(qw.banner_lbl.text()))
+visible_cells = [col_cell(win, ch, k)
+                 for ch in qw.visible_channels()
+                 for k, _h in rg._QC_COLS
+                 # Density is — in this fixture with or without a sample
+                 # (no scored minutes), so it says nothing about sample mode
+                 if k != 'density'
+                 and not qw.table.isColumnHidden(rg._QC_COL_INDEX[k])]
+check('96', "[96] the six check columns are hidden (not dashed); no "
+      "visible cell is — because of sample mode; Topo check items disabled",
+      hidden_cols == [True] * 6 and '—' not in visible_cells
       and tops and all(not en and tip == 'Hidden while you review the '
                        'sample.' for _t, en, tip in tops),
-      repr((cells, qw.counts_lbl.text())))
-# montage order = the order of the coordinates loaded above (CH10), not
-# the database's alphabetical order
-chan_order = [c for c in CH10 if c in qw.visible_channels()]
+      repr((hidden_cols, [c for c in visible_cells if c == '—'])))
+stage_b = qw.stage_group.buttons()
+win.tabs.setCurrentIndex(0)              # the status bar's Channels summary
+app.processEvents()
+check('97', "[97] Stage buttons disabled with the R4.0 tooltip (the "
+      "checked one still checked); the header count starts 'checks hidden "
+      "· '", stage_b and all(not b.isEnabled() for b in stage_b)
+      and all(b.toolTip() == 'Stages apply to the channel checks, which are '
+              'hidden while you review the sample.' for b in stage_b)
+      and sum(b.isChecked() for b in stage_b) == 1
+      and qw.counts_lbl.text().startswith('checks hidden · ')
+      and ' · checks hidden · ' in win.seg_position.text()
+      and 'soft checks' not in win.seg_position.text(),
+      repr((qw.counts_lbl.text(), win.seg_position.text())))
 sort_items = {qw.sort_combo.itemText(i): (
     qw.sort_combo.model().item(i).isEnabled(),
     qw.sort_combo.itemData(i, Qt.ToolTipRole))
     for i in range(qw.sort_combo.count())}
 check_sorts = [lab for lab, k, _d in rg._er.SORT_ITEMS
                if k is None or k in rg._er.CHECK_COLUMNS]
-check('sort-s', "sample active: rows in montage order (Fz, F3, Cz, ...; O2, "
-      "flagged, is not on top), Sort reads 'Channel order', check sorts disabled with the "
-      "tooltip, header clicks do not sort",
-      sorted_before[0] == 'O2' and qw.visible_channels() == chan_order
+check('sort-s', "[R4.1, 98] sample active: the check sort fell back to "
+      "'Channel' (O2, flagged, is not on top), the check sorts are disabled "
+      "with the tooltip, no 'Column header' item appeared",
+      sorted_before[0] == 'O2'
+      and qw.sort_combo.currentText() == 'Channel'
+      and qw.visible_channels() == sorted(qw.visible_channels())
       and qw.visible_channels()[0] != 'O2'
-      and chan_order != sorted(chan_order)
-      and qw.sort_combo.currentText() == 'Channel order'
       and all(not sort_items[l][0] and sort_items[l][1]
               == 'Hidden while you review the sample.' for l in check_sorts)
       and sort_items['Amp z ↓'][0] and sort_items['Channel'][0]
-      and not qw.table.isSortingEnabled(),
+      and 'Column header' not in sort_items
+      and 'Channel order' not in sort_items,
       repr((sorted_before[:2], qw.visible_channels()[:3],
             qw.sort_combo.currentText())))
 n_flag_s = qw.show_combo.itemText(1)
-check('tbl-f', "sample active: Show > Flagged counts amplitude flags only",
+check('tbl-f', "[99] sample active: Show > Flagged counts amplitude flags only",
       n_flag_s == f"Flagged ({int(qw.model.df['flag'].isin(['hard', 'soft']).sum())})",
       repr(n_flag_s))
 # no check filter during sample review
@@ -767,20 +795,27 @@ check('flt-s', "sample active: Open in Epochs on a flagged channel applies "
       repr((ep_._channel, ep_.chip_text(), ep_._check_filter,
             sorted(set(full)), len(seen_all), len(ep_._ev),
             msg_open)))
-win._exit_sample()
+qw.banner_exit_btn.click()               # the banner's Exit sample
+app.processEvents()
 win.on_qc_channel_selected('O2')
 app.processEvents()
+check('95b', "[95] the banner's button ends the sample and the banner goes",
+      not win._sample_active and not qw.sample_banner.isVisibleTo(qw))
 check('sort-e', "after Exit: the previous sort ('Checks (hard first)', "
-      "O2 on top) is back and every Sort item is enabled again",
+      "O2 on top) is back, every Sort item is enabled, no 'Column header'",
       qw.sort_combo.currentText() == 'Checks (hard first)'
       and qw.visible_channels() == sorted_before
-      and qw.sort_combo.findText('Channel order') < 0
+      and qw.sort_combo.findText('Column header') < 0
       and all(qw.sort_combo.model().item(i).isEnabled()
-              for i in range(qw.sort_combo.count()))
-      and qw.table.isSortingEnabled(),
+              for i in range(qw.sort_combo.count())),
       repr((qw.sort_combo.currentText(), qw.visible_channels()[:3])))
-check('tbl-e', "after Exit: check cells, header count and Topo items back",
-      col_cell(win, 'O2', 'checks_flag').startswith('× HARD')
+check('tbl-e', "[96] after Exit: the check columns, the header count, the "
+      "Stage buttons and the Topo items are back",
+      [qw.table.isColumnHidden(rg._QC_COL_INDEX[k]) for k in SIX]
+      == [False] * 6
+      and all(b.isEnabled() and b.toolTip() == ''
+              for b in qw.stage_group.buttons())
+      and col_cell(win, 'O2', 'checks_flag').startswith('× HARD')
       and qw.counts_lbl.text()[0].isdigit()
       and all(dk.topo_combo.model().item(i).isEnabled()
               for i in range(3, dk.topo_combo.count())),
@@ -796,13 +831,30 @@ win._start_sample()
 app.processEvents()
 ep = win.epochs_panel
 evp = win.detail_dock_w.event_panel
-BANNED = ('in band', 'OFF BAND', 'low prominence', 'at the floor',
-          'at the ceiling', 'outside run limits', 'barely', 'meets', 'fails')
+BANNED = ('in band', 'OFF BAND', 'shortest allowed', 'longest allowed',
+          'outside the limits', 'barely', 'yes', 'no · ', 'meets', 'fails',
+          'only just crossed', 'flagged')
 
 
 def panel_text():
-    return '\n'.join((r['value'] + '\n' + '\n'.join(r['sub']))
-                     for r in evp._rows)
+    """Everything the panel shows for the event: the header and sample
+    lines, the four values and their tooltips."""
+    return '\n'.join([evp.event_line.text(), evp.sample_lbl.text()]
+                     + [r['value'] + '\n' + r['tooltip'] for r in evp._rows])
+
+
+def trace_marks():
+    """'outlier' labels on the traces, the red-tinted bands, and the red
+    (outlier) ticker bars."""
+    bad = rg.QtGui.QColor(rg.THEME['bad'])
+    labels = [it.toPlainText() for p, it in ep._event_items
+              if isinstance(it, rg.pg.TextItem)]
+    red = [it for it in ep.band_items(ep.raw_plot)
+           if it.brush.color().red() == bad.red()
+           and it.brush.color().green() == bad.green()]
+    ticks = [it for it in ep._ticker_items
+             if it.opts.get('brush') == rg.THEME['bad']]
+    return labels.count('outlier'), len(red), len(ticks)
 
 
 def coloured():
@@ -813,14 +865,92 @@ t = panel_text()
 check('80', "[80] no flag word before a decision; numbers stay; no warn/bad "
       "colour; the hidden line is shown", ep._selected_uuid == target
       and not any(b in t for b in BANNED)
-      and all(u in t for u in ('Hz', 'dB', '×'))
-      and coloured() == [] and evp.hidden_lbl.isVisibleTo(evp),
-      repr(([b for b in BANNED if b in t], coloured())))
-labels_on_trace = [it.toPlainText() for p, it in ep._event_items
-                   if isinstance(it, rg.pg.TextItem)]
-check('83', "[83] outlier row and the outlier trace label present before "
-      "any decision", (evp.row_text('outlier') or '').startswith('yes')
-      and labels_on_trace.count('outlier') == 2, repr(labels_on_trace))
+      and [r['value'] for r in evp._rows] == [
+          '1.2×', '0.52 s · limits 0.5–3 s', '≈ 7.5 Hz', '900 µV']
+      and coloured() == [] and evp.hidden_lbl.isVisibleTo(evp)
+      and all(evp._row_widgets[k][1].textFormat() == Qt.PlainText
+              for k in evp.row_keys()),
+      repr(([b for b in BANNED if b in t], coloured(),
+            [r['value'] for r in evp._rows])))
+check('83', "[ruling] an undecided sample event that is an amplitude "
+      "outlier is drawn as a regular band: no 'outlier' label, no red "
+      "tint on the traces, no red ticker bar", trace_marks() == (0, 0, 0),
+      repr(trace_marks()))
+# the gate's probe: the first sample event is a 900 µV outlier, undecided.
+# No surface of the Epochs tab or the right dock may say so.
+dkp = win.detail_dock_w
+
+
+def shown_texts():
+    """Every text the Epochs tab and the right dock show: labels, buttons,
+    list rows, and the text items on the plots."""
+    out = []
+    for root in (ep, dkp):
+        for w in root.findChildren(QtWidgets.QWidget):
+            if not w.isVisibleTo(root):
+                continue
+            if isinstance(w, (QtWidgets.QLabel, QtWidgets.QAbstractButton)):
+                out.append(w.text())
+            if isinstance(w, QtWidgets.QListWidget):
+                out += [w.item(i).text() for i in range(w.count())]
+    for plot in (ep.plot, ep.raw_plot, ep.filt_plot, ep.ticker):
+        out += [it.toPlainText() for it in plot.getPlotItem().items
+                if isinstance(it, rg.pg.TextItem)]
+    return out
+
+
+def strip_red():
+    return [it for it in ep.plot.getPlotItem().items
+            if isinstance(it, rg.pg.BarGraphItem)
+            and it.opts.get('brush') == rg.THEME['bad']]
+
+
+def rank_rows():
+    return ([dkp.global_worst_list.item(i).text()
+             for i in range(dkp.global_worst_list.count())]
+            + [dkp.worst_list.item(i).text()
+               for i in range(dkp.worst_list.count())])
+
+
+# a refresh while the sample is active must not refill the rankings
+win.refresh_qc_dashboard()
+win.wait_population()
+if dkp._last_channel is not None:
+    dkp.update_channel(*dkp._last_channel)
+app.processEvents()
+texts_s = shown_texts()
+# Fixed names, the same for every event, are not indications: the fourth
+# Event-panel row's label, and the two disabled hop buttons (the ruling
+# keeps them, disabled, with a tooltip)
+FIXED = ('Amplitude outlier', '◀◀ Prev outlier', 'Next outlier ▶▶')
+leaks = [t for t in texts_s if 'outlier' in t.lower() and t not in FIXED]
+epoch_before = ep._epoch
+press(win, Qt.Key_N)
+press(win, Qt.Key_P)
+ep._next_outlier()
+ep._prev_outlier()
+check('out-s', "[BLOCK] sample active, first sample event a 900 µV outlier, "
+      "undecided: no text in the Epochs tab or the right dock says "
+      "'outlier'; the two rankings are empty and replaced by one line; the "
+      "strip has no red bar and its legend no red; the outlier rule line "
+      "is hidden; N / P and the outlier buttons do nothing",
+      ep._selected_uuid == target and not leaks
+      and rank_rows() == [] and not any('900' in t for t in texts_s
+                                        if t != evp.row_text('outlier'))
+      and not dkp.global_worst_list.isVisibleTo(dkp)
+      and not dkp.worst_list.isVisibleTo(dkp)
+      and dkp.global_worst_hidden.isVisibleTo(dkp)
+      and dkp.worst_hidden.isVisibleTo(dkp)
+      and dkp.worst_hidden.text() == 'Hidden while you review the sample.'
+      and strip_red() == []
+      and 'red' not in ep.strip_legend.text()
+      and 'outlier' not in ep.epoch_lbl.text()
+      and not ep.strip_hdr.isVisibleTo(ep)
+      and not ep.prev_out_btn.isEnabled() and not ep.next_out_btn.isEnabled()
+      and ep.next_out_btn.toolTip() == 'Hidden while you review the sample.'
+      and ep._epoch == epoch_before and ep._outlier_epoch_indices() == []
+      and 'µV' not in evp.row('outlier')['tooltip'].split('Detector')[0],
+      repr((leaks, rank_rows()[:2], ep.epoch_lbl.text())))
 win._auto_advance = False
 press(win, Qt.Key_U)
 press(win, Qt.Key_Return)
@@ -829,27 +959,58 @@ check('81a', "[81] after U + Enter the labels stay hidden",
       not any(b in t for b in BANNED) and evp.hidden_lbl.isVisibleTo(evp))
 press(win, Qt.Key_A)
 t = panel_text()
-check('81b', "[81] after A they appear and the hidden line goes",
-      'OFF BAND' in t and 'low prominence' in t
-      and not evp.hidden_lbl.isVisibleTo(evp), repr(t[:120]))
+check('81b', "[81, 121] after A the reading words appear (coloured, "
+      "weight 600), the hidden line goes, and the outlier label is on both "
+      "traces", [r['value'] for r in evp._rows] == [
+          '1.2× · barely above background',
+          '0.52 s · limits 0.5–3 s · at the shortest allowed',
+          '≈ 7.5 Hz · OFF BAND', 'yes · 900 µV']
+      and coloured() == ['signal_bg', 'duration', 'peak_freq', 'outlier']
+      and 'font-weight:600' in evp._row_widgets['peak_freq'][1].text()
+      and ' · flagged: ' in evp.sample_lbl.text()
+      and not evp.hidden_lbl.isVisibleTo(evp)
+      and trace_marks()[0] == 2, repr((t[:120], trace_marks())))
 press(win, Qt.Key_Z, Qt.ControlModifier)
 t = panel_text()
 check('81c', "[81] Ctrl+Z (back to unsure) hides them again",
-      not any(b in t for b in BANNED) and evp.hidden_lbl.isVisibleTo(evp),
-      repr([b for b in BANNED if b in t]))
+      not any(b in t for b in BANNED) and evp.hidden_lbl.isVisibleTo(evp)
+      and trace_marks()[0] == 0, repr([b for b in BANNED if b in t]))
 win._exit_sample()
 ep.select_event(target)
 app.processEvents()
 t = panel_text()
-check('82a', "[82] the same event outside sample mode shows its labels",
-      'OFF BAND' in t and not evp.hidden_lbl.isVisibleTo(evp))
+texts_e = shown_texts()
+check('out-e', "[BLOCK] after Exit everything is back: the rankings (with "
+      "the 900 µV event), the red strip bar and its legend, the outlier "
+      "count in the epoch label, the rule line, N / P and the buttons",
+      any('900' in r for r in rank_rows())
+      and dkp.global_worst_list.isVisibleTo(dkp)
+      and dkp.worst_list.isVisibleTo(dkp)
+      and not dkp.global_worst_hidden.isVisibleTo(dkp)
+      and len(strip_red()) == 1
+      and 'red = amplitude outliers' in ep.strip_legend.text()
+      and 'outlier' in ep.epoch_lbl.text()
+      and ep.strip_hdr.isVisibleTo(ep)
+      and ep.strip_hdr.text().startswith('Outlier rule: amp > ')
+      and ep.prev_out_btn.isEnabled() and ep.next_out_btn.isEnabled()
+      and ep.next_out_btn.toolTip() == ''
+      and ep._outlier_epoch_indices() != []
+      and 'Rule: amplitude above' in evp.row('outlier')['tooltip'],
+      repr((rank_rows()[:1], ep.epoch_lbl.text())))
+check('82a', "[82] the same event outside sample mode shows its labels "
+      "and its outlier marks, and has no sample line",
+      'OFF BAND' in t and 'yes · 900 µV' in t
+      and not evp.hidden_lbl.isVisibleTo(evp)
+      and not evp.sample_lbl.isVisibleTo(evp) and trace_marks()[0] == 2,
+      repr(trace_marks()))
 win._start_sample()
 other = next(u for u in ep._ev['uuid'] if u not in win._sample['rows'])
 ep.select_event(other)
 app.processEvents()
 check('82b', "[82] a non-sample event in sample mode shows labels, no "
-      "hidden line, no sample row", not evp.hidden_lbl.isVisibleTo(evp)
-      and 'sample' not in evp.row_keys())
+      "hidden line, no sample line", not evp.hidden_lbl.isVisibleTo(evp)
+      and not evp.sample_lbl.isVisibleTo(evp)
+      and evp.row_keys() == FOUR)
 # [item 2] a flagged and an unflagged undecided event in ONE cell: before a
 # decision both rows are identical in form (no stratum, flags or weight);
 # after accept the stratum and the weight tooltip appear.
@@ -869,12 +1030,15 @@ before = {}
 for u in pair or ():
     win._goto_sample_event(u)
     app.processEvents()
-    r = evp.row('sample')
-    before[u] = (r['value'], list(r['sub']), r['tooltip'])
-check('wt-a', "flagged + unflagged in one cell, undecided: both rows read "
-      "only 'event i of N', no sub-line, no tooltip", pair is not None
-      and all(re.match(r'^event \d+ of 120$', val) and sub == [] and not tip
-              for val, sub, tip in before.values()), repr(before))
+    before[u] = (evp.sample_lbl.text(), evp.sample_lbl.toolTip())
+cell_txt = (f"{rows3[pair[0]]['region']} · {rows3[pair[0]]['stage']}"
+            if pair else '')
+check('wt-a', "flagged + unflagged in one cell, undecided: both sample "
+      "lines read 'Sample event i of N · region · stage' and nothing "
+      "else, with no weight tooltip", pair is not None
+      and all(re.match(r'^Sample event \d+ of 120 · ' + re.escape(cell_txt)
+                       + r'$', val) and not tip
+              for val, tip in before.values()), repr(before))
 after = {}
 for u in pair or ():
     win._goto_sample_event(u)
@@ -882,14 +1046,12 @@ for u in pair or ():
     press(win, Qt.Key_A)
     win._goto_sample_event(u)
     app.processEvents()
-    r = evp.row('sample')
-    after[u] = (r['value'], r['tooltip'])
+    after[u] = (evp.sample_lbl.text(), evp.sample_lbl.toolTip())
 check('wt-b', "after accept: region · stage · flags, and the weight "
       "tooltip, which differs between the flagged and unflagged event",
       pair is not None
-      and after[pair[0]][0].startswith(
-          f"{rows3[pair[0]]['region']} · {rows3[pair[0]]['stage']} · flagged")
-      and after[pair[1]][0].endswith('not flagged')
+      and f" · {cell_txt} · flagged: " in after[pair[0]][0]
+      and after[pair[1]][0].endswith(f" · {cell_txt} · not flagged")
       and all('weight' in tip.lower() for _v, tip in after.values())
       and after[pair[0]][1] != after[pair[1]][1], repr(after))
 win.close()

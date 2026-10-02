@@ -1,5 +1,14 @@
 """
 turtlewave_hdEEG - GUI for HD EEG Analysis
+
+Side effect of ``import frontend`` when PyQt5 is installed: the GUI modules
+imported below set the environment variable ``TURTLEWAVE_QUIET_WONAMBI=1``
+if it is not already set (``os.environ.setdefault``), so that the library
+hides Wonambi's two harmless DeprecationWarnings (the fooof notice and a
+NumPy scalar conversion) for the GUIs. Export ``TURTLEWAVE_QUIET_WONAMBI=0``
+before starting to see them. Without PyQt5 the GUI modules fail to import
+before that line and nothing is set; ``import turtlewave_hdEEG`` alone never
+sets it.
 """
 # frontend/__init__.py
 # Every GUI import here is optional. PyQt5/pyqtgraph are not guaranteed to be

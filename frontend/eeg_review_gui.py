@@ -2,6 +2,12 @@
 """
 TurtleWave Event Review GUI - Modern 3-Panel Design
 Optimized for high-density EEG event review with virtualized table and timeline
+
+Importing this module sets the environment variable
+``TURTLEWAVE_QUIET_WONAMBI=1`` when it is not already set (``setdefault``),
+before the first ``turtlewave_hdEEG`` import, so the GUI does not print
+Wonambi's two harmless DeprecationWarnings (the fooof notice and a NumPy
+scalar conversion). Export ``TURTLEWAVE_QUIET_WONAMBI=0`` to see them.
 """
 
 import sys
@@ -27,6 +33,13 @@ from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, pyqtSig
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import PlotWidget, mkPen, mkBrush
+
+# Hide Wonambi's two harmless DeprecationWarnings (the fooof notice and a
+# NumPy scalar conversion) in the GUI. The library reads this variable before
+# its first Wonambi import, so it must be set before the import below; a call
+# after it would be too late for the fooof notice. setdefault: export
+# TURTLEWAVE_QUIET_WONAMBI=0 to see the warnings.
+os.environ.setdefault('TURTLEWAVE_QUIET_WONAMBI', '1')
 
 try:
     from turtlewave_hdEEG import LargeDataset, CustomAnnotations
@@ -81,9 +94,11 @@ except ImportError:  # run as a script
                                        PrecisionReportDialog)
 
 try:
-    from frontend.channel_types import (neighbour_channels, physio_channels)
+    from frontend.channel_types import (neighbour_channels, physio_channels,
+                                        channel_units)
 except ImportError:  # run as a script
-    from channel_types import neighbour_channels, physio_channels
+    from channel_types import (neighbour_channels, physio_channels,
+                               channel_units)
 
 try:
     from turtlewave_hdEEG.utils import region_from_label
@@ -388,8 +403,11 @@ class EventDatabase:
     def create_qc_tables(self):
         """Create GUI-side QC state tables. Idempotent.
 
-        - channel_qc: per-channel keep/drop verdict (drop => omitted from the
-          re-detect channels.csv).
+        - channel_qc: per-channel verdict (``'drop'`` = excluded: left out of
+          the re-run's ``channels.csv``, of review samples and of the
+          montage flag statistics; a stored ``'channel_artefact'`` reads the
+          same) and ``redetect`` (1 = queued for re-detection; the queue is
+          per channel, so a channel is queued when any of its rows says so).
         - qc_artefact_intervals: WHOLE-MONTAGE artefact time windows the
           reviewer confirmed as global. `evidence_channel` is provenance only;
           the emitted Wonambi event is chan='(all)'.
@@ -402,9 +420,15 @@ class EventDatabase:
                 verdict TEXT,
                 reviewer TEXT,
                 qc_timestamp TEXT,
+                redetect INTEGER DEFAULT 0,
                 PRIMARY KEY (channel, event_type)
             )
         ''')
+        # additive migration for tables created before the queue was stored
+        if 'redetect' not in {r[1] for r in cursor.execute(
+                "PRAGMA table_info(channel_qc)")}:
+            cursor.execute(
+                "ALTER TABLE channel_qc ADD COLUMN redetect INTEGER DEFAULT 0")
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS qc_artefact_intervals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -448,14 +472,64 @@ class EventDatabase:
         return pd.read_sql_query(query, self.conn, params=params)
 
     def set_channel_verdict(self, channel, event_type, verdict, reviewer=""):
-        """Persist a keep/drop verdict for a (channel, event_type)."""
+        """Persist a verdict for a (channel, event_type): ``'drop'`` =
+        excluded, ``''`` = not excluded. The row's ``redetect`` mark is
+        kept."""
         cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO channel_qc
-                (channel, event_type, verdict, reviewer, qc_timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (channel, event_type, verdict, reviewer, datetime.now().isoformat()))
+        now = datetime.now().isoformat()
+        # UPDATE then INSERT (no UPSERT: SQLite older than 3.24 lacks it)
+        cursor.execute(
+            "UPDATE channel_qc SET verdict = ?, reviewer = ?, "
+            "qc_timestamp = ? WHERE channel = ? AND event_type = ?",
+            (verdict, reviewer, now, channel, event_type))
+        if cursor.rowcount == 0:
+            cursor.execute(
+                "INSERT INTO channel_qc (channel, event_type, verdict, "
+                "reviewer, qc_timestamp, redetect) VALUES (?, ?, ?, ?, ?, 0)",
+                (channel, event_type, verdict, reviewer, now))
         self.conn.commit()
+
+    def set_channel_redetect(self, channel, on, event_type=""):
+        """Add a channel to the re-detect queue or take it off (the queue is
+        per channel, stored on ``channel_qc.redetect``).
+
+        Parameters
+        ----------
+        channel : str
+            Channel label.
+        on : bool
+            True queues the channel; False clears the mark on every row of
+            the channel.
+        event_type : str, optional
+            Event type of the row that carries the mark when the channel has
+            no row yet. Default ``""``.
+        """
+        cursor = self.conn.cursor()
+        channel = str(channel)
+        if not on:
+            cursor.execute(
+                "UPDATE channel_qc SET redetect = 0 WHERE channel = ?",
+                (channel,))
+        else:
+            cursor.execute(
+                "UPDATE channel_qc SET redetect = 1 WHERE channel = ? AND "
+                "event_type = ?", (channel, str(event_type)))
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    "INSERT INTO channel_qc (channel, event_type, verdict, "
+                    "reviewer, qc_timestamp, redetect) VALUES (?, ?, '', '', "
+                    "?, 1)", (channel, str(event_type),
+                              datetime.now().isoformat()))
+        self.conn.commit()
+
+    def get_redetect_queue(self):
+        """Channels queued for re-detection (a set of labels)."""
+        try:
+            cur = self.conn.execute(
+                "SELECT DISTINCT channel FROM channel_qc WHERE redetect = 1")
+        except sqlite3.OperationalError:
+            return set()
+        return {str(r[0]) for r in cur.fetchall()}
 
     def get_channel_verdicts(self):
         """Return {(channel, event_type): verdict} for resume across sessions."""
@@ -1070,20 +1144,39 @@ def _region_from_xy(x, y):
 
 
 def _region_for_channel(channel, coords=None):
-    """Region for one channel: coordinate-based when ``coords`` (a
-    ``{label: (x, y)}`` map) carries this channel, else the index fallback."""
-    if coords:
-        xy = coords.get(str(channel))
-        if xy is not None:
-            try:
-                return _region_from_xy(float(xy[0]), float(xy[1]))
-            except (TypeError, ValueError):
-                pass
+    """Region for one channel.
+
+    A 10-20 / 10-5 label (``Fz``, ``F1h``, ``PPO2h``) is read from the label
+    (``region_from_label``), the same rule the review sample uses, so the
+    table, the topography and the sample strata agree. The coordinate rule
+    (``_region_from_xy``, cut-offs tuned on EGI nets) is used only for EGI
+    ``E<n>`` labels, or when the label gives ``'other'`` and ``coords`` (a
+    ``{label: (x, y)}`` map) carries the channel. Without coordinates an
+    EGI label falls back to the index guess.
+    """
+    s = str(channel)
+    egi = s.startswith('E') and s[1:].isdigit()
+    if not egi:
+        region = region_from_label(s)
+        if region != 'other':
+            return region
+    xy = coords.get(s) if coords else None
+    if xy is not None:
+        try:
+            return _region_from_xy(float(xy[0]), float(xy[1]))
+        except (TypeError, ValueError):
+            pass
     return _region_for(channel)
 
 
+#: amp-flag measures and the word the flag cell uses for each (R4.6)
+AMP_TRIGGERS = (('mean_amp', 'mean'), ('p95_amp', '95th pct'),
+                ('max_p2p', 'largest event'))
+
+
 def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
-                        hard_z=3.5, soft_z=2.0, dead_frac=0.15, coords=None):
+                        hard_z=3.5, soft_z=2.0, dead_frac=0.15, coords=None,
+                        excluded=None):
     """Per-channel QC metrics + tri-state outlier flag for ONE event type.
 
     Parameters
@@ -1101,14 +1194,26 @@ def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
         Tunable thresholds (View -> Outlier threshold...).
     coords : dict or None
         ``{channel_label: (x, y)}`` topo projection. When given, the ``region``
-        column is derived from real scalp position (so it agrees with the
-        topography); otherwise it falls back to the EGI index heuristic.
+        column of EGI ``E<n>`` labels (and labels the 10-20 / 10-5 rule
+        cannot place) is derived from scalp position; see
+        ``_region_for_channel``.
+    excluded : set of str or None
+        Excluded channels (``channel_qc.verdict`` 'drop'). They are left out
+        of the montage median and MAD and of the dead-channel median, and
+        are not flagged themselves (``flag`` ``''``); their z values are
+        still given against the other channels.
 
     Returns
     -------
     pandas.DataFrame
         One row per channel: n, density, mean_amp, p95_amp, mean_p2p, max_p2p,
-        pct_in_artefact, flag ('hard'|'soft'|'dead'|''), flag_reasons.
+        pct_in_artefact, flag ('hard'|'soft'|'dead'|''), flag_reasons,
+        ``excluded`` (bool), ``flag_trigger`` (the measure with the largest absolute z among those over
+        the limit: 'mean_amp', 'p95_amp' or 'max_p2p'; ``''`` when not amp
+        flagged), ``sz_mean_amp`` / ``sz_p95_amp`` / ``sz_max_p2p`` (signed
+        robust z of each measure) and ``amp_z`` (the signed z of the
+        trigger; for an unflagged channel the signed z with the largest
+        absolute value of the three).
 
     Notes
     -----
@@ -1123,7 +1228,9 @@ def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
 
     cols = ['channel', 'region', 'n', 'density', 'mean_amp', 'p95_amp',
             'mean_p2p', 'max_p2p', 'pct_in_artefact', 'flag', 'flag_reasons',
-            'z_mean_amp', 'z_p95_amp', 'z_max_p2p', 'outlier_score', 'amp_z']
+            'z_mean_amp', 'z_p95_amp', 'z_max_p2p', 'outlier_score', 'amp_z',
+            'flag_trigger', 'sz_mean_amp', 'sz_p95_amp', 'sz_max_p2p',
+            'excluded']
     if events_df is None or len(events_df) == 0:
         return pd.DataFrame(columns=cols)
 
@@ -1166,52 +1273,64 @@ def compute_channel_qc(events_df, scored_minutes=None, artefact_intervals=None,
     else:
         agg['pct_in_artefact'] = 0.0
 
-    def _robust_z(series):
+    excluded = {str(c) for c in (excluded or ())}
+    inc = ~agg['channel'].astype(str).isin(excluded).to_numpy()
+
+    def _signed_z(series):
+        """Signed robust z of every channel against the median and MAD of
+        the INCLUDED channels (zeros when the MAD is 0 or not finite)."""
         x = series.to_numpy(dtype=float)
-        med = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - med))
+        ref = x[inc]
+        if not np.isfinite(ref).any():
+            return np.zeros(len(x))
+        med = np.nanmedian(ref)
+        mad = np.nanmedian(np.abs(ref - med))
         if not np.isfinite(mad) or mad == 0:
             return np.zeros(len(x))
-        return np.abs(x - med) / (1.4826 * mad)
+        return np.nan_to_num((x - med) / (1.4826 * mad))
 
+    metrics = [m for m, _ in AMP_TRIGGERS]
     flag = np.array([''] * len(agg), dtype=object)
+    trigger = np.array([''] * len(agg), dtype=object)
     reasons = [[] for _ in range(len(agg))]
-    zmap = {'mean_amp': np.zeros(len(agg)),
-            'p95_amp': np.zeros(len(agg)),
-            'max_p2p': np.zeros(len(agg))}
-    if len(agg) >= 3:
-        for metric in ('mean_amp', 'p95_amp', 'max_p2p'):
-            z = _robust_z(agg[metric])
-            zmap[metric] = z
-            for i, zi in enumerate(z):
-                if zi > hard_z:
-                    flag[i] = 'hard'
-                    reasons[i].append(f"{metric} z={zi:.1f}")
-                elif zi > soft_z:
-                    if flag[i] != 'hard':
-                        flag[i] = 'soft'
-                    reasons[i].append(f"{metric} z={zi:.1f}")
-        n_med = np.nanmedian(agg['n'].to_numpy(dtype=float))
+    sz = {m: np.zeros(len(agg)) for m in metrics}
+    if int(inc.sum()) >= 3:
+        for metric in metrics:
+            sz[metric] = _signed_z(agg[metric])
+        for i in range(len(agg)):
+            if not inc[i]:
+                continue                # an excluded channel is not judged
+            over = [(abs(sz[m][i]), m) for m in metrics
+                    if abs(sz[m][i]) > soft_z]
+            if not over:
+                continue
+            flag[i] = 'hard' if max(over)[0] > hard_z else 'soft'
+            trigger[i] = max(over, key=lambda t: t[0])[1]
+            reasons[i] = [f"{m} z={z:.1f}" for z, m in over]
+        n_all = agg['n'].to_numpy(dtype=float)
+        n_med = np.nanmedian(n_all[inc])
         if np.isfinite(n_med) and n_med > 0:
-            for i, nv in enumerate(agg['n'].to_numpy()):
-                if nv < dead_frac * n_med:
+            for i, nv in enumerate(n_all):
+                if inc[i] and nv < dead_frac * n_med:
                     flag[i] = 'dead'
+                    trigger[i] = ''
                     reasons[i] = [f"n={int(nv)} < {dead_frac:.0%} of median {n_med:.0f}"]
     agg['flag'] = flag
+    agg['excluded'] = ~inc
+    agg['flag_trigger'] = trigger
     agg['flag_reasons'] = ['; '.join(r) for r in reasons]
-    agg['z_mean_amp'] = zmap['mean_amp']
-    agg['z_p95_amp'] = zmap['p95_amp']
-    agg['z_max_p2p'] = zmap['max_p2p']
-    agg['outlier_score'] = np.maximum.reduce(
-        [zmap['mean_amp'], zmap['p95_amp'], zmap['max_p2p']])
-    # signed robust z of the mean amplitude, for the Amp z column
-    x = agg['mean_amp'].to_numpy(dtype=float)
-    med = np.nanmedian(x) if np.isfinite(x).any() else np.nan
-    mad = np.nanmedian(np.abs(x - med)) if np.isfinite(med) else np.nan
-    agg['amp_z'] = ((x - med) / (1.4826 * mad)
-                    if np.isfinite(mad) and mad > 0 else np.zeros(len(x)))
-    # Region: coordinate-based when a montage is loaded (matches the topo),
-    # else the EGI index-bucket fallback.
+    for m in metrics:
+        agg['z_' + m] = np.abs(sz[m])
+        agg['sz_' + m] = sz[m]
+    stack = np.vstack([sz[m] for m in metrics])          # 3 x channels
+    agg['outlier_score'] = np.abs(stack).max(axis=0)
+    # Amp z: the trigger's signed z; unflagged: the largest |z| of the three
+    pick = np.abs(stack).argmax(axis=0)
+    for i, t in enumerate(trigger):
+        if t:
+            pick[i] = metrics.index(t)
+    agg['amp_z'] = stack[pick, np.arange(len(agg))] if len(agg) else []
+    # Region: from the 10-20 / 10-5 label; coordinates only for EGI labels
     agg['region'] = agg['channel'].map(
         lambda ch: _region_for_channel(ch, coords))
 
@@ -1848,7 +1967,7 @@ _FLAG_BG = {
 }
 _QC_COLS = [   # UX spec revision 3, section 1 "Table columns"
     ('channel', 'Channel'), ('region', 'Region'), ('n', 'Events'),
-    ('density', 'Density /min'), ('mean_amp', 'Med amp µV'),
+    ('density', 'Density /min'), ('mean_amp', 'Mean amp µV'),
     ('amp_z', 'Amp z'), ('flag', 'Amp flag'), ('checks_flag', 'Checks'),
     ('pct_off_band', 'Off-band'), ('pct_low_prom', 'Low prom.'),
     ('pct_dur_floor', 'At floor'), ('med_amp_ratio', 'Amp / bg'),
@@ -1857,14 +1976,117 @@ _QC_COLS = [   # UX spec revision 3, section 1 "Table columns"
 _AMP_FLAG_TEXT = {'': '✓ OK', 'hard': '× HARD', 'soft': '▲ SOFT',
                   'dead': 'DEAD'}
 SAMPLE_HIDDEN_TIP = 'Hidden while you review the sample.'
+#: ``channel_qc.verdict`` values that mean "excluded" ('drop' is what the
+#: Exclude channel toggle writes; 'channel_artefact' is from older versions)
+EXCLUDED_VERDICTS = ('drop', 'channel_artefact')
+QUEUED_TIP = ('Queued for re-detection. Use File ▸ Export re-run package… '
+              'to re-run these channels.')
+EXCLUDE_TIP = ('Leaves this channel out of review samples, the re-run export, '
+               'the flag statistics and the topography. Event density and '
+               'exported events are unchanged in 4.6.0. Click again to '
+               'include it.')
+EXCLUDE_TIME_TIP = ('Excludes this time from analysis for every channel. It '
+                    'is saved with the review and applied when detection is '
+                    're-run. Events already detected are not changed.')
+EXCLUDE_TIME_HINT = 'Brush a range on the trace, then Exclude time range…'
+
+
+def exclude_epochs_text(n):
+    """``Exclude 3 epochs…`` / ``Exclude 1 epoch…`` (R4.12)."""
+    return f"Exclude {int(n)} epoch{'' if int(n) == 1 else 's'}…"
+
+
+SAMPLE_BANNER_TEXT = ('Review sample in progress: channel checks are hidden. '
+                      'Exit sample to see them.')
+SAMPLE_STAGE_TIP = ('Stages apply to the channel checks, which are hidden '
+                    'while you review the sample.')
+QUEUE_HARD_TIP = ('Add every channel with a hard amp flag to the re-detect '
+                  'queue.')
+RERUN_STATUS_TIP = ('Writes the queued channels (redetect_channels.csv) for '
+                    'examples/rerun_detection.py --channels.')
+RERUN_EMPTY_TEXT = ('Nothing is queued for re-detection. Select a channel and '
+                    'use "Add to re-detect queue".')
+AMP_Z_HEADER_TIP = ('Robust z of the amplitude measure furthest from the '
+                    'other channels: the mean, the 95th percentile or the '
+                    'largest event. Hover a cell for all three.')
+MEAN_AMP_HEADER_TIP = ("Mean amplitude of this channel's events "
+                       "(detection-band signal).")
+#: the six check columns hidden while a review sample is active (R4.1)
+SAMPLE_HIDDEN_COLS = ('checks_flag', 'pct_off_band', 'pct_low_prom',
+                      'pct_dur_floor', 'med_amp_ratio', 'med_thresh_ratio')
+
+
+def fit_checked_width(button, texts=None):
+    """Give a checkable button room for its text at weight 600 (the checked
+    style), so the label is not clipped when it turns bold. ``texts`` are
+    all the labels the button can show (default: its current text). The
+    width is the button's own size hint plus what the bold text adds, so it
+    follows the stylesheet's font and padding."""
+    button.ensurePolished()
+    font = QtGui.QFont(button.font())
+    normal = QtGui.QFontMetrics(font)
+    font.setWeight(QtGui.QFont.DemiBold)
+    bold = QtGui.QFontMetrics(font)
+    chrome = button.sizeHint().width() - normal.horizontalAdvance(
+        button.text())
+    widest = max(bold.horizontalAdvance(t) for t in (texts or [button.text()]))
+    button.setMinimumWidth(chrome + widest + 4)
+
+
+def exclude_tip(event_type=None):
+    """The Exclude channel tooltip; with an event type it ends ``Applies to
+    spindles only.`` (the exclusion is stored per event type)."""
+    if not event_type:
+        return EXCLUDE_TIP
+    events = _er.EVENT_PLURAL.get(str(event_type), str(event_type))
+    return f"{EXCLUDE_TIP} Applies to {events} only."
+
+
+def set_exclude_button(button, excluded, event_type=None):
+    """One Exclude channel toggle (R4.0): ``Exclude channel`` in the danger
+    style for an included channel, ``Include channel`` shown checked for an
+    excluded one; the tooltip names the event type it applies to."""
+    button.setToolTip(exclude_tip(event_type))
+    button.setText('Include channel' if excluded else 'Exclude channel')
+    button.setChecked(bool(excluded))
+    name = '' if excluded else 'danger'
+    if button.objectName() != name:
+        button.setObjectName(name)
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+
+class _SepWrapLabel(QLabel):
+    """A word-wrapped label that breaks only at its `` · `` separators:
+    spaces inside a part are shown as no-break spaces. ``text()`` returns
+    the text as it was set."""
+
+    def setText(self, text):
+        self._plain = str(text or '')
+        parts = [p.replace(' ', '\u00a0') for p in self._plain.split(' · ')]
+        super().setText('\u00a0· '.join(parts))
+
+    def text(self):
+        return getattr(self, '_plain', super().text())
+
+
+class _ElidedLabel(QLabel):
+    """A one-line label that paints its text elided with ``…`` when the
+    widget is too narrow; ``text()`` keeps the whole line."""
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(40, super().minimumSizeHint().height())
+
+    def paintEvent(self, _ev):
+        p = QtGui.QPainter(self)
+        fm = self.fontMetrics()
+        p.drawText(self.rect(), int(Qt.AlignLeft | Qt.AlignVCenter),
+                   fm.elidedText(self.text(), Qt.ElideRight, self.width()))
+        p.end()
 #: Column index of each key in the QC table (for hiding / header tooltips).
 _QC_COL_INDEX = {k: i for i, (k, _) in enumerate(_QC_COLS)}
 
-# Selection-state glyph vocabulary, shared by the State column + the tray.
-_STATE_ART_COLOR = '#f85149'   # ⚑ channel artefact (verdict drop/channel_artefact)
 _STATE_RD_COLOR = '#5a8fce'    # ↻ queued for re-detection
-_STATE_ART_GLYPH = '⚑ artefact'
-_STATE_RD_GLYPH = '↻ re-detect'
 # Note: density / pct_in_artefact / verdict are still computed and used —
 # verdict still shades rows (BackgroundRole) and drives Drop/Keep; density
 # still appears in the Epochs-tab title — they're just hidden from the table.
@@ -1892,10 +2114,6 @@ def _heat_bg(z):
         a *= 0.5
     bg = (11, 14, 19)  # window bg, for flat blend onto opaque cell
     return QtGui.QColor(*[int(bg[i] + (base[i] - bg[i]) * a) for i in range(3)])
-
-
-_STATUS_TEXT = {'': 'untriaged', 'keep': 'kept', 'drop': 'channel artefact',
-                'channel_artefact': 'channel artefact'}
 
 
 def _hms(seconds):
@@ -1940,7 +2158,7 @@ def _amp_cell(amp):
     """Return ``(display_text, is_impossible)`` for a µV amplitude — the single
     scale rule shared by the global worst-events list and the per-channel
     worst-epochs list. >1000 µV renders as ``kµV`` with a trailing ⚠
-    (physiologically impossible peak-to-peak → almost certainly artefact)."""
+    (peak-to-peak beyond physiological scale)."""
     if amp > 1000:
         return f"{amp / 1000:.1f} kµV ⚠", True
     return f"{int(round(amp))} µV", False
@@ -1949,7 +2167,7 @@ def _amp_cell(amp):
 def _artefact_tooltip(amp):
     """Tooltip for an impossible-scale (>1000 µV) amplitude row."""
     return (f"{amp:.0f} µV peak-to-peak — exceeds physiological scale "
-            f"(>1000 µV); almost certainly artefact.")
+            f"(>1000 µV).")
 
 
 def _eeglab_polar_to_xy(chanlocs):
@@ -1999,6 +2217,8 @@ class ChannelQCModel(QAbstractTableModel):
             df['verdict'] = ''
         if verdicts and len(df):
             df['verdict'] = df['channel'].map(verdicts).fillna(df['verdict'])
+        df['redetect'] = (df['channel'].astype(str).isin(self._redetect)
+                          if len(df) else False)
         self.df = df.reset_index(drop=True)
         # A plain records list: the view and the sort proxy call data()
         # thousands of times per reset; dict access is O(1).
@@ -2024,32 +2244,41 @@ class ChannelQCModel(QAbstractTableModel):
             return QVariant()
         rec = self._records[index.row()]
         key = _QC_COLS[index.column()][0]
+        dropped = str(rec.get('verdict', '')) in EXCLUDED_VERDICTS
+        if dropped and key in ('flag', 'checks_flag'):
+            # an excluded channel is not judged (R4.4)
+            if role == Qt.DisplayRole:
+                return '—'
+            if role == Qt.ForegroundRole:
+                return QtGui.QColor(THEME['text_3'])
+            if role == Qt.BackgroundRole:
+                return QtGui.QColor(48, 34, 36)
+            return -1 if role == Qt.UserRole else QVariant()
         if key in CHECK_COLUMNS or key == 'checks_flag':
-            if self._checks.get('sample'):
-                # live sample review: channel checks stay out of sight
-                if role == Qt.DisplayRole:
-                    return '—'
-                if role == Qt.ToolTipRole:
-                    return SAMPLE_HIDDEN_TIP
-                return QVariant()
+            if dropped and role == Qt.ForegroundRole:
+                return QtGui.QColor(THEME['text_3'])
             out = self._check_cell(rec, key, role)
             return QVariant() if out is None else out
         val = rec.get(key, '')
-        dropped = str(rec.get('verdict', '')) in ('drop', 'channel_artefact')
         queued = str(rec.get('channel', '')) in self._redetect
         if key == 'verdict' and role == Qt.ToolTipRole and queued:
-            return 'Queued for re-detection. Remove it from the Selection tray.'
+            return QUEUED_TIP
         if key == 'verdict' and role == _STATUS_HTML_ROLE:
-            head = (f"<span style='color:{THEME['bad']}'>× dropped</span>"
+            head = (f"<span style='color:{THEME['bad']}'>× excluded</span>"
                     if dropped else 'kept')
             return head + (f" · <span style='color:{_STATE_RD_COLOR}'>"
                            f"↻ re-detect</span>" if queued else '')
         if role == Qt.DisplayRole:
             if key == 'verdict':
-                return ('× dropped' if dropped else 'kept') + (
+                return ('× excluded' if dropped else 'kept') + (
                     ' · ↻ re-detect' if queued else '')
             if key == 'flag':
-                return _AMP_FLAG_TEXT.get(str(val or ''), '✓ OK')
+                text = _AMP_FLAG_TEXT.get(str(val or ''), '✓ OK')
+                word = dict(AMP_TRIGGERS).get(
+                    str(rec.get('flag_trigger') or ''))
+                if word and str(val) in ('hard', 'soft'):
+                    text += f" · {word}"
+                return text
             if key == 'n':
                 try:
                     return f"{int(val):,}"
@@ -2073,6 +2302,9 @@ class ChannelQCModel(QAbstractTableModel):
                 return 1 if dropped else 0
             if key in ('channel', 'region'):
                 return str(val or '')
+            if key == 'amp_z':              # Amp z sorts by |z| (R4.6)
+                f = _er._finite(val)
+                return None if f is None else abs(f)
             return _er._finite(val)
         if role == Qt.BackgroundRole:
             if key in _HEAT_Z:
@@ -2092,8 +2324,14 @@ class ChannelQCModel(QAbstractTableModel):
                     str(val or ''), QtGui.QColor(THEME['ok']))
             if key == 'verdict' and dropped:
                 return QtGui.QColor(THEME['bad'])
-        if role == Qt.ToolTipRole and key == 'flag':
-            return str(rec.get('flag_reasons', '') or '') or None
+            if dropped:                     # the row keeps its values, dimmed
+                return QtGui.QColor(THEME['text_3'])
+        if role == Qt.ToolTipRole and key in ('flag', 'amp_z'):
+            zs = [_er._finite(rec.get(k)) for k in
+                  ('sz_mean_amp', 'sz_p95_amp', 'sz_max_p2p')]
+            if all(z is not None for z in zs):
+                return (f"mean z {zs[0]:.1f} · 95th pct z {zs[1]:.1f} · "
+                        f"largest event z {zs[2]:.1f}")
         return QVariant()
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
@@ -2102,7 +2340,10 @@ class ChannelQCModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return _QC_COLS[section][1]
         if role == Qt.ToolTipRole:
-            tip = self._checks['tips'].get(_QC_COLS[section][0])
+            key = _QC_COLS[section][0]
+            tip = self._checks['tips'].get(key) or {
+                'amp_z': AMP_Z_HEADER_TIP,
+                'mean_amp': MEAN_AMP_HEADER_TIP}.get(key)
             if tip:
                 return tip
         return QVariant()
@@ -2168,7 +2409,7 @@ _STATUS_HTML_ROLE = Qt.UserRole + 7
 
 class _StatusDelegate(QtWidgets.QStyledItemDelegate):
     """Paints the Status cell from :data:`_STATUS_HTML_ROLE`, so
-    ``× dropped`` (``bad``) and ``↻ re-detect`` (re-detect blue) keep their
+    ``× excluded`` (``bad``) and ``↻ re-detect`` (re-detect blue) keep their
     own colours."""
 
     def paint(self, painter, option, index):
@@ -2198,23 +2439,13 @@ class _QCSortProxy(QtCore.QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.keep = None          # set of channels, or None for all
-        # {channel: position} in montage / file order: while set, rows sort
-        # by it (sample review); channels not in it follow in database order
-        self.rank = None
 
     def filterAcceptsRow(self, row, parent):
         if self.keep is None:
             return True
         return self.sourceModel().channel_at(row) in self.keep
 
-    def _pos(self, index):
-        ch = self.sourceModel().channel_at(index.row())
-        return (0, self.rank[ch], 0) if ch in self.rank else \
-            (1, 0, index.row())
-
     def lessThan(self, left, right):
-        if self.rank is not None:
-            return self._pos(left) < self._pos(right)
         a = self.sourceModel().data(left, Qt.UserRole)
         b = self.sourceModel().data(right, Qt.UserRole)
         a = None if a is None or (isinstance(a, QVariant) and a.isNull()) else a
@@ -2254,6 +2485,7 @@ class EventDecisionPanel(QWidget):
     autoAdvanceToggled = pyqtSignal(bool)
     openReportClicked = pyqtSignal()
     revisitClicked = pyqtSignal()
+    helpRequested = pyqtSignal()        # "What do these mean?"
 
     EMPTY_TEXT = ('Click an event band, or press ] for the next unreviewed '
                   'event.')
@@ -2267,8 +2499,36 @@ class EventDecisionPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
+        # header row: EVENT i OF n IN EPOCH ............ What do these mean?
+        hrow = QHBoxLayout()
         self.header_lbl = _h_label("EVENT")
-        lay.addWidget(self.header_lbl)
+        hrow.addWidget(self.header_lbl)
+        hrow.addStretch()
+        self.help_btn = QPushButton(_er.HELP_LINK_TEXT)
+        self.help_btn.setFlat(True)
+        self.help_btn.setFocusPolicy(Qt.NoFocus)
+        self.help_btn.setCursor(Qt.PointingHandCursor)
+        self.help_btn.setStyleSheet(
+            f"border:0;background:transparent;color:{THEME['accent']};"
+            "text-decoration:underline;font-size:11px;padding:0;")
+        self.help_btn.clicked.connect(lambda: self.helpRequested.emit())
+        hrow.addWidget(self.help_btn)
+        lay.addLayout(hrow)
+        # header line: time · channel · stage · method band (R4.8)
+        self.event_line = _SepWrapLabel("")
+        self.event_line.setWordWrap(True)
+        self.event_line.setStyleSheet(
+            f"color:{THEME['text']};font-size:12px;"
+            "font-family:'IBM Plex Mono',monospace;")
+        self.event_line.setVisible(False)
+        lay.addWidget(self.event_line)
+        # sample line, directly under the header line (sample events only)
+        self.sample_lbl = QLabel("")
+        self.sample_lbl.setWordWrap(True)
+        self.sample_lbl.setStyleSheet(
+            f"color:{THEME['text_2']};font-size:11px;")
+        self.sample_lbl.setVisible(False)
+        lay.addWidget(self.sample_lbl)
         self.hidden_lbl = QLabel(_er.HIDDEN_LABELS_NOTE)
         self.hidden_lbl.setWordWrap(True)
         self.hidden_lbl.setStyleSheet(
@@ -2302,6 +2562,7 @@ class EventDecisionPanel(QWidget):
             b.setCheckable(True)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda _=False, d=dec: self.decisionClicked.emit(d))
+            fit_checked_width(b)
             brow.addWidget(b)
             self.btn[dec] = b
         lay.addLayout(brow)
@@ -2362,6 +2623,7 @@ class EventDecisionPanel(QWidget):
         self.auto_chk.toggled.connect(self.autoAdvanceToggled.emit)
         lay.addWidget(self.auto_chk)
         self.progress_lbl = QLabel("")
+        self.progress_lbl.setWordWrap(True)
         self.progress_lbl.setStyleSheet("font-size:11px;")
         lay.addWidget(self.progress_lbl)
         self.hint_lbl = QLabel(self.HINT)
@@ -2399,9 +2661,6 @@ class EventDecisionPanel(QWidget):
         return super().eventFilter(obj, ev)
 
     # ---- rows ------------------------------------------------------------
-    _LEVEL_STYLE = {'warn': "color:#e0a334;font-weight:600;",
-                    'bad': "color:#e0533f;font-weight:600;",
-                    'muted': "color:#888888;"}
 
     def _clear_grid(self):
         while self._grid.count():
@@ -2411,6 +2670,34 @@ class EventDecisionPanel(QWidget):
                 w.deleteLater()
         self._row_widgets = {}
 
+    def _value_html(self, row):
+        """The value as rich text: the number plain, the reading word in
+        the ``warn`` / ``bad`` colour at weight 600 (R4.8). A muted
+        (compact-state) row and a row without a level are plain."""
+        import html
+        level = row.get('level')
+        word = row.get('word') or ''
+        number = row.get('number', row.get('value', ''))
+        if level not in ('warn', 'bad') or not word:
+            return None
+        colour = THEME['warn'] if level == 'warn' else THEME['bad']
+        span = (f"<span style='color:{colour};font-weight:600'>"
+                f"{html.escape(word)}</span>")
+        num = html.escape(str(number))
+        return (span + num) if row.get('word_first') else (num + span)
+
+    def set_event_line(self, text, tooltip=''):
+        """The header line under ``EVENT …`` (empty hides it)."""
+        self.event_line.setText(text or '')
+        self.event_line.setToolTip(tooltip or '')
+        self.event_line.setVisible(bool(text))
+
+    def set_sample_line(self, text, tooltip=''):
+        """The sample line under the header line (empty hides it)."""
+        self.sample_lbl.setText(text or '')
+        self.sample_lbl.setToolTip(tooltip or '')
+        self.sample_lbl.setVisible(bool(text))
+
     def set_rows(self, rows):
         """Show ``rows`` (``build_event_rows`` dicts) in order."""
         self._clear_grid()
@@ -2419,12 +2706,16 @@ class EventDecisionPanel(QWidget):
         for row in self._rows:
             lab = QLabel(row['label'])
             lab.setStyleSheet("color:#b8b8b8;font-size:11px;")
-            val = QLabel(str(row['value']))
+            rich = self._value_html(row)
+            val = QLabel(rich if rich is not None else str(row['value']))
+            val.setTextFormat(Qt.RichText if rich is not None
+                              else Qt.PlainText)
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             val.setWordWrap(True)
             val.setStyleSheet(
                 "font-family:'IBM Plex Mono',monospace;font-size:12px;"
-                + self._LEVEL_STYLE.get(row.get('level'), "color:#e5e5e5;"))
+                + ("color:#888888;" if row.get('level') == 'muted'
+                   else "color:#e5e5e5;"))
             if row.get('tooltip'):
                 val.setToolTip(row['tooltip'])
                 lab.setToolTip(row['tooltip'])
@@ -2436,11 +2727,7 @@ class EventDecisionPanel(QWidget):
                 sl = QLabel(text)
                 sl.setWordWrap(True)
                 sl.setAlignment(Qt.AlignRight)
-                warn_words = ('low prominence', 'barely', 'at the floor',
-                              'outside run limits', 'at the ceiling', 'fails')
-                hot = any(w in text for w in warn_words)
-                sl.setStyleSheet("font-size:11px;" + (
-                    "color:#e0a334;" if hot else "color:#888888;"))
+                sl.setStyleSheet("font-size:11px;color:#888888;")
                 self._grid.addWidget(sl, r, 1)
                 subs.append(sl)
             self._row_widgets[row['key']] = (lab, val, subs)
@@ -2473,6 +2760,8 @@ class EventDecisionPanel(QWidget):
         self.set_armed(None)
         self.set_controls_enabled(False)
         self.set_header('EVENT')
+        self.set_event_line('')
+        self.set_sample_line('')
         self.set_hidden(False)
 
     def set_header(self, text):
@@ -2540,12 +2829,17 @@ class EventDecisionPanel(QWidget):
         for d, b in self.btn.items():
             b.setChecked(d == decision)
 
+    #: an ARMED button (waiting for a reason, nothing written yet) has the
+    #: 1 px accent border and NO fill; a CHECKED one (the saved decision) is
+    #: filled and bold (``QPushButton:checked`` in ``DARK_QSS``), so the two
+    #: read differently (spec R4.2)
+    ARMED_QSS = "QPushButton { border: 1px solid #5a8fce; }"
+
     def set_armed(self, decision, hint=None):
-        """Show an armed Reject/Unsure (or none) and its hint: the button and
-        the reason grid get a 1 px accent border."""
+        """Show an armed Reject/Unsure (or none) and its hint: the button
+        gets a dashed accent border, the reason grid a 1 px accent border."""
         for d, b in self.btn.items():
-            b.setStyleSheet(f"border:1px solid {THEME['accent']};"
-                            if d == decision else "")
+            b.setStyleSheet(self.ARMED_QSS if d == decision else "")
         self.grid_box.setStyleSheet(
             f"#reasonGrid{{border:1px solid {THEME['accent']};}}"
             if decision else "")
@@ -2599,7 +2893,7 @@ class FlaggedChannelList(QWidget):
     """``CHECKS — FLAGGED CHANNELS`` under the topography (UX spec revision
     3, section 1): facts only, one row per checks-flagged channel, hard
     first; clicking a row selects the channel and shows ``Open in Epochs``
-    and ``Drop channel`` on that row only."""
+    and ``Exclude channel`` on that row only."""
 
     channelPicked = pyqtSignal(str)
     openInEpochs = pyqtSignal(str)
@@ -2657,7 +2951,7 @@ class FlaggedChannelList(QWidget):
                 f"color:{THEME['bad'] if hard else THEME['warn']};"
                 "font-weight:600;font-size:11px;"
                 "font-family:'IBM Plex Mono',monospace;")
-            name = r['channel'] + (' · dropped' if r.get('dropped') else '')
+            name = r['channel'] + (' · excluded' if r.get('dropped') else '')
             text = ' · '.join([name] + list(r['facts']))
             lbl = _ClickLabel(text)
             lbl.setWordWrap(True)
@@ -2678,8 +2972,10 @@ class FlaggedChannelList(QWidget):
             bl.addWidget(b_open)
             b_drop = None
             if not r.get('dropped'):
-                b_drop = QPushButton("Drop channel")
+                b_drop = QPushButton("Exclude channel")
                 b_drop.setObjectName("danger")
+                b_drop.setToolTip(exclude_tip(
+                    getattr(self, 'event_type', None)))
                 b_drop.clicked.connect(
                     lambda _=False, c=r['channel']: self.dropChannel.emit(c))
                 bl.addWidget(b_drop)
@@ -2713,6 +3009,8 @@ class ChannelDetailDock(QWidget):
     Clicking a row in the worst-epochs list emits gotoEpochRequested(idx),
     which the main window wires to switch to the Epochs tab and call
     EpochsPanel._goto_epoch."""
+
+    EXCLUDED_LEGEND = '○ excluded channel (not used for the map)'
 
     loadMontageRequested = pyqtSignal()
     gotoEpochRequested = pyqtSignal(int)          # epoch idx on current channel
@@ -2774,6 +3072,14 @@ class ChannelDetailDock(QWidget):
         self.topo_caption.setStyleSheet(
             f"color:{THEME['text_3']};font-size:11px;")
         lay.addWidget(self.topo_caption)
+        # shown only when at least one channel is excluded (R4.4)
+        self.topo_excluded_lbl = QLabel(self.EXCLUDED_LEGEND)
+        self.topo_excluded_lbl.setStyleSheet(
+            f"color:{THEME['text_3']};font-size:11px;")
+        self.topo_excluded_lbl.setVisible(False)
+        lay.addWidget(self.topo_excluded_lbl)
+        self.excluded_spots = None      # hollow markers of excluded channels
+        self.topo_input_channels = []   # channels the map is interpolated from
         # population-check caption (not recorded / which run)
         self.checks_caption = QLabel("")
         self.checks_caption.setWordWrap(True)
@@ -2804,6 +3110,8 @@ class ChannelDetailDock(QWidget):
             "font-family:'IBM Plex Mono',monospace;font-size:11px;")
         self.global_worst_list.itemClicked.connect(self._on_global_worst_click)
         lay.addWidget(self.global_worst_list)
+        self.global_worst_hidden = self._hidden_line()
+        lay.addWidget(self.global_worst_hidden)
 
         # --- strong divider: everything below is scoped to ONE channel ---
         divider = QtWidgets.QFrame()
@@ -2818,9 +3126,6 @@ class ChannelDetailDock(QWidget):
         self.title.setStyleSheet("font:600 15px 'IBM Plex Mono',monospace;"
                                  "color:#e7eef7;")
         lay.addWidget(self.title)
-        self.subtitle = QLabel("")
-        self.subtitle.setStyleSheet("color:#6b7585;font-size:11px;")
-        lay.addWidget(self.subtitle)
         # facts line: name, region, events; amp and checks flags; off-band
         self.facts_line = QLabel("")
         self.facts_line.setWordWrap(True)
@@ -2843,6 +3148,8 @@ class ChannelDetailDock(QWidget):
             "font-family:'IBM Plex Mono',monospace;font-size:11px;")
         self.worst_list.itemClicked.connect(self._on_worst_click)
         lay.addWidget(self.worst_list)
+        self.worst_hidden = self._hidden_line()
+        lay.addWidget(self.worst_hidden)
 
         # --- robust z readout ------------------------------------------
         lay.addWidget(_h_label("ROBUST Z-SCORES"))
@@ -2864,7 +3171,7 @@ class ChannelDetailDock(QWidget):
         # --- marked artefact (compact, channel-scoped) -----------------
         # Replaces the standalone EpochsPanel "MARKED ARTEFACT RANGES"
         # panel. Single-line rows: HH:MM:SS–HH:MM:SS + ep count + × button.
-        self.marked_hdr = _h_label("MARKED ARTEFACT (0)")
+        self.marked_hdr = _h_label("EXCLUDED TIME (0)")
         lay.addWidget(self.marked_hdr)
         self._marked_box = QWidget()
         self._marked_layout = QVBoxLayout(self._marked_box)
@@ -2902,9 +3209,9 @@ class ChannelDetailDock(QWidget):
         marked = list(marked or [])
         if channel is not None and total is not None:
             self.marked_hdr.setText(
-                f"MARKED ARTEFACT ({len(marked)} on {channel} · {total} total)")
+                f"EXCLUDED TIME ({len(marked)} from {channel} · {total} total)")
         else:
-            self.marked_hdr.setText(f"MARKED ARTEFACT ({len(marked)})")
+            self.marked_hdr.setText(f"EXCLUDED TIME ({len(marked)})")
         for m in marked:
             t0, t1 = float(m['start_time']), float(m['end_time'])
             mid = int(m['id'])
@@ -3020,12 +3327,34 @@ class ChannelDetailDock(QWidget):
 
     SAMPLE_HIDDEN = 'Channel checks are hidden while you review the sample.'
 
+    @staticmethod
+    def _hidden_line():
+        q = QLabel(SAMPLE_HIDDEN_TIP)
+        q.setStyleSheet(f"color:{THEME['text_3']};font-size:11px;")
+        q.setVisible(False)
+        return q
+
     def set_sample_mode(self, on):
         """Live sample review: channel-level flags stay out of the dock (one
         facts line, no flagged list, no rings, check metrics disabled in the
-        Topo combo). The caller redraws."""
+        Topo combo), and the two amplitude rankings (worst events, worst
+        epochs) are emptied and replaced by one line each, because they
+        would show which events are amplitude outliers. The caller redraws;
+        Exit refills the rankings from what was last given."""
         self._sample_mode = bool(on)
         self._apply_sample_lock()
+        for lst, line in ((self.global_worst_list, self.global_worst_hidden),
+                          (self.worst_list, self.worst_hidden)):
+            lst.setVisible(not on)
+            line.setVisible(bool(on))
+        if on:
+            self.global_worst_list.clear()
+            self.worst_list.clear()
+        else:
+            if getattr(self, '_last_global', None) is not None:
+                self.set_global_worst(*self._last_global)
+            if getattr(self, '_last_channel', None) is not None:
+                self.update_channel(*self._last_channel)
 
     def _apply_sample_lock(self):
         """Disable (with tooltip) or restore the Topo combo's check items."""
@@ -3076,6 +3405,7 @@ class ChannelDetailDock(QWidget):
     def set_event_type(self, event_type):
         """Set the event type used in the topo title + global-worst header."""
         self._event_type = str(event_type or 'slow_wave')
+        self.flagged.event_type = self._event_type
         self.global_worst_hdr.setText(
             f"WORST EVENTS — ALL CHANNELS · {self._event_type}")
 
@@ -3099,6 +3429,8 @@ class ChannelDetailDock(QWidget):
         self.topo.clear()
         self.ring_items, self.ring_labels = [], []
         self.topo_caption.setText('')
+        if hasattr(self, 'topo_excluded_lbl'):
+            self.topo_excluded_lbl.setVisible(False)
         self.topo.setTitle("Topography")
         self.load_montage_btn.setVisible(True)   # button only in fallback
         txt = pg.TextItem(
@@ -3115,11 +3447,6 @@ class ChannelDetailDock(QWidget):
             f"WORST EPOCHS ON {channel}" if channel else "WORST EPOCHS ON —")
         self.worst_list.clear()
         if qc_row is not None:
-            flag = ('' if getattr(self, '_sample_mode', False) else
-                    f"flag {qc_row.get('flag', '') or 'ok'} · ")
-            self.subtitle.setText(
-                f"{qc_row.get('region', '')} · {flag}"
-                f"n={int(qc_row.get('n', 0))}")
             for k, val in self._z_labels.items():
                 z = qc_row.get(k)
                 try:
@@ -3131,9 +3458,11 @@ class ChannelDetailDock(QWidget):
                 except Exception:
                     val.setText("—")
         else:
-            self.subtitle.setText("")
             for val in self._z_labels.values():
                 val.setText("—")
+        self._last_channel = (channel, df_slice, qc_row)
+        if getattr(self, '_sample_mode', False):
+            return                  # ranking hidden while the sample is reviewed
         if df_slice is None or len(df_slice) == 0:
             return
         # qc_row optionally carries _epochs (the scored-epoch table) +
@@ -3188,7 +3517,10 @@ class ChannelDetailDock(QWidget):
         """
         if event_type is not None:
             self.set_event_type(event_type)
+        self._last_global = (rows, None)
         self.global_worst_list.clear()
+        if getattr(self, '_sample_mode', False):
+            return                  # hidden while the sample is reviewed
         et = self._event_type
         if not rows:
             it = QtWidgets.QListWidgetItem(
@@ -3283,16 +3615,24 @@ class ChannelDetailDock(QWidget):
             self._render_topo_empty()
             return
         metric = self.topo_metric
-        pts, vals, chans = [], [], []
+        pts, vals, chans, hollow = [], [], [], []
         for _, r in qc_df.iterrows():
             ch = str(r['channel'])
-            if ch in self._coords and pd.notna(r.get(metric)):
+            if ch not in self._coords:
+                continue
+            if bool(r.get('excluded', False)):
+                hollow.append(ch)       # drawn hollow, never interpolated
+            elif pd.notna(r.get(metric)):
                 pts.append(self._coords[ch]); vals.append(float(r[metric]))
                 chans.append(ch)
-        # Interpolate only channels present in BOTH coords and the QC frame.
+        self.excluded_spots = None
+        self.topo_input_channels = list(chans)
+        # Interpolate only channels present in BOTH coords and the QC frame,
+        # and not excluded.
         if len(pts) < 4:
             self._render_topo_empty()
             return
+        self.topo_excluded_lbl.setVisible(bool(hollow))
         pts = np.asarray(pts); vals = np.asarray(vals)
         xi = np.linspace(pts[:, 0].min(), pts[:, 0].max(), 80)
         yi = np.linspace(pts[:, 1].min(), pts[:, 1].max(), 80)
@@ -3343,6 +3683,16 @@ class ChannelDetailDock(QWidget):
             hoverPen=pg.mkPen('#e7eef7', width=1.5), tip=_tip)
         sp.sigClicked.connect(self._on_topo_click)
         self.topo.addItem(sp)
+        if hollow:
+            hp = np.asarray([self._coords[c] for c in hollow], dtype=float)
+            self.excluded_spots = pg.ScatterPlotItem(
+                x=(hp[:, 0] - pts[:, 0].min()) / max(np.ptp(pts[:, 0]), 1e-9) * 80,
+                y=(hp[:, 1] - pts[:, 1].min()) / max(np.ptp(pts[:, 1]), 1e-9) * 80,
+                size=6, brush=None, pen=pg.mkPen(THEME['text_3'], width=1),
+                data=[(c, float('nan')) for c in hollow], hoverable=True,
+                tip=lambda x, y, data: f"{data[0]}\nexcluded")
+            self.excluded_spots.sigClicked.connect(self._on_topo_click)
+            self.topo.addItem(self.excluded_spots)
         self._draw_rings(metric, pts, chans)
         # Colorbar / legend with numeric min/max endpoints.
         try:
@@ -3354,16 +3704,21 @@ class ChannelDetailDock(QWidget):
             self._colorbar = None
 
 
-class FlowLayout(QtWidgets.QLayout):
-    """Left-to-right layout that wraps its items onto new rows (Qt's standard
-    flow-layout pattern). Used for the Selection-tray chip rows."""
+class WrapRowLayout(QtWidgets.QLayout):
+    """One row of items that wraps onto further rows when the widget is too
+    narrow, so the row's minimum width is its widest single item.
 
-    def __init__(self, parent=None, margin=0, spacing=6):
+    The last ``tail`` items are pushed to the right edge of the line they
+    end up on when that is the last line (the place a stretch would give
+    them in a plain row). Hidden widgets take no space.
+    """
+
+    def __init__(self, parent=None, spacing=8, tail=0):
         super().__init__(parent)
-        if parent is not None:
-            self.setContentsMargins(margin, margin, margin, margin)
+        self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(spacing)
         self._items = []
+        self._tail = int(tail)
 
     def addItem(self, item):
         self._items.append(item)
@@ -3384,70 +3739,148 @@ class FlowLayout(QtWidgets.QLayout):
         return True
 
     def heightForWidth(self, width):
-        return self._do_layout(QtCore.QRect(0, 0, width, 0), True)
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), False)
 
     def setGeometry(self, rect):
         super().setGeometry(rect)
-        self._do_layout(rect, False)
+        self._do_layout(rect, True)
 
     def sizeHint(self):
-        return self.minimumSize()
+        """Everything on one line."""
+        shown = [it for it in self._items if not it.isEmpty()]
+        w = sum(it.sizeHint().width() for it in shown) \
+            + self.spacing() * max(0, len(shown) - 1)
+        h = max([it.sizeHint().height() for it in shown] or [0])
+        return QtCore.QSize(w, h)
 
     def minimumSize(self):
         size = QtCore.QSize()
         for it in self._items:
-            size = size.expandedTo(it.minimumSize())
-        m = self.contentsMargins()
-        size += QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
+            if not it.isEmpty():
+                size = size.expandedTo(it.minimumSize())
         return size
 
-    def _do_layout(self, rect, test_only):
-        x, y, line_h = rect.x(), rect.y(), 0
+    def _do_layout(self, rect, apply):
         sp = self.spacing()
-        for it in self._items:
-            w, h = it.sizeHint().width(), it.sizeHint().height()
-            nx = x + w + sp
-            if nx - sp > rect.right() and line_h > 0:
-                x, y = rect.x(), y + line_h + sp
-                nx, line_h = x + w + sp, 0
-            if not test_only:
-                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), it.sizeHint()))
-            x, line_h = nx, max(line_h, h)
-        return y + line_h - rect.y()
+        lines, line, x = [], [], rect.x()
+        for i, it in enumerate(self._items):
+            if it.isEmpty():
+                continue
+            w = max(min(it.sizeHint().width(), rect.width()),
+                    it.minimumSize().width())
+            if line and x + w > rect.right() + 1:
+                lines.append(line)
+                line, x = [], rect.x()
+            line.append((i, it, x, w))
+            x += w + sp
+        if line:
+            lines.append(line)
+        y = rect.y()
+        first_tail = len(self._items) - self._tail
+        for n, ln in enumerate(lines):
+            h = max(it.sizeHint().height() for _i, it, _x, _w in ln)
+            shift = 0
+            if n == len(lines) - 1 and self._tail:
+                end = ln[-1][2] + ln[-1][3]
+                shift = max(0, rect.right() + 1 - end)
+            if apply:
+                for i, it, x0, w in ln:
+                    dx = shift if i >= first_tail else 0
+                    hh = it.sizeHint().height()
+                    it.setGeometry(QtCore.QRect(x0 + dx, y + (h - hh) // 2,
+                                                w, hh))
+            y += h + sp
+        return max(0, y - sp - rect.y())
+
+
+class _ShrinkCombo(QComboBox):
+    """A combo box as wide as its longest item when there is room, that may
+    shrink to :attr:`MIN_PX` (the popup list keeps its full width)."""
+
+    MIN_PX = 140
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.view().setTextElideMode(Qt.ElideNone)
+        self.view().setMinimumWidth(240)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(self.MIN_PX, super().minimumSizeHint().height())
+
+
+def _row_group(*widgets):
+    """Widgets that stay together when a :class:`WrapRowLayout` wraps."""
+    box = QWidget()
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    for w in widgets:
+        lay.addWidget(w)
+    return box
 
 
 class ChannelQCWidget(QWidget):
     """Tab 0 — primary QC surface (UX spec revision 3, section 1): control
     row (event type, Stage, Show, Sort, header counts), the channel table, a
-    bottom action bar for the selected channel, the footer rule text, and a
-    Selection tray for artefact / re-detect channels."""
+    bottom action bar for the selected channel and the footer rule text."""
 
     channelSelected = pyqtSignal(str)
     requestDrill = pyqtSignal(str)          # Open in Epochs
-    requestDrop = pyqtSignal(str)           # Drop channel
-    verdictChanged = pyqtSignal()
+    requestExclude = pyqtSignal(str, bool)  # Exclude channel toggle
     addToRedetect = pyqtSignal(str)
     requestQueueAllHard = pyqtSignal()
-    requestBuildRedetect = pyqtSignal()
     loadMontageRequested = pyqtSignal()
-    unmarkArtefact = pyqtSignal(str)       # tray chip ✕ → clear artefact verdict
-    removeFromRedetect = pyqtSignal(str)   # tray chip ✕ → un-queue channel
     stageChanged = pyqtSignal(str)         # stage text or COMBINED
+    exitSampleRequested = pyqtSignal()     # banner button
+    exportRerunRequested = pyqtSignal()    # queue hint link
 
     COMBINED = '__all__'
     COLUMN_HEADER = 'Column header'
-    #: temporary Sort item while the sample is reviewed (montage/file order)
-    SAMPLE_SORT = 'Channel order'
+    CHECKS_COL_PX = 170
+    STATUS_COL_PX = 190
+
+    def _fit_status_column(self):
+        """Status keeps at least :attr:`STATUS_COL_PX` and takes the width
+        the other columns leave free."""
+        hdr = self.table.horizontalHeader()
+        last = _QC_COL_INDEX['verdict']
+        others = hdr.length() - hdr.sectionSize(last)
+        spare = self.table.viewport().width() - others
+        hdr.blockSignals(True)
+        self.table.setColumnWidth(last, max(self.STATUS_COL_PX, spare))
+        hdr.blockSignals(False)
+        hdr.viewport().update()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         ll = QVBoxLayout(self)
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("Event type"))
+        # sample-mode banner (R4.1): only while a review sample is active
+        self.sample_banner = QtWidgets.QFrame()
+        self.sample_banner.setObjectName('sampleBanner')
+        self.sample_banner.setStyleSheet(
+            f"#sampleBanner{{background:{THEME['accent_soft']};"
+            f"border-left:3px solid {THEME['accent']};}}")
+        bl = QHBoxLayout(self.sample_banner)
+        bl.setContentsMargins(10, 4, 6, 4)
+        self.banner_lbl = QLabel(SAMPLE_BANNER_TEXT)
+        self.banner_lbl.setStyleSheet(
+            f"color:{THEME['text']};font-size:12px;background:transparent;")
+        bl.addWidget(self.banner_lbl)
+        bl.addStretch()
+        self.banner_exit_btn = QPushButton("Exit sample")
+        self.banner_exit_btn.clicked.connect(
+            lambda: self.exitSampleRequested.emit())
+        bl.addWidget(self.banner_exit_btn)
+        self.sample_banner.setVisible(False)
+        ll.addWidget(self.sample_banner)
+        # control row: wraps when the tab is narrow, so it never pushes the
+        # right dock out of the window
+        self.control_row = QWidget()
+        bar = WrapRowLayout(self.control_row)
         self.evt_combo = QComboBox()
         self.evt_combo.addItems(['slow_wave', 'spindle', 'k_complex', 'pac'])
-        bar.addWidget(self.evt_combo)
-        bar.addWidget(QLabel("Stage"))
+        bar.addWidget(_row_group(QLabel("Event type"), self.evt_combo))
         self.stage_box = QWidget()
         self.stage_lay = QHBoxLayout(self.stage_box)
         self.stage_lay.setContentsMargins(0, 0, 0, 0)
@@ -3457,25 +3890,23 @@ class ChannelQCWidget(QWidget):
         self.stage_group.buttonClicked.connect(self._on_stage_clicked)
         self.stage_box.setToolTip(_er.STAGE_TOOLTIP)
         self.stage_buttons = {}
-        bar.addWidget(self.stage_box)
-        bar.addWidget(QLabel("Show"))
-        self.show_combo = QComboBox()
-        self.show_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        bar.addWidget(_row_group(QLabel("Stage"), self.stage_box))
+        self.show_combo = _ShrinkCombo()
         for item in _er.SHOW_ITEMS:
             self.show_combo.addItem(f"{item} (0)", item)
-        bar.addWidget(self.show_combo)
-        bar.addWidget(QLabel("Sort"))
-        self.sort_combo = QComboBox()
+        bar.addWidget(_row_group(QLabel("Show"), self.show_combo))
+        self.sort_combo = _ShrinkCombo()
         for label, _k, _d in _er.SORT_ITEMS:
             self.sort_combo.addItem(label)
-        bar.addWidget(self.sort_combo)
-        bar.addStretch()
-        self.counts_lbl = QLabel("")      # header count line
+        bar.addWidget(_row_group(QLabel("Sort"), self.sort_combo))
+        ll.addWidget(self.control_row)
+        # header count line: its own row under the control row, left-aligned
+        self.counts_lbl = QLabel("")
+        self.counts_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.counts_lbl.setStyleSheet(
             "font-family:'IBM Plex Mono',monospace;font-size:12px;"
             f"color:{THEME['text_2']};")
-        bar.addWidget(self.counts_lbl)
-        ll.addLayout(bar)
+        ll.addWidget(self.counts_lbl)
 
         self.model = ChannelQCModel()
         self.proxy = _QCSortProxy()
@@ -3483,6 +3914,13 @@ class ChannelQCWidget(QWidget):
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
+        # Checks fits "× HARD · off-band 70 %"; Status (the last column) is
+        # at least as wide ("× excluded · ↻ re-detect") and takes any spare
+        # width: see _fit_status_column
+        self.table.setColumnWidth(_QC_COL_INDEX['checks_flag'],
+                                  self.CHECKS_COL_PX)
+        self.table.setColumnWidth(_QC_COL_INDEX['verdict'],
+                                  self.STATUS_COL_PX)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setAlternatingRowColors(True)
@@ -3500,74 +3938,59 @@ class ChannelQCWidget(QWidget):
         self.empty_lbl.setVisible(False)
 
         # --- bottom action bar (selected channel) ----------------------
-        btns = QHBoxLayout()
         self._sel_lbl = QLabel("—")
         self._sel_lbl.setStyleSheet(
             "font-family:'IBM Plex Mono',monospace;font-weight:600;")
-        btns.addWidget(self._sel_lbl)
         self.btn_open = QPushButton("Open in Epochs")
         self.btn_open.setObjectName("primary")
         self.btn_open.clicked.connect(self._drill)
         self.btn_drill = self.btn_open           # older name
-        self.btn_drop = QPushButton("Drop channel")
-        self.btn_drop.setObjectName("danger")
-        self.btn_drop.clicked.connect(self._drop)
-        self.btn_mark = QPushButton("Mark channel artefact")
-        self.btn_mark.clicked.connect(self._toggle_artefact)
+        # one toggle: checked = the selected channel is excluded
+        self.btn_exclude = QPushButton("Exclude channel")
+        self.btn_exclude.setCheckable(True)
+        self.btn_exclude.setToolTip(EXCLUDE_TIP)
+        self.btn_exclude.clicked.connect(self._exclude_clicked)
+        set_exclude_button(self.btn_exclude, False)
+        fit_checked_width(self.btn_exclude,
+                          ['Exclude channel', 'Include channel'])
         self.btn_redetect = QPushButton("Add to re-detect queue")
+        self.btn_redetect.setCheckable(True)    # checked = queued
         self.btn_redetect.clicked.connect(self._redetect)
+        fit_checked_width(self.btn_redetect, ['Add to re-detect queue',
+                                              'Remove from re-detect queue'])
         self.f_chip = QLabel("F")
         self.f_chip.setStyleSheet(
             f"border:1px solid {THEME['border_strong']};border-radius:3px;"
             "padding:0 4px;font-family:'IBM Plex Mono',monospace;"
             "font-size:10px;")
-        for b in (self.btn_open, self.btn_drop, self.btn_mark,
-                  self.btn_redetect):
-            btns.addWidget(b)
-        btns.addWidget(self.f_chip)
-        btns.addStretch()
+        # queue hint: a flat link, only while something is queued (R4.5)
+        self.queue_link = QPushButton("")
+        self.queue_link.setFlat(True)
+        self.queue_link.setCursor(Qt.PointingHandCursor)
+        self.queue_link.setStyleSheet(
+            f"border:0;background:transparent;color:{THEME['accent']};"
+            "text-decoration:underline;")
+        self.queue_link.clicked.connect(
+            lambda: self.exportRerunRequested.emit())
+        self.queue_link.setVisible(False)
         self.btn_queue_hard = QPushButton("Queue all HARD")
+        self.btn_queue_hard.setToolTip(QUEUE_HARD_TIP)
         self.btn_queue_hard.clicked.connect(
             lambda: self.requestQueueAllHard.emit())
+        # R4.5 order: name · Open · Exclude · queue toggle F · (space) ·
+        # queue link · Queue all HARD. Wraps when the tab is narrow; the
+        # last two sit at the right edge of their line.
+        self.action_row = QWidget()
+        btns = WrapRowLayout(self.action_row, tail=2)
+        btns.addWidget(_row_group(self._sel_lbl, self.btn_open,
+                                  self.btn_exclude))
+        btns.addWidget(_row_group(self.btn_redetect, self.f_chip))
+        btns.addWidget(self.queue_link)
         btns.addWidget(self.btn_queue_hard)
-        self.btn_build = QPushButton("Build re-detect request…")
-        self.btn_build.clicked.connect(
-            lambda: self.requestBuildRedetect.emit())
-        btns.addWidget(self.btn_build)
-        ll.addLayout(btns)
-        self.footer = QLabel("")
-        self.footer.setWordWrap(True)
+        ll.addWidget(self.action_row)
+        self.footer = _ElidedLabel("")      # one line, full rule in tooltip
         self.footer.setStyleSheet(f"color:{THEME['text_3']};font-size:11px;")
         ll.addWidget(self.footer)
-
-        # --- Selection tray (collapsible): artefact + re-detect chips ------
-        self._tray_open = True
-        tray_hdr = QHBoxLayout()
-        tlbl = QLabel("Selection")
-        tlbl.setStyleSheet("color:#9ba6b5;font-weight:600;")
-        tray_hdr.addWidget(tlbl)
-        tray_hdr.addStretch()
-        self.tray_toggle = QPushButton("▾")
-        self.tray_toggle.setFlat(True)
-        self.tray_toggle.setMaximumWidth(28)
-        self.tray_toggle.setCursor(Qt.PointingHandCursor)
-        self.tray_toggle.clicked.connect(self._toggle_tray)
-        tray_hdr.addWidget(self.tray_toggle)
-        ll.addLayout(tray_hdr)
-
-        self.tray_body = QWidget()
-        tb = QVBoxLayout(self.tray_body)
-        tb.setContentsMargins(0, 0, 0, 0)
-        tb.setSpacing(2)
-        self.art_hdr = _h_label("CHANNEL ARTEFACTS (0)")
-        tb.addWidget(self.art_hdr)
-        self.art_scroll, self.art_flow = self._make_chip_area()
-        tb.addWidget(self.art_scroll)
-        self.rd_hdr = _h_label("RE-DETECT QUEUE (0)")
-        tb.addWidget(self.rd_hdr)
-        self.rd_scroll, self.rd_flow = self._make_chip_area()
-        tb.addWidget(self.rd_scroll)
-        ll.addWidget(self.tray_body)
 
         self._qc_full = None      # full computed df for current event type
         self._events_slice = None  # montage-wide events df (current event type)
@@ -3605,14 +4028,14 @@ class ChannelQCWidget(QWidget):
             b.setCheckable(True)
             b.setFocusPolicy(Qt.NoFocus)
             b.setProperty('stage_key', key)
+            fit_checked_width(b)
             self.stage_group.addButton(b)
             self.stage_lay.addWidget(b)
             self.stage_buttons[key] = b
-        if len(stages) == 1:
-            self.stage_buttons[self.COMBINED].setEnabled(False)
         key = current if current in self.stage_buttons else self.COMBINED
         if key in self.stage_buttons:
             self.stage_buttons[key].setChecked(True)
+        self._apply_stage_lock()
 
     def current_stage(self):
         b = self.stage_group.checkedButton()
@@ -3629,7 +4052,7 @@ class ChannelQCWidget(QWidget):
     def set_checks_context(self, recorded, method='', ratio=True,
                            event_type='spindle', tips=None, pending=False,
                            figures_off=False, medians=None, bounds=None,
-                           footer=None):
+                           footer=None, footer_tip=None):
         """Population-check state for the table: whether the run stored
         figures, its method (amp/thr tooltip), header tooltips, montage
         medians and duration bounds (cell tooltips), the footer rule text,
@@ -3641,12 +4064,13 @@ class ChannelQCWidget(QWidget):
                               'pending': bool(pending),
                               'figures_off': bool(figures_off),
                               'medians': dict(medians or {}),
-                              'bounds': bounds,
-                              'sample': getattr(self, '_sample_mode', False)}
-        self.table.setColumnHidden(_QC_COL_INDEX['pct_low_prom'],
-                                   str(event_type) != 'spindle')
+                              'bounds': bounds}
+        self._low_prom_applies = str(event_type) == 'spindle'
+        self._apply_column_visibility()
         if footer is not None:
             self.footer.setText(footer)
+        if footer_tip is not None:
+            self.footer.setToolTip(footer_tip)
         self.model.headerDataChanged.emit(Qt.Horizontal, 0,
                                           len(_QC_COLS) - 1)
         if self.model.rowCount():
@@ -3668,69 +4092,88 @@ class ChannelQCWidget(QWidget):
         if self.table.model().rowCount() and not self.table.currentIndex().isValid():
             self.table.selectRow(0)
         self._update_action_state()
-        self._rebuild_tray()
 
     def _frame(self):
         """The model's frame (verdicts merged)."""
         return self.model.df
 
+    def _apply_column_visibility(self):
+        """Check columns: hidden while a review sample is active (R4.1); the
+        low-prominence column is also hidden for non-spindle event types."""
+        sample = getattr(self, '_sample_mode', False)
+        for key in SAMPLE_HIDDEN_COLS:
+            hide = sample or (key == 'pct_low_prom' and
+                              not getattr(self, '_low_prom_applies', True))
+            self.table.setColumnHidden(_QC_COL_INDEX[key], hide)
+        self._fit_status_column()
+
     def set_sample_mode(self, on, channel_order=None):
-        """Live sample review: check cells, the checks count and the checks
-        part of Show > Flagged are hidden, and rows sit in ``channel_order``
-        (montage / file order; database order for channels not in it, or
-        when it is None); Exit brings everything back."""
-        self._channel_order = list(channel_order or [])
-        self._sample_mode = bool(on)
-        self.model._checks['sample'] = bool(on)
-        if self.model.rowCount():
-            self.model.dataChanged.emit(
-                self.model.index(0, 0),
-                self.model.index(self.model.rowCount() - 1,
-                                 len(_QC_COLS) - 1))
-        self._apply_sample_sort(bool(on))
+        """Live sample review (R4.1): the banner shows, the six check columns
+        are hidden, the Stage toggle is disabled, the header count and Show >
+        Flagged leave the checks out, and a check-based sort falls back to
+        ``Channel``; Exit sample brings everything back. ``channel_order`` is
+        accepted for older callers and not used."""
+        on = bool(on)
+        self._sample_mode = on
+        self.sample_banner.setVisible(on)
+        self._apply_column_visibility()
+        self._apply_stage_lock()
+        self._apply_sample_sort(on)
         self._update_counts()
         self._apply_show_filter()
 
-    def _apply_sample_sort(self, on):
-        """While the sample is reviewed, rows sit in channel order (a check
-        sort would put flagged channels on top) and the check-based Sort
-        items and header-click sorting are off; Exit restores the user's
-        sort exactly (combo item, or the column header sort)."""
-        combo, hdr = self.sort_combo, self.table.horizontalHeader()
-        locked = getattr(self, '_sort_before_sample', None) is not None
-        if on == locked:
-            if on:
-                self._sort_channel_order()     # montage may have changed
-            return
+    def _apply_stage_lock(self):
+        """Stage buttons: disabled with the R4.0 tooltip in sample mode (the
+        checked one still shows as checked); a one-stage run's single button
+        stays disabled either way."""
+        sample = getattr(self, '_sample_mode', False)
+        single = len(self.stage_buttons) == 1
+        for b in self.stage_group.buttons():
+            b.setEnabled(not sample and not single)
+            b.setToolTip(SAMPLE_STAGE_TIP if sample else '')
+        self.stage_box.setToolTip(SAMPLE_STAGE_TIP if sample
+                                  else _er.STAGE_TOOLTIP)
+
+    def _sort_is_check_based(self):
         check_keys = {None} | set(_er.CHECK_COLUMNS)
-        combo.blockSignals(True)
-        if on:
+        label = self.sort_combo.currentText()
+        if label == self.COLUMN_HEADER:
+            col = self.table.horizontalHeader().sortIndicatorSection()
+            return 0 <= col < len(_QC_COLS) and (
+                _QC_COLS[col][0] in SAMPLE_HIDDEN_COLS)
+        return any(lab == label and key in check_keys
+                   for lab, key, _d in _er.SORT_ITEMS)
+
+    def _apply_sample_sort(self, on):
+        """While the sample is reviewed the check-based Sort items are
+        disabled, and an active check sort falls back to ``Channel``; Exit
+        restores the sort the user had (combo item or column header)."""
+        combo, hdr = self.sort_combo, self.table.horizontalHeader()
+        check_keys = {None} | set(_er.CHECK_COLUMNS)
+        if on and getattr(self, '_sort_before_sample', None) is None \
+                and self._sort_is_check_based():
             self._sort_before_sample = (combo.currentText(),
                                         hdr.sortIndicatorSection(),
                                         hdr.sortIndicatorOrder())
-            self.table.setSortingEnabled(False)   # no header-click sorting
-            hdr.setSortIndicator(-1, Qt.AscendingOrder)
-            combo.addItem(self.SAMPLE_SORT)
-            combo.setCurrentText(self.SAMPLE_SORT)
-            self._sort_channel_order()
-        else:
-            self.proxy.rank = None
-            label, section, order = self._sort_before_sample
-            self._sort_before_sample = None
-            i = combo.findText(self.SAMPLE_SORT)
+            combo.blockSignals(True)
+            i = combo.findText(self.COLUMN_HEADER)
             if i >= 0:
                 combo.removeItem(i)
+            combo.setCurrentText('Channel')
+            combo.blockSignals(False)
+            self._on_sort_combo()
         for i, (_lab, key, _d) in enumerate(_er.SORT_ITEMS):
             item = combo.model().item(i)
             if item is not None and key in check_keys:
                 item.setEnabled(not on)
                 combo.setItemData(i, SAMPLE_HIDDEN_TIP if on else None,
                                   Qt.ToolTipRole)
-        combo.blockSignals(False)
-        if on:
+        before = getattr(self, '_sort_before_sample', None)
+        if on or before is None:
             return
+        self._sort_before_sample = None
+        label, section, order = before
         self._sorting_from_combo = True
-        self.table.setSortingEnabled(True)
         self.table.sortByColumn(section, order)
         self._sorting_from_combo = False
         combo.blockSignals(True)
@@ -3739,13 +4182,6 @@ class ChannelQCWidget(QWidget):
             combo.addItem(self.COLUMN_HEADER)
         combo.setCurrentText(label)
         combo.blockSignals(False)
-
-    def _sort_channel_order(self):
-        self.proxy.rank = {ch: i for i, ch in
-                           enumerate(getattr(self, '_channel_order', []))}
-        self.proxy.invalidate()
-        self.proxy.sort(0, Qt.AscendingOrder)
-        self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
 
     def _update_counts(self):
         df = self._frame()
@@ -3767,28 +4203,21 @@ class ChannelQCWidget(QWidget):
         ch = self._current_channel()
         self._sel_lbl.setText(ch or '—')
         en = ch is not None
-        for b in (self.btn_open, self.btn_drop, self.btn_mark,
-                  self.btn_redetect):
+        for b in (self.btn_open, self.btn_exclude, self.btn_redetect):
             b.setEnabled(en)
-        if ch is not None:
-            v = self._verdicts.get(ch, '')
-            dropped = v in ('drop', 'channel_artefact')
-            self.btn_mark.setText(
-                "Unmark channel artefact" if dropped
-                else "Mark channel artefact")
-            self.btn_drop.setEnabled(not dropped)
-            self.btn_drop.setToolTip('Already dropped. Undo from the '
-                                     'Selection tray.' if dropped else '')
-            self.btn_redetect.setText(
-                "Remove from re-detect queue" if ch in self._redetect_ref
-                else "Add to re-detect queue")
+        set_exclude_button(self.btn_exclude, en and self._verdicts.get(
+            ch, '') in EXCLUDED_VERDICTS, self.current_event_type())
+        queued = en and ch in self._redetect_ref
+        self.btn_redetect.setChecked(bool(queued))
+        self.btn_redetect.setText("Remove from re-detect queue" if queued
+                                  else "Add to re-detect queue")
+        nq = len(self._redetect_ref)
+        self.queue_link.setText(f"{nq} queued · Export re-run package…")
+        self.queue_link.setVisible(nq > 0)
         n_hard = 0 if self._qc_full is None or len(self._qc_full) == 0 \
             else int((self._qc_full['flag'] == 'hard').sum())
         self.btn_queue_hard.setText(f"Queue all HARD ({n_hard})")
         self.btn_queue_hard.setEnabled(n_hard > 0)
-        self.btn_build.setText(
-            f"Build re-detect request… ({len(self._redetect_ref)})")
-        self.btn_build.setEnabled(len(self._redetect_ref) > 0)
 
     # ---- Show and Sort ---------------------------------------------------
     def show_item(self):
@@ -3813,6 +4242,7 @@ class ChannelQCWidget(QWidget):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self.empty_lbl.resize(self.table.viewport().size())
+        self._fit_status_column()
 
     def _sort_spec(self, label):
         for lab, key, desc in _er.SORT_ITEMS:
@@ -3823,9 +4253,6 @@ class ChannelQCWidget(QWidget):
     def _on_sort_combo(self, *_):
         label = self.sort_combo.currentText()
         if label == self.COLUMN_HEADER:
-            return
-        if label == self.SAMPLE_SORT:
-            self._sort_channel_order()
             return
         spec = self._sort_spec(label)
         if spec is None:
@@ -3842,8 +4269,8 @@ class ChannelQCWidget(QWidget):
         self._sorting_from_combo = False
 
     def _on_header_sort(self, col, order):
-        if self._sorting_from_combo:
-            return
+        if self._sorting_from_combo or col < 0 or col >= len(_QC_COLS):
+            return                  # no sorted column (e.g. channel order)
         key = _QC_COLS[col][0]
         desc = order == Qt.DescendingOrder
         match = next((lab for lab, k, d in _er.SORT_ITEMS
@@ -3883,31 +4310,15 @@ class ChannelQCWidget(QWidget):
             return
         self.channelSelected.emit(ch)
 
-    def _toggle_artefact(self):
-        ch = self._current_channel()
-        if not ch:
-            return
-        cur = self._verdicts.get(ch, '')
-        # Unmark returns to '' (untriaged), NOT 'keep' — a '' channel is still
-        # included in export; only drop/channel_artefact are excluded.
-        self._verdict('' if cur in ('drop', 'channel_artefact') else 'drop')
-
-    def _drop(self):
+    def _exclude_clicked(self, checked):
         ch = self._current_channel()
         if ch:
-            self.requestDrop.emit(ch)
+            self.requestExclude.emit(ch, bool(checked))
 
     def events_slice_for(self, ch):
         if self._events_slice is not None and len(self._events_slice):
             return self._events_slice[self._events_slice['channel'] == ch]
         return None
-
-    def _verdict(self, v):
-        ch = self._current_channel()
-        if ch:
-            self._verdicts[ch] = v
-            self.verdictChangedTo = (ch, v)
-            self.verdictChanged.emit()
 
     def _drill(self):
         ch = self._current_channel()
@@ -3928,89 +4339,6 @@ class ChannelQCWidget(QWidget):
         if ch:
             self.addToRedetect.emit(ch)
 
-    # ---- Selection tray ----------------------------------------------
-    def _make_chip_area(self):
-        """A scrollable (~2 rows) wrapping chip area. Returns (scroll, flow)."""
-        wrap = QWidget()
-        flow = FlowLayout(wrap, margin=2, spacing=6)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(wrap)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setMaximumHeight(64)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        return scroll, flow
-
-    def _toggle_tray(self):
-        self._tray_open = not self._tray_open
-        self.tray_body.setVisible(self._tray_open)
-        self.tray_toggle.setText("▾" if self._tray_open else "▸")
-
-    def _clear_flow(self, flow):
-        while flow.count():
-            it = flow.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.deleteLater()
-
-    def _empty_label(self, text):
-        q = QLabel(text)
-        q.setStyleSheet("color:#6b7585;font-style:italic;font-size:11px;")
-        return q
-
-    def _make_chip(self, ch, color, on_remove):
-        """A [ label ✕ ] chip: body click selects the channel, ✕ removes it."""
-        chip = QWidget()
-        chip.setStyleSheet(
-            f"background:#161b22;border:1px solid {color};border-radius:9px;")
-        h = QHBoxLayout(chip)
-        h.setContentsMargins(7, 1, 3, 1)
-        h.setSpacing(2)
-        body = QPushButton(str(ch))
-        body.setFlat(True)
-        body.setCursor(Qt.PointingHandCursor)
-        body.setStyleSheet(
-            f"border:0;background:transparent;color:{color};"
-            "font-family:'IBM Plex Mono',monospace;font-size:11px;")
-        body.clicked.connect(lambda _=False, c=str(ch): self.select_channel(c))
-        x = QPushButton("✕")
-        x.setFlat(True)
-        x.setMaximumWidth(16)
-        x.setCursor(Qt.PointingHandCursor)
-        x.setStyleSheet(f"border:0;background:transparent;color:{color};"
-                        "font-size:10px;")
-        x.clicked.connect(lambda _=False: on_remove())
-        h.addWidget(body)
-        h.addWidget(x)
-        return chip
-
-    def _rebuild_tray(self):
-        """Rebuild both chip sections from the current verdicts + queue.
-        Artefact chips reflect the ACTIVE event type; re-detect is channel-level.
-        """
-        self._clear_flow(self.art_flow)
-        self._clear_flow(self.rd_flow)
-        evt = self.current_event_type()
-        art = sorted(ch for ch, v in self._verdicts.items()
-                     if v in ('drop', 'channel_artefact'))
-        rd = sorted(str(c) for c in self._redetect_ref)
-        self.art_hdr.setText(f"CHANNEL ARTEFACTS ({len(art)})")
-        self.rd_hdr.setText(f"RE-DETECT QUEUE ({len(rd)})")
-        if art:
-            for ch in art:
-                self.art_flow.addWidget(self._make_chip(
-                    ch, _STATE_ART_COLOR,
-                    lambda c=ch: self.unmarkArtefact.emit(str(c))))
-        else:
-            self.art_flow.addWidget(self._empty_label(
-                f"No channels marked as artefact for {evt}."))
-        if rd:
-            for ch in rd:
-                self.rd_flow.addWidget(self._make_chip(
-                    ch, _STATE_RD_COLOR,
-                    lambda c=ch: self.removeFromRedetect.emit(str(c))))
-        else:
-            self.rd_flow.addWidget(self._empty_label("Re-detect queue empty."))
 
 
 DEFAULT_BAND = {'slow_wave': (0.5, 2.0), 'k_complex': (0.5, 1.5),
@@ -4358,7 +4686,8 @@ class _Collapsible(QWidget):
         self.body_lay.setContentsMargins(0, 0, 0, 0)
         self.body_lay.setSpacing(1)
         lay.addWidget(self.body)
-        self._open = _setting_bool(settings_key, True)
+        # closed on first use (R4.11); after that the saved state
+        self._open = _setting_bool(settings_key, False)
         self._apply()
 
     def is_open(self):
@@ -4380,32 +4709,46 @@ class _Collapsible(QWidget):
 
 
 class NeighboursPlot(EEGDetailWidget):
-    """``EEGDetailWidget`` drawing the selected event on its neighbours:
-    target on top in the accent colour, one shared fixed scale, the event
-    span shaded and the neighbours' own same-type events shaded per row."""
+    """``EEGDetailWidget`` drawing the selected event on its neighbours
+    (spec R4.10): target on top in the accent colour, one shared scale, the
+    selected event as two thin accent lines through every row, and each
+    neighbour's own same-type events as a 3 px bar under its trace. No
+    shaded band or block covers the signal."""
+
+    BAR_PX = 3
 
     def plot_neighbours(self, ts, data, labels, event_span, scale,
                         neighbour_spans=None, detected=None):
-        """``data`` rows follow ``labels``; row 0 is the target."""
+        """``data`` rows follow ``labels``; row 0 is the target. ``scale`` is
+        the shared half-range: a sample beyond it is clipped at its row
+        edge."""
         self.clear()
         self.channel_curves, self.channel_labels, self.event_items = [], [], []
+        self.sel_lines, self.bar_items = [], []
         ts = np.asarray(ts, dtype=float)
         n = len(labels)
         step = 2.0 * scale
         x0, x1 = float(ts[0]), float(ts[-1])
+        bar_pen = pg.mkPen(THEME['text_2'], width=self.BAR_PX)
+        bar_pen.setCapStyle(Qt.FlatCap)
         for i, lab in enumerate(labels):
             y = -i * step
             pen = (pg.mkPen(THEME['accent'], width=1.5) if i == 0
                    else pg.mkPen(THEME['text_2'], width=1))
             row = np.clip(np.asarray(data[i], dtype=float), -scale, scale)
             self.channel_curves.append(self.plot(ts, row + y, pen=pen))
-            for s, e in (neighbour_spans or {}).get(lab, []):
-                r = QtWidgets.QGraphicsRectItem(max(s, x0), y - scale,
-                                                min(e, x1) - max(s, x0), step)
-                r.setBrush(pg.mkBrush(136, 136, 136, 40))
-                r.setPen(pg.mkPen(None))
-                self.addItem(r)
-                self.event_items.append(r)
+            # the neighbour's own detections: a bar at the row's lower edge
+            # (the target row has none; its event is the two lines)
+            for s, e in ((neighbour_spans or {}).get(lab, []) if i else []):
+                a, b = max(float(s), x0), min(float(e), x1)
+                if b <= a:
+                    continue
+                yb = y - 0.94 * scale
+                bar = pg.PlotCurveItem(x=[a, b], y=[yb, yb], pen=bar_pen)
+                self.addItem(bar)
+                self.bar_items.append({'label': lab, 'span': (a, b),
+                                       'item': bar})
+                self.event_items.append(bar)
             text = lab + (' · detected' if detected and lab in detected
                           else '')
             t = pg.TextItem(text, anchor=(0, 0.5),
@@ -4413,17 +4756,22 @@ class NeighboursPlot(EEGDetailWidget):
             t.setPos(x0, y + 0.6 * scale)
             self.addItem(t, ignoreBounds=True)
             self.channel_labels.append(t)
-        reg = pg.LinearRegionItem(values=list(event_span), movable=False,
-                                  brush=pg.mkBrush(90, 143, 206, 30),
-                                  pen=pg.mkPen(None))
-        self.addItem(reg)
-        self.event_items.append(reg)
+        for x in event_span:
+            ln = pg.InfiniteLine(pos=float(x), angle=90, movable=False,
+                                 pen=pg.mkPen(THEME['accent'], width=1))
+            self.addItem(ln, ignoreBounds=True)
+            self.sel_lines.append(ln)
         self.setXRange(x0, x1, padding=0)
         self.setYRange(-(n - 1) * step - scale, scale, padding=0)
         self._last_channels = list(labels)
 
     def row_labels(self):
         return [t.toPlainText() for t in self.channel_labels]
+
+    def bars_for(self, label):
+        """Bar spans drawn under the row whose label starts with ``label``."""
+        return [b['span'] for b in getattr(self, 'bar_items', [])
+                if b['label'] == label]
 
 
 class NeighboursGroup(_Collapsible):
@@ -4447,6 +4795,12 @@ class NeighboursGroup(_Collapsible):
         self.plot.hideAxis('left')
         self.plot.setMinimumHeight(160)
         self.body_lay.addWidget(self.plot)
+        self.legend = QLabel("")            # R4.0 legend, live half-range
+        self.legend.setStyleSheet(f"color:{THEME['text_3']};font-size:11px;")
+        self.legend.setWordWrap(True)
+        self.legend.setVisible(False)
+        self.body_lay.addWidget(self.legend)
+        self.half_range = None              # applied shared half-range, µV
         self.empty = QLabel("Select an event to see it on neighbouring "
                             "channels.")
         self.empty.setStyleSheet("color:#888888;font-size:11px;")
@@ -4464,6 +4818,8 @@ class NeighboursGroup(_Collapsible):
         self.empty.setText(text)
         self.empty.setVisible(True)
         self.plot.setVisible(False)
+        self.legend.setVisible(False)
+        self.half_range = None
 
     def set_event(self, target, row, event_type, band):
         self._args = (target, row, event_type, band)
@@ -4511,22 +4867,32 @@ class NeighboursGroup(_Collapsible):
                     (float(r['start_time']), float(r['end_time'])))
                 if float(r['start_time']) < e and float(r['end_time']) > s:
                     detected.add(lab)
-        scale = 50.0 if event_type == 'spindle' else 150.0
+        # one scale for every row, from the data in the window (R4.10)
+        scale = _er.neighbour_half_range(
+            data[keep], event_type, self.filter_chk.isChecked())
+        self.half_range = scale
+        self.legend.setText(_er.neighbours_legend(scale))
         self.empty.setVisible(False)
         self.plot.setVisible(True)
+        self.legend.setVisible(True)
         self.plot.plot_neighbours(ts, data[keep], row_labels, (s, e), scale,
                                   spans, detected)
 
 
-#: Physiology rows: kind -> (row label, filter, fixed half-range or None).
-PHYSIO_ROWS = {'eog': ('EOG', (0.3, 15.0), 150.0),
-               'emg': ('Chin EMG', (10.0, None), 40.0),
-               'ecg': ('ECG', None, None)}
+#: Physiology rows: kind -> (row label, filter). Every row is scaled from
+#: its own data in the epoch (spec R4.9); there are no fixed scales.
+PHYSIO_ROWS = {'eog': ('EOG', (0.3, 15.0)),
+               'emg': ('Chin EMG', (10.0, None)),
+               'ecg': ('ECG', None)}
 
 
 class PhysioStrip(_Collapsible):
-    """``▾ PHYSIOLOGY (n)`` under Neighbours (spec section 9): typed EOG,
-    chin EMG and ECG, X-linked to the raw trace, read once per epoch."""
+    """``▾ PHYSIOLOGY (n)`` under Neighbours (spec section 9, R4.9): typed
+    EOG, chin EMG and ECG, X-linked to the raw trace, read once per epoch,
+    each row scaled to its own signal. The scale label names a unit only
+    when the file states one (``panel.channel_unit``)."""
+
+    ROW_PX = 44
 
     def __init__(self, panel):
         super().__init__('PHYSIOLOGY (0)', 'review/physio_open', panel)
@@ -4537,6 +4903,7 @@ class PhysioStrip(_Collapsible):
         self.body_lay.addWidget(self.legend)
         self.n_reads = 0
         self._window = None
+        self.row_scales = {}    # channel -> (centre, half-range, label text)
         self.toggled.connect(lambda on: self._render() if on else None)
         self.setVisible(False)
 
@@ -4555,7 +4922,7 @@ class PhysioStrip(_Collapsible):
         for kind, ch in order:
             w = pg.PlotWidget()
             _theme_plot(w)
-            w.setFixedHeight(36)
+            w.setFixedHeight(self.ROW_PX)
             w.setMouseEnabled(False, False)
             w.setMenuEnabled(False)
             w.hideButtons()
@@ -4565,19 +4932,20 @@ class PhysioStrip(_Collapsible):
             w.setXLink(self.panel.raw_plot)
             self.body_lay.insertWidget(self.body_lay.count() - 1, w)
             self.rows.append((kind, ch, w))
-        kinds = []
-        if phys.get('eog'):
-            kinds.append('EOG 0.3–15 Hz')
-        if phys.get('emg'):
-            kinds.append('chin EMG above 10 Hz')
-        if phys.get('ecg'):
-            kinds.append('ECG unfiltered')
-        if kinds and (phys.get('eog') or phys.get('emg')):
-            kinds.append('fixed scales except ECG' if phys.get('ecg')
-                         else 'fixed scales')
-        self.legend.setText(' · '.join(kinds))
+        self.row_scales = {}
+        self._update_legend()
         self.set_title(f"PHYSIOLOGY ({len(self.rows)})")
         self.setVisible(bool(self.rows))
+
+    def _unit(self, channel):
+        fn = getattr(self.panel, 'channel_unit', None)
+        return fn(channel) if callable(fn) else None
+
+    def _update_legend(self):
+        kinds = [k for k, _c, _w in self.rows]
+        no_unit = {k for k, c, _w in self.rows if not self._unit(c)}
+        self.legend.setText(_er.physio_legend(kinds, no_unit)
+                            if self.rows else '')
 
     def row_titles(self):
         return [f"{PHYSIO_ROWS[k][0]} · {c}" for k, c, _w in self.rows]
@@ -4631,8 +4999,9 @@ class PhysioStrip(_Collapsible):
             return
         ts, data, sf, got = out
         idx = {c: i for i, c in enumerate(got)}
+        self.row_scales = {}
         for kind, ch, w in self.rows:
-            label, filt, half = PHYSIO_ROWS[kind]
+            label, filt = PHYSIO_ROWS[kind]
             title = f"{label} · {ch}"
             if ch not in idx:
                 continue
@@ -4642,18 +5011,19 @@ class PhysioStrip(_Collapsible):
             elif filt:
                 x = _highpass(x, sf, filt[0])
             w.plot(ts, x, pen=pg.mkPen(THEME['text_2'], width=1))
-            if half:
-                w.setYRange(-half, half, padding=0)
-                scale = f"±{half:g} µV"
-            else:
-                w.enableAutoRange('y', True)
-                scale = 'auto'
+            # the row's own scale in this epoch; a unit only if the file
+            # states one (never a claimed µV)
+            centre, half = _er.physio_range(x)
+            w.setYRange(centre - half, centre + half, padding=0)
+            scale = _er.physio_scale_label(half, self._unit(ch))
+            self.row_scales[ch] = (centre, half, scale)
             t = pg.TextItem(title, anchor=(0, 0), color=THEME['text_2'])
-            t.setPos(t0, half if half else float(np.nanmax(x)) if x.size else 0)
+            t.setPos(t0, centre + half)
             w.addItem(t, ignoreBounds=True)
             r = pg.TextItem(scale, anchor=(1, 0), color=THEME['text_3'])
-            r.setPos(t1, half if half else float(np.nanmax(x)) if x.size else 0)
+            r.setPos(t1, centre + half)
             w.addItem(r, ignoreBounds=True)
+        self._update_legend()
 
 
 class EpochsPanel(QWidget):
@@ -4675,7 +5045,7 @@ class EpochsPanel(QWidget):
     (mouse pan/zoom disabled, X-locked to the epoch). A thin event ticker
     above the raw trace marks regular (grey) and outlier (red) events in
     the active epoch. Sub-epoch artefacts can also be marked by brushing
-    the blue region on the trace and clicking *Mark as artefact*.
+    the blue region on the trace and clicking *Exclude time range…*.
 
     Sidecar XML contract unchanged: per-channel artefacts are written
     under rater ``review-qc`` in a separate file; the scorer XML is never
@@ -4697,7 +5067,7 @@ class EpochsPanel(QWidget):
     event.
     """
 
-    dropChannelRequested = pyqtSignal(str)
+    excludeChannelRequested = pyqtSignal(str, bool)   # Exclude channel toggle
     globalArtefactConfirmed = pyqtSignal(float, float, str)
     markArtefactRequested = pyqtSignal(str, float, float)   # ch, t0, t1
     unmarkArtefactRequested = pyqtSignal(int)                # interval id
@@ -4758,7 +5128,20 @@ class EpochsPanel(QWidget):
         self.neighbour_events = None
         # () -> {'eog': [...], 'emg': ch, 'ecg': ch}
         self.physio_provider = None
+        # channel -> the unit the file states ('µV', 'mV', ...) or None
+        self.channel_unit = None
+        # uuid -> True while an outlier mark must stay hidden (an undecided
+        # sample event in live sample review)
+        self.outlier_hidden = None
+        self._trace = None            # (ts, raw, filtered) of the epoch
+        self._clip_items = []         # (plot, item) clip marks and notes
+        self._clip_notes = {}         # 'raw' / 'filt' -> note text or None
+        self.raw_half_range = None    # applied half-ranges, µV
+        self.filt_half_range = None
+        self._filt_ytop = 1.0
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(3)
 
         # --- top strip --------------------------------------------------
         top = QHBoxLayout()
@@ -4795,9 +5178,17 @@ class EpochsPanel(QWidget):
         # --- main split: viewer (left) | marked-ranges (right) ---------
         split = QSplitter(Qt.Horizontal)
 
-        left = QWidget()
-        lc = QVBoxLayout(left)
+        # centre column (R4.11): a vertical splitter. Top pane = strip,
+        # navigation, raw and filtered traces, action rows. Bottom pane = a
+        # scroll area holding Neighbours and Physiology, so opening a group
+        # grows or scrolls the bottom pane and never squeezes the traces.
+        left = QSplitter(Qt.Vertical)
+        left.setChildrenCollapsible(False)
+        self.v_split = left
+        top_pane = QWidget()
+        lc = QVBoxLayout(top_pane)
         lc.setContentsMargins(0, 0, 0, 0)
+        lc.setSpacing(3)        # compact: the pane's minimum height matters
 
         # Hypnogram PlotWidget: kept as an attribute for headless-gate
         # compatibility, but HIDDEN per user spec — the epoch strip below
@@ -4879,12 +5270,13 @@ class EpochsPanel(QWidget):
 
         # Strip-range commit bar: "Mark N epochs as artefact" + Clear
         rangebar = QHBoxLayout()
-        rb_hint = QLabel("Shift+drag the strip to select epochs · "
-                         "Esc clears the selection")
+        rb_hint = QLabel("Shift+drag the strip to select epochs to exclude "
+                         "· Esc clears the selection")
         rb_hint.setStyleSheet("color:#6b7585;font-size:11px;")
         rangebar.addWidget(rb_hint)
         rangebar.addStretch()
-        self.mark_n_btn = QPushButton("Mark 0 epochs as artefact")
+        self.mark_n_btn = QPushButton(exclude_epochs_text(0))
+        self.mark_n_btn.setToolTip(EXCLUDE_TIME_TIP)
         self.mark_n_btn.setEnabled(False)
         self.mark_n_btn.clicked.connect(self._mark_strip_range)
         rangebar.addWidget(self.mark_n_btn)
@@ -4916,12 +5308,14 @@ class EpochsPanel(QWidget):
         self.raw_plot.hideButtons()
         self.raw_plot.setLabel('left', 'raw µV')
         self.raw_plot.setLabel('bottom', 'time (s)')
+        self.raw_plot.setMinimumHeight(self.RAW_MIN_PX)
         self.filt_plot = pg.PlotWidget()
         _theme_plot(self.filt_plot)
         self.filt_plot.setMouseEnabled(False, False)
         self.filt_plot.setMenuEnabled(False)
         self.filt_plot.hideButtons()
         self.filt_plot.setLabel('left', 'filtered µV')
+        self.filt_plot.setMinimumHeight(self.FILT_MIN_PX)
         self.filt_plot.setXLink(self.raw_plot)
         self.ticker.setXLink(self.raw_plot)
         self._sync_axis_widths()   # shared left-axis column (re-asserted per epoch)
@@ -4941,32 +5335,59 @@ class EpochsPanel(QWidget):
         self._region_programmatic = False
         self.region.sigRegionChanged.connect(self._on_region_changed)
         self.trace_note = QLabel(
-            "drag the blue brush on the trace to set an artefact range · "
-            "load an EEG file to enable the signal trace")
+            "drag the blue brush on the trace to choose a time range to "
+            "exclude · load an EEG file to enable the signal trace")
         self.trace_note.setStyleSheet("color:#6b7585;font-size:11px;")
         # header for the filtered trace: passband + its source
         self.filt_hdr = QLabel("filtered —")
         self.filt_hdr.setStyleSheet("color:#9ba6b5;font-size:11px;")
         lc.addWidget(self.raw_plot, 2)
-        lc.addWidget(self.filt_hdr)
+        # trace header: the filtered band, and Full range (off by default,
+        # not saved, reset when the epoch changes)
+        fh = QHBoxLayout()
+        fh.addWidget(self.filt_hdr)
+        fh.addStretch()
+        self.full_range_chk = QCheckBox("Full range")
+        self.full_range_chk.setFocusPolicy(Qt.NoFocus)
+        self.full_range_chk.setToolTip(
+            "Show the whole signal range of this epoch instead of the "
+            "range that keeps ordinary activity readable.")
+        self.full_range_chk.toggled.connect(self._on_full_range)
+        fh.addWidget(self.full_range_chk)
+        lc.addLayout(fh)
         lc.addWidget(self.filt_plot, 2)
         lc.addWidget(self.trace_note)
-        # neighbouring channels and EOG / EMG / ECG for the selected event
+        # neighbouring channels and EOG / EMG / ECG for the selected event:
+        # in the bottom pane's scroll area
         self.neighbours = NeighboursGroup(self)
-        lc.addWidget(self.neighbours)
         self.physio = PhysioStrip(self)
-        lc.addWidget(self.physio)
+        groups = QWidget()
+        gl = QVBoxLayout(groups)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(2)
+        gl.addWidget(self.neighbours)
+        gl.addWidget(self.physio)
+        gl.addStretch()
+        self.groups_scroll = QtWidgets.QScrollArea()
+        self.groups_scroll.setWidgetResizable(True)
+        self.groups_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.groups_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.groups_scroll.setWidget(groups)
+        # just the two header rows when both groups are closed
+        self.groups_scroll.setMinimumHeight(40)
+        self._groups_box = groups
 
         # --- action bar ------------------------------------------------
         bar = QHBoxLayout()
-        self.sel_lbl = QLabel("brush a range on the trace, then Mark")
+        self.sel_lbl = QLabel(EXCLUDE_TIME_HINT)
         self.sel_lbl.setStyleSheet("color:#6b7585;font-size:11px;")
         bar.addWidget(self.sel_lbl)
         bar.addStretch()
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.clicked.connect(self._reset_region)
         bar.addWidget(self.clear_btn)
-        self.mark_btn = QPushButton("Mark as artefact (writes XML)")
+        self.mark_btn = QPushButton("Exclude time range…")
+        self.mark_btn.setToolTip(EXCLUDE_TIME_TIP)
         self.mark_btn.setObjectName("primary")
         self.mark_btn.clicked.connect(self._mark)
         bar.addWidget(self.mark_btn)
@@ -4977,10 +5398,15 @@ class EpochsPanel(QWidget):
         clbl = QLabel("Channel-level:")
         clbl.setStyleSheet("color:#6b7585;")
         crow.addWidget(clbl)
-        self.drop_btn = QPushButton("Drop channel")
-        self.drop_btn.setObjectName("danger")
-        self.drop_btn.clicked.connect(self._drop)
-        crow.addWidget(self.drop_btn)
+        # the same Exclude channel toggle as the Channels tab's bottom bar
+        self.exclude_btn = QPushButton("Exclude channel")
+        self.exclude_btn.setCheckable(True)
+        self.exclude_btn.setToolTip(EXCLUDE_TIP)
+        self.exclude_btn.clicked.connect(self._exclude_clicked)
+        set_exclude_button(self.exclude_btn, False)
+        fit_checked_width(self.exclude_btn,
+                          ['Exclude channel', 'Include channel'])
+        crow.addWidget(self.exclude_btn)
         # Hidden: _add_global_artefact writes only a channel-scoped DB row
         # (no sidecar XML), so it has NO re-detect effect despite the dialog's
         # whole-montage claim. Misleading half-stub — hide until a real
@@ -4991,7 +5417,24 @@ class EpochsPanel(QWidget):
         crow.addWidget(self.global_btn)
         crow.addStretch()
         lc.addLayout(crow)
+        left.addWidget(top_pane)
+        left.addWidget(self.groups_scroll)
+        left.setStretchFactor(0, 1)
+        left.setStretchFactor(1, 0)
         split.addWidget(left)
+        # the saved splitter position, else the bottom pane fitted to the
+        # groups' two header rows; a group toggle refits it
+        state = _review_settings().value('review/epochs_splitter')
+        try:
+            restored = state is not None and bool(left.restoreState(state))
+        except TypeError:           # a stored value of another type
+            restored = False
+        if not restored:
+            QtCore.QTimer.singleShot(0, self._fit_groups_pane)
+        left.splitterMoved.connect(lambda *_: _review_settings().setValue(
+            'review/epochs_splitter', left.saveState()))
+        self.neighbours.toggled.connect(lambda *_: self._fit_groups_pane())
+        self.physio.toggled.connect(lambda *_: self._fit_groups_pane())
 
         # Standalone "MARKED ARTEFACT RANGES" panel removed — marked ranges
         # now show as purple-dashed overlays on the strip + a compact list
@@ -5006,6 +5449,93 @@ class EpochsPanel(QWidget):
 
         # PageUp/PageDown also page (Left/Right covered by button shortcuts)
         self.setFocusPolicy(Qt.StrongFocus)
+
+    RAW_MIN_PX, FILT_MIN_PX = 160, 110
+
+    def _fit_groups_pane(self):
+        """Size the bottom pane to what the two groups need, without taking
+        the top pane below its minimum (the raw and filtered traces keep
+        their minimum heights; the rest scrolls)."""
+        sp = self.v_split
+        total = sum(sp.sizes())
+        if total <= 0:
+            return
+        self._groups_box.layout().activate()
+        want = self._groups_box.sizeHint().height() + 4
+        top_min = sp.widget(0).minimumSizeHint().height()
+        bottom = max(24, min(want, total - top_min))
+        sp.setSizes([total - bottom, bottom])
+        _review_settings().setValue('review/epochs_splitter', sp.saveState())
+
+    # ---- trace y-range (R4.11) -----------------------------------------
+    def _on_full_range(self, _on):
+        self._apply_trace_ranges()
+        self._redraw_event_layers()
+
+    def clip_note(self, which='raw'):
+        """The clip note shown on the raw (``'raw'``) or filtered
+        (``'filt'``) trace, or ``None``."""
+        return self._clip_notes.get(which)
+
+    def _apply_trace_ranges(self):
+        """Draw the epoch's raw and filtered curves in a y-range that one
+        large event cannot flatten: centre = median, half-range = the larger
+        of the floor (50 / 10 µV) and 8 robust SDs, no larger than the
+        largest sample, rounded up to a 1-2-5 number. Samples beyond it are
+        drawn clipped at the plot edge, with a 2 px line along that edge and
+        a note; ``Full range`` shows everything."""
+        for p, it in self._clip_items:
+            p.removeItem(it)
+        self._clip_items = []
+        self._clip_notes = {'raw': None, 'filt': None}
+        if self._trace is None:
+            self.raw_half_range = self.filt_half_range = None
+            return
+        ts, raw, filt = self._trace
+        full = self.full_range_chk.isChecked()
+        warn = pg.mkPen(THEME['warn'], width=2)
+        for key, plot, x, floor, pen in (
+                ('raw', self.raw_plot, raw, _er.RAW_FLOOR,
+                 pg.mkPen((155, 166, 181), width=1)),
+                ('filt', self.filt_plot, filt, _er.FILTERED_FLOOR,
+                 pg.mkPen(QtGui.QColor(EVT_COLOR.get(self._event_type,
+                                                     '#5fd3a4')), width=1))):
+            centre, half, largest = _er.trace_range(x, floor)
+            if full:
+                half = _er.round_up_125(max(largest, half))
+            lo, hi = centre - half, centre + half
+            curve = getattr(self, f'_{key}_curve', None)
+            y = np.clip(x, lo, hi)
+            if curve is None or curve.scene() is None:
+                curve = plot.plot(ts, y, pen=pen)
+                setattr(self, f'_{key}_curve', curve)
+            else:
+                curve.setData(ts, y)
+            plot.setYRange(lo, hi, padding=0)
+            plot.enableAutoRange('y', False)
+            if key == 'raw':
+                self.raw_half_range, self._raw_ytop = half, hi
+            else:
+                self.filt_half_range, self._filt_ytop = half, hi
+            if largest > half * (1 + 1e-9):
+                for edge, mask in ((hi, x > hi), (lo, x < lo)):
+                    if mask.any():
+                        mark = pg.PlotCurveItem(
+                            ts, np.where(mask, edge, np.nan), pen=warn,
+                            connect='finite')
+                        mark.setZValue(6)
+                        plot.addItem(mark, ignoreBounds=True)
+                        self._clip_items.append((plot, mark))
+                text = _er.clip_note(half, largest)
+                note = pg.TextItem(text, color=THEME['warn'], anchor=(1, 0))
+                f = note.textItem.font()
+                f.setPixelSize(10)
+                note.setFont(f)
+                note.setPos(float(ts[-1]), hi)
+                note.setZValue(7)
+                plot.addItem(note, ignoreBounds=True)
+                self._clip_items.append((plot, note))
+                self._clip_notes[key] = text
 
     # ---- epoch table --------------------------------------------------
     def index_at(self, t):
@@ -5175,6 +5705,8 @@ class EpochsPanel(QWidget):
         idx = self._agg['idx'].to_numpy(dtype=int)
         n_ev = self._agg['n_events'].to_numpy(dtype=float)
         n_out = self._agg['n_outliers'].to_numpy(dtype=float)
+        if getattr(self, '_hide_outliers', False):
+            n_out = np.zeros_like(n_ev)     # sample review: one neutral layer
         denom = max(1.0, float(self._n_max))
         H = 1.0
         h_reg = (n_ev - n_out) / denom * H
@@ -5188,10 +5720,11 @@ class EpochsPanel(QWidget):
         self.plot.addItem(pg.BarGraphItem(
             x=centres, width=widths,
             y0=0, height=h_reg, brush=THEME['text_3'], pen=None))
-        # top (red) layer stacked on top
-        self.plot.addItem(pg.BarGraphItem(
-            x=centres, width=widths,
-            y0=h_reg, height=h_out, brush=THEME['bad'], pen=None))
+        # top (red) layer stacked on top; not drawn in sample review
+        if not getattr(self, '_hide_outliers', False):
+            self.plot.addItem(pg.BarGraphItem(
+                x=centres, width=widths,
+                y0=h_reg, height=h_out, brush=THEME['bad'], pen=None))
         # marked-artefact bands (dashed purple, transparent fill)
         edge = pg.mkPen('#a371f7', width=1, style=Qt.DashLine)
         for m in self._marked:
@@ -5234,6 +5767,10 @@ class EpochsPanel(QWidget):
     def _goto_epoch(self, i):
         n = self._n_epochs()
         i = max(0, min(int(i), n - 1))
+        if i != self._epoch and self.full_range_chk.isChecked():
+            self.full_range_chk.blockSignals(True)   # reset per epoch
+            self.full_range_chk.setChecked(False)
+            self.full_range_chk.blockSignals(False)
         self._epoch = i
         t0, t1 = self.span(i)
         # paging keeps the selection only when the event starts here
@@ -5244,15 +5781,7 @@ class EpochsPanel(QWidget):
             if s0 is None or not (t0 <= s0 < t1):
                 self._selected_uuid = None
                 dropped = True
-        dur = t1 - t0
-        stage = self._epoch_stage() or '—'
-        n_ev, n_out = self._epoch_counts(i)
-        # name the length only when it is not the standard 30 s
-        dtxt = ('' if abs(dur - DEFAULT_EPOCH_S) < 1e-6
-                else f" ({_epoch_len_text(dur)})")
-        self.epoch_lbl.setText(
-            f"Epoch {i + 1}/{n} · {_hms(t0)}–{_hms(t1)}{dtxt} · {stage} · "
-            f"{n_ev} events ({n_out} outlier{'s' if n_out != 1 else ''})")
+        self._update_epoch_label()
         # move overview + hypno current-epoch markers + strip cursor
         self._ov_marker.setRegion([t0, t1])
         self._hypno_marker.setRegion([t0, t1])
@@ -5263,6 +5792,9 @@ class EpochsPanel(QWidget):
         self.ticker.clear()
         self._event_items = []
         self._ticker_items = []
+        self._clip_items = []
+        self._raw_curve = self._filt_curve = None
+        self._trace = None
         # re-add brush region (outline-only) centred in window; guard the
         # programmatic setRegion so it stays unfilled until the user drags.
         self._region_programmatic = True
@@ -5275,11 +5807,12 @@ class EpochsPanel(QWidget):
             p.setXRange(t0, t1, padding=0)
             p.enableAutoRange('x', False)
         self.ticker.setXRange(t0, t1, padding=0)
-        # fixed filt y-range per event type (raw stays autoscaled) so the
-        # reviewer's eye doesn't recalibrate on every click.
+        # y-ranges come from the epoch's data (_apply_trace_ranges); with no
+        # signal the filtered trace keeps its nominal range
         yr = FILT_YRANGE.get(self._event_type, 50)
         self.filt_plot.setYRange(-yr, yr, padding=0)
         self.filt_plot.enableAutoRange('y', False)
+        self._filt_ytop = float(yr)
         # re-assert the shared left-axis column width (holds once the panel
         # is visible) → ticker bars align with the trace data area.
         self._sync_axis_widths()
@@ -5297,16 +5830,9 @@ class EpochsPanel(QWidget):
                 self.trace_note.setText(
                     f"signal trace · {self._channel} · "
                     f"epoch {i + 1}/{n} ({_hms(t0)}–{_hms(t1)})")
-                self.raw_plot.plot(
-                    ts, data, pen=pg.mkPen((155, 166, 181), width=1))
-                fin = data[np.isfinite(data)]
-                self._raw_ytop = float(fin.max()) if fin.size else 1.0
                 lo, hi = self._band   # sourced from event rows in set_channel
-                self.filt_plot.plot(
-                    ts, _bandpass(data, sfreq, lo, hi),
-                    pen=pg.mkPen(QtGui.QColor(
-                        EVT_COLOR.get(self._event_type, '#5fd3a4')),
-                        width=1))
+                self._trace = (ts, data, np.asarray(
+                    _bandpass(data, sfreq, lo, hi), dtype=float))
             else:
                 self.trace_note.setText(
                     f"signal trace · {self._channel} · "
@@ -5315,6 +5841,7 @@ class EpochsPanel(QWidget):
             self.trace_note.setText(
                 "load an EEG file to enable the signal trace")
             self._raw_ytop = 1.0
+        self._apply_trace_ranges()
         self._draw_window_overlays()
         self._draw_trace_events(t0, t1)
         self._draw_ticker(t0, t1)
@@ -5444,6 +5971,9 @@ class EpochsPanel(QWidget):
                                 sub['_end'].to_numpy(dtype=float),
                                 sub['_is_out'].to_numpy(dtype=bool),
                                 sub['uuid'].tolist()):
+            # live sample review: an undecided sample event is a regular
+            # band, with no outlier tint or label
+            out = bool(out) and not self._outlier_hidden(u)
             fill, pen, z, glyph, gcol = self._band_style(
                 u, out, not self._passes_filter(u))
             e = min(e, t1)
@@ -5455,7 +5985,7 @@ class EpochsPanel(QWidget):
                 self._event_items.append((p, it))
             if out:
                 # amplitude outliers keep a text label on both traces
-                ftop = float(FILT_YRANGE.get(self._event_type, 50))
+                ftop = float(self._filt_ytop)
                 for p, ytop_p in ((self.raw_plot, ytop), (self.filt_plot, ftop)):
                     lab = pg.TextItem('outlier', color=THEME['bad'],
                                       anchor=(1, 0))
@@ -5476,6 +6006,13 @@ class EpochsPanel(QWidget):
                 txt.uuid = u
                 self.raw_plot.addItem(txt, ignoreBounds=True)
                 self._event_items.append((self.raw_plot, txt))
+
+    def _outlier_hidden(self, uuid):
+        fn = self.outlier_hidden
+        try:
+            return bool(fn(uuid)) if callable(fn) else False
+        except Exception:
+            return False
 
     def band_items(self, plot=None):
         """The current band items (``LinearRegionItem``), for tests."""
@@ -5501,8 +6038,10 @@ class EpochsPanel(QWidget):
         dec = uu.map(self._decision_of)
         reviewed = dec.notna()
         grey = THEME['text_3']
-        layers = [(sub[~sub['_is_out'] & ~reviewed], 0.4, 9, grey, None),
-                  (sub[sub['_is_out'] & ~reviewed], 0.6, 14, THEME['bad'], None),
+        # an undecided sample event is a regular bar (no outlier height/red)
+        is_out = sub['_is_out'].astype(bool) & ~uu.map(self._outlier_hidden)
+        layers = [(sub[~is_out & ~reviewed], 0.4, 9, grey, None),
+                  (sub[is_out & ~reviewed], 0.6, 14, THEME['bad'], None),
                   (sub[dec == 'accept'], 0.4, 9, THEME['ok'], None),
                   (sub[dec == 'reject'], 0.4, 9, None, pg.mkPen(grey, width=1)),
                   (sub[dec == 'unsure'], 0.4, 9, THEME['warn'], None)]
@@ -5762,9 +6301,24 @@ class EpochsPanel(QWidget):
         return (self.chip_lbl.text() + ' ✕') if self.chip.isVisible() else ''
 
     def set_sample_legend(self, on):
-        """Strip legend; sample mode adds the blue ticks."""
-        self.strip_legend.setText(_er.STRIP_LEGEND + (
-            _er.STRIP_LEGEND_SAMPLE if on else ''))
+        """Sample mode on the panel: the strip legend gains the blue ticks,
+        and every amplitude-outlier indication is hidden (strip colour and
+        legend, the epoch label's outlier count, the outlier-rule line, the
+        Prev / Next outlier buttons and N / P), so an undecided sample
+        event's outlier status cannot be read off any of them. Exit sample
+        brings them back."""
+        on = bool(on)
+        self._hide_outliers = on
+        self.strip_legend.setText(
+            (_er.STRIP_LEGEND_NO_OUTLIERS + _er.STRIP_LEGEND_SAMPLE) if on
+            else _er.STRIP_LEGEND)
+        self.strip_hdr.setVisible(not on)
+        for b in (self.prev_out_btn, self.next_out_btn):
+            b.setEnabled(not on)
+            b.setToolTip(SAMPLE_HIDDEN_TIP if on else '')
+        if self._channel is not None:
+            self._render_strip()
+            self._update_epoch_label()
 
     def set_sample_marks(self, times):
         """2 px accent ticks on the epoch strip at the sample events of the
@@ -5816,7 +6370,26 @@ class EpochsPanel(QWidget):
     def _next(self):
         self._goto_epoch(self._epoch + 1)
 
+    def _update_epoch_label(self):
+        """``Epoch 3/755 · 00:01:00–00:01:30 · NREM2 · 5 events (1
+        outlier)``; the outlier count is left out in sample review."""
+        i, n = self._epoch, self._n_epochs()
+        t0, t1 = self.span(i)
+        dur = t1 - t0
+        stage = self._epoch_stage() or '—'
+        n_ev, n_out = self._epoch_counts(i)
+        # name the length only when it is not the standard 30 s
+        dtxt = ('' if abs(dur - DEFAULT_EPOCH_S) < 1e-6
+                else f" ({_epoch_len_text(dur)})")
+        outs = ('' if getattr(self, '_hide_outliers', False)
+                else f" ({n_out} outlier{'s' if n_out != 1 else ''})")
+        self.epoch_lbl.setText(
+            f"Epoch {i + 1}/{n} · {_hms(t0)}–{_hms(t1)}{dtxt} · {stage} · "
+            f"{n_ev} events{outs}")
+
     def _outlier_epoch_indices(self):
+        if getattr(self, '_hide_outliers', False):
+            return []           # N / P and the buttons do nothing
         if self._agg is None or len(self._agg) == 0:
             return []
         return self._agg.loc[self._agg['n_outliers'] > 0,
@@ -5868,13 +6441,13 @@ class EpochsPanel(QWidget):
         n = self._epochs.count_in(t0, t1)
         self.mark_n_btn.setEnabled(n > 0 and self._channel is not None)
         self.mark_n_btn.setText(
-            f"Mark {n} epoch{'' if n == 1 else 's'} as artefact")
+            exclude_epochs_text(n))
 
     def _clear_strip_range(self):
         self._strip_range.setRegion([0, 0])
         self._strip_range.hide()
         self.mark_n_btn.setEnabled(False)
-        self.mark_n_btn.setText("Mark 0 epochs as artefact")
+        self.mark_n_btn.setText(exclude_epochs_text(0))
 
     def _mark_strip_range(self):
         if self._channel is None:
@@ -5932,7 +6505,7 @@ class EpochsPanel(QWidget):
         s, e = self._sel()
         if e - s < 0.5:
             QtWidgets.QMessageBox.information(
-                self, "Mark artefact",
+                self, "Exclude time range",
                 "Brush a wider range on the trace first.")
             return
         self.markArtefactRequested.emit(self._channel, s, e)
@@ -5942,9 +6515,17 @@ class EpochsPanel(QWidget):
         if it is not None:
             self.unmarkArtefactRequested.emit(int(it.data(Qt.UserRole)))
 
-    def _drop(self):
+    def _exclude_clicked(self, checked):
         if self._channel:
-            self.dropChannelRequested.emit(self._channel)
+            self.excludeChannelRequested.emit(self._channel, bool(checked))
+        else:
+            set_exclude_button(self.exclude_btn, False)
+
+    def set_channel_excluded(self, excluded):
+        """Show the drilled channel as excluded (``Include channel``,
+        checked) or included (``Exclude channel``)."""
+        set_exclude_button(self.exclude_btn, bool(excluded),
+                           self._event_type)
 
     def _inspect_global(self):
         if self._channel is None:
@@ -5961,7 +6542,7 @@ class EpochsPanel(QWidget):
                "Marking this as a GLOBAL artefact removes this time from ALL "
                "channels at re-detection. Only confirm if the contamination "
                "is genuinely whole-head (movement/electrical), NOT a "
-               "single-channel problem (use 'Drop channel' for that).\n\n"
+               "single-channel problem (use 'Exclude channel' for that).\n\n"
                "Confirm global artefact?")
         if QtWidgets.QMessageBox.question(
                 self, "Confirm GLOBAL artefact", msg,
@@ -6036,6 +6617,63 @@ def _theme_plot(pw):
 
 # QApplication stylesheet — applied at app boot (see app.setStyleSheet near
 # main()). Symbol kept as DARK_QSS so the apply site doesn't move.
+
+
+def qss_url(path):
+    """``url("...")`` for a file path in a Qt style sheet: forward slashes,
+    the path in double quotes, backslashes and double quotes escaped, so a
+    folder name with spaces or parentheses does not break the rule."""
+    text = str(path).replace(os.sep, '/').replace('\\', '/')
+    return 'url("' + text.replace('"', '\\"') + '")'
+
+
+def checkbox_mark_qss(folder=None):
+    """Stylesheet rules that put a tick (``✓``) on a checked checkbox and a
+    dash (``–``) on a partly checked one (spec R4.2), so the state does not
+    rely on the fill colour alone.
+
+    Qt style sheets take the mark only as an image file, so two small PNGs
+    are painted once into a temporary folder (removed at exit). Needs a
+    ``QApplication``; returns ``''`` if the images cannot be written.
+    """
+    import atexit
+    import shutil
+    import tempfile
+    default = folder is None        # only the default call is cached
+    cached = getattr(checkbox_mark_qss, '_qss', None)
+    if cached is not None and default:
+        return cached
+    qss = ''
+    try:
+        if folder is None:
+            folder = tempfile.mkdtemp(prefix='tw_review_marks_')
+            atexit.register(shutil.rmtree, folder, ignore_errors=True)
+        paths = {}
+        for name, mark in (('checked', '✓'), ('partial', '–')):
+            pm = QtGui.QPixmap(26, 26)          # 2x for sharp scaling
+            pm.fill(Qt.transparent)
+            p = QtGui.QPainter(pm)
+            font = p.font()
+            font.setPixelSize(22)
+            font.setBold(True)
+            p.setFont(font)
+            p.setPen(QtGui.QColor(THEME['text']))
+            p.drawText(pm.rect(), int(Qt.AlignCenter), mark)
+            p.end()
+            path = os.path.join(folder, name + '.png')
+            if not pm.save(path, 'PNG'):
+                raise OSError(path)
+            paths[name] = qss_url(path)
+        qss = (f"\nQCheckBox::indicator:checked "
+               f"{{ image: {paths['checked']}; }}"
+               f"\nQCheckBox::indicator:indeterminate "
+               f"{{ image: {paths['partial']}; }}\n")
+    except Exception:
+        qss = ''
+    if default:
+        checkbox_mark_qss._qss = qss
+    return qss
+
 DARK_QSS = f"""
 QWidget {{
     background: {THEME['bg_window']};
@@ -6117,6 +6755,29 @@ QPushButton#primary {{
     color: white;
     border-color: #4477b3;
 }}
+QPushButton#danger {{
+    color: #f0a59a;
+    border-color: {THEME['bad']};
+}}
+QPushButton#danger:disabled {{
+    color: {THEME['text_3']};
+    border-color: {THEME['border_strong']};
+}}
+/* Every checkable button (spec R4.2): checked = soft accent fill, 1 px
+   accent border, weight 600, so the state reads without colour. Placed
+   after #primary / #danger so the checked look wins. */
+QPushButton:checked, QToolButton:checked {{
+    background: {THEME['accent_soft']};
+    border: 1px solid {THEME['accent']};
+    color: {THEME['text']};
+    font-weight: 600;
+}}
+QPushButton:checked:hover, QToolButton:checked:hover {{ background: #36557d; }}
+QPushButton:checked:disabled, QToolButton:checked:disabled {{
+    border: 1px solid {THEME['text_3']};
+    color: {THEME['text_2']};
+    font-weight: 600;
+}}
 QComboBox, QLineEdit, QSpinBox {{
     background: #2a2a2a;
     color: {THEME['text']};
@@ -6137,7 +6798,7 @@ QCheckBox::indicator {{
     border: 1px solid {THEME['border_strong']};
     border-radius: 2px;
 }}
-QCheckBox::indicator:checked {{
+QCheckBox::indicator:checked, QCheckBox::indicator:indeterminate {{
     background: {THEME['accent']};
     border-color: {THEME['accent']};
 }}
@@ -6694,6 +7355,12 @@ class EventReviewGUI(QMainWindow):
             a.triggered.connect(slot)
             m_file.addAction(a)
         m_file.addSeparator()
+        a = QAction('Export re-run package…', self)
+        a.setStatusTip(RERUN_STATUS_TIP)
+        a.triggered.connect(self.export_rerun_package)
+        m_file.addAction(a)
+        self.act_export_rerun = a
+        m_file.addSeparator()
         a = QAction('Exit', self)
         a.triggered.connect(self.close)
         m_file.addAction(a)
@@ -6748,26 +7415,28 @@ class EventReviewGUI(QMainWindow):
         a = QAction('Refresh QC dashboard', self)
         a.triggered.connect(self.refresh_qc_dashboard)
         m_an.addAction(a)
-        a = QAction('Build re-detect request…', self)
-        a.triggered.connect(self.open_redetect_modal)
-        m_an.addAction(a)
 
         m_exp = mb.addMenu('E&xport')
         for text, slot in (
                 ('Export QC report…', self.export_qc_summary),
                 (None, None),
-                ('Export Re-run Package…', self.export_rerun_package),
+                ('Export re-run package…', self.export_rerun_package),
                 ('Export Figure…', self.export_figure)):
             if text is None:
                 m_exp.addSeparator()
                 continue
             a = QAction(text, self)
+            if slot == self.export_rerun_package:
+                a.setStatusTip(RERUN_STATUS_TIP)
             a.triggered.connect(slot)
             m_exp.addAction(a)
 
         m_help = mb.addMenu('&Help')
         a = QAction('Keyboard shortcuts…', self)
         a.triggered.connect(self.open_cheat_sheet)
+        m_help.addAction(a)
+        a = QAction(_er.HELP_TITLE, self)
+        a.triggered.connect(self.open_event_help)
         m_help.addAction(a)
         a = QAction('Design notes', self)
         a.triggered.connect(self.open_design_notes)
@@ -6874,6 +7543,7 @@ class EventReviewGUI(QMainWindow):
         # --- global RIGHT dock: topography & selected-channel detail ---
         self.detail_dock = QDockWidget("Topography & detail", self)
         self.detail_dock.setObjectName("DetailDock")
+        self.detail_dock.setMinimumWidth(300)
         self.detail_dock.setFeatures(QDockWidget.DockWidgetMovable |
                                      QDockWidget.DockWidgetFloatable)
         self.detail_dock_w = ChannelDetailDock()
@@ -6890,7 +7560,8 @@ class EventReviewGUI(QMainWindow):
         self.detail_dock_w.unmarkArtefactRequested.connect(
             self._unmark_artefact)
         self.detail_dock_w.openInEpochs.connect(self._open_in_epochs)
-        self.detail_dock_w.dropChannelRequested.connect(self._drop_from_channels)
+        self.detail_dock_w.dropChannelRequested.connect(
+            lambda ch: self._set_channel_excluded(ch, True))
         dock_scroll = QtWidgets.QScrollArea()
         dock_scroll.setWidgetResizable(True)
         dock_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -6907,21 +7578,21 @@ class EventReviewGUI(QMainWindow):
         evp.nextClicked.connect(lambda: self._nav_unreviewed(+1))
         evp.auto_chk.setChecked(self._auto_advance)
         evp.autoAdvanceToggled.connect(self._on_auto_advance)
+        evp.helpRequested.connect(self.open_event_help)
 
         self.qc_widget.channelSelected.connect(self.on_qc_channel_selected)
         self.qc_widget.requestDrill.connect(self._open_in_epochs)
-        self.qc_widget.requestDrop.connect(self._drop_from_channels)
+        self.qc_widget.requestExclude.connect(self._set_channel_excluded)
+        self.qc_widget.exitSampleRequested.connect(self._exit_sample)
+        self.qc_widget.exportRerunRequested.connect(self.export_rerun_package)
         self.qc_widget.stageChanged.connect(self._on_check_stage)
-        self.qc_widget.verdictChanged.connect(self.on_qc_verdict_changed)
         self.qc_widget.addToRedetect.connect(self.on_qc_add_redetect)
-        self.qc_widget.unmarkArtefact.connect(self._qc_unmark_artefact)
-        self.qc_widget.removeFromRedetect.connect(self._qc_remove_redetect)
         self.qc_widget.requestQueueAllHard.connect(self.on_qc_queue_all_hard)
-        self.qc_widget.requestBuildRedetect.connect(self.open_redetect_modal)
         self.qc_widget.loadMontageRequested.connect(self.on_load_montage)
         self.qc_widget.evt_combo.currentTextChanged.connect(
             lambda *_: self._refresh_all())
-        self.epochs_panel.dropChannelRequested.connect(self._drop_channel)
+        self.epochs_panel.excludeChannelRequested.connect(
+            self._set_channel_excluded)
         self.epochs_panel.globalArtefactConfirmed.connect(self._add_global_artefact)
         self.epochs_panel.markArtefactRequested.connect(
             self._mark_channel_artefact)
@@ -6954,6 +7625,8 @@ class EventReviewGUI(QMainWindow):
         self.epochs_panel.read_channels = self._read_eeg_channels
         self.epochs_panel.neighbour_provider = self._neighbour_provider
         self.epochs_panel.neighbour_events = self._neighbour_events
+        self.epochs_panel.channel_unit = self._channel_unit
+        self.epochs_panel.outlier_hidden = self._outlier_marks_hidden
         self._review_qc_sidecar = None
 
         # Always land on the Channels (QC) dashboard — it is the triage entry
@@ -7133,9 +7806,9 @@ class EventReviewGUI(QMainWindow):
                 _density_logger.warning(
                     "Density is unavailable: the artefact-free denominator "
                     "could not be computed from the scoring, and there are "
-                    "%d reviewer artefact mark(s) pending. The denominator "
+                    "%d excluded time range(s) pending. The denominator "
                     "stored by the detection run is not used here because it "
-                    "predates those marks and would show a density that "
+                    "predates those ranges and would show a density that "
                     "ignores them. The density column stays blank until the "
                     "scoring loads cleanly.", len(extra_intervals))
                 return None
@@ -7401,6 +8074,9 @@ class EventReviewGUI(QMainWindow):
             return
         all_verdicts = self.db.get_channel_verdicts()   # queried once per refresh
         verdicts = {ch: v for (ch, et), v in all_verdicts.items() if et == evt}
+        excluded = {str(c) for c, v in verdicts.items()
+                    if v in EXCLUDED_VERDICTS}
+        self._load_redetect_queue()
         intervals = self.db.get_qc_artefact_intervals()
         ivs = list(zip(intervals['start_time'], intervals['end_time'])) \
             if len(intervals) else None
@@ -7417,12 +8093,15 @@ class EventReviewGUI(QMainWindow):
         qc = compute_channel_qc(df, scored_minutes=density_min,
                                 artefact_intervals=ivs,
                                 coords=self.detail_dock_w._coords,
+                                excluded=excluded,
                                 **self._qc_thresholds)
         # population checks: cached per run, else read in the background
         qc = self._apply_population(qc, evt, methods, freq_band)
         self._qc_events_df = df
         self._qc_df = qc
         self.qc_widget.set_data(qc, df, verdicts, self._redetect_queue)
+        self.epochs_panel.set_channel_excluded(
+            str(self.epochs_panel._channel) in excluded)
         self.detail_dock_w.set_event_type(evt)
         # Name the denominator next to the number it defines. _qc_density_minutes
         # has just resolved the set (and whether it was read or assumed), so
@@ -7437,7 +8116,7 @@ class EventReviewGUI(QMainWindow):
             self._global_worst_rows(df, evt), event_type=evt)
         # filter-dock decorations: ⚑ channel-artefact verdicts, ↻ queued
         artefact_set = {c for (c, e2), v in all_verdicts.items()
-                        if v in ('drop', 'channel_artefact')}
+                        if v in EXCLUDED_VERDICTS}
         self.filter_dock.decorate_channels(artefact_set, self._redetect_queue,
                                            interp_set=self._eeg_channel_info()[2])
         self._refresh_event_counts()
@@ -7445,11 +8124,9 @@ class EventReviewGUI(QMainWindow):
         self._refresh_toolbar_state()
         n_hard = int((qc['flag'] == 'hard').sum()) if len(qc) else 0
         n_soft = int((qc['flag'] == 'soft').sum()) if len(qc) else 0
-        n_marked = len({str(r.get('evidence_channel'))
-                        for _, r in intervals.iterrows()}) if len(intervals) else 0
         self.status_bar.showMessage(
             f"{len(qc)} channels · {n_hard} hard · {n_soft} soft · "
-            f"{n_marked} marked artefact · {evt}")
+            f"{len(excluded)} excluded · {evt}")
 
     def _refresh_event_counts(self):
         """Per-event-type counts for the filter-dock swatches (one GROUP BY
@@ -7586,6 +8263,7 @@ class EventReviewGUI(QMainWindow):
             ch, sl, df, event_type=evt,
             epochs=self._epoch_table(), trec=self._recording_seconds(),
             marked=self._marked_for(ch), reviews=self._reviews_for_slice(sl))
+        self.epochs_panel.set_channel_excluded(str(ch) in self._excluded_now(evt))
         if switch_tab:
             self.tabs.setCurrentIndex(1)
         # keys (]/[, A/R/U) reach the panel without a click on the trace
@@ -7721,17 +8399,18 @@ class EventReviewGUI(QMainWindow):
             thresholds=thr, figures=figs, figure_state=state,
             interpolated=interp, outlier_thr=ep._amp_thr, amp_col=ep._amp_col,
             ptp_units_uv=self.db.ptp_units_microvolts() if self.db else False,
-            figure_note=note)
+            figure_note=note, outlier_n=ep._amp_n)
         uuid = str(row.get('uuid'))
         hidden = self._labels_hidden(uuid)
         if hidden:
             rows = _er.hide_flag_words(rows)
-        srow = self._sample_row_for(uuid)
-        if srow is not None:
-            rows = [srow] + rows
         panel.set_grid(evt)
         i, n = ep.epoch_events_order()
         panel.set_header(f"EVENT {i} OF {n} IN EPOCH" if i else 'EVENT')
+        panel.set_event_line(
+            _er.event_header_line(row, interp),
+            _er.event_header_tooltip(row, run, row.get('run_id')))
+        panel.set_sample_line(*self._sample_line_for(uuid))
         panel.set_hidden(hidden)
         panel.set_rows(rows)
         panel.set_note(_er.LOAD_EEG_NOTE if state == 'missing' else '')
@@ -7964,6 +8643,38 @@ class EventReviewGUI(QMainWindow):
                  g.center().y() - dlg.height() // 2)
         self._cheat_sheet = dlg
         dlg.show()
+        return dlg
+
+    def open_event_help(self):
+        """``What do these mean?`` / Help ▸ What the event figures mean: a
+        small non-modal dialog. Its text is built into the GUI, so it needs
+        no network and no docs folder; the link below it opens the published
+        how-to in the browser."""
+        dlg = getattr(self, '_event_help', None)
+        if dlg is None:
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle(_er.HELP_TITLE)
+            dlg.setModal(False)
+            lay = QVBoxLayout(dlg)
+            body = QLabel(_er.HELP_BODY)
+            body.setWordWrap(True)
+            body.setTextFormat(Qt.PlainText)
+            body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            body.setMinimumWidth(460)
+            lay.addWidget(body)
+            link = QLabel(f"<a href='{_er.HELP_GUIDE_URL}' "
+                          f"style='color:{THEME['accent']}'>"
+                          f"{_er.HELP_GUIDE_TEXT}</a>")
+            link.setTextFormat(Qt.RichText)
+            link.setOpenExternalLinks(True)
+            lay.addWidget(link)
+            bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+            bb.rejected.connect(dlg.close)
+            lay.addWidget(bb)
+            dlg.body_lbl, dlg.link_lbl = body, link
+            self._event_help = dlg
+        dlg.show()
+        dlg.raise_()
         return dlg
 
     def review_shortcuts_enabled(self):
@@ -8481,8 +9192,7 @@ class EventReviewGUI(QMainWindow):
         # channel flags out of the dock while the sample is reviewed
         dock = self.detail_dock_w
         dock.set_sample_mode(on)
-        self.qc_widget.set_sample_mode(
-            on, channel_order=list(getattr(dock, '_coords', None) or []))
+        self.qc_widget.set_sample_mode(on)
         qc = getattr(self, '_qc_df', None)
         if qc is not None:
             self._refresh_flagged(qc, self.qc_widget.current_event_type())
@@ -8491,6 +9201,9 @@ class EventReviewGUI(QMainWindow):
         if ch:
             self._update_check_line(ch)
         self._update_sample_marks()
+        if self.epochs_panel._channel is not None:
+            # outlier marks of undecided sample events appear / disappear
+            self.epochs_panel._redraw_event_layers()
         self._refresh_position_segment()
 
     def _update_sample_marks(self):
@@ -8691,29 +9404,37 @@ class EventReviewGUI(QMainWindow):
         mine = self.epochs_panel._reviews.get(uuid)
         return not mine or mine[0] not in ('accept', 'reject')
 
-    def _sample_row_for(self, uuid):
-        """The Event panel's ``sample`` row (sample mode, sample events).
+    def _outlier_marks_hidden(self, uuid):
+        """Live sample review: no event shows an outlier tint or label on
+        the traces or the ticker, sample event or not, until this reviewer
+        has accepted or rejected that event (then its own band may show
+        it). Outside sample mode nothing is hidden."""
+        if not self._sample_active:
+            return False
+        mine = self.epochs_panel._reviews.get(uuid)
+        return not mine or mine[0] not in ('accept', 'reject')
 
-        Before this reviewer's accept / reject it reads only ``event i of N``
-        (no stratum, no flags, no weight: within a cell flagged events carry
-        a lower weight, so the weight would give the flag away). After
-        accept / reject: region · stage · flags, the position as a
-        sub-line, and the weight tooltip. ``is_shared`` never.
+    def _sample_line_for(self, uuid):
+        """``(text, tooltip)`` of the Event panel's sample line (sample mode,
+        sample events; ``('', '')`` otherwise).
+
+        ``Sample event i of N · region · stage``. The `` · flagged: …`` /
+        `` · not flagged`` part and the sampling-weight tooltip appear only
+        after this reviewer's accept or reject: within a cell flagged events
+        carry a lower weight, so the weight would give the flag away.
+        ``is_shared`` never.
         """
         if not self._sample_active or self._sample is None:
-            return None
+            return '', ''
         srow = self._sample['rows'].get(uuid)
         if srow is None:
-            return None
-        pos = (f"event {self._sample['pos'][uuid] + 1} of "
-               f"{len(self._sample['order'])}")
-        if self._labels_hidden(uuid):
-            return {'key': 'sample', 'label': 'Sample', 'value': pos,
-                    'sub': [], 'tooltip': '', 'level': None}
-        return {'key': 'sample', 'label': 'Sample',
-                'value': _sr.stratum_text(srow), 'sub': [pos],
-                'tooltip': _sr.weight_tooltip(srow.get('weight')),
-                'level': None}
+            return '', ''
+        hidden = self._labels_hidden(uuid)
+        text = (f"Sample event {self._sample['pos'][uuid] + 1} of "
+                f"{len(self._sample['order'])} · "
+                f"{_sr.stratum_text(srow, hide_flags=hidden)}")
+        return text, ('' if hidden
+                      else _sr.weight_tooltip(srow.get('weight')))
 
     # ---- draw dialog and report ------------------------------------------
     def _update_review_menu(self):
@@ -8900,7 +9621,10 @@ class EventReviewGUI(QMainWindow):
             self.qc_widget.set_checks_context(
                 False, event_type=evt, pending=True,
                 footer=_er.footer_text(self._qc_thresholds['hard_z'],
-                                       self._qc_thresholds['soft_z'], evt))
+                                       self._qc_thresholds['soft_z'], evt),
+                footer_tip=_er.footer_tooltip(self._qc_thresholds['hard_z'],
+                                              self._qc_thresholds['soft_z'],
+                                              evt))
             self.detail_dock_w.set_checks_context(
                 True, event_type=evt, caption='Reading event checks…')
             self.detail_dock_w.set_check_state({}, (), None)
@@ -8928,7 +9652,7 @@ class EventReviewGUI(QMainWindow):
         pop, med = _er.population_flags(
             src, hard_z=self._qc_thresholds['hard_z'],
             soft_z=self._qc_thresholds['soft_z'], event_type=evt,
-            ratio_allowed=ratio)
+            ratio_allowed=ratio, excluded=self._excluded_now(evt))
         # the check frame's own event count must not replace the table's
         # Events column (which follows the Filters dock, not the Stage toggle)
         pop_m = pop.rename(columns={'n': 'n_checks'})
@@ -8958,7 +9682,10 @@ class EventReviewGUI(QMainWindow):
         self.qc_widget.set_checks_context(
             recorded, method, ratio, evt, tips,
             figures_off=bool(res.get('figures_off')), medians=med,
-            bounds=bounds, footer=footer)
+            bounds=bounds, footer=footer,
+            footer_tip=_er.footer_tooltip(self._qc_thresholds['hard_z'],
+                                          self._qc_thresholds['soft_z'],
+                                          evt, ratio))
         caption = ''
         if not recorded:
             caption = (_er.FIGURES_OFF_RUN if res.get('figures_off')
@@ -8990,7 +9717,7 @@ class EventReviewGUI(QMainWindow):
         except Exception:
             verdicts = dict(self.qc_widget._verdicts)
         dropped = {c for c, v in verdicts.items()
-                   if v in ('drop', 'channel_artefact')}
+                   if v in EXCLUDED_VERDICTS}
         bounds = view['bounds']
         min_dur = bounds[0] if bounds else None
         rows, flags = [], {}
@@ -9110,14 +9837,6 @@ class EventReviewGUI(QMainWindow):
             self.on_qc_drill(ch, switch_tab=True)
             return
         self._on_check_link(ch, col)
-
-    def _drop_from_channels(self, ch):
-        """Drop channel (bottom bar / flagged list): the Epochs tab's action,
-        with the spec's status line."""
-        evt = self.qc_widget.current_event_type()
-        self._drop_channel(ch)
-        self.status_bar.showMessage(
-            f"Dropped {ch} from {_er.EVENT_PLURAL.get(evt, evt)}.")
 
     def _on_check_link(self, ch, col):
         """Dock phrase link: drill the channel and filter its events to
@@ -9319,14 +10038,16 @@ class EventReviewGUI(QMainWindow):
             return
         self.db.add_qc_artefact_interval(s, e, ch, self.reviewer_name)
         ok = self._write_review_qc_sidecar()
-        self.status_bar.showMessage(
-            f"{ch}: artefact {_hms(s)}–{_hms(e)} marked"
-            + (f" · sidecar {os.path.basename(self._review_qc_sidecar)}"
-               if ok else " · (DB only — no XML loaded)"))
         self.refresh_qc_dashboard()
         self.on_qc_drill(ch, switch_tab=False)
         self.detail_dock_w.set_marked(self._marked_for(ch),
                                       channel=ch, total=self._total_marked())
+        # after the refresh, whose own summary would replace it
+        self.status_bar.showMessage(
+            f"Excluded {_hms(s)}–{_hms(e)} from analysis for every channel "
+            f"(applied at re-detection)."
+            + ("" if ok else " No annotation file is loaded, so it is saved "
+               "in the database only."))
 
     def _unmark_artefact(self, interval_id):
         if self.db is None:
@@ -9339,7 +10060,8 @@ class EventReviewGUI(QMainWindow):
             self.detail_dock_w.set_marked(
                 self._marked_for(self._qc_selected_channel),
                 channel=self._qc_selected_channel, total=self._total_marked())
-        self.status_bar.showMessage(f"Artefact range {interval_id} unmarked")
+        self.status_bar.showMessage(
+            f"Excluded time range {interval_id} is included again.")
 
     def _write_review_qc_sidecar(self):
         """Write all qc_artefact_intervals into a SIDECAR Wonambi XML whose
@@ -9389,57 +10111,63 @@ class EventReviewGUI(QMainWindow):
 
 
 
-    def on_qc_verdict_changed(self):
-        ch, v = getattr(self.qc_widget, 'verdictChangedTo', (None, None))
-        if ch is None:
+    def _excluded_now(self, evt=None):
+        """Channels excluded for the event type in view (``verdict`` 'drop',
+        or 'channel_artefact' from an older version)."""
+        if self.db is None:
+            return set()
+        evt = evt or self.qc_widget.current_event_type()
+        return {str(c) for (c, et), v in self.db.get_channel_verdicts().items()
+                if et == evt and v in EXCLUDED_VERDICTS}
+
+    def _set_channel_excluded(self, ch, on):
+        """The one Exclude channel action (Channels bottom bar, flagged
+        list, Epochs tab): writes ``verdict='drop'`` or ``''``. An excluded
+        channel leaves the montage flag statistics, the topography, review
+        samples and the re-run export; its events stay in the database."""
+        if self.db is None or not ch:
             return
         evt = self.qc_widget.current_event_type()
-        self.db.set_channel_verdict(ch, evt, v, self.reviewer_name)
+        self.db.set_channel_verdict(str(ch), evt, 'drop' if on else '',
+                                    self.reviewer_name)
+        ev = _er.EVENT_PLURAL.get(evt, evt)
+        self.refresh_qc_dashboard()
         self.status_bar.showMessage(
-            f"{ch}: {'artefact cleared' if v == '' else v} ({evt})")
-        self.refresh_qc_dashboard()
+            f"Excluded {ch} from {ev}: left out of review samples, the "
+            f"re-run export, the flag statistics and the topography." if on
+            else f"Included {ch} again.")
 
-    def _qc_unmark_artefact(self, ch):
-        """Tray chip ✕ (or button): clear the channel-artefact verdict back to
-        '' (untriaged). No sidecar XML is written for channel marks, so there
-        is nothing in XML to reverse. Single refresh updates State + tray +
-        counts + filter-dock glyphs."""
-        evt = self.qc_widget.current_event_type()
-        self.db.set_channel_verdict(str(ch), evt, '', self.reviewer_name)
-        self.status_bar.showMessage(f"{ch}: artefact cleared ({evt})")
-        self.refresh_qc_dashboard()
+    def _load_redetect_queue(self):
+        """The re-detect queue as stored in ``channel_qc`` (kept across
+        sessions)."""
+        self._redetect_queue = (self.db.get_redetect_queue()
+                                if self.db is not None else set())
+        return self._redetect_queue
 
-    def _qc_remove_redetect(self, ch):
-        """Tray chip ✕: drop the channel from the re-detect queue."""
-        self._redetect_queue.discard(str(ch))
+    def _queue_message(self):
         self.status_bar.showMessage(
             f"Re-detect queue: {len(self._redetect_queue)} channel(s)")
-        self.refresh_qc_dashboard()
 
     def on_qc_add_redetect(self, ch):
-        if ch in self._redetect_queue:
-            self._redetect_queue.discard(ch)
-        else:
-            self._redetect_queue.add(ch)
-        self.status_bar.showMessage(
-            f"Re-detect queue: {len(self._redetect_queue)} channel(s)")
+        """Add the channel to the stored re-detect queue, or take it off."""
+        if self.db is None or not ch:
+            return
+        ch = str(ch)
+        self.db.set_channel_redetect(
+            ch, ch not in self._load_redetect_queue(),
+            self.qc_widget.current_event_type())
         self.refresh_qc_dashboard()
+        self._queue_message()
 
     def on_qc_queue_all_hard(self):
         df = getattr(self, '_qc_df', None)
-        if df is None or len(df) == 0:
+        if df is None or len(df) == 0 or self.db is None:
             return
-        for ch in df.loc[df['flag'] == 'hard', 'channel']:
-            self._redetect_queue.add(str(ch))
-        self.status_bar.showMessage(
-            f"Re-detect queue: {len(self._redetect_queue)} channel(s)")
-        self.refresh_qc_dashboard()
-
-    def _drop_channel(self, ch):
         evt = self.qc_widget.current_event_type()
-        self.db.set_channel_verdict(ch, evt, 'drop', self.reviewer_name)
-        self.status_bar.showMessage(f"{ch} dropped ({evt})")
+        for ch in df.loc[df['flag'] == 'hard', 'channel']:
+            self.db.set_channel_redetect(str(ch), True, evt)
         self.refresh_qc_dashboard()
+        self._queue_message()
 
     def _add_global_artefact(self, s, e, ch):
         self.db.add_qc_artefact_interval(s, e, ch, self.reviewer_name)
@@ -9556,15 +10284,17 @@ class EventReviewGUI(QMainWindow):
             "<li><b>Channels (QC)</b> — sortable per-channel aggregates + "
             "robust-outlier flags; the landing triage surface.</li>"
             "<li><b>Epochs</b> — per-channel amplitude strip + raw/filtered "
-            "trace; brush a time range to mark an artefact (written to a "
+            "trace; brush a time range and use \"Exclude time range…\" to "
+            "leave it out of analysis for every channel (written to a "
             "sidecar XML under rater <code>review-qc</code>; original backed "
             "up to <code>*.xml.bak</code>).</li>"
             "</ul>"
             "<p>The right dock carries a live scalp topography of the active "
             "QC metric (from the EEGLAB <code>.set</code> chanlocs) and a "
             "read-only worst-events list across all channels — click a row to "
-            "drill into that channel and epoch. Re-detection is a "
-            "one-directional JSON hand-off to turtlewave_gui — this GUI never "
+            "drill into that channel and epoch. Re-detection: queue "
+            "channels, then File ▸ Export re-run package… writes the channel "
+            "list that examples/rerun_detection.py reads. This GUI never "
             "runs detection.</p>")
         lay.addWidget(te)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
@@ -9580,7 +10310,7 @@ class EventReviewGUI(QMainWindow):
         if verdicts is None:
             verdicts = self.db.get_channel_verdicts() if self.db else {}
         return {str(c) for (c, _e), v in verdicts.items()
-                if v in ('drop', 'channel_artefact')}
+                if v in EXCLUDED_VERDICTS}
 
     def _redetect_queue_channels(self, verdicts=None):
         """The reviewer-selected re-detect queue as a sorted, deduped list,
@@ -9591,126 +10321,8 @@ class EventReviewGUI(QMainWindow):
         dropped = self._dropped_channels(verdicts)
         return sorted(set(map(str, self._redetect_queue)) - dropped)
 
-    def _build_redetect_request(self):
-        """Assemble the schema-v1 re-detect request dict."""
-        verdicts = self.db.get_channel_verdicts() if self.db else {}
-        # Queue-minus-dropped: what the driver actually re-detects.
-        redetect = self._redetect_queue_channels(verdicts)
-        # exclude_channels stays queue ∪ drops (dropped channels ARE excluded).
-        excl = sorted(set(map(str, self._redetect_queue)) |
-                      self._dropped_channels(verdicts))
-        epochs = []
-        if self.db is not None:
-            try:
-                iv = self.db.get_qc_artefact_intervals()
-                for _, r in iv.iterrows():
-                    epochs.append(dict(
-                        channel=str(r.get('evidence_channel') or '(all)'),
-                        t0=round(float(r['start_time']), 1),
-                        t1=round(float(r['end_time']), 1)))
-            except Exception:
-                pass
-        evt = self.qc_widget.current_event_type()
-        fb = (0.5, 2.0)
-        if evt == 'spindle':
-            fb = (11.0, 16.0)
-        elif evt == 'k_complex':
-            fb = (0.5, 1.5)
-        return {
-            'schema_version': 1,
-            'subject': self.subject,
-            'source_db': getattr(self.db, 'db_path', None),
-            'source_xml': getattr(self, 'annot_file_path', None),
-            'eeg_file': getattr(self, 'eeg_file_path', None),
-            'method': (self.method_combo.currentText()
-                       if self.method_combo.currentIndex() > 0
-                       else 'Wamsley2012'),
-            'freq_band': list(fb),
-            'stages': ['NREM2', 'NREM3'],
-            'event_types': [evt],
-            'exclude_channels': excl,
-            'redetect_channels': redetect,
-            'exclude_epochs': epochs,
-            'requested_at': datetime.now().isoformat(timespec='seconds'),
-            'requested_by': self.reviewer_name,
-        }
-
-    def open_redetect_modal(self):
-        """Full JSON-preview modal: Save writes redetect_request.json beside
-        the XML for turtlewave_gui to pick up (one-directional hand-off; this
-        GUI never runs detection)."""
-        if self.db is None:
-            QtWidgets.QMessageBox.warning(
-                self, "Re-detect", "Load a database first.")
-            return
-        import json
-        req = self._build_redetect_request()
-        dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("Build re-detect request")
-        dlg.resize(640, 560)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel(
-            "This GUI does not run detection. It writes "
-            "<b>redetect_request.json</b> beside the XML; turtlewave_gui "
-            "picks it up."))
-        lay.addWidget(_h_label(
-            f"CHANNELS TO EXCLUDE / RE-DETECT ({len(req['exclude_channels'])})"))
-        chips = QLabel(", ".join(req['exclude_channels']) or "(none)")
-        chips.setWordWrap(True)
-        chips.setStyleSheet("font-family:'IBM Plex Mono',monospace;"
-                            "color:#d6dee8;")
-        lay.addWidget(chips)
-        lay.addWidget(_h_label(
-            f"SELECTED FOR RE-DETECT ({len(req['redetect_channels'])})"))
-        rd_chips = QLabel(", ".join(req['redetect_channels'])
-                          or "(nothing queued)")
-        rd_chips.setWordWrap(True)
-        rd_chips.setStyleSheet("font-family:'IBM Plex Mono',monospace;"
-                               "color:#d6dee8;")
-        lay.addWidget(rd_chips)
-        lay.addWidget(_h_label(
-            f"ARTEFACT EPOCH RANGES ({len(req['exclude_epochs'])})"))
-        lay.addWidget(_h_label("JSON PREVIEW"))
-        te = QTextEdit()
-        te.setReadOnly(True)
-        te.setStyleSheet("font-family:'IBM Plex Mono',monospace;"
-                         "font-size:11px;")
-        te.setPlainText(json.dumps(req, indent=2))
-        lay.addWidget(te)
-        bb = QtWidgets.QDialogButtonBox()
-        cancel = bb.addButton("Cancel", QtWidgets.QDialogButtonBox.RejectRole)
-        save = bb.addButton("Save request",
-                            QtWidgets.QDialogButtonBox.AcceptRole)
-        save.setObjectName("primary")
-        cancel.clicked.connect(dlg.reject)
-        save.clicked.connect(
-            lambda: (self._write_redetect_json(req), dlg.accept()))
-        lay.addWidget(bb)
-        dlg.exec_()
-
-    def _write_redetect_json(self, req):
-        """Write redetect_request.json beside the XML (or the DB). Purely a
-        one-directional hand-off — turtlewave_gui picks the file up; this GUI
-        never launches it."""
-        import json
-        base = (os.path.dirname(self.annot_file_path)
-                if getattr(self, 'annot_file_path', None)
-                else (os.path.dirname(self.db.db_path)
-                      if self.db else os.getcwd()))
-        out = os.path.join(base, "redetect_request.json")
-        try:
-            with open(out, 'w', encoding='utf-8') as fh:
-                json.dump(req, fh, indent=2)
-        except Exception as ex:
-            QtWidgets.QMessageBox.critical(self, "Re-detect", str(ex))
-            return
-        self.status_bar.showMessage(f"Re-detect request written: {out}")
-
-    
-    
     def setup_status_bar(self):
-        """Segmented status bar: subject · hard · marked · ranges · queue ·
-        build re-detect."""
+        """Segmented status bar: reviewer · position · save line."""
         self.status_bar = self.statusBar()
         # first permanent segment: who decisions are saved under
         self.seg_reviewer = QPushButton("Reviewer: not set")
@@ -9734,12 +10346,9 @@ class EventReviewGUI(QMainWindow):
         # tab shows the same facts in its header and bottom bar)
         self.seg_subject = _seg("—", False)
         self.seg_hard = _seg("0 hard outliers", False)
-        self.seg_marked = _seg("0 channels marked artefact", False)
-        self.seg_ranges = _seg("0 artefact ranges", False)
+        self.seg_marked = _seg("0 channels excluded", False)
+        self.seg_ranges = _seg("0 excluded time ranges", False)
         self.seg_queue = _seg("re-detect queue: 0", False)
-        self.btn_build_redetect = QPushButton("Build re-detect request…")
-        self.btn_build_redetect.setEnabled(False)
-        self.btn_build_redetect.clicked.connect(self.open_redetect_modal)
         # (reviewer name is provenance-only — still written to the DB, never
         # surfaced in the UI.)
         # legacy sinks (open_database / review_event still call .setText on
@@ -9758,9 +10367,9 @@ class EventReviewGUI(QMainWindow):
         if self.db is not None:
             marked = len({c for (c, e2), v in
                           self.db.get_channel_verdicts().items()
-                          if v in ('drop', 'channel_artefact')})
+                          if v in EXCLUDED_VERDICTS})
         self.seg_marked.setText(
-            f"{marked} channel{'' if marked == 1 else 's'} marked artefact")
+            f"{marked} channel{'' if marked == 1 else 's'} excluded")
         nranges = 0
         if self.db is not None:
             try:
@@ -9768,10 +10377,9 @@ class EventReviewGUI(QMainWindow):
             except Exception:
                 nranges = 0
         self.seg_ranges.setText(
-            f"{nranges} artefact range{'' if nranges == 1 else 's'}")
+            f"{nranges} excluded time range{'' if nranges == 1 else 's'}")
         nq = len(self._redetect_queue)
         self.seg_queue.setText(f"re-detect queue: {nq}")
-        self.btn_build_redetect.setEnabled(nq > 0 or nranges > 0)
         self._refresh_position_segment()
 
     def _refresh_position_segment(self):
@@ -9780,6 +10388,11 @@ class EventReviewGUI(QMainWindow):
             return
         ep = self.epochs_panel
         on_epochs = self.tabs.currentIndex() == 1
+        if hasattr(self, 'lbl_detector'):
+            text, tip = _er.detector_label(
+                self._pop_view[1] if self._pop_view else None)
+            self.lbl_detector.setText('detector: ' + text)
+            self.lbl_detector.setToolTip(tip)
         if on_epochs and ep._channel is not None:
             self.seg_position.setText(
                 f"{ep._channel} · epoch {ep._epoch + 1} / {ep._n_epochs()}")
@@ -9799,13 +10412,17 @@ class EventReviewGUI(QMainWindow):
                 try:
                     d = sum(1 for (c, et), v in
                             self.db.get_channel_verdicts().items()
-                            if et == evt and v in ('drop', 'channel_artefact'))
+                            if et == evt and v in EXCLUDED_VERDICTS)
                 except Exception:
                     d = 0
             ev = _er.EVENT_PLURAL.get(evt, evt)
+            # live sample review: the number of check-flagged channels stays
+            # out of sight here too
+            checks = ('checks hidden' if self._sample_active
+                      else f"{h} hard / {s_} soft checks")
             self.seg_position.setText(
                 f"{ev[:1].upper()}{ev[1:]} · {method} · {btxt} · {n} channels "
-                f"· {h} hard / {s_} soft checks · {d} channel(s) dropped")
+                f"· {checks} · {d} channel(s) excluded")
         if self.db is None or not self.db.has_review_backend:
             self.seg_save.setText(_er.SAVE_LINE_NO_STORE if self.db is not None
                                   else _er.SAVE_LINE_NO_NAME)
@@ -9950,6 +10567,20 @@ class EventReviewGUI(QMainWindow):
                 f"The recording opened, but its channels could not be set "
                 f"up: {first}. The full error is {REVIEW_GUI_ERROR_WHERE}.")
             traceback.print_exc()
+
+    def _channel_unit(self, channel):
+        """The unit the loaded file states for ``channel`` (``'µV'``,
+        ``'mV'``, ...), or ``None`` when it states none. Read once per file
+        (header, EDF physical dimension, or a BIDS ``*_channels.tsv`` beside
+        the file)."""
+        data = self.eeg_data
+        key = (id(data), getattr(self, 'eeg_file_path', None))
+        cache = getattr(self, '_unit_cache', None)
+        if cache is None or cache[0] != key:
+            header = getattr(data, 'header', None) if data is not None else None
+            cache = (key, channel_units(header, key[1]))
+            self._unit_cache = cache
+        return cache[1].get(str(channel))
 
     def _eeg_channel_info(self):
         """``(channels, chan_type, interpolated)`` of the loaded EEG file;
@@ -10227,6 +10858,24 @@ class EventReviewGUI(QMainWindow):
         except Exception:
             return []
 
+    def _rerun_channel_lists(self):
+        """``(kept, excluded, redetect)`` channel lists of the re-run
+        package: excluded channels (any event type; 'drop' or an older
+        'channel_artefact') are left out of ``channels.csv``; ``redetect`` is
+        the stored queue minus the excluded channels
+        (``redetect_channels.csv``)."""
+        verdicts = self.db.get_channel_verdicts()
+        dropped = sorted(self._dropped_channels(verdicts))
+        kept = [c for c in self._all_db_channels() if c not in dropped]
+        self._load_redetect_queue()
+        return kept, dropped, self._redetect_queue_channels(verdicts)
+
+    def _queued_but_excluded(self):
+        """Queued channels left out of ``redetect_channels.csv`` because
+        they are excluded (for any event type)."""
+        return sorted(set(map(str, self._redetect_queue))
+                      & self._dropped_channels())
+
     def export_rerun_package(self):
         """Snapshot originals, then write channels.csv + a sidecar XML the
         existing local detector scripts consume via --annot/--channels.
@@ -10235,6 +10884,12 @@ class EventReviewGUI(QMainWindow):
         (raters[0]) inside the SIDECAR copy — never the original (R4)."""
         if not self.db:
             QtWidgets.QMessageBox.warning(self, "Warning", "No database loaded")
+            return
+        kept, dropped, redetect = self._rerun_channel_lists()
+        if not redetect and not dropped and not len(
+                self.db.get_qc_artefact_intervals(unexported_only=True)):
+            # nothing queued, excluded or newly excluded in time: no package
+            self.status_bar.showMessage(RERUN_EMPTY_TEXT)
             return
         if not getattr(self, 'annot_file_path', None) or \
                 not os.path.exists(self.annot_file_path):
@@ -10251,14 +10906,6 @@ class EventReviewGUI(QMainWindow):
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
 
-        # dropped channels (any event type) -> excluded from channels.csv
-        verdicts = self.db.get_channel_verdicts()
-        dropped = sorted({ch for (ch, _et), v in verdicts.items() if v == 'drop'})
-        kept = [c for c in self._all_db_channels() if c not in dropped]
-        # re-detect queue MINUS any dropped/channel_artefact channel — a dropped
-        # channel is excluded from analysis, never re-detected (matches the JSON
-        # field so the two hand-off artefacts can't disagree).
-        redetect = self._redetect_queue_channels(verdicts)
         intervals = self.db.get_qc_artefact_intervals(unexported_only=True)
 
         # ---- snapshot originals BEFORE anything can overwrite them --------
@@ -10349,16 +10996,19 @@ class EventReviewGUI(QMainWindow):
             f"re-detect\n"
             if redetect else "redetect_channels.csv: none queued (not written)\n")
         msg = (f"Snapshot: {backup}\n  ({', '.join(snapped) or 'nothing found to snapshot'})\n\n"
-               f"channels.csv: {len(kept)} kept, {len(dropped)} dropped\n"
+               + _er.rerun_summary(len(kept), dropped,
+                                   self._queued_but_excluded()) +
                f"{redetect_line}"
-               f"Sidecar artefacts appended (whole-montage): {n_iv}\n\n"
+               f"Excluded time ranges appended (all channels): {n_iv}\n\n"
                f"Re-running detection OVERWRITES wonambi/*_results + the DB — "
                f"the snapshot above is your rollback.\n\n"
                f"Run e.g.:\n  {cmd}\n\nFiles written. OK.")
         if len(intervals):
             self.db.mark_artefact_intervals_exported(list(intervals['id']))
         QtWidgets.QMessageBox.information(self, "Re-run package ready", msg)
-        self.status_bar.showMessage(f"Re-run package written to {backup}")
+        self.status_bar.showMessage(
+            f"Re-run package written to {backup}: {len(redetect)} "
+            f"channel(s) queued." if redetect else RERUN_EMPTY_TEXT)
 
     def export_figure(self):
         """Export the active tab's plot to PNG (pg.exporters; no new dep)."""
@@ -10396,7 +11046,8 @@ class EventReviewGUI(QMainWindow):
             with open(fp, 'w', encoding='utf-8') as fh:
                 fh.write(f"# QC report — {self.qc_widget.current_event_type()}\n\n")
                 fh.write(f"- Channels: {0 if df is None else len(df)}\n")
-                fh.write(f"- Dropped: {sorted({c for (c,_),v in verdicts.items() if v=='drop'})}\n")
+                fh.write("- " + _er.excluded_any_type_line(
+                    self._dropped_channels(verdicts)) + "\n")
                 fh.write(f"- Global artefact windows: {len(iv)}\n\n")
                 if df is not None and len(df):
                     flg = df[df['flag'] != '']
@@ -10444,7 +11095,7 @@ def main():
         QtCore.QCoreApplication.setOrganizationName("turtlewave")
     if not QtCore.QCoreApplication.applicationName():
         QtCore.QCoreApplication.setApplicationName("eeg_review_gui")
-    app.setStyleSheet(DARK_QSS)
+    app.setStyleSheet(DARK_QSS + checkbox_mark_qss())
 
     window = EventReviewGUI()
     window.show()

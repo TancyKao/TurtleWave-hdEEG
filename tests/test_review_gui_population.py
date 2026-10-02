@@ -25,6 +25,8 @@ Run with:
     QT_QPA_PLATFORM=offscreen python tests/test_review_gui_population.py
 """
 import os
+import re
+import sqlite3
 import sys
 import tempfile
 import time
@@ -359,9 +361,9 @@ flagged = set(qc.index[(qc['checks_flag'].isin(['hard', 'soft']))
 check('54b', "[54] Flagged keeps exactly checks- or amp-flagged rows",
       set(qcw.visible_channels()) == flagged, repr(sorted(flagged)))
 qcw.show_combo.setCurrentIndex(2)
-check('54c', "[54] no dropped channels: 'No channels match \"Dropped\".'",
+check('54c', "[54] no excluded channels: 'No channels match \"Excluded\".'",
       qcw.proxy.rowCount() == 0 and qcw.empty_lbl.isVisibleTo(qcw)
-      and qcw.empty_lbl.text() == 'No channels match "Dropped".')
+      and qcw.empty_lbl.text() == 'No channels match "Excluded".')
 qcw.show_combo.setCurrentIndex(0)
 # Sort
 df = win.qc_widget.model.df
@@ -443,86 +445,254 @@ check('59a', "[59] At floor tooltip with floor and ceiling shares", ftip ==
       repr(ftip))
 check('59b', "[59] 0 % floor, 40 % ceiling: not flagged",
       qc.loc['E42', 'checks_flag'] == '')
-# bottom bar
+# bottom bar (R4.4, R4.5)
 qcw.table.setCurrentIndex(QtCore.QModelIndex())
 qcw.table.clearSelection()
 qcw._update_action_state()
 check('60a', "[60] no row: label — and every bar button disabled",
       qcw._sel_lbl.text() == '—' and not any(
-          b.isEnabled() for b in (qcw.btn_open, qcw.btn_drop, qcw.btn_mark,
+          b.isEnabled() for b in (qcw.btn_open, qcw.btn_exclude,
                                   qcw.btn_redetect)))
 qcw.select_channel('E70')
-lay_texts = []
-bl = qcw.btn_open.parentWidget().layout()
-for i in range(bl.count()):
-    item = bl.itemAt(i)
-    while item is not None and item.layout() is not None and False:
-        pass
-row = [qcw.btn_open, qcw.btn_drop, qcw.btn_mark, qcw.btn_redetect]
-xs = [b.mapTo(qcw, QtCore.QPoint(0, 0)).x() for b in row]
-check('60b', "[60] selected: Open in Epochs, Drop channel, Mark channel "
-      "artefact, Add to re-detect queue (left to right); Queue all HARD and "
-      "Build still there", [b.text() for b in row] ==
-      ['Open in Epochs', 'Drop channel', 'Mark channel artefact',
-       'Add to re-detect queue'] and xs == sorted(xs)
+row = [qcw.btn_open, qcw.btn_exclude, qcw.btn_redetect, qcw.btn_queue_hard]
+# reading order (the bar wraps onto a second line when the tab is narrow)
+xs = [(p.y(), p.x()) for p in (b.mapTo(qcw, QtCore.QPoint(0, 0))
+                               for b in row)]
+check('60b', "[R4.5] bar, left to right: Open in Epochs, Exclude channel, "
+      "Add to re-detect queue, …, Queue all HARD (n) with its tooltip; no "
+      "Build button",
+      [b.text() for b in row[:3]] == ['Open in Epochs', 'Exclude channel',
+                                      'Add to re-detect queue']
+      and xs == sorted(xs)
       and qcw.btn_queue_hard.text().startswith('Queue all HARD (')
-      and qcw.btn_build.text().startswith('Build re-detect request…'),
+      and qcw.btn_queue_hard.toolTip() == 'Add every channel with a hard '
+      'amp flag to the re-detect queue.'
+      and not hasattr(qcw, 'btn_build') and not hasattr(qcw, 'tray_body'),
       repr(xs))
+def n_checks_included(df):
+    """Checks-flagged channels among the included ones."""
+    inc = df[~er.excluded_mask(df)]
+    return int(inc['checks_flag'].isin(['hard', 'soft']).sum())
+
+
+EXC_TIP = ('Leaves this channel out of review samples, the re-run export, '
+           'the flag statistics and the topography. Event density and '
+           'exported events are unchanged in 4.6.0. Click again to include '
+           'it.')
 qcw.select_channel('E62')
-qcw.btn_drop.click()
+check('103a', "[103] an included channel: 'Exclude channel', not checked, "
+      "with the tooltip", qcw.btn_exclude.text() == 'Exclude channel'
+      and not qcw.btn_exclude.isChecked()
+      and qcw.btn_exclude.objectName() == 'danger'
+      and qcw.btn_exclude.toolTip() == EXC_TIP + ' Applies to spindles '
+      'only.', repr(qcw.btn_exclude.toolTip()))
+qcw.btn_exclude.click()
 app.processEvents()
-win.epochs_panel.dropChannelRequested.emit('E29')
+msg_ex = win.status_bar.currentMessage()
+win.on_qc_drill('E29', switch_tab=False)
+win.epochs_panel.exclude_btn.click()
 app.processEvents()
 ver = win.db.get_channel_verdicts()
-check('61', "[61] bottom-bar Drop sets the same verdict as the Epochs "
-      "tab's Drop channel; Status reads × dropped",
+qcw.select_channel('E62')
+check('104a', "[104] Exclude channel (bottom bar and Epochs tab) writes "
+      "verdict 'drop'; Status reads × excluded; the buttons read 'Include "
+      "channel', checked",
       ver.get(('E62', 'spindle')) == ver.get(('E29', 'spindle')) == 'drop'
-      and col_cell(win, 'E62', 'verdict') == '× dropped',
-      repr((ver.get(('E62', 'spindle')), col_cell(win, 'E62', 'verdict'))))
-qcw.select_channel('E62')
-check('61b', "Drop on an already-dropped channel: disabled, with tooltip",
-      not qcw.btn_drop.isEnabled() and qcw.btn_drop.toolTip() ==
-      'Already dropped. Undo from the Selection tray.')
+      and col_cell(win, 'E62', 'verdict') == '× excluded'
+      and qcw.btn_exclude.text() == 'Include channel'
+      and qcw.btn_exclude.isChecked() and qcw.btn_exclude.objectName() == ''
+      and win.epochs_panel.exclude_btn.text() == 'Include channel'
+      and win.epochs_panel.exclude_btn.isChecked()
+      and win.epochs_panel.exclude_btn.toolTip() == EXC_TIP
+      + ' Applies to spindles only.'
+      and msg_ex == 'Excluded E62 from spindles: left out of review '
+      'samples, the re-run export, the flag statistics and the topography.',
+      repr((ver.get(('E62', 'spindle')), col_cell(win, 'E62', 'verdict'),
+            msg_ex)))
+check('106a', "[106] an excluded row is not judged: Amp flag and Checks "
+      "read —; the header counts it only in ' · 2 excluded'",
+      col_cell(win, 'E62', 'flag') == '—'
+      and col_cell(win, 'E62', 'checks_flag') == '—'
+      and qcw.counts_lbl.text().endswith(' · 2 excluded')
+      and qcw.counts_lbl.text().startswith(
+          f"{n_checks_included(qcw.model.df)} checks flagged · "), repr(qcw.counts_lbl.text()))
+win.db.set_channel_verdict('E30', 'spindle', 'channel_artefact', 'TK')
+refresh(win)
+qcw.select_channel('E30')
+check('104b', "[104] a row stored as 'channel_artefact' reads × excluded "
+      "and 'Include channel'", col_cell(win, 'E30', 'verdict') == '× excluded'
+      and qcw.btn_exclude.text() == 'Include channel'
+      and qcw.btn_exclude.isChecked())
+qcw.btn_exclude.click()
+app.processEvents()
+check('104c', "[104] Include channel writes '' and reports it",
+      win.db.get_channel_verdicts().get(('E30', 'spindle')) == ''
+      and col_cell(win, 'E30', 'verdict') == 'kept'
+      and win.status_bar.currentMessage() == 'Included E30 again.',
+      repr(win.status_bar.currentMessage()))
+shows = [qcw.show_combo.itemText(i) for i in range(qcw.show_combo.count())]
+
+
+def window_texts(root):
+    out = []
+    for w in root.findChildren(QtWidgets.QWidget):
+        if isinstance(w, (QtWidgets.QAbstractButton, QtWidgets.QLabel)):
+            out.append(w.text())
+        if isinstance(w, QtWidgets.QComboBox):
+            out += [w.itemText(i) for i in range(w.count())]
+    out += [a.text() for a in root.findChildren(QtWidgets.QAction)]
+    out.append(root.status_bar.currentMessage())
+    return out
+
+
+texts = window_texts(win)
+check('105', "[105] Show has 'Excluded (2)' and no 'Dropped'; no visible "
+      "string says 'dropped' or 'marked artefact'; [103] no 'Drop channel' "
+      "or 'Mark channel artefact' anywhere",
+      'Excluded (2)' in shows and not any(t.startswith('Dropped')
+                                          for t in shows)
+      and not [t for t in texts if 'dropped' in t.lower()
+               or 'marked artefact' in t.lower() or t in (
+                   'Drop channel', 'Mark channel artefact')],
+      repr((shows, [t for t in texts if 'dropped' in t.lower()])))
+menu_titles = [a.text() for a in win.menuBar().actions()]
+analysis = next(a.menu() for a in win.menuBar().actions()
+                if a.text().replace('&', '') == 'Analysis')
+src = open(rg.__file__, encoding='utf-8').read()
+check('109', "[109] no Selection tray, no 'Build re-detect request…' "
+      "(button, menu item or JSON writer)",
+      not [t for t in texts if t in ('Selection', 'Build re-detect request…')
+           or t.startswith(('CHANNEL ARTEFACTS', 'RE-DETECT QUEUE',
+                            'Build re-detect request'))]
+      and not [a for a in analysis.actions() if 'detect' in a.text().lower()]
+      and 'redetect_request' not in src
+      and not hasattr(win, 'open_redetect_modal')
+      and not hasattr(win, 'btn_build_redetect'), repr(menu_titles))
+# re-detect queue: stored, shown in Status and Show, toggled by F
+n_q0 = next(t for t in shows if t.startswith('Queued for re-detect ('))
 qcw.select_channel('E75')
+check('110a', "queue empty: Show reads 'Queued for re-detect (0)', the hint "
+      "link is hidden, the button reads 'Add to re-detect queue'",
+      n_q0 == 'Queued for re-detect (0)' and not qcw.queue_link.isVisibleTo(
+          qcw) and qcw.btn_redetect.text() == 'Add to re-detect queue')
 qcw.btn_redetect.click()
 app.processEvents()
-check('rd', "a queued channel's Status reads 'kept · ↻ re-detect' with the "
-      "tray tooltip; a dropped queued one '× dropped · ↻ re-detect'",
-      col_cell(win, 'E75', 'verdict') == 'kept · ↻ re-detect'
+qcw.select_channel('E75')
+shows = [qcw.show_combo.itemText(i) for i in range(qcw.show_combo.count())]
+check('110b', "[110] Add to re-detect queue: button reads 'Remove from "
+      "re-detect queue', Status gains ' · ↻ re-detect' with its tooltip, "
+      "Show reads 'Queued for re-detect (1)'",
+      qcw.btn_redetect.text() == 'Remove from re-detect queue'
+      and qcw.btn_redetect.isChecked()
+      and col_cell(win, 'E75', 'verdict') == 'kept · ↻ re-detect'
       and col_cell(win, 'E75', 'verdict', Qt.ToolTipRole) ==
-      'Queued for re-detection. Remove it from the Selection tray.'
+      'Queued for re-detection. Use File ▸ Export re-run package… to re-run '
+      'these channels.'
       and '↻ re-detect' in col_cell(win, 'E75', 'verdict',
-                                    rg._STATUS_HTML_ROLE),
-      repr(col_cell(win, 'E75', 'verdict')))
+                                    rg._STATUS_HTML_ROLE)
+      and 'Queued for re-detect (1)' in shows,
+      repr((col_cell(win, 'E75', 'verdict'), shows)))
 qcw.select_channel('E62')
-qcw.btn_redetect.click()
+win._flag_selected_qc_row()              # the F key's slot
 app.processEvents()
-check('rd2', "dropped and queued", col_cell(win, 'E62', 'verdict') ==
-      '× dropped · ↻ re-detect', repr(col_cell(win, 'E62', 'verdict')))
-qcw.select_channel('E62')
-qcw.btn_redetect.click()
-qcw.select_channel('E75')
-qcw.btn_redetect.click()
+# The link runs the real export slot. With no annotation file loaded the
+# export stops at its warning box; capture that instead of showing it.
+emitted = []
+_warn = QtWidgets.QMessageBox.warning
+QtWidgets.QMessageBox.warning = staticmethod(
+    lambda *a, **k: emitted.append(a[2]))
+link_text, link_vis = qcw.queue_link.text(), qcw.queue_link.isVisibleTo(qcw)
+qcw.queue_link.click()
 app.processEvents()
+QtWidgets.QMessageBox.warning = _warn
+kept, excl, redet = win._rerun_channel_lists()
+file_menu = next(a.menu() for a in win.menuBar().actions()
+                 if a.text().replace('&', '') == 'File')
+exp = [a for a in file_menu.actions() if a.text() == 'Export re-run package…']
+check('111a', "[110, 111] F queues the selected row too: an excluded "
+      "queued channel reads '× excluded · ↻ re-detect'; the bar shows the "
+      "link '2 queued · Export re-run package…'; File has the same item "
+      "with its status tip; the export list is the queue minus excluded",
+      col_cell(win, 'E62', 'verdict') == '× excluded · ↻ re-detect'
+      and link_text == '2 queued · Export re-run package…' and link_vis
+      and len(exp) == 1 and exp[0].statusTip() == 'Writes the queued '
+      'channels (redetect_channels.csv) for examples/rerun_detection.py '
+      '--channels.' and len(emitted) == 1
+      and emitted[0].startswith('Load the base annotation XML first')
+      and redet == ['E75']
+      and set(excl) == {'E62', 'E29'} and 'E62' not in kept
+      and 'E75' in kept, repr((link_text, redet, excl)))
+P1_path = win.db.db_path
+win.close()
+win = open_window(P1_path)
+refresh(win)
+qcw = win.qc_widget
+con_chk = sqlite3.connect(P1_path)
+stored = sorted(r[0] for r in con_chk.execute(
+    "SELECT DISTINCT channel FROM channel_qc WHERE redetect = 1"))
+con_chk.close()
+check('110c', "[110] after closing and reopening the window on the same "
+      "database both channels are still queued (channel_qc.redetect)",
+      stored == ['E62', 'E75'] and win._redetect_queue == {'E62', 'E75'}
+      and col_cell(win, 'E75', 'verdict') == 'kept · ↻ re-detect',
+      repr((stored, win._redetect_queue)))
+for ch in ('E62', 'E75'):
+    qcw.select_channel(ch)
+    qcw.btn_redetect.click()
+    app.processEvents()
+for ch in ('E62', 'E29'):                 # include both again
+    win._set_channel_excluded(ch, False)
+app.processEvents()
+win.export_rerun_package()                # nothing queued or excluded
+check('111b', "[111] empty queue: the link is hidden and the export says "
+      "so", not qcw.queue_link.isVisibleTo(qcw)
+      and win.status_bar.currentMessage() == 'Nothing is queued for '
+      're-detection. Select a channel and use "Add to re-detect queue".',
+      repr(win.status_bar.currentMessage()))
 line1 = qcw.counts_lbl.text()
-qcw.show_combo.setCurrentIndex(3)
-line2 = qcw.counts_lbl.text()
-qcw.show_combo.setCurrentIndex(0)
-check('56b', "[56] header gains ' · 2 dropped' and ignores Show",
-      line1.endswith(' · 2 dropped') and line2 == line1, repr(line1))
+check('56b', "[56] with nothing excluded the header has no excluded part",
+      'excluded' not in line1, repr(line1))
 foot = qcw.footer.text()
-check('62a', "[62] footer states the relative rule from live limits",
-      all(t in foot for t in (
-          'Checks compare each channel with the rest of the montage.',
-          'above 3.5', 'above 2.0', '10 percentage points', '0.3×',
-          'at least 20 events',
-          'Low prominence is shown for context and never flags.'))
-      and '≥ 25 %' not in foot and '≥ 15 %' not in foot, repr(foot))
+ftip = qcw.footer.toolTip()
+check('62a', "[102] footer: the one R4.0 line with the live limits, no "
+      "line break; the full rule in the tooltip", foot ==
+      '× hard / ▲ soft: the channel stands out from the others (robust z '
+      'above 3.5 / 2). Low prominence never flags. Hover for the full rule.'
+      and '\n' not in foot and not qcw.footer.wordWrap()
+      and all(t in ftip for t in (
+          'mean event amplitude, its 95th percentile or its largest event',
+          '10 percentage points', '0.3×', 'at least 20 events',
+          'Low prominence is shown for context and never flags.',
+          'Excluded channels are left out of the comparison.',
+          'Change the limits in View ▸ Outlier threshold….'))
+      and len(ftip.split('\n')) == 6, repr(foot))
+check('62c', "[R4.3] slow waves: no low-prominence sentence in the line, "
+      "five tooltip lines; no amp/thr when the method has no ratio",
+      er.footer_text(3.5, 2.0, 'slow_wave') == '× hard / ▲ soft: the '
+      'channel stands out from the others (robust z above 3.5 / 2). Hover '
+      'for the full rule.'
+      and len(er.footer_tooltip(3.5, 2.0, 'slow_wave').split('\n')) == 5
+      and 'amp/thr' not in er.footer_tooltip(3.5, 2.0, 'spindle', False))
+hdrs = [qcw.model.headerData(i, Qt.Horizontal) for i in range(
+    qcw.model.columnCount())]
+check('113', "[113] header 'Mean amp µV' (no 'Med amp µV'), with the two "
+      "amplitude header tooltips", 'Mean amp µV' in hdrs
+      and 'Med amp µV' not in hdrs
+      and qcw.model.headerData(rg._QC_COL_INDEX['mean_amp'], Qt.Horizontal,
+                               Qt.ToolTipRole) == "Mean amplitude of this "
+      "channel's events (detection-band signal)."
+      and qcw.model.headerData(rg._QC_COL_INDEX['amp_z'], Qt.Horizontal,
+                               Qt.ToolTipRole).startswith(
+          'Robust z of the amplitude measure furthest from the other '
+          'channels'), repr(hdrs))
+check('114a', "[114] one run in view: the top bar names the detector",
+      win.lbl_detector.text() == 'detector: Moelle2011 · 9–12 Hz'
+      and win.lbl_detector.toolTip() == '', repr(win.lbl_detector.text()))
 win._qc_thresholds.update(hard_z=4.0, soft_z=2.5)
 refresh(win)
 foot = qcw.footer.text()
-check('62b', "[62] after hard 4.0 / soft 2.5", 'above 4.0' in foot
-      and 'above 2.5' in foot, repr(foot))
+check('62b', "[102] after hard 4.0 / soft 2.5", 'above 4 / 2.5)' in foot
+      and 'above 4, soft above 2.5' in qcw.footer.toolTip(), repr(foot))
 win._qc_thresholds.update(hard_z=3.5, soft_z=2.0)
 refresh(win)
 qc = win._qc_df.set_index('channel')
@@ -571,11 +741,17 @@ check('69', "[69] a row click selects the channel and shows its two "
       "buttons only; another click moves them",
       vis1 == ['E75'] and sel1 == 'E75' and vis2 == ['E70']
       and fl.row('E70')['open'].text() == 'Open in Epochs'
-      and fl.row('E70')['drop'].text() == 'Drop channel', repr((vis1, vis2)))
-check('70', "[70] a dropped flagged channel: ' · dropped', no Drop button",
-      fl.row('E62') is not None and fl.row('E62')['text'].startswith(
-          'E62 · dropped · ') and fl.row('E62')['drop'] is None,
-      repr(fl.row('E62') and fl.row('E62')['text']))
+      and fl.row('E70')['drop'].text() == 'Exclude channel',
+      repr((vis1, vis2)))
+fl.row('E62')['drop'].click()
+app.processEvents()
+qc_x = win._qc_df.set_index('channel')
+check('70', "[R4.4] the flagged list's Exclude channel excludes it; an "
+      "excluded channel is not judged, so it leaves the list",
+      win.db.get_channel_verdicts().get(('E62', 'spindle')) == 'drop'
+      and win.detail_dock_w.flagged.row('E62') is None
+      and qc_x.loc['E62', 'checks_flag'] == ''
+      and bool(qc_x.loc['E62', 'excluded']))
 # topography rings, labels and caption
 grid = {ch: ((i % 8) / 8.0 - 0.45, (i // 8) / 6.0 - 0.4)
         for i, ch in enumerate(sorted(qc.index))}
@@ -583,12 +759,28 @@ win.detail_dock_w.set_coords(grid)
 dk = win.detail_dock_w
 dk.topo_combo.setCurrentIndex(dk.topo_combo.findData('pct_off_band'))
 app.processEvents()
-ringed = {c for c in qc.index[qc['checks_flag'].isin(['hard', 'soft'])]
-          if c != 'E62'}                    # E62 is dropped: no ring
+qc = win._qc_df.set_index('channel')        # E62 is excluded now
+ringed = set(qc.index[qc['checks_flag'].isin(['hard', 'soft'])])
 pens = {r.channel: r.opts['pen'].style() for r in dk.ring_items}
-check('63a', "[63] one ring per checks-flagged channel (dropped excluded); "
-      "solid hard, dashed soft; one label each (≤ 12)",
-      set(pens) == ringed and all(
+spots = dk.excluded_spots
+check('107a', "[107] the excluded channel: a hollow marker (no fill), not "
+      "in the interpolation input, legend shown; no ring",
+      spots is not None and [p.data()[0] for p in spots.points()] == ['E62']
+      and spots.opts['brush'].style() == Qt.NoBrush
+      and 'E62' not in dk.topo_input_channels
+      and set(dk.topo_input_channels) == set(
+          qc.index[qc['pct_off_band'].notna()]) - {'E62'}
+      and dk.topo_excluded_lbl.isVisibleTo(dk)
+      and dk.topo_excluded_lbl.text()
+      == '○ excluded channel (not used for the map)'
+      and 'E62' not in ringed, repr((
+          spots is not None and [p.data() for p in spots.points()],
+          spots is not None and spots.opts['brush'],
+          'E62' in dk.topo_input_channels, len(dk.topo_input_channels),
+          len(qc), dk.topo_excluded_lbl.isVisibleTo(dk))))
+check('63a', "[63] one ring per checks-flagged channel (none for the "
+      "excluded one); solid hard, dashed soft; one label each (≤ 12)",
+      'E62' not in pens and set(pens) == ringed and all(
           (pens[c] == Qt.SolidLine) == (qc.loc[c, 'checks_flag'] == 'hard')
           for c in pens) and len(dk.ring_labels) == len(ringed),
       repr(sorted(pens)))
@@ -599,6 +791,17 @@ check('64', "[64] Off-band caption", cap ==
 dk.topo_combo.setCurrentIndex(0)
 app.processEvents()
 check('63b', "[63] no rings on Event density", dk.ring_items == [])
+dk.topo_combo.setCurrentIndex(dk.topo_combo.findData('pct_off_band'))
+win._set_channel_excluded('E62', False)
+app.processEvents()
+qc_in = win._qc_df.set_index('channel')
+check('107b', "[107] with no channel excluded the legend is hidden and "
+      "E62 feeds the map again", not dk.topo_excluded_lbl.isVisibleTo(dk)
+      and dk.excluded_spots is None and 'E62' in dk.topo_input_channels
+      and set(dk.topo_input_channels) == set(
+          qc_in.index[qc_in['pct_off_band'].notna()]), repr((
+          dk.topo_excluded_lbl.isVisibleTo(dk), dk.excluded_spots,
+          len(dk.topo_input_channels), len(qc))))
 win.close()
 # 14 flagged channels: 12 labels, caption suffix
 spec14 = {f"E{i}": dict(off_band=float(ob), at_floor=0.1, low_prom=0.2)
@@ -814,6 +1017,431 @@ check('15d', "the work the checks add on the GUI thread is under 10 % of a "
 check('15c', "the background read filled the columns",
       win._qc_df['pct_off_band'].notna().sum() == 257)
 win.close()
+
+# =================================================================== R4
+say("\n== R4. Checked style, sort guard, exclusion, regions, flag trigger")
+qss = rg.DARK_QSS
+m = re.search(r'QPushButton:checked, QToolButton:checked \{([^}]*)\}', qss)
+body = m.group(1) if m else ''
+check('100', "[100] the stylesheet has a QPushButton:checked and a "
+      "QToolButton:checked rule: weight 600, accent border, soft accent "
+      "fill; checked + disabled keeps the weight with a text_3 border; an "
+      "armed button has the border and no fill",
+      m is not None and 'font-weight: 600' in body
+      and f"border: 1px solid {rg.THEME['accent']}" in body
+      and f"background: {rg.THEME['accent_soft']}" in body
+      and re.search(r'QPushButton:checked:disabled, QToolButton:checked:'
+                    r'disabled \{[^}]*border: 1px solid '
+                    + re.escape(rg.THEME['text_3']) + r'[^}]*font-weight: 600',
+                    qss) is not None
+      and 'background' not in rg.EventDecisionPanel.ARMED_QSS
+      and rg.THEME['accent'] in rg.EventDecisionPanel.ARMED_QSS,
+      repr(body.strip()))
+marks = rg.checkbox_mark_qss()
+check('100b', "[R4.2] checked checkboxes get a tick image and partly "
+      "checked ones a dash (files written once, then cached)",
+      'QCheckBox::indicator:checked' in marks
+      and 'QCheckBox::indicator:indeterminate' in marks
+      and len(re.findall(r'url\("([^"]+)"\)', marks)) == 2
+      and all(os.path.exists(p)
+              for p in re.findall(r'url\("([^"]+)"\)', marks))
+      and rg.checkbox_mark_qss() is marks, repr(marks.strip()[:80]))
+win = open_window(P1)
+refresh(win)
+qcw = win.qc_widget
+b_ = {b.text(): b for b in qcw.stage_group.buttons()}
+check('101', "[101] with no stored review/check_stage the combined Stage "
+      "button is the checked one", b_['NREM2 + NREM3'].isChecked()
+      and not b_['NREM2'].isChecked() and not b_['NREM3'].isChecked(),
+      repr({k: v.isChecked() for k, v in b_.items()}))
+hdr = qcw.table.horizontalHeader()
+items0 = [qcw.sort_combo.itemText(i) for i in range(qcw.sort_combo.count())]
+hdr.setSortIndicator(-1, Qt.AscendingOrder)
+app.processEvents()
+items1 = [qcw.sort_combo.itemText(i) for i in range(qcw.sort_combo.count())]
+hdr.setSortIndicator(rg._QC_COL_INDEX['n'], Qt.DescendingOrder)   # a click
+app.processEvents()
+check('98', "[98] setSortIndicator(-1) never adds 'Column header'; a real "
+      "header sort on Events does", 'Column header' not in items0
+      and items1 == items0
+      and qcw.sort_combo.currentText() == 'Column header',
+      repr((items1, qcw.sort_combo.currentText())))
+qcw.sort_combo.setCurrentText('Checks (hard first)')
+win.close()
+
+# two runs in view -> detector: — with the tooltip; none -> the other tooltip
+P_two = os.path.join(TMP, 'two_runs.db')
+con = fx.open_schema(P_two)
+fx.add_run(con, RUN)
+fx.add_run(con, 'run-b', timestamp='2026-09-01T10:00:00')
+for ch, run_ in (('Cz', RUN), ('Fz', RUN), ('Pz', 'run-b')):
+    rows, _a = fx.make_rows(ch, 40, run_, rng)
+    fx.insert_rows(con, rows)
+con.commit()
+con.close()
+win = open_window(P_two)
+refresh(win)
+check('114b', "[114] two runs in view: 'detector: —' with the tooltip",
+      win.lbl_detector.text() == 'detector: —' and win.lbl_detector.toolTip()
+      == 'Several detection runs are in view. Choose a method and band in '
+      'the Filters dock.', repr(win.lbl_detector.text()))
+check('114c', "no events in view: 'detector: —', 'No events in view.'",
+      er.detector_label(None) == ('—', 'No events in view.')
+      and er.detector_label({'res': {'runs_in_view': []}})[1]
+      == 'No events in view.')
+win.close()
+
+# regions from 10-20 / 10-5 labels; coordinates only for EGI labels [108]
+from turtlewave_hdEEG.utils import region_from_label          # noqa: E402
+xy_parietal = {c: (0.1, -0.3) for c in ('F1h', 'F2h', 'Fz', 'E75', 'XYZ')}
+ev_lab = pd.DataFrame({'channel': ['F1h', 'F2h', 'Fz', 'PPO1h', 'E75'] * 3,
+                       'start_time': np.arange(15.0), 'end_time':
+                       np.arange(15.0) + 1, 'max_amp': 30.0,
+                       'peak2peak_amp': 60.0})
+reg = rg.compute_channel_qc(ev_lab, coords=xy_parietal).set_index(
+    'channel')['region']
+check('108', "[108] F1h, F2h and Fz are frontal in the table whatever the "
+      "coordinates say, the same string the sample strata use; E75 still "
+      "takes its region from coordinates; an unknown label too",
+      [reg[c] for c in ('F1h', 'F2h', 'Fz')] == ['frontal'] * 3
+      and all(reg[c] == region_from_label(c) for c in ('F1h', 'F2h', 'Fz',
+                                                       'PPO1h'))
+      and rg._region_from_xy(0.1, -0.3) == 'parietal'
+      and reg['E75'] == 'parietal'
+      and rg._region_for_channel('XYZ', xy_parietal) == 'parietal'
+      and rg._region_for_channel('XYZ') == 'other', repr(dict(reg)))
+
+
+# amp flag: trigger, z and exclusion on a hand-made montage [106, 112]
+def amp_events(spec, n=40):
+    """``spec``: {channel: (amplitudes, peak-to-peak)} -> an events frame."""
+    rows = []
+    for ch, (amps, p2p) in spec.items():
+        for i, (a, p) in enumerate(zip(amps, p2p)):
+            rows.append({'channel': ch, 'start_time': float(i),
+                         'end_time': float(i) + 1.0, 'max_amp': float(a),
+                         'peak2peak_amp': float(p)})
+    return pd.DataFrame(rows)
+
+
+g = np.random.default_rng(11)
+spec = {f"C{i:02d}": (30 + g.normal(0, 1.0, 40) + 0.2 * i,
+                      60 + g.normal(0, 1.0, 40) + 0.2 * i) for i in range(12)}
+low = np.sort(spec['C00'][0].copy())
+low[:32] -= 20.0             # the lower 80 % of events: mean falls, p95 stays
+spec['MEAN'] = (low, spec['C00'][1])
+top = spec['C01'][0].copy()
+top[:4] += 200.0                         # 10 % of events: p95 far, mean less
+spec['P95'] = (top, spec['C01'][1])
+big = spec['C02'][1].copy()
+big[0] = 900.0                           # one event: only the largest
+spec['MAXEV'] = (spec['C02'][0], big)
+qa = rg.compute_channel_qc(amp_events(spec)).set_index('channel')
+check('112a', "[112] the trigger is the measure with the largest |z| over "
+      "the limit: mean, 95th pct, largest event",
+      (qa.loc['MEAN', 'flag'], qa.loc['MEAN', 'flag_trigger'])
+      == ('hard', 'mean_amp')
+      and (qa.loc['P95', 'flag'], qa.loc['P95', 'flag_trigger'])
+      == ('hard', 'p95_amp')
+      and (qa.loc['MAXEV', 'flag'], qa.loc['MAXEV', 'flag_trigger'])
+      == ('hard', 'max_p2p')
+      and abs(qa.loc['MAXEV', 'amp_z'] - qa.loc['MAXEV', 'sz_max_p2p']) < 1e-9
+      and abs(qa.loc['MAXEV', 'sz_mean_amp']) < qa.loc['MAXEV', 'amp_z']
+      and qa.loc['C05', 'flag_trigger'] == ''
+      and abs(qa.loc['C05', 'amp_z']) == max(
+          abs(qa.loc['C05', k]) for k in ('sz_mean_amp', 'sz_p95_amp',
+                                          'sz_max_p2p')),
+      repr(qa.loc[['MEAN', 'P95', 'MAXEV'], ['flag', 'flag_trigger',
+                                             'amp_z']].to_dict('index')))
+model = rg.ChannelQCModel()
+model.set_data(qa.reset_index(), {}, set(), 'spindle')
+
+
+def cell(ch, key, role=Qt.DisplayRole):
+    for r in range(model.rowCount()):
+        if model.channel_at(r) == ch:
+            return model.data(model.index(r, rg._QC_COL_INDEX[key]), role)
+
+
+tipz = cell('MAXEV', 'amp_z', Qt.ToolTipRole)
+check('112b', "[112] cells: '× HARD · largest event' / '· mean' / "
+      "'· 95th pct'; Amp z shows that measure's z; its tooltip lists all "
+      "three; Amp z sorts by |z|",
+      cell('MAXEV', 'flag') == '× HARD · largest event'
+      and cell('MEAN', 'flag') == '× HARD · mean'
+      and cell('P95', 'flag') == '× HARD · 95th pct'
+      and cell('C05', 'flag') == '✓ OK'
+      and cell('MAXEV', 'amp_z') == f"{qa.loc['MAXEV', 'sz_max_p2p']:.1f}"
+      and re.match(r'^mean z -?\d+\.\d · 95th pct z -?\d+\.\d · largest '
+                   r'event z -?\d+\.\d$', tipz or '') is not None
+      and cell('MEAN', 'amp_z', Qt.UserRole) == abs(qa.loc['MEAN', 'amp_z']),
+      repr((cell('MAXEV', 'flag'), cell('MAXEV', 'amp_z'), tipz)))
+# one channel so large that it widens the spread: excluding it changes the
+# others' flags, exactly as if it were not in the montage
+spec2 = {k: v for k, v in spec.items() if k.startswith('C')}
+for i, name in enumerate(('X1', 'X2', 'X3', 'X4', 'X5', 'X6')):
+    spec2[name] = (spec['C00'][0] + 6.0 + i, spec['C00'][1])
+ev2 = amp_events(spec2)
+q_all = rg.compute_channel_qc(ev2).set_index('channel')
+q_exc = rg.compute_channel_qc(ev2, excluded={'X6'}).set_index('channel')
+q_wo = rg.compute_channel_qc(ev2[ev2['channel'] != 'X6']).set_index('channel')
+others = [c for c in q_wo.index]
+check('106b', "[106] excluded={X6}: every other channel's flag, trigger and "
+      "z equal a montage computed without X6 (and differ from the montage "
+      "with it); X6 itself is not flagged",
+      list(q_exc.loc[others, 'flag']) == list(q_wo.loc[others, 'flag'])
+      and list(q_exc.loc[others, 'flag_trigger'])
+      == list(q_wo.loc[others, 'flag_trigger'])
+      and np.allclose(q_exc.loc[others, 'amp_z'], q_wo.loc[others, 'amp_z'])
+      and not np.allclose(q_exc.loc[others, 'amp_z'],
+                          q_all.loc[others, 'amp_z'])
+      and q_exc.loc['X6', 'flag'] == '' and bool(q_exc.loc['X6', 'excluded'])
+      and not q_exc.loc[others, 'excluded'].any(),
+      repr((list(q_all.loc[others, 'flag']), list(q_exc.loc[others, 'flag']))))
+pop = pd.DataFrame({'channel': [f"K{i}" for i in range(12)]})
+for col in er.CHECK_COLUMNS:
+    pop[col] = np.linspace(5.0, 8.0, 12)
+    pop[er.CHECK_N[col]] = 100
+pop.loc[11, 'pct_off_band'] = 70.0
+pop.loc[10, 'pct_off_band'] = 30.0
+p_all, _m = er.population_flags(pop)
+p_exc, med_exc = er.population_flags(pop, excluded={'K11'})
+p_wo, med_wo = er.population_flags(pop[pop['channel'] != 'K11'])
+check('106c', "[106] checks: excluded={K11} gives the other channels the "
+      "flags and medians of a montage without K11; K11 itself is not "
+      "flagged", list(p_exc['checks_flag'][:11]) == list(p_wo['checks_flag'])
+      and med_exc['pct_off_band'] == med_wo['pct_off_band']
+      and p_all.loc[11, 'checks_flag'] == 'hard'
+      and p_exc.loc[11, 'checks_flag'] == ''
+      and p_exc.loc[10, 'checks_flag'] in ('hard', 'soft'),
+      repr((list(p_all['checks_flag']), list(p_exc['checks_flag']))))
+
+# channel_qc: an older table gains the redetect column; a verdict keeps it
+P_mig = os.path.join(TMP, 'old_qc.db')
+con = fx.open_schema(P_mig)
+fx.add_run(con, RUN)
+rows, _a = fx.make_rows('Cz', 30, RUN, rng)
+fx.insert_rows(con, rows)
+con.execute("CREATE TABLE channel_qc (channel TEXT, event_type TEXT, "
+            "verdict TEXT, reviewer TEXT, qc_timestamp TEXT, "
+            "PRIMARY KEY (channel, event_type))")
+con.execute("INSERT INTO channel_qc VALUES ('Cz', 'spindle', 'drop', 'TK', "
+            "'2026-09-01')")
+con.commit()
+con.close()
+dbm = rg.EventDatabase(P_mig)
+cols = [r[1] for r in dbm.conn.execute("PRAGMA table_info(channel_qc)")]
+dbm.set_channel_redetect('Cz', True, 'spindle')
+dbm.set_channel_redetect('Fz', True, 'spindle')
+dbm.set_channel_verdict('Cz', 'spindle', '', 'TK')
+q1 = dbm.get_redetect_queue()
+dbm.set_channel_redetect('Cz', False)
+check('mig', "an older channel_qc table gains 'redetect' (rows kept); a "
+      "verdict change keeps the queue mark; a channel with no row can be "
+      "queued; un-queue clears it",
+      'redetect' in cols and q1 == {'Cz', 'Fz'}
+      and dbm.get_channel_verdicts()[('Cz', 'spindle')] == ''
+      and dbm.get_channel_verdicts()[('Fz', 'spindle')] == ''
+      and dbm.get_redetect_queue() == {'Fz'}, repr((cols, q1)))
+dbm.conn.close()
+
+# designer sign-off: a 1366 x 768 window, both docks shown
+# measured with the application stylesheet, as main() applies it
+src = open(rg.__file__, encoding='utf-8').read()
+app.setStyle('Fusion')
+app.setStyleSheet(rg.DARK_QSS + rg.checkbox_mark_qss())
+win = open_window(P1)
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+win.resize(1366, 768)
+win.show()
+refresh(win)
+qcw = win.qc_widget
+qcw.select_channel('E7')
+win.on_qc_add_redetect('E7')
+win._set_channel_excluded('E7', True)
+win.on_qc_drill('E7', switch_tab=True)
+ep = win.epochs_panel
+ep.select_event(str(ep._ev.sort_values('_start')['uuid'].iloc[0]))
+for _ in range(4):
+    app.processEvents()
+evp = win.detail_dock_w.event_panel
+dock = win.detail_dock
+scroll = dock.widget()
+vals = {}
+for k in evp.row_keys():
+    v = evp._row_widgets[k][1]
+    x0 = v.mapTo(win, QtCore.QPoint(0, 0)).x()
+    plain = re.sub(r'<[^>]+>', '', v.text())
+    widest = max(v.fontMetrics().horizontalAdvance(w)
+                 for w in plain.split(' '))
+    vals[k] = (x0, x0 + v.width(), widest <= v.width(),
+               v.heightForWidth(v.width()) <= v.height() + 1, plain)
+widths = {'window': (win.width(), win.height()),
+          'right dock': (dock.x(), dock.x() + dock.width()),
+          'dock h-scroll': scroll.horizontalScrollBar().maximum(),
+          'channels min': qcw.minimumSizeHint().width(),
+          'epochs min': ep.minimumSizeHint().width()}
+say(f"  measured at 1366 x 768: {widths}")
+check('w1', "[sign-off 1] at 1366 x 768 with both docks shown the window "
+      "keeps that size, the right dock's right edge is inside it, the dock "
+      "does not scroll sideways, and its minimum width is 300",
+      widths['window'] == (1366, 768) and win.filter_dock.isVisible()
+      and dock.isVisible() and widths['right dock'][1] <= win.width()
+      and widths['dock h-scroll'] == 0 and dock.minimumWidth() == 300,
+      repr(widths))
+check('w2', "[sign-off 1] each of the four Event-panel value labels is "
+      "fully visible: inside the window, wide enough for its longest word, "
+      "tall enough for its wrapped lines",
+      list(vals) == ['signal_bg', 'duration', 'peak_freq', 'outlier']
+      and all(0 <= a and b <= win.width() and fits and tall
+              for a, b, fits, tall, _t in vals.values()), repr(vals))
+check('w3', "[sign-off 1] the Channels tab's minimum width is at most 760 "
+      "px; Show and Sort can shrink to 140 px; the count line is its own "
+      "row under the control row, left-aligned",
+      widths['channels min'] <= 760
+      and qcw.show_combo.minimumSizeHint().width() == 140
+      and qcw.sort_combo.minimumSizeHint().width() == 140
+      and qcw.counts_lbl.y() >= qcw.control_row.y() + qcw.control_row.height()
+      and qcw.counts_lbl.x() == qcw.control_row.x()
+      and qcw.counts_lbl.alignment() & Qt.AlignLeft
+      and qcw.counts_lbl.parentWidget() is qcw, repr(widths))
+raw_line = QtWidgets.QLabel.text(evp.event_line)
+check('w4', "[sign-off 1] the Event panel header line wraps only at its "
+      "' · ' separators (no-break spaces inside a part); text() is the "
+      "plain line", evp.event_line.wordWrap()
+      and evp.event_line.text().count(' · ') == 3
+      and '\u00a0' not in evp.event_line.text()
+      and raw_line.split(' ') == [p.replace(' ', '\u00a0') + '\u00a0·'
+                                  for p in evp.event_line.text().split(
+                                      ' · ')[:-1]]
+      + [evp.event_line.text().split(' · ')[-1].replace(' ', '\u00a0')],
+      repr(raw_line))
+win.tabs.setCurrentIndex(0)
+app.processEvents()
+fm = qcw.table.fontMetrics()
+wc = qcw.table.columnWidth(rg._QC_COL_INDEX['checks_flag'])
+ws = qcw.table.columnWidth(rg._QC_COL_INDEX['verdict'])
+check('w5', "[sign-off 2] Checks is at least 170 px and fits '× HARD · "
+      "off-band 70 %'; Status is at least 170 px and fits '× excluded · "
+      "↻ re-detect' (the cell shown for E7)",
+      wc >= 170 and fm.horizontalAdvance('× HARD · off-band 70 %') + 10 <= wc
+      and ws >= 170
+      and fm.horizontalAdvance('× excluded · ↻ re-detect') + 10 <= ws
+      and col_cell(win, 'E7', 'verdict') == '× excluded · ↻ re-detect',
+      repr((wc, ws, fm.horizontalAdvance('× excluded · ↻ re-detect'))))
+win.resize(2400, 1000)                  # room for the whole bar on one line
+app.processEvents()
+row = [qcw.btn_open, qcw.btn_exclude, qcw.btn_redetect, qcw.queue_link,
+       qcw.btn_queue_hard]
+pos = [b.mapTo(qcw, QtCore.QPoint(0, 0)) for b in row]
+check('w6', "wide window: the bottom bar is one line in the R4.5 order, "
+      "with the queue link and Queue all HARD at the right edge",
+      qcw.action_row.width() >= qcw.action_row.sizeHint().width()
+      and max(p.y() + b.height() // 2 for p, b in zip(pos, row))
+      - min(p.y() + b.height() // 2 for p, b in zip(pos, row)) <= 2
+      and [p.x() for p in pos] == sorted(p.x() for p in pos)
+      and pos[-1].x() + row[-1].width() >= qcw.action_row.x()
+      + qcw.action_row.width() - 2
+      and pos[3].x() - (pos[2].x() + row[2].width()) > 40,
+      repr([(p.x(), p.y()) for p in pos]))
+win.on_qc_add_redetect('E7')
+win._set_channel_excluded('E7', False)
+dk = win.detail_dock_w
+check('s3', "[sign-off 3, 5] strings: the Worst-events tooltip, Design "
+      "notes, the export summary, the density warning; the old SELECTED "
+      "CHANNEL subtitle is gone",
+      rg._artefact_tooltip(1234.0) == '1234 µV peak-to-peak — exceeds '
+      'physiological scale (>1000 µV).'
+      and re.search(r'brush a time range and use \\"Exclude time range…\\" '
+                    r'to "\s+"leave it out of analysis for every channel '
+                    r'\(written to a "\s+"sidecar XML', src) is not None
+      and 'to mark an artefact' not in src
+      and 'Excluded time ranges appended (all channels): {n_iv}' in src
+      and 'Sidecar artefacts appended' not in src
+      and 'almost certainly artefact' not in src
+      and '%d excluded time range(s) pending.' in src
+      and 'artefact mark(s) pending' not in src
+      and not hasattr(dk, 'subtitle')
+      and not [l.text() for l in dk.findChildren(QtWidgets.QLabel)
+               if re.search(r'· n=\d+$', l.text()) or 'flag ok' in l.text()])
+win.close()
+app.setStyleSheet('')
+
+# gate low items: export wording, units from a later source, quoted url()
+check('g3', "[gate 3] the export summary and the QC report say 'Excluded "
+      "for any event type: …' and name a queued channel that is left out "
+      "because it is excluded; the tooltip names the event type",
+      er.rerun_summary(36, ['E62', 'E29'], ['E62']) ==
+      'channels.csv: 36 kept\nExcluded for any event type: E29, E62\n'
+      'Queued but excluded, not re-detected: E62\n'
+      and er.rerun_summary(38, [], []) ==
+      'channels.csv: 38 kept\nExcluded for any event type: none\n'
+      and er.excluded_any_type_line({'Cz'}) ==
+      'Excluded for any event type: Cz'
+      and rg.exclude_tip('slow_wave').endswith(' Applies to slow waves only.')
+      and rg.exclude_tip() == EXC_TIP
+      and '_er.excluded_any_type_line(' in src and '_er.rerun_summary(' in src)
+from frontend.channel_types import channel_units             # noqa: E402
+bids = os.path.join(TMP, 'bids dir')
+os.makedirs(bids, exist_ok=True)
+with open(os.path.join(bids, 'sub-01_task-psg_channels.tsv'), 'w',
+          encoding='utf-8') as fh:
+    fh.write('name\ttype\tunits\nVEOG\tEOG\tmV\nECG\tECG\tn/a\n'
+             'Cz\tEEG\tuV\n')
+units = channel_units({'chan_name': ['VEOG', 'ECG', 'Cz', 'Fz'],
+                       'chan_unit': ['', 'n/a', 'µV', None]},
+                      os.path.join(bids, 'sub-01_task-psg_desc-clean_eeg.set'))
+check('g4', "[gate 4] an empty or 'n/a' unit in the header does not block "
+      "the unit a BIDS channels.tsv states; a stated header unit wins; "
+      "'n/a' in every source stays None",
+      units == {'VEOG': 'mV', 'ECG': None, 'Cz': 'µV', 'Fz': None},
+      repr(units))
+odd = os.path.join(TMP, 'marks dir (copy) 1')
+os.makedirs(odd, exist_ok=True)
+marks_odd = rg.checkbox_mark_qss(odd)
+box = QtWidgets.QCheckBox('x')
+box.setStyleSheet(rg.DARK_QSS + marks_odd)
+box.setChecked(True)
+box.resize(60, 24)
+box.show()
+app.processEvents()
+img = box.grab().toImage()
+light = sum(1 for x in range(0, 16) for y in range(img.height())
+            if QtGui.QColor(img.pixel(x, y)).lightness() > 200)
+box.setStyleSheet(rg.DARK_QSS)
+app.processEvents()
+img0 = box.grab().toImage()
+light0 = sum(1 for x in range(0, 16) for y in range(img0.height())
+             if QtGui.QColor(img0.pixel(x, y)).lightness() > 200)
+box.close()
+check('g5', "[gate 5] the mark images are referenced as url(\"…\") with "
+      "the path quoted; in a folder with a space and parentheses the tick "
+      "is still drawn on a checked box",
+      re.findall(r'url\("([^"]+)"\)', marks_odd) == [
+          odd.replace(os.sep, '/') + '/checked.png',
+          odd.replace(os.sep, '/') + '/partial.png']
+      and rg.qss_url('C:\\a b\\x"y.png') == 'url("C:/a b/x\\"y.png")'
+      and light > light0 and light >= 6, repr((light, light0, marks_odd)))
+
+# removed code stays removed [136-141]
+er_src = open(er.__file__, encoding='utf-8').read()
+check('136', "[136-141] removed: tray signals and layout, the re-detect "
+      "modal, the tray glyph constants, fixed physiology scales, the "
+      "Wonambi peak-frequency read; the footer is one line",
+      not any(hasattr(rg.ChannelQCWidget, n) for n in (
+          'requestDrop', 'unmarkArtefact', 'removeFromRedetect',
+          'requestBuildRedetect', 'verdictChanged', '_rebuild_tray'))
+      and not any(hasattr(rg, n) for n in (
+          'FlowLayout', '_STATE_ART_GLYPH', '_STATE_RD_GLYPH',
+          '_STATE_ART_COLOR', '_STATUS_TEXT'))
+      and not any(hasattr(rg.EventReviewGUI, n) for n in (
+          'open_redetect_modal', '_build_redetect_request',
+          '_qc_unmark_artefact', '_qc_remove_redetect', '_drop_channel'))
+      and all(len(v) == 2 for v in rg.PHYSIO_ROWS.values())
+      and "ev.get('peak_freq')" not in er_src
+      and 'first-difference' not in er_src and 'first-difference' not in src
+      and '\n' not in er.footer_text(3.5, 2.0, 'spindle'))
 
 say("\n" + "=" * 78)
 check('settings', "the real review-GUI preferences file was not "
