@@ -105,14 +105,15 @@ detector is right, work through a drawn sample (see the
 ## Step 6: Flag a Channel for Re-detection
 
 Once you've decided a channel needs re-running with different parameters
-(or dropped from analysis):
+(or excluded from the analysis with **Exclude channel**):
 
 1. Select the channel in the Channels (QC) table
 2. Press **F** (or use **Edit → Flag selected channel for re-detect**)
 
-The channel is added to the re-detect queue shown in the status bar. Repeat
-for as many channels as needed, then use **Analysis → Build re-detect
-request…** to hand them off to a re-run.
+The channel is added to the re-detect queue, its Status reads `kept · ↻
+re-detect`, and the queue is saved in the database. Repeat for as many channels
+as needed, then choose **File → Export re-run package…** to hand them off to a
+re-run.
 
 ## Step 7: Export a QC Report
 
@@ -122,7 +123,7 @@ When you're done triaging:
 2. Choose a location and filename
 
 This writes a Markdown summary of the per-channel QC table, flagged
-channels, and marked artefact ranges for the current event type.
+channels, and excluded time ranges for the current event type.
 
 !!! success "What you've created"
     A Markdown report you can attach to a study log or share with a

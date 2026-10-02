@@ -44,9 +44,9 @@ individual events.
 
 **2. Channel Verdicts for Action, Event Decisions for Evidence**
 
-Decisions that change the analysis (keep / drop / mark-artefact /
+Decisions that change the analysis (include / exclude /
 queue-for-re-detect) are recorded per channel. This matches how they get used
-downstream: a dropped channel is excluded wholesale; a re-detect-queued channel
+downstream: an excluded channel is left out of review samples, the re-run export, the flag statistics and the topography; a re-detect-queued channel
 gets re-run with different parameters. Event decisions (accept / reject /
 unsure, with a reason) are different in kind. They are stored in
 `event_reviews`, keyed by the event's uuid and the reviewer, and feed a
@@ -82,15 +82,14 @@ neural_events.db  →  per-channel QC aggregates  →  Channels (QC) table
                                                           ▼
                                                     Epochs panel
                                                           │
-                                    mark artefact / queue re-detect
+                                    exclude channel or time / queue re-detect
                                                           ▼
                                         channel_qc / qc_artefact_intervals
                                      (written back into neural_events.db)
                                                           │
-                          Export QC report… (Markdown)  ◄─┤─►  Build re-detect
-                                                             request… (JSON) /
-                                                             Export Re-run
-                                                             Package…
+                          Export QC report… (Markdown)  ◄─┤─►  Export re-run
+                                                             package…
+                                                             (redetect_channels.csv)
 ```
 
 QC verdicts, artefact ranges, event decisions and sample data are written
@@ -138,8 +137,8 @@ The Epochs panel exists because a channel-level flag alone doesn't tell you
 otherwise clean recording. Stepping through 30-second windows (with outlier
 epochs marked and `P`/`N` hopping between them) lets a reviewer distinguish
 "globally noisy channel" from "channel with one contaminated stretch," which
-determines whether the right fix is dropping the channel or marking an
-artefact range.
+determines whether the right fix is excluding the channel or excluding a
+time range.
 
 ### Background Waveform Loading
 

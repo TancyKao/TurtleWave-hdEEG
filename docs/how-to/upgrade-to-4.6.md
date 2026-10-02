@@ -56,7 +56,28 @@ database you care about.
 - **Review GUI:** population checks on the Channels tab, an Event panel,
   decision keys, neighbouring channels and a physiology strip on the Epochs tab,
   and a review sample with a precision report. See
-  [Reference: EEG Review GUI](../reference/eeg-review-gui.md).
+  [Reference: EEG Review GUI](../reference/eeg-review-gui.md). Changes to the
+  controls you may already use:
+    - **Exclude channel** is one toggle that replaces *Drop channel* and *Mark
+      channel artefact*. It writes the same stored verdict, so earlier choices
+      carry over. An excluded channel is left out of review samples, the re-run
+      export, the flag statistics and the topography; event density and exported
+      events are unchanged in 4.6.0.
+    - The *Selection* area and *Build re-detect request…* are gone, and nothing
+      writes `redetect_request.json` any more. The re-detect queue is saved in the
+      database (the `channel_qc` table gains a `redetect` column), shows in the
+      Status column and the Show filter, and **File ▸ Export re-run package…**
+      writes `redetect_channels.csv` for `examples/rerun_detection.py --channels`.
+    - *Mark as artefact (writes XML)* is now **Exclude time range…**, and *Mark N
+      epochs as artefact* is **Exclude N epochs…**. The reject reason *Artefact*
+      keeps its name and labels one event only.
+    - The Channels table says *Mean amp µV* (it was *Med amp µV*), and an amp flag
+      names the measure that triggered it. Regions come from electrode names for
+      10-20 and 10-5 labels.
+    - The Event panel shows four rows (Signal vs background, Duration, Peak freq
+      or Wave freq, Amplitude outlier); the rest moved to tooltips.
+    - While a review sample is active the Channels tab shows a banner and hides
+      the check columns.
 
 ## What you need to do
 
@@ -83,6 +104,43 @@ If an `event_reviews` table written by a pre-release build has an older reason
 vocabulary, it is rebuilt in one transaction: `arousal-alpha` becomes
 `arousal`, and any other unknown reason or decision is kept as text in
 `comment`. Every row is kept.
+
+## Quiet two harmless Wonambi warnings
+
+The pinned Wonambi 7.15 prints two `DeprecationWarning`s that no fix on your side
+can remove:
+
+- a notice that the `fooof` package is being deprecated, printed when Wonambi
+  imports it (TurtleWave never uses `fooof`);
+- NumPy's "Conversion of an array with ndim > 0 to a scalar is deprecated",
+  raised from `wonambi/trans/analyze.py` once per call site.
+
+The GUIs and the example and Gadi driver scripts now set the environment
+variable `TURTLEWAVE_QUIET_WONAMBI=1` before they import the package, and
+`import turtlewave_hdEEG` then calls `turtlewave_hdEEG.utils.quiet_wonambi_warnings()`
+before it imports Wonambi. Nothing else is silenced. The library never does this
+on its own: without the variable, your warnings stay visible.
+
+To see the warnings again, set the variable to `0` before starting:
+
+```bash
+TURTLEWAVE_QUIET_WONAMBI=0 turtlewave_gui
+```
+
+In your own script, set it before the first import:
+
+```python
+import os
+os.environ.setdefault('TURTLEWAVE_QUIET_WONAMBI', '1')
+from turtlewave_hdEEG import ParalEvents
+```
+
+The order matters for the `fooof` notice: `fooof` switches Python's warning
+filter to "always" just before it warns, so no filter set earlier can stop it.
+The function imports `fooof` itself inside a quiet block, which only works before
+Wonambi is first imported. Called later, it still silences the NumPy warning but
+cannot take back a notice already printed. See
+[Utilities API Reference](../reference/api/utils.md).
 
 ## See also
 

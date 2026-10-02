@@ -22,7 +22,7 @@ that database. By default they already are — detection writes straight into
 
 **Solution:**
 
-1. On the **1 · Channels (QC)** tab, open the **Show** combo and choose `Flagged`, `Dropped` or `Dead`, or leave it on `All channels`
+1. On the **1 · Channels (QC)** tab, open the **Show** combo and choose `Flagged`, `Excluded`, `Queued for re-detect` or `Dead`, or leave it on `All channels`
 2. Open the **Sort** combo to order the rows, for example `Checks (hard first)`, `Off-band share ↓` or `Amp z ↓`. Clicking a column header also sorts
 3. Use the **Stage** buttons to set the stages the check columns use
 
@@ -138,25 +138,34 @@ reconstructed from neighbours. The mark is display only. On open, the GUI
 shows `Cz`, `Fz` and `Pz` when the file has them, never a channel the file
 types as non-EEG.
 
-## Mark a Channel as an Artefact
+## Exclude a Channel
 
-**Problem:** A channel is unusable for the current event type and should be excluded going forward.
-
-**Solution:**
-
-1. Select the channel on the **1 · Channels (QC)** tab
-2. Click **Mark channel artefact**
-
-The button toggles — click **Unmark channel artefact** to reverse it. Marked channels are excluded from exports and get a ⚑ tag in the channel filter list.
-
-## Mark a Time Range as Artefact
-
-**Problem:** Only part of a channel's recording is bad, not the whole channel.
+**Problem:** A channel is unusable for the current event type and should not count.
 
 **Solution:**
 
-1. On the **2 · Epochs** tab, shift-drag across the overview strip to select a range
-2. Click **Mark N epochs as artefact** to confirm
+1. Select the channel on the **1 · Channels (QC)** tab (or drill into it)
+2. Click **Exclude channel**
+
+The button is one toggle: it reads **Include channel** while the channel is
+excluded, and clicking it again reverses the exclusion. In 4.6.0 an excluded
+channel is left out of review samples, of the re-run export, of the flag
+statistics and of the topography. Its events stay in the database, and event
+density and CSV exports are unchanged. Its Status reads `× excluded`.
+
+## Exclude a Time Range
+
+**Problem:** Only part of the recording is bad, not the whole channel.
+
+**Solution:**
+
+1. On the **2 · Epochs** tab, brush a range on the trace, or shift-drag across the overview strip to select epochs
+2. Click **Exclude time range…** (or **Exclude N epochs…**) to confirm
+
+The time is excluded from analysis for every channel. It is saved with the
+review and applied when detection is re-run; events already detected are not
+changed. This is different from rejecting one event with the reason
+**Artefact**, which labels that event only.
 
 ## Flag Channels for Re-detection
 
@@ -164,19 +173,23 @@ The button toggles — click **Unmark channel artefact** to reverse it. Marked c
 
 **Solution:**
 
-- Select the channel and press **F**, or click **Add to re-detect queue**
+- Select the channel and press **F**, or click **Add to re-detect queue** (the button then reads **Remove from re-detect queue**)
 - To queue every currently HARD-flagged channel at once, click **Queue all HARD**
 
-The re-detect queue count is shown in the status bar and in the **RE-DETECT QUEUE** section of the selection tray, where you can remove channels with the chip's ✕.
+A queued channel reads `kept · ↻ re-detect` in the Status column, and **Show ▸
+Queued for re-detect** lists them. The queue is saved in the database, so it is
+still there when you reopen the GUI.
 
-## Hand Off Flagged Channels to a Re-run
+## Hand Off Queued Channels to a Re-run
 
-**Problem:** You've flagged channels and want to hand them off to a re-run.
+**Problem:** You've queued channels and want to re-run detection on them.
 
-**Solution:** there are two hand-off formats, depending on which detector script picks them up:
-
-- **Analysis → Build re-detect request…** (or the **Build re-detect request…** button on the Channels tab) previews and saves `redetect_request.json` next to the annotation XML, for `turtlewave_gui` to pick up. This GUI never runs detection itself.
-- **Export → Export Re-run Package…** snapshots the current database/CSVs, then writes a `channels.csv` and a sidecar annotation XML (with any marked artefact ranges folded in) for the local `--annot`/`--channels` detector scripts (e.g. `examples/hdEEG_spindle_detector.py`).
+**Solution:** choose **File → Export re-run package…** (or click the `n queued ·
+Export re-run package…` link in the bar). It snapshots the current database,
+then writes `channels.csv`, `redetect_channels.csv` (only the queued channels)
+and a sidecar annotation XML with the excluded time ranges. Pass
+`redetect_channels.csv` to `examples/rerun_detection.py --channels`. This GUI
+never runs detection itself.
 
 See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels.md) for the full hand-off flow.
 
@@ -189,7 +202,7 @@ See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels
 1. **Export → Export QC report…**
 2. Choose a location and filename
 
-This writes a Markdown summary — channel count, dropped channels, global artefact windows, and the full flagged-channel table — for the current event type.
+This writes a Markdown summary — channel count, excluded channels, excluded time ranges, and the full flagged-channel table — for the current event type.
 
 ## Troubleshooting
 

@@ -47,8 +47,10 @@ To read them:
    (the library reports it from 5);
    hover the row for the share below and above the band. What those peaks are is
    for you to decide: the list never says.
-5. Select a channel and use the bottom bar: **Open in Epochs**, **Drop channel**,
-   **Mark channel artefact** or **Add to re-detect queue**.
+5. Select a channel and use the bottom bar: **Open in Epochs**, **Exclude
+   channel** or **Add to re-detect queue**. Excluding leaves the channel out of
+   review samples, the re-run export, the flag statistics and the topography;
+   it does not change event density or exported events.
 
 **How a channel is flagged.** There are no fixed thresholds. Each channel is
 compared with the rest of the montage. It is flagged when its off-band or

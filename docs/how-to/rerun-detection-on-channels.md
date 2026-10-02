@@ -19,7 +19,7 @@ In `eeg_review_gui`, use **Export Re-run Package**. This:
    reviewer's live artefact marks appended as `Artefact` events, under the
    **same rater the detector will read** (never the original annotation file).
 3. Writes `channels.csv` — the kept channels (whole montage minus any
-   dropped channel).
+   excluded channel).
 4. Writes `redetect_channels.csv` — **only** the channels the reviewer
    explicitly queued for re-detection (skipped entirely if none were queued).
 

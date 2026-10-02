@@ -22,11 +22,11 @@ Two tabs, plus two docks:
 
 - **1 · Channels (QC)** (landing tab) — a sortable per-channel table for the
   current event type, with a Stage toggle, Show and Sort combos, population-check
-  columns and a `Checks` flag beside the amplitude columns, and actions to mark a
-  channel as an artefact, queue it for re-detection, drop it or open its epochs
+  columns and a `Checks` flag beside the amplitude columns, and actions to
+  exclude a channel, queue it for re-detection or open its epochs
   (see [Channels Tab](#channels-tab)).
 - **2 · Epochs** — steps through the scored epochs for a single channel, with
-  a hypnogram strip, outlier markers, and range-marking for artefacts. Epochs
+  a hypnogram strip, outlier markers, and time-range exclusion. Epochs
   are the annotation file's own epochs: 30 s on a uniform grid, and on a cut
   recording whole-second epochs of 1 to 30 s. The window and the hypnogram
   strip follow each epoch's true length. Without an annotation file the tab
@@ -47,7 +47,7 @@ Two tabs, plus two docks:
   listed in the Filters dock with a trailing ` ~` and the tooltip
   "Interpolated channel (reconstructed from neighbours by the cleaning
   pipeline)". The channel name used for lookups is unchanged.
-- A channel flagged as an artefact keeps its existing ⚑ tag.
+- An excluded channel shows `× excluded` in the Status column.
 - The waveform channels open as `E112`, `E118`, `Cz` when all three exist (EGI
   nets). Otherwise they are those of `Cz`, `Fz`, `Pz` that exist, topped up to
   three from the start of the list. Channels the file types as non-EEG are
@@ -60,19 +60,29 @@ Two tabs, plus two docks:
 
 | Menu | Notable actions |
 |------|------------------|
-| File | Open Database…, Open EEG File…, Open Annotation File…, Exit |
+| File | Open Database…, Open EEG File…, Open Annotation File…, Export re-run package…, Exit |
 | Edit | Flag selected channel for re-detect (`F`) |
 | Review | Reviewer name…, Show other reviewers (checkable, off at every launch), and the review-sample entries (Draw review sample…, Resume review sample, Exit review sample, Precision report…) |
 | View | Outlier threshold…, toggle Filters dock / Topography & detail dock |
-| Analysis | Refresh QC dashboard, Build re-detect request… |
+| Analysis | Refresh QC dashboard |
 | Export | Export QC report…, Export Re-run Package…, Export Figure… |
-| Help | Keyboard shortcuts…, Design notes, About |
+| Help | Keyboard shortcuts…, What the event figures mean, Design notes, About |
 
 ## Channels Tab
 
-Top to bottom: a control row, the channel table, a bottom action bar for the
-selected channel and a footer line stating the flag rule. The right dock holds
-the topography and, under it, the flagged-channel list.
+Top to bottom: a banner (only while a review sample is active), a control row,
+the channel table, a bottom action bar for the selected channel and a one-line
+footer. The right dock holds the topography and, under it, the flagged-channel
+list. The top bar shows `detector: Moelle2011 · 11–16 Hz` for the run in view,
+or `detector: —` when several runs match the Filters dock.
+
+**Banner during sample review.** While a review sample is active, a banner reads
+`Review sample in progress: channel checks are hidden. Exit sample to see them.`
+with an **Exit sample** button. The six check columns (`Checks`, `Off-band`,
+`Low prom.`, `At floor`, `Amp / bg`, `Amp / thr`) are hidden, the Stage buttons
+are disabled, the check-based Sort items are disabled, `Flagged` counts the
+amplitude flag only, and the count line starts `checks hidden`. All return on
+Exit sample.
 
 **Control row.**
 
@@ -83,14 +93,13 @@ the topography and, under it, the flagged-channel list.
   topography and the flagged-channel list. Density and amplitude columns follow
   the Filters dock. The choice is remembered per event type.
 - **Show** filters the rows: `All channels (n)`, `Flagged (n)` (a `Checks` flag
-  or an amplitude flag of hard or soft), `Dropped (n)` and `Dead (n)`. The
-  counts are over all channels.
+  or an amplitude flag of hard or soft), `Excluded (n)`, `Queued for re-detect (n)` and `Dead (n)`. The counts are over all channels.
 - **Sort** orders the rows: `Checks (hard first)` (the default), `Off-band share
   ↓`, `At-floor share ↓`, `Amp / bg ↑`, `Amp / thr ↑`, `Low prominence share ↓`,
   `Amp z ↓`, `Channel` and `Region`. Clicking a column header also sorts; the
   combo then reads `Column header` unless the click matches an item.
 - A **count line** at the right: `8 checks flagged · 3 amp flagged · 1 dead`,
-  plus `· 1 dropped` when any channel is dropped. It counts channels over the
+  plus `· 1 excluded` when any channel is excluded. It counts channels over the
   whole montage, not the Show filter. On a run without stored figures it starts
   `checks not recorded`.
 
@@ -101,30 +110,35 @@ the topography and, under it, the flagged-channel list.
 | `Channel`, `Region` | name; region |
 | `Events` | count with thousands separator |
 | `Density /min` | events per minute |
-| `Med amp µV` | median amplitude |
-| `Amp z` | signed robust z of the amplitude |
-| `Amp flag` | `✓ OK`, `▲ SOFT`, `× HARD` or `DEAD` |
+| `Mean amp µV` | mean amplitude of the channel's events (detection-band signal) |
+| `Amp z` | signed robust z of the amplitude measure furthest from the other channels (mean, 95th percentile or largest event); hover for all three |
+| `Amp flag` | `✓ OK`, `▲ SOFT · mean`, `× HARD · largest event`, `· 95th pct`, or `DEAD`; the text after the dot names the measure that triggered it |
 | `Checks` | `× HARD · off-band 34 %`, `▲ SOFT · …`, `—`, or `— dead channel` |
 | `Off-band` | share of events whose peak lies outside the run band |
 | `Low prom.` | share with `low_prominence`; context only, never tinted |
 | `At floor` | share within 0.05 s of the run's minimum duration |
 | `Amp / bg` | median event amplitude over background |
 | `Amp / thr` | median detection peak over the detection threshold |
-| `Status` | `kept` or `× dropped`, followed by ` · ↻ re-detect` when the channel is queued for re-detection |
+| `Status` | `kept` or `× excluded`, followed by ` · ↻ re-detect` when the channel is queued for re-detection |
 
-There is no State column. A channel queued for re-detection reads `kept · ↻
-re-detect` or `× dropped · ↻ re-detect` in the Status column. It also shows in
-the **RE-DETECT QUEUE** chips of the selection tray, in the `re-detect queue: n`
-count in the status bar and in the bottom-bar button, which reads `Remove from
-re-detect queue` for a queued channel. A channel marked as an
-artefact shows in the tray's **CHANNEL ARTEFACTS** chips and in the Status
-column.
+There is no State column and no Selection area. A channel queued for
+re-detection reads `kept · ↻ re-detect` or `× excluded · ↻ re-detect` in the
+Status column, and the queue is saved in the database (the `channel_qc` table),
+so it is still there when you reopen the GUI. The status bar shows the
+`re-detect queue: n` count. An excluded channel's own `Amp flag` and `Checks`
+cells read `—`: an excluded channel is not judged.
+
+**Regions** come from the electrode name for 10-20 and 10-5 labels (`Fz`, `F1h`
+and `F2h` are Frontal), and from coordinates only for EGI `E<n>` labels, or when
+the name gives no region. The table, the topography and the review sample use
+the same region.
 
 Hover tooltips: the `Checks` cell lists every flagged column with its value,
 the montage median and the robust z. The `At floor` cell gives the floor share
 and the ceiling share, or says the run has no upper limit. Shares are over
 events for which the figure was computed, so a channel with fewer than 20 such
-events shows `—` and is never flagged on that column.
+events shows `—` and is never flagged on that column. `Amp z` shows the z of the measure that
+triggered the flag.
 
 **The flag rule, in words.** A channel is compared with the rest of the
 montage, never with a fixed number. It is flagged when its off-band or at-floor
@@ -132,9 +146,15 @@ share is well above the montage median, or its median amp/bg or amp/thr is well
 below it: hard when the robust z is above the hard limit (default 3.5), soft
 above the soft limit (2.0). It also needs a difference from the montage median
 of at least 10 percentage points (shares) or 0.3× (ratios) and at least 20
-events. The limits are those of **View ▸ Outlier threshold…**, and the footer
-line shows the current values. A problem every channel shares is not flagged;
+events. The limits are those of **View ▸ Outlier threshold…**. Excluded channels
+are left out of the comparison. A problem every channel shares is not flagged;
 see the Precision report.
+
+**Footer.** One line: `× hard / ▲ soft: the channel stands out from the others
+(robust z above 3.5 / 2). Low prominence never flags. Hover for the full rule.`
+The tooltip states the full rule for the amplitude flag (mean, 95th percentile or
+largest event; dead means fewer than 15 % of the median event count) and for the
+checks. The line is the same during sample review.
 
 **Low prominence is context only.** It stays as a column, a topography choice
 and a montage median, but it never sets the `Checks` flag, never appears in the
@@ -145,15 +165,33 @@ The `Checks` flag is separate from the amplitude `Amp flag`. **Queue all HARD**
 acts on the amplitude flag only.
 
 **Bottom action bar** (for the selected row): **Open in Epochs** (also turns on
-the check filter for the channel's largest-z flagged column), **Drop channel**,
-**Mark channel artefact**, **Add to re-detect queue** (`F`), then **Queue all
-HARD** and **Build re-detect request…**. All are disabled with no row selected.
+the check filter for the channel's largest-z flagged column), **Exclude channel**
+(**Include channel** once excluded), **Add to re-detect queue** (`F`; **Remove
+from re-detect queue** once queued), then, when something is queued, a link
+`n queued · Export re-run package…`, and **Queue all HARD (n)**. The buttons are
+disabled with no row selected.
+
+**Exclude channel** is one toggle. In 4.6.0 an excluded channel is left out of
+review samples, of the re-run export (`redetect_channels.csv`), of the flag
+statistics (the montage median and spread that channels are compared with) and
+of the topography, where it is a hollow marker not used for the map. Event
+density and exported events are unchanged, so excluding a channel does not
+remove its events from `event_density` or from a CSV export. It is stored in
+`channel_qc` and one click reverses it. **Exclude time range…** on the Epochs
+tab is a different action; see below.
+
+**Re-running queued channels.** The queue is not a request file. **File ▸ Export
+re-run package…** (or the link in the bar) writes `redetect_channels.csv`, the
+file `examples/rerun_detection.py --channels` reads. See
+[Re-run Detection on Reviewer-Selected Channels](../how-to/rerun-detection-on-channels.md).
 
 **Topography.** The combo offers event density, mean amplitude, maximum
 peak-to-peak and the check metrics (off-band share, low-prominence share
 (context), at-floor share, amp vs background, amp vs threshold). On a check
 metric, each channel with a `Checks` flag has a ring (hard solid, soft dashed)
-and up to 12 of them, those with the largest z, carry their name; a caption
+and up to 12 of them, those with the largest z, carry their name; excluded
+channels are hollow, with a legend line `○ excluded channel (not used for the
+map)`; a caption
 under the colour bar defines the metric and says how many more are ringed.
 Clicking a ringed electrode selects the channel.
 
@@ -170,8 +208,8 @@ channel has at least 10 off-band events (the library reports the bin from 5; the
 band, the share above it and the bin. Other facts read `median amplitude 1.2×
 background (montage median 2.4×)` and the same for threshold. The list never
 interprets: it does not say what the off-band peaks are. Clicking a row selects
-the channel and shows **Open in Epochs** and **Drop channel** on that row. A
-dropped channel stays, greyed, with ` · dropped`. The **Selected channel** block
+the channel and shows **Open in Epochs** and **Exclude channel** on that row. An
+excluded channel stays, greyed, with ` · excluded`. The **Selected channel** block
 gives two lines of facts: name, region and event count, then `amp`, `checks` and
 off-band share.
 
@@ -195,39 +233,63 @@ no filter chip.
 ## Event Panel
 
 The header reads `EVENT i OF n IN EPOCH` (all events of the drilled channel and
-type that start in the epoch), or `EVENT` with no selection. Values come from the
-`events` row; for a 4.5 run they read `not recorded for this run (detected with
-4.5 or earlier)`. A missing value is `—` with a reason, never blank.
+type that start in the epoch), or `EVENT` with no selection, with a **What do
+these mean?** link at its right (also **Help ▸ What the event figures mean**,
+which opens a short built-in explanation that needs no network). Under it, one
+line: `01:16:37.5 · PPOz · NREM2 · Moelle2011 11–16 Hz` (the channel is `~PPOz`
+when interpolated). Its tooltip gives the times in seconds, the run, stages,
+excluded event types, reference and version.
 
-| Row | Shows |
-|---|---|
-| Time | clock time and seconds from recording start |
-| Channel | name; `~PPOz` for an interpolated channel |
-| Stage | `epoch_stage` |
-| Detection | method, band, run date and short run id; tooltip has stages, reject types, reference and version |
-| Duration | seconds, and position against the run's duration limits |
-| Half-waves | half-waves standing out from background (2.5× bg RMS); spindles |
-| Cycles (nominal) | sign changes ÷ 2 on the band-passed event; spindles |
-| Peak frequency | 1/f-corrected peak with `in band` or `OFF BAND`, prominence, `low prominence`, `coarse` and the detector's own peak; spindles |
-| Wave frequency | 1 / (2 × negative half-wave), with `in band` or `OFF BAND`; slow waves and K-complexes |
-| Amp. vs background | ratio, band RMS against background RMS, number of windows, `near a stage change` |
-| Amp. vs threshold | per method: a ratio, several thresholds, `no ratio`, or `Threshold not recorded for this run (detected with 4.5 or earlier)` |
-| Trough, Peak-to-peak, Negative half-wave | slow waves and K-complexes; peak-to-peak only when `db_meta.det_ptp_units` is µV |
-| Amplitude outlier | `yes` with the amplitude and limit, or `no` |
+Then four rows. Everything else is in tooltips.
 
-In sample mode a first row, `Sample`, shows the region and stage, with the
-event's position in the sample and a tooltip giving its sampling weight.
+| Row | Shows | Tooltip adds |
+|---|---|---|
+| `Signal vs background` | how many times bigger the event is than the surrounding signal in the detection band, for example `4.0×` | event and background RMS, the number of windows used, a stage-change note |
+| `Duration` | seconds and the run's limits, for example `1.37 s · limits 0.5–3 s` | the half-waves above background and the nominal cycle count (spindles) |
+| `Peak freq` | the dominant rhythm, with `in band` or `OFF BAND`; `≈` before the value for an event under 1 s | prominence in dB, a weak-peak or coarse-resolution note |
+| `Wave freq` | one wave per event length, for slow waves and K-complexes (replaces `Peak freq`) | the searched band |
+| `Amplitude outlier` | `yes · 984 µV` or `no · 41 µV` | the channel's outlier rule and the detector-threshold line; for slow waves the trough, peak-to-peak and negative half-wave |
 
-**Flag words in live sample review.** For a sample event on which you have no
-decision or an unsure decision, the panel hides every flag word and keeps every
-number: `in band` / `OFF BAND`, `low prominence`, `at the floor of the run
-limits`, `barely above background`, `barely crossed`, `meets` / `fails`, and the
-`flagged: …` part of the Sample row (the Massimini and AASM value cell reads `2
-criteria`). Nothing is coloured while hidden, and a line reads `Labels hidden
+Where a figure is missing the value reads `not recorded` (a 4.5 run),
+`computing…`, `near a splice`, `too little background` or `not computed`, with
+the reason in the tooltip. `Duration` and `Amplitude outlier` always have a
+value. The detector's own first-difference frequency is not shown anywhere.
+
+In sample mode a line `Sample event i of N · region · stage` sits under the
+header.
+
+**Reading words in live sample review.** For a sample event on which you have no
+decision or an unsure decision, the panel hides the reading words and keeps every
+number: `in band` / `OFF BAND`, `at the shortest allowed`, `at the longest
+allowed`, `outside the limits`, `barely above background`, the `yes` / `no` of
+the outlier row, the `flagged: …` part of the sample line, and `meets` / `fails`
+in tooltips. Nothing is coloured while hidden, and a line reads `Labels hidden
 until you accept or reject this sample event.` The words appear straight after
 your accept or reject is written, and are hidden again if it is undone or
 cleared. Outside sample mode, and for events outside the sample, they always
-show. The `outlier` row stays.
+show. An undecided sample event is drawn without the outlier mark on the trace.
+See [Decide whether an event is genuine](../how-to/decide-if-an-event-is-genuine.md).
+
+## Epochs Tab Layout
+
+- The centre column is a vertical splitter. The top pane holds the epoch strip,
+  navigation, the raw and filtered traces and the action rows; the bottom pane
+  scrolls and holds Neighbours and Physiology, both closed on first use. Opening
+  them never shrinks the traces below their minimum heights (raw 160 px, filtered
+  110 px). The splitter position is remembered.
+- Each trace's vertical range comes from a robust estimate of that epoch (the
+  larger of a floor, 50 µV raw and 10 µV filtered, and about 8 robust standard
+  deviations), so one large event does not flatten the trace. A sample beyond the
+  range is drawn clipped at the edge, marked by a thin line, and a note reads
+  `clipped at ±200 µV · largest 984 µV`. The **Full range** checkbox shows the
+  whole range; it is off by default and resets when the epoch changes.
+- **Exclude time range…** (formerly "Mark as artefact") and **Exclude N
+  epochs…** exclude the brushed time from analysis for every channel. They are
+  saved with the review and applied when detection is re-run; events already
+  detected are not changed. This is separate from rejecting one event with the
+  reason **Artefact**, which labels that event only.
+- The strip legend reads `grey bars = events per epoch · red = amplitude outliers
+  · purple dashes = excluded time · white line = current epoch`.
 
 ## Decision Controls
 
@@ -252,7 +314,7 @@ comment; `9` is unused.
 | `8` | Single channel | Wrong morphology |
 | `0` | Other | Other |
 
-A reject needs a reason; an unsure does not. Pressing `R` arms a reject and a
+The `Artefact` reason labels that one event only; its tooltip points to **Exclude time range…** for leaving time out of the analysis. A reject needs a reason; an unsure does not. Pressing `R` arms a reject and a
 digit or a click on a grid button writes it. Clicking a grid button with nothing
 armed arms Reject with that reason preselected (hint: `Click {label} again or
 press Enter to reject ({label}).`); a second click on the same reason or `Enter`
@@ -329,31 +391,40 @@ edge is within 0.3 s.
 ## Status Bar
 
 Left to right: `Reviewer: TK` (or `not set`); the position (`PPOz · epoch 3 / 40`
-on the Epochs tab, or the event type, method, band, channel count and check
-counts on the Channels tab); the save line `Decisions save to neural_events.db
+on the Epochs tab, or the event type, method, band, channel count, check
+counts and `n channel(s) excluded` on the Channels tab); the save line `Decisions save to neural_events.db
 as you make them.` (`Set a reviewer name to save decisions.` without a name, and
 a message when the library has no review store); and the re-detect queue count.
 Decision confirmations appear as temporary messages.
 
 Under the epoch strip a legend reads `grey bars = events per epoch · red =
-amplitude outliers · purple dashes = marked artefact · white line = current
+amplitude outliers · purple dashes = excluded time · white line = current
 epoch`, with ` · blue ticks = sample events` in sample mode.
 
 ## Neighbours and Physiology
 
 **Neighbours** shows the selected event on the target channel and up to six
 nearest EEG channels (by electrode position, else the same region) over 4 s
-(spindles) or 6 s (slow waves, K-complexes), with their own detected events
-shaded. Rows are labelled by rank, not distance: `E75 · target`, then `E19 · 1`,
-`E23 · 2` with 1 the nearest, and `~E19 · 1` for an interpolated channel. The
-header says `(1 = nearest)`. The region and selected-channel fallbacks are not
-ranked, so their rows carry the name only. No distance is shown, because EEGLAB
-coordinates carry no reliable units.
+(spindles) or 6 s (slow waves, K-complexes). Two thin blue lines through all rows
+mark the selected event's start and end, and a short bar under a neighbour's
+trace marks an event detected on that channel. A one-line legend reads `blue
+lines = the selected event · bar under a trace = an event detected on that
+channel · all rows share one scale (±h µV)`, where `h` is taken
+from the data in the window, with a floor (25 µV for spindles, 75 µV for slow
+waves and K-complexes). Rows are labelled by rank, not distance: `E75 · target`,
+then `E19 · 1`, `E23 · 2` with 1 the nearest, and `~E19 · 1` for an interpolated
+channel. The region and selected-channel fallbacks are not ranked, so their rows
+carry the name only. No distance is shown, because EEGLAB coordinates carry no
+reliable units.
 
 **Physiology** shows EOG, chin EMG and ECG channels the file types as such,
-filtered for display. The selected event is marked by two thin vertical lines
-(its start and end) on each row. No box, fill or text covers the signal. Each
-group collapses, and the choice is remembered.
+filtered for display (EOG 0.3–15 Hz, chin EMG above 10 Hz, ECG unfiltered). Each
+row is scaled from its own data in the current epoch, and its right-aligned
+label gives the half-range: `±50 µV` when the file states microvolts, `±0.5 mV`
+for another stated unit, and `±0.05 · no unit in file` when the file states
+none. The legend adds `no unit stated in this file for …` when that applies. The
+selected event is marked by two thin vertical lines on each row; no box, fill or
+text covers the signal. Each group collapses, and the choice is remembered.
 
 ## Review Sample Bar
 
@@ -399,16 +470,16 @@ EEG file, and optionally a Wonambi annotation XML for sleep stages.
 **Output:**
 
 - **Export QC report…** — a Markdown summary (per-channel QC table, flagged
-  channels, marked artefact ranges) for the current event type.
-- **Build re-detect request…** — a `redetect_request.json` written next to
-  the annotation XML for `turtlewave_gui` to pick up.
-- **Export Re-run Package…** — a snapshot of the current results plus
-  `channels.csv` and a sidecar annotation XML for the local
-  `--annot`/`--channels` detector scripts. See
+  channels, excluded time ranges) for the current event type.
+- **Export re-run package…** (File menu, Export menu, or the `n queued` link) —
+  a snapshot of the current results plus `channels.csv` (the channels that are
+  not excluded), `redetect_channels.csv` (only the queued channels, for
+  `examples/rerun_detection.py --channels`) and a sidecar annotation XML with the
+  excluded time ranges. There is no re-detect request file any more. See
   [Re-run Detection on Reviewer-Selected Channels](../how-to/rerun-detection-on-channels.md).
 
-Channel-level QC verdicts (kept / dropped / marked-artefact) and the
-re-detect queue live in the same database, in tables the GUI manages
+Channel-level QC verdicts (kept / excluded) and the re-detect queue live in
+the same database, in tables the GUI manages
 internally (`channel_qc`, `qc_artefact_intervals`). Event decisions are written
 to `event_reviews` at once, one row per event and reviewer, and sample data to
 `review_sample_designs`, `review_samples` and `review_precision`. Decisions never
