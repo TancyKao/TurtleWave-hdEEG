@@ -4,6 +4,12 @@ hdEEG_annotator_GADI.py
 """
 
 import os
+# Silence two harmless DeprecationWarnings of the pinned Wonambi 7.15 (the
+# fooof notice and NumPy's array-to-scalar conversion); see
+# turtlewave_hdEEG.utils.quiet_wonambi_warnings. This must be set BEFORE
+# turtlewave_hdEEG (and so Wonambi) is imported. Export
+# TURTLEWAVE_QUIET_WONAMBI=0 to see the warnings.
+os.environ.setdefault('TURTLEWAVE_QUIET_WONAMBI', '1')
 import glob
 import sys
 import argparse

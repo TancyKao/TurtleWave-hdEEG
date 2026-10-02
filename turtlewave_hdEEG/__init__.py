@@ -4,6 +4,16 @@ turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 
 __version__ = '4.6.0'
 
+# Opt-in only: with TURTLEWAVE_QUIET_WONAMBI=1 in the environment, silence the
+# two Wonambi 7.15 DeprecationWarnings BEFORE Wonambi is imported below (the
+# fooof notice cannot be stopped afterwards; see quiet_wonambi_warnings).
+# Without the variable nothing is filtered at import. utils imports no Wonambi.
+import os as _os
+from .utils import quiet_wonambi_warnings, QUIET_WONAMBI_ENV
+if _os.environ.get(QUIET_WONAMBI_ENV, '').strip().lower() in ('1', 'true',
+                                                              'yes', 'on'):
+    quiet_wonambi_warnings()
+
 # Import important classes to expose at the package level
 from .dataset import LargeDataset
 from .eeglab_io import open_dataset, EEGLABFormatError

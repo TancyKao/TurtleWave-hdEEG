@@ -48,17 +48,24 @@ refuses if they can be recovered from neither source.
 
 Note on the GUI hand-off
 ------------------------
-The current ``eeg_review_gui`` writes ``channels.csv`` as the *kept* channels
-(whole montage minus dropped) and ``redetect_request.json``'s
-``exclude_channels`` as the re-detect queue unioned with dropped channels;
-neither emits the SELECTED re-detect channels as a clean, distinct list. Until a
-GUI change adds one, pass the selected channels here explicitly via
-``--channels`` (one channel per row, no header).
+``eeg_review_gui``'s File > Export re-run package writes, into its snapshot
+folder, ``channels.csv`` (the *kept* channels: whole montage minus dropped) and,
+when the reviewer queued any channel for re-detection,
+``redetect_channels.csv`` (only those SELECTED channels, one per row, no
+header). Pass ``redetect_channels.csv`` to ``--channels`` here. The file is not
+written when nothing is queued; ``channels.csv`` is the kept list, not the
+re-detect list, so do not pass it in its place.
 """
 
 import argparse
 import logging
 import os
+# Silence two harmless DeprecationWarnings of the pinned Wonambi 7.15 (the
+# fooof notice and NumPy's array-to-scalar conversion); see
+# turtlewave_hdEEG.utils.quiet_wonambi_warnings. This must be set BEFORE
+# turtlewave_hdEEG (and so Wonambi) is imported. Export
+# TURTLEWAVE_QUIET_WONAMBI=0 to see the warnings.
+os.environ.setdefault('TURTLEWAVE_QUIET_WONAMBI', '1')
 import sys
 
 from turtlewave_hdEEG import open_dataset  # reads both EEGLAB layouts
