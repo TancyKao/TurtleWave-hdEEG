@@ -109,6 +109,30 @@ If a re-run needs to be undone, restore the snapshotted files from
 files, and the database copy) over the current ones. The `rerun_log` table
 records the exact `backup_path` used for each re-run.
 
+## Troubleshooting
+
+### Export re-run package is greyed out
+
+**Export re-run package…**, **Exclude time range…** and the `n queued` link are
+disabled when the loaded annotation file does not belong to the open database.
+The tooltip reads `Load the annotation file for {subject} first (File ▸ Open
+Annotation File…).` The package is built from that annotation file, so the GUI
+will not export from another recording's.
+
+1. Read the status bar. After you open a file it may say
+   `Annotation file unloaded: it belongs to {stem}. Load the annotation for {subject}.`
+2. Choose **File ▸ Open Annotation File…** and open the annotation for the
+   subject named in the tooltip.
+3. If the file is the right one but is still unloaded, its name and the two
+   folders above it do not contain the subject. This happens with a generically
+   named file (for example `annotations.xml`) three or more folders below the
+   subject folder. Rename the file to include the subject, such as
+   `sub-01_annotations.xml`, and open it again.
+
+If the status bar says `Cannot check that {stem} belongs to this database (no
+subject recorded). Check it is the right recording.`, the file stays loaded and
+the controls stay enabled. Confirm yourself that it is the right recording.
+
 ## See also
 
 - [Direct-to-database detection](direct-to-database-detection.md)

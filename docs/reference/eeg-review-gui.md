@@ -559,6 +559,33 @@ to `event_reviews` at once, one row per event and reviewer, and sample data to
 `review_sample_designs`, `review_samples` and `review_precision`. Decisions never
 change `events`.
 
+## Recording Check
+
+When you open a database, an annotation file or an EEG file, the GUI compares
+the files with the subject stored in the database (`detection_runs.subject`,
+with any leading `sub-` removed, compared without case). A subject matches when
+it appears as a whole token in the file name, in the name of its parent folder,
+or in the name of its grandparent folder. A name that carries a BIDS `sub-`
+label is compared by that label only and it must match exactly, so `sub-1` does
+not match `sub-10_ses-1_eeg.set`.
+
+| Result | What the GUI does |
+|--------|-------------------|
+| The file provably belongs to another recording | Unloads the file and shows `Annotation file unloaded: it belongs to {stem}. Load the annotation for {subject}.` (or `EEG file unloaded: it belongs to {stem}. Load the EEG file for {subject}.`) in the status bar. |
+| The database stores no subject | Keeps the file and shows `Cannot check that {stem} belongs to this database (no subject recorded). Check it is the right recording.` |
+
+While no matching annotation file is loaded, **Exclude time range…**,
+**Export re-run package…** and the `n queued` link are disabled. Their tooltip
+reads `Load the annotation file for {subject} first (File ▸ Open Annotation
+File…).` Loading the matching annotation file enables them again. See
+[Re-run Detection on Reviewer-Selected Channels](../how-to/rerun-detection-on-channels.md#export-re-run-package-is-greyed-out).
+
+!!! note "Known limit"
+    Only the file name and the two folders above it are compared. A generically
+    named file such as `annotations.xml` that sits three or more folders below
+    the subject folder is treated as another recording's and is unloaded.
+    Rename the file so its name includes the subject.
+
 ## What Changed From the Pre-4.0 GUI
 
 4.0.0 dropped the per-event Events tab and everything built around it: no

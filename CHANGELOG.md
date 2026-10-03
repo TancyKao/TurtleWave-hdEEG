@@ -40,10 +40,17 @@ Per-event figures and detection thresholds are not recorded for runs made before
 - Review GUI: the re-detect queue is saved in the database.
 - Review GUI: regions come from electrode names for 10-20 and 10-5 labels.
 - Review GUI: the amplitude flag names the measure that triggered it.
+- Review GUI: excluded time ranges take effect only through File ▸ Export re-run package…; the review-qc file is a record.
+- Review GUI: an annotation or EEG file from a different recording than the open database is unloaded, and Exclude time range and Export re-run package stay disabled until the matching annotation is loaded.
 
 ### Removed
 
 - Review GUI: the Selection area and "Build re-detect request…".
+
+### Fixed
+
+- Review GUI: each re-run package carries every current exclusion; a second package used to drop ranges exported in the first.
+- Review GUI: the suggested re-run command names the right script for the event type and quotes paths.
 
 ## [4.5.0] — 2026-10-01
 
