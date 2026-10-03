@@ -1200,29 +1200,28 @@ check('9.86c', "[86] two clicks on '0  Other' wait for a comment",
 QTest.keyClick(evp.comment, Qt.Key_Escape)
 ep.setFocus()
 app.processEvents()
-# REVIEW STATUS
-sc = fd.status_checks
-check('9.72a', "[72] REVIEW STATUS: five boxes, all checked, reviewed "
-      "tri-state", list(sc) == ['unreviewed', 'reviewed', 'accepted',
-                                'rejected', 'unsure']
+# Show events (R5.4): the row above the raw trace, not the left dock
+sc = ep.show_checks
+dock_texts = [w.text() for w in fd.findChildren(QtWidgets.QLabel)]
+check('9.72a', "[162] the left dock has no REVIEW STATUS group; the row "
+      "above the raw trace has 'Show events:' and four boxes, all ticked, "
+      "with no chip, ticks or shown-buttons",
+      not hasattr(fd, 'status_checks')
+      and not any('REVIEW STATUS' in t for t in dock_texts)
+      and 'Filters apply globally to both tabs.' in dock_texts
+      and list(sc) == ['unreviewed', 'accepted', 'rejected', 'unsure']
       and all(c.isChecked() for c in sc.values())
-      and sc['reviewed'].isTristate())
-sc['reviewed'].click()
-app.processEvents()
-off = [sc[k].isChecked() for k in ('accepted', 'rejected', 'unsure')]
-sc['reviewed'].click()
-app.processEvents()
-on = [sc[k].isChecked() for k in ('accepted', 'rejected', 'unsure')]
-sc['rejected'].setChecked(False)
-app.processEvents()
-check('9.72b', "[72] reviewed sets its three children; unchecking rejected "
-      "alone makes it partial", off == [False] * 3 and on == [True] * 3
-      and sc['reviewed'].checkState() == Qt.PartiallyChecked)
-check('9.74', "[74] caption", fd.status_caption.text() ==
-      'Your decisions only. Applies to the Epochs tab.')
-for k in ('reviewed', 'accepted', 'rejected', 'unsure'):
+      and not ep.shown_chip.isVisibleTo(ep) and ep.shown_ticks is None
+      and not ep.prev_shown_btn.isVisibleTo(ep)
+      and not ep.next_shown_btn.isVisibleTo(ep)
+      and ep.prev_shown_btn.text() == '◀ previous shown'
+      and ep.next_shown_btn.text() == 'next shown ▶'
+      and any(w.text() == 'Show events:' and w.toolTip() == (
+          "Which of this channel's events to show, by your own decisions. "
+          "Applies to this tab only.") for w in ep.findChildren(
+              QtWidgets.QLabel)), repr(list(sc)))
+for k in ('accepted', 'rejected', 'unsure'):
     sc[k].setChecked(False)
-sc['unreviewed'].setChecked(True)
 app.processEvents()
 dbwrite.store_event_review(db9.conn, 'u-e', 'accept', 'JS')
 db9.conn.commit()
@@ -1230,18 +1229,19 @@ ep._goto_epoch(0)
 alpha = {u: next((it.brush.color().alpha() for it in ep.band_items(
     ep.raw_plot) if abs(it.getRegion()[0] - STARTS[UUIDS.index(u)]) < 1e-9),
     None) for u in ('u-a', 'u-b', 'u-c', 'u-e')}
-check('9.73a', "[73] only unreviewed: TK's decided events at half fill, "
-      "JS-only u-e full", alpha['u-a'] == 10 and alpha['u-c'] == 10
-      and alpha['u-e'] == 30, repr(alpha))
+check('9.73a', "[73, 169] only unreviewed: TK's decided events at half "
+      "fill, JS-only u-e full (another reviewer's decision is 'unreviewed')",
+      alpha['u-a'] == 10 and alpha['u-c'] == 10 and alpha['u-e'] == 30,
+      repr(alpha))
 ep.select_event('u-a')
 QTest.keyClick(ep, Qt.Key_BraceRight)
 app.processEvents()
 check('9.73b', "[73] } skips TK-decided events (u-b, u-c): lands on u-out",
       ep._selected_uuid == 'u-out', repr(ep._selected_uuid))
-check('9.79b', "[79] the status filter does not change n in the header",
+check('9.79b', "[79, 168] the filter does not change n in the header",
       evp.header_lbl.text() == 'EVENT 4 OF 5 IN EPOCH',
       repr(evp.header_lbl.text()))
-# [73] ] / [ ignore the filter: with only 'rejected' shown, ] from u-a still
+# [168] ] / [ ignore the filter: with only 'rejected' shown, ] from u-a still
 # goes to the next event TK has not decided (u-out), which the filter hides
 for k in ('unreviewed', 'accepted', 'unsure'):
     sc[k].setChecked(False)
@@ -1253,12 +1253,89 @@ app.processEvents()
 after_r = ep._selected_uuid
 QTest.keyClick(ep, Qt.Key_BracketLeft)
 app.processEvents()
-check('9.73c', "[73] ] / [ ignore REVIEW STATUS: ] lands on an unreviewed "
-      "event the filter dims, [ comes back", after_r == 'u-out'
+check('9.73c', "[73, 168] ] / [ ignore Show events: ] lands on an "
+      "unreviewed event the filter dims, [ comes back", after_r == 'u-out'
       and ep._selected_uuid != 'u-out', repr((after_r, ep._selected_uuid)))
-for c in sc.values():
-    c.setChecked(True)
+# two of TK's own rejects (u-h in epoch 1, u-i in epoch 3), then only
+# 'rejected' shown
+for u in ('u-h', 'u-i'):
+    dbwrite.store_event_review(db9.conn, u, 'reject', 'TK',
+                               reason='artefact')
+db9.conn.commit()
+ep.set_reviews(win._reviews_for_slice(ep._df))
 app.processEvents()
+rej = sorted(u for u, v in ep._reviews.items() if v[0] == 'reject')
+n_ev = int(ep._ev['uuid'].notna().sum())
+want_eps = sorted({ep.index_at(STARTS[UUIDS.index(u)]) for u in rej})
+ep.select_event('u-a')
+others_dim = all(it.brush.color().alpha() < 30 for it in ep.band_items(
+    ep.raw_plot) if not any(abs(it.getRegion()[0] - STARTS[UUIDS.index(u)])
+                            < 1e-9 for u in rej))
+check('9.163a', "[163] only 'rejected': the chip names what is shown and "
+      "the counts, the other bands are dimmed, ticks sit under exactly the "
+      "epochs holding a rejected event, and the shown buttons appear",
+      ep.shown_chip_text() == f"Showing: rejected · {len(rej)} of {n_ev} on "
+      f"Cz ✕" and others_dim and ep.shown_tick_epochs == want_eps
+      and ep.shown_ticks is not None
+      and ep.shown_ticks.opts['pen'].widthF() == 3
+      and ep.shown_ticks.opts['pen'].color().name() == rg.THEME['text']
+      and ep.prev_shown_btn.isVisibleTo(ep)
+      and ep.next_shown_btn.isEnabled()
+      and 'grey ticks below = epochs with shown events'
+      in ep.strip_legend.text(),
+      repr((ep.shown_chip_text(), ep.shown_tick_epochs, want_eps)))
+ep.select_event('u-a')
+ep.next_shown_btn.click()
+by_button = ep._selected_uuid
+ep.select_event('u-a')
+QTest.keyClick(ep, Qt.Key_BraceRight)
+app.processEvents()
+check('9.163b', "[163] 'next shown ▶' and } select the same event",
+      by_button == ep._selected_uuid and by_button in rej,
+      repr((by_button, ep._selected_uuid)))
+sel_rej = ep._selected_uuid
+ep.select_event(next(u for u in rej if u != sel_rej))   # a rejected event
+ep.clear_selection()        # the selection's accent edge replaces any edge
+app.processEvents()
+glyphs = [it for it in ep.glyph_items()
+          if getattr(it, 'uuid', None) in rej]
+pen_style = [(it.getRegion()[0], it.lines[0].pen.style())
+             for it in ep.band_items(ep.raw_plot)
+             if any(abs(it.getRegion()[0] - STARTS[UUIDS.index(u)]) < 1e-9
+                    for u in rej)]
+check('9.167', "[167] a rejected event that passes the filter keeps its ✗ "
+      "glyph and dashed edge", glyphs and all(g.toPlainText() == '✗'
+                                              for g in glyphs)
+      and pen_style and all(p == Qt.DashLine for _x, p in pen_style),
+      repr((len(glyphs), pen_style)))
+sc['rejected'].setChecked(False)
+sc['accepted'].setChecked(True)
+sc['unsure'].setChecked(True)
+app.processEvents()
+check('9.165', "[165] 'accepted' and 'unsure': {what} is 'accepted, unsure'",
+      ep.shown_chip_text().startswith('Showing: accepted, unsure · '),
+      repr(ep.shown_chip_text()))
+for k in ('accepted', 'unsure'):
+    sc[k].setChecked(False)
+sc['unsure'].setChecked(True)
+app.processEvents()
+QTest.keyClick(ep, Qt.Key_BraceRight)
+app.processEvents()
+check('9.166', "[166] a filter that matches nothing: '0 of', both buttons "
+      "disabled, } says so in the status bar",
+      ' · 0 of ' in ep.shown_chip_text()
+      and not ep.prev_shown_btn.isEnabled()
+      and not ep.next_shown_btn.isEnabled()
+      and win.status_bar.currentMessage() == 'No unsure events on Cz.',
+      repr((ep.shown_chip_text(), win.status_bar.currentMessage())))
+ep.shown_chip_x.click()
+app.processEvents()
+check('9.164', "[164] ✕ ticks all four and removes the chip, the ticks and "
+      "the buttons", all(c.isChecked() for c in sc.values())
+      and not ep.shown_chip.isVisibleTo(ep) and ep.shown_ticks is None
+      and not ep.next_shown_btn.isVisibleTo(ep)
+      and ep.shown_chip_x.toolTip() == 'Show all events again.'
+      and 'grey ticks' not in ep.strip_legend.text())
 ep.clear_selection()
 check('9.79c', "[79] no selection: header EVENT", evp.header_lbl.text() ==
       'EVENT', repr(evp.header_lbl.text()))
@@ -1275,7 +1352,8 @@ check('9.76a', "[76] ? opens the sheet with keys and the spindle grid",
       sheet is not None and sheet.isVisible()
       and all(k in txt for k in ('A        accept', '1–8, 0', 'Enter',
                                  'C        type a comment', '] [', '} {',
-                                 'N P', 'Shift+drag', '4  Filter ringing'))
+                                 'N P', '4  Filter ringing'))
+      and 'Shift+drag' not in txt
       and 'REASONS FOR SPINDLES' in txt, repr(txt[:80]))
 QTest.keyClick(sheet, Qt.Key_Question)
 app.processEvents()
@@ -1297,11 +1375,11 @@ win.set_reviewer_name('')
 check('9.77b', "[77] no reviewer name: save line asks for one",
       win.seg_save.text() == 'Set a reviewer name to save decisions.')
 win.set_reviewer_name('TK')
-check('9.78', "[78] strip legend", ep.strip_legend.text() ==
-      'grey bars = events per epoch · red = amplitude outliers · purple '
-      'dashes = excluded time · white line = current epoch'
-      and 'Shift+drag on the epoch strip   select epochs to exclude'
-      in er.cheat_sheet_text('spindle', 'Ctrl+Z'))
+check('9.78', "[158] strip legend says 'purple = excluded time'; the cheat "
+      "sheet has no Shift+drag", ep.strip_legend.text() ==
+      'grey bars = events per epoch · red = amplitude outliers · purple = '
+      'excluded time · white line = current epoch'
+      and 'Shift+drag' not in er.cheat_sheet_text('spindle', 'Ctrl+Z'))
 win.tabs.setCurrentIndex(0)
 app.processEvents()
 check('9.75b', "[75] Channels tab hint", win.key_hint_lbl.text() ==
@@ -1612,40 +1690,340 @@ texts = all_texts(win)
 old = [t for t in texts if t == 'Mark as artefact (writes XML)'
        or re.search(r'Mark \d+ epochs? as artefact', t)
        or t in ('Drop channel', 'Mark channel artefact')]
-zero = ep.mark_n_btn.text()
-ep._on_shift_drag(*ep.snap(30.5, 119.0), True)
-three = ep.mark_n_btn.text()
-ep._on_shift_drag(*ep.snap(30.5, 59.0), True)
-one = ep.mark_n_btn.text()
 TIME_TIP = ('Excludes this time from analysis for every channel. It is '
             'saved with the review and applied when detection is re-run. '
             'Events already detected are not changed.')
-check('10.8', "[131] no 'Mark … as artefact' text anywhere; 'Exclude time "
-      "range…' and 'Exclude 0 / 3 epochs…' / 'Exclude 1 epoch…' with the "
-      "tooltip; the hint names the button",
-      not old and ep.mark_btn.text() == 'Exclude time range…'
-      and (zero, three, one) == ('Exclude 0 epochs…', 'Exclude 3 epochs…',
-                                 'Exclude 1 epoch…')
-      and ep.mark_btn.toolTip() == TIME_TIP
-      and ep.mark_n_btn.toolTip() == TIME_TIP
-      and ep.sel_lbl.text()
-      == 'Brush a range on the trace, then Exclude time range…',
-      repr((old, zero, three, one)))
-ep._clear_strip_range()
+HINT0 = ('Brush a range on the trace to exclude it, or click a hatched range '
+         'to remove it.')
+
+
+class FakeClick:
+    """What _on_trace_click / _on_overview_click read from a scene click."""
+
+    def __init__(self, plot, x, button=Qt.LeftButton):
+        vb = plot.getPlotItem().vb
+        y = sum(vb.viewRange()[1]) / 2.0
+        self._pos = vb.mapViewToScene(QtCore.QPointF(float(x), y))
+        self._button = button
+
+    def button(self):
+        return self._button
+
+    def scenePos(self):
+        return self._pos
+
+
+class FakeDrag:
+    """What a view box's mouseDragEvent reads."""
+
+    def __init__(self, vb, x0, x1, mods=Qt.NoModifier):
+        y = sum(vb.viewRange()[1]) / 2.0
+        self._p0 = vb.mapViewToScene(QtCore.QPointF(float(x0), y))
+        self._p1 = vb.mapViewToScene(QtCore.QPointF(float(x1), y))
+        self._mods = mods
+        self.accepted = None
+
+    def button(self):
+        return Qt.LeftButton
+
+    def modifiers(self):
+        return self._mods
+
+    def buttonDownScenePos(self, *_):
+        return self._p0
+
+    # what pyqtgraph's own ViewBox.mouseDragEvent reads (the strip)
+    def pos(self):
+        return QtCore.QPointF(10.0, 5.0)
+
+    def lastPos(self):
+        return QtCore.QPointF(2.0, 5.0)
+
+    def buttonDownPos(self, *_):
+        return QtCore.QPointF(2.0, 5.0)
+
+    def lastScenePos(self):
+        return self._p0
+
+    def scenePos(self):
+        return self._p1
+
+    def isFinish(self):
+        return True
+
+    def isStart(self):
+        return False
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.accepted = False
+
+
+# a scored annotation file, so the sidecar and the density denominator are
+# real: 4 epochs of 30 s, all NREM2
+from wonambi import Dataset as _WDataset                       # noqa: E402
+from wonambi.attr.annotations import create_empty_annotations  # noqa: E402
+from wonambi.ioeeg import write_edf as _write_edf              # noqa: E402
+from wonambi.utils.simulate import create_data as _create_data  # noqa: E402
+from turtlewave_hdEEG import CustomAnnotations                 # noqa: E402
+_edf = os.path.join(TMP, 'rev5.edf')
+_write_edf(_create_data(datatype='ChanTime', n_trial=1, s_freq=1.0,
+                        chan_name=['Cz'], time=(0, 120.0)), _edf)
+XML10 = os.path.join(TMP, 'rev5.xml')
+create_empty_annotations(XML10, _WDataset(_edf))
+_ann = CustomAnnotations(XML10)
+_ann.wonb_annot.add_rater('scorer', epoch_length=30)
+for _k in range(4):
+    _ann.wonb_annot.set_stage_for_epoch(_k * 30, 'NREM2', save=False)
+_ann.wonb_annot.save()
+win.annot_file_path = XML10
+win.annotations = CustomAnnotations(XML10)
+# the library writes a run's stages as one joint token
+win.db.conn.execute("UPDATE events SET stage = 'NREM2NREM3'")
+win.db.conn.commit()
+win.refresh_qc_dashboard()
+win.on_qc_drill('Cz', switch_tab=True)
+ep._goto_epoch(1)                      # 30-60 s: u-f 33, u-g 41, u-h 52
+app.processEvents()
+
+
+def sidecar_ranges():
+    side = os.path.splitext(XML10)[0] + '_review-qc.xml'
+    if not os.path.exists(side):
+        return []
+    import xml.etree.ElementTree as ET
+    out = []
+    for r in ET.parse(side).getroot().iter('rater'):
+        if r.get('name') != 'review-qc':
+            continue
+        for e in r.iter('event'):
+            out.append((round(float(e.find('event_start').text), 3),
+                        round(float(e.find('event_end').text), 3)))
+    return sorted(out)
+
+
+texts = all_texts(win)
+old = [t for t in texts if t == 'Mark as artefact (writes XML)'
+       or re.search(r'Mark \d+ epochs? as artefact', t)
+       or re.search(r'Exclude \d+ epochs?…', t)
+       or t in ('Drop channel', 'Mark channel artefact')]
+hints = [w.text() for w in win.findChildren(QtWidgets.QLabel)
+         if 'Shift+drag' in w.text()]
+strip_items0 = len(ep.plot.getPlotItem().items)
+# a real Shift+drag across the strip (mouse events on its viewport)
+_svb = ep.plot.getPlotItem().vb
+_yy = sum(_svb.viewRange()[1]) / 2.0
+_a = ep.plot.mapFromScene(_svb.mapViewToScene(QtCore.QPointF(35.0, _yy)))
+_b = ep.plot.mapFromScene(_svb.mapViewToScene(QtCore.QPointF(95.0, _yy)))
+QTest.mousePress(ep.plot.viewport(), Qt.LeftButton, Qt.ShiftModifier, _a)
+for _k in range(1, 6):
+    QTest.mouseMove(ep.plot.viewport(), _a + (_b - _a) * _k / 5)
+QTest.mouseRelease(ep.plot.viewport(), Qt.LeftButton, Qt.ShiftModifier, _b)
+app.processEvents()
+strip_items1 = len(ep.plot.getPlotItem().items)
+ep._on_overview_click(FakeClick(ep.plot, 100.0))
+paged = ep._epoch
 ep._goto_epoch(1)
-ep.region.setRegion([35.0, 38.0])
+check('10.8', "[151] no 'Exclude N epochs…' or 'Mark … as artefact', no "
+      "Shift+drag hint; a Shift+drag on the strip makes no range; a plain "
+      "strip click still pages", not old and not hints
+      and strip_items1 == strip_items0 and not ep.has_brush()
+      and paged == 3 and not hasattr(ep, 'mark_n_btn')
+      and type(_svb) is pg.ViewBox and not hasattr(_svb, 'sigShiftDrag')
+      and not hasattr(ep, '_strip_range'),
+      repr((old, hints, strip_items0, strip_items1, paged)))
+clear_btns = [b for b in win.findChildren(QtWidgets.QPushButton)
+              if b.text() == 'Clear range']
+row_btns = [b.text() for b in ep.mark_btn.parentWidget().findChildren(
+    QtWidgets.QPushButton) if b.parentWidget() is ep.mark_btn.parentWidget()]
+c0 = ep.clear_range_btn.isEnabled()
+m0 = ep.mark_btn.isEnabled()
+# a real drag on the raw trace draws the brush
+ep._raw_vb.mouseDragEvent(FakeDrag(ep._raw_vb, 35.0, 38.0))
+app.processEvents()
+brushed = ep._brush
+c1 = ep.clear_range_btn.isEnabled()
+hint1 = ep.sel_lbl.text()
+ep.clear_range_btn.click()
+app.processEvents()
+gone1 = ep._brush is None and not ep.region.isVisible()
+ep.set_brush(35.0, 38.0)
+QTest.keyClick(ep, Qt.Key_Escape)
+app.processEvents()
+gone2 = ep._brush is None and not ep.region.isVisible()
+check('10.8b', "[152, 153] one 'Clear range' (tooltip), disabled with no "
+      "brush; a drag on the raw trace draws the brush and enables it; the "
+      "button and Esc clear it; no plain 'Clear' in the trace row; the "
+      "primary button needs a brush",
+      len(clear_btns) == 1 and not c0 and not m0
+      and ep.clear_range_btn.toolTip() == 'Clear the unsaved range (Esc).'
+      and brushed is not None and abs(brushed[0] - 35.0) < 0.05
+      and abs(brushed[1] - 38.0) < 0.05 and c1
+      and hint1 == 'Unsaved range 00:00:35–00:00:38 (3.0 s).'
+      and gone1 and gone2 and 'Clear' not in row_btns
+      and ep.sel_lbl.text() == HINT0
+      and ep.mark_btn.text() == 'Exclude time range…'
+      and ep.mark_btn.toolTip() == TIME_TIP,
+      repr((len(clear_btns), c0, m0, brushed, c1, hint1, row_btns)))
+# save one range over u-g (41.0-41.8): 40-43 s
+ep.set_brush(40.0, 43.0)
+unsaved = (ep.region.brush.style(), ep.region.lines[0].pen.style(),
+           ep.region_label.toPlainText(), ep.region_label.isVisible())
+dens0 = getattr(win, '_qc_density_min', None)
 ep.mark_btn.click()
 app.processEvents()
 iv = win.db.get_qc_artefact_intervals()
+dens1 = getattr(win, '_qc_density_min', None)
 check('10.9', "[132] Exclude time range… stores the brushed range as "
-      "before (qc_artefact_intervals, evidence channel) and reports it",
-      len(iv) == 1 and abs(float(iv['start_time'].iloc[0]) - 35.0) < 1e-6
-      and abs(float(iv['end_time'].iloc[0]) - 38.0) < 1e-6
+      "before (qc_artefact_intervals, evidence channel), writes it to the "
+      "sidecar, and reports it",
+      len(iv) == 1 and abs(float(iv['start_time'].iloc[0]) - 40.0) < 1e-6
+      and abs(float(iv['end_time'].iloc[0]) - 43.0) < 1e-6
       and str(iv['evidence_channel'].iloc[0]) == 'Cz'
+      and sidecar_ranges() == [(40.0, 43.0)]
       and win.status_bar.currentMessage().startswith(
-          'Excluded 00:00:35–00:00:38 from analysis for every channel '
+          'Excluded 00:00:40–00:00:43 from analysis for every channel '
           '(applied at re-detection).'),
       repr((iv.to_dict('records'), win.status_bar.currentMessage())))
+mid = int(iv['id'].iloc[0])
+items = ep.exclusion_items(ep.raw_plot).get(mid, [])
+labels = [it.toPlainText() for p, it in ep._excl_items.get(mid, [])
+          if isinstance(it, pg.TextItem)]
+check('10.154', "[154] a saved range: diagonal hatch, dashed edge, label "
+      "'excluded'; the unsaved brush was plain fill, solid edge, 'not saved'",
+      len(items) == 1 and items[0].brush.style() == Qt.BDiagPattern
+      and items[0].lines[0].pen.style() == Qt.DashLine
+      and labels == ['excluded']
+      and ep.exclusion_items(ep.filt_plot).get(mid)
+      and unsaved == (Qt.SolidPattern, Qt.SolidLine, 'not saved', True)
+      and not ep.has_brush(), repr((unsaved, labels)))
+ep._on_trace_click(FakeClick(ep.raw_plot, 41.4), ep.raw_plot)
+on_event = (ep._selected_uuid, ep.selected_exclusion())
+ep._on_trace_click(FakeClick(ep.raw_plot, 42.5), ep.raw_plot)
+app.processEvents()
+items = ep.exclusion_items(ep.raw_plot).get(mid, [])
+check('10.155', "[155] a click inside the range on an event selects the "
+      "event; away from events it selects the range: 2 px solid edge, "
+      "'Remove exclusion' (danger), the hint names who saved it",
+      on_event == ('u-g', None) and ep.selected_exclusion() == mid
+      and items and items[0].lines[0].pen.style() == Qt.SolidLine
+      and items[0].lines[0].pen.widthF() == 2
+      and ep.mark_btn.text() == 'Remove exclusion'
+      and ep.mark_btn.objectName() == 'danger'
+      and ep.mark_btn.toolTip().startswith('Stop excluding this time.')
+      and ep.sel_lbl.text().startswith(
+          'Excluded 00:00:40–00:00:43 (3.0 s), saved by TK on 20')
+      and ep.clear_range_btn.isEnabled(),
+      repr((on_event, ep.mark_btn.text(), ep.sel_lbl.text())))
+ep.mark_btn.click()
+app.processEvents()
+dens2 = getattr(win, '_qc_density_min', None)
+check('10.156', "[156, 157] Remove exclusion deletes the row, rewrites the "
+      "sidecar without it, gives the 3 s back to the density denominator, "
+      "removes the hatch and says so; the button returns, disabled",
+      len(win.db.get_qc_artefact_intervals()) == 0
+      and sidecar_ranges() == [] and mid not in ep._excl_items
+      and dens0 is not None and dens1 is not None and dens2 is not None
+      and abs((dens0 - dens1) - 3 / 60.0) < 1e-6
+      and abs(dens2 - dens0) < 1e-9
+      and win.status_bar.currentMessage() == (
+          'Removed exclusion 00:00:40–00:00:43. It is no longer applied at '
+          're-detection; brush it again to restore it.')
+      and ep.mark_btn.text() == 'Exclude time range…'
+      and not ep.mark_btn.isEnabled() and ep.selected_exclusion() is None,
+      repr((dens0, dens1, dens2, win.status_bar.currentMessage())))
+# an exclusion already in an exported re-run package
+ep.set_brush(44.0, 46.0)
+ep.mark_btn.click()
+app.processEvents()
+mid2 = int(win.db.get_qc_artefact_intervals()['id'].iloc[0])
+win.db.mark_artefact_intervals_exported([mid2])
+win._refresh_exclusions()
+win.detail_dock_w.exclusionClicked.emit(mid2)      # the dock list's row
+app.processEvents()
+sel_from_dock = ep.selected_exclusion()
+ep.mark_btn.click()
+app.processEvents()
+check('10.156b', "[156] the dock list's row selects the range; removing an "
+      "exported one adds 'export again to update it'",
+      sel_from_dock == mid2 and win.status_bar.currentMessage().endswith(
+          'It was in a re-run package you exported earlier; export again '
+          'to update it.'), repr(win.status_bar.currentMessage()))
+
+# ---- decision buttons [159, 160] -------------------------------------------
+ep.select_event('u-f')
+app.processEvents()
+btn = evp.btn
+none_checked = [b.isChecked() for b in btn.values()]
+btn['reject'].click()            # a click arms Reject; nothing is saved yet
+app.processEvents()
+after_click = ({d: b.isChecked() for d, b in btn.items()},
+               btn['reject'].styleSheet())
+QTest.keyClick(ep, Qt.Key_Escape)
+app.processEvents()
+QTest.keyClick(ep, Qt.Key_A)
+app.processEvents()
+win._auto_advance = False
+ep.select_event('u-f')
+app.processEvents()
+saved_a = {d: b.isChecked() for d, b in btn.items()}
+QTest.keyClick(ep, Qt.Key_R)
+app.processEvents()
+armed = ({d: b.isChecked() for d, b in btn.items()},
+         btn['reject'].styleSheet(), btn['accept'].styleSheet())
+QTest.keyClick(ep, Qt.Key_Escape)
+app.processEvents()
+back = ({d: b.isChecked() for d, b in btn.items()},
+        [b.styleSheet() for b in btn.values()])
+cb = evp.clear_btn
+check('10.clear', "[sign-off] the Current line's button reads 'Clear "
+      "decision' with its tooltip; no other dock button reads 'Clear'; the "
+      "density caption counts excluded ranges",
+      cb.text() == 'Clear decision' and cb.toolTip()
+      == 'Delete your decision on this event (Ctrl+Z brings it back).'
+      and not [b for b in win.detail_dock_w.findChildren(
+          QtWidgets.QPushButton) if b.text() == 'Clear']
+      and not [l for l in win.detail_dock_w.findChildren(QtWidgets.QLabel)
+               if 'mark you added' in l.text()
+               or 'marks you added' in l.text()], repr(cb.text()))
+win.detail_dock_w.set_denominator_mask(['Artefact'], 'from the detection run',
+                                       pending_marks=1)
+cap1 = win.detail_dock_w.mask_caption.text()
+win.detail_dock_w.set_denominator_mask(['Artefact'], 'from the detection run',
+                                       pending_marks=2)
+cap2 = win.detail_dock_w.mask_caption.text()
+check('10.cap', "[sign-off] '+ 1 excluded range you added' / '+ 2 excluded "
+      "ranges you added'", cap1.endswith('· + 1 excluded range you added')
+      and cap2.endswith('· + 2 excluded ranges you added'), repr((cap1, cap2)))
+ep.select_event('u-f')
+QTest.keyClick(ep, Qt.Key_A)
+app.processEvents()
+ep.select_event('u-f')
+cb.click()
+app.processEvents()
+check('10.clear2', "[sign-off] Clear decision deletes it and says so",
+      win.status_bar.currentMessage().startswith('Deleted your decision on '
+                                                 'Cz ')
+      and win.status_bar.currentMessage().endswith(' · Ctrl+Z brings it '
+                                                   'back')
+      and all(not b.isChecked() for b in evp.btn.values()),
+      repr(win.status_bar.currentMessage()))
+check('10.159', "[159, 160] undecided: none checked, and a click on Reject "
+      "only arms it (not checked); after A only Accept is checked; R arms "
+      "Reject with the border while Accept stays checked; Esc returns to "
+      "Accept checked only",
+      none_checked == [False, False, False]
+      and after_click[0] == {'accept': False, 'reject': False,
+                             'unsure': False}
+      and after_click[1] == rg.EventDecisionPanel.ARMED_QSS
+      and saved_a == {'accept': True, 'reject': False, 'unsure': False}
+      and armed[0] == {'accept': True, 'reject': False, 'unsure': False}
+      and armed[1] == rg.EventDecisionPanel.ARMED_QSS and armed[2] == ''
+      and back[0] == {'accept': True, 'reject': False, 'unsure': False}
+      and back[1] == ['', '', ''],
+      repr((none_checked, after_click, saved_a, armed, back)))
 ab = evp.reason_buttons['artefact']
 check('10.10', "[134] the '1  Artefact' button: R4.0 tooltip, token still "
       "'artefact'", ab.text().split() == ['1', 'Artefact'] and ab.toolTip()

@@ -454,10 +454,6 @@ def fmt_check(col, v):
     return f"{f:.1f}×"
 
 
-_FACT_SHORT = {'pct_off_band': 'off-band {v}', 'pct_dur_floor': 'at floor {v}',
-               'med_amp_ratio': 'amp/bg {v}', 'med_thresh_ratio': 'amp/thr {v}'}
-
-
 def flagged_columns(row):
     """The row's flagged columns, hard before soft, then by z descending."""
     cols = [c for c in FLAG_COLUMNS
@@ -473,43 +469,6 @@ def top_flag_column(row):
     if not cols:
         return None
     return max(cols, key=lambda c: float(row.get('z_' + c) or 0))
-
-
-def checks_cell(row, recorded=True):
-    """``Checks`` cell: ``× HARD · off-band 60 %``, ``—``, ``— dead channel``."""
-    if str(row.get('flag', '') or '') == 'dead':
-        return '— dead channel'
-    fl = str(row.get('checks_flag', '') or '')
-    if not recorded or fl not in ('hard', 'soft'):
-        return '—'
-    col = top_flag_column(row)
-    badge = '× HARD' if fl == 'hard' else '▲ SOFT'
-    return f"{badge} · " + _FACT_SHORT[col].format(
-        v=fmt_check(col, row.get(col)))
-
-
-def checks_tooltip(row, medians):
-    """One line per flagged column: header, value, montage median, z."""
-    lines = []
-    for col in flagged_columns(row):
-        lines.append(f"{CHECK_COLUMNS[col][0]} {fmt_check(col, row.get(col))}"
-                     f" · montage median {fmt_check(col, medians.get(col))}"
-                     f" · robust z {float(row.get('z_' + col) or 0):.1f}")
-    return '\n'.join(lines)
-
-
-def at_floor_tooltip(row, bounds):
-    """``At floor`` cell tooltip (floor and ceiling shares)."""
-    lo, hi = (bounds or (None, None))
-    p = fmt_check('pct_dur_floor', row.get('pct_dur_floor'))
-    mn = f"{lo:g} s" if lo is not None else 'not recorded'
-    if hi is None:
-        return (f"At the floor ({mn}): {p} · no upper duration limit for "
-                f"this run.")
-    q = fmt_check('pct_at_ceiling', row.get('pct_at_ceiling'))
-    n = int(row.get('n_bound') or 0)
-    return (f"At the floor ({mn}): {p} · at the ceiling ({hi:g} s): {q} · "
-            f"{n} events with a duration bound.")
 
 
 def flagged_facts(row, event_type, medians, min_dur=None):
@@ -556,39 +515,42 @@ def flagged_tooltip(row):
     return text
 
 
-def footer_text(hard_z, soft_z, event_type='spindle', ratio=True):
-    """The one-line footer under the Channels table (spec R4.0 / R4.3), with
-    the live z limits. ``ratio`` is accepted for the tooltip's signature and
-    does not change the line."""
-    text = ("× hard / ▲ soft: the channel stands out from the others (robust "
-            f"z above {hard_z:g} / {soft_z:g}).")
-    if event_type == 'spindle':
-        text += " Low prominence never flags."
-    return text + " Hover for the full rule."
+def amp_flag_tooltip(hard_z, soft_z):
+    """The ``Amp flag`` header tooltip: the amplitude rule (R5.0), with the
+    live z limits."""
+    return '\n'.join([
+        "Amp flag compares this channel with the other channels in view "
+        "(excluded channels are left out).",
+        "× hard / ▲ soft: the channel's mean event amplitude, its 95th "
+        "percentile or its largest event is far from the montage median "
+        f"(robust z above {hard_z:g} / {soft_z:g}). The cell names which one.",
+        "DEAD: fewer than 15 % of the median event count.",
+        "Change the limits in View ▸ Outlier threshold….",
+    ])
 
 
-def footer_tooltip(hard_z, soft_z, event_type='spindle', ratio=True):
-    """The footer's full rule (six lines; five without the low-prominence
-    line for slow waves and K-complexes)."""
-    ratios = 'amp/bg or amp/thr' if ratio else 'amp/bg'
-    lines = [
-        "Both flags compare a channel with the other channels in view. "
-        "Excluded channels are left out of the comparison.",
-        "Amp flag: the channel's mean event amplitude, its 95th percentile "
-        "or its largest event is far from the montage median: hard when the "
-        f"robust z is above {hard_z:g}, soft above {soft_z:g}. Dead: fewer "
-        "than 15 % of the median event count.",
-        "Checks: the off-band or at-floor share is well above the montage "
-        f"median, or the median {ratios} is well below it. Same z limits, "
-        "and only if the difference is at least 10 percentage points "
-        "(shares) or 0.3× (ratios) and the channel has at least 20 events.",
-    ]
-    if event_type == 'spindle':
-        lines.append("Low prominence is shown for context and never flags.")
-    lines += ["A problem every channel shares is not flagged; see the "
-              "Precision report.",
-              "Change the limits in View ▸ Outlier threshold…."]
-    return '\n'.join(lines)
+def checks_rule_tooltip(hard_z, soft_z):
+    """The ``CHECKS — FLAGGED CHANNELS`` header tooltip: the checks rule
+    (R5.0), with the live z limits."""
+    return '\n'.join([
+        "Channel checks compare each channel with the others in view "
+        "(excluded channels are left out).",
+        "A channel is listed when its off-band or at-floor share is well "
+        "above the montage median, or its median signal vs background or "
+        "amp vs threshold is well below it: hard above robust z "
+        f"{hard_z:g}, soft above {soft_z:g}, and only if the difference is "
+        "at least 10 percentage points (shares) or 0.3× (ratios) and the "
+        "channel has at least 20 events.",
+        "Low prominence is shown on the topography for context and never "
+        "flags.",
+        "A problem every channel shares is not listed; see the Precision "
+        "report.",
+    ])
+
+
+#: tooltip of the header line's ``{c} checks flagged`` link
+CHECKS_LINK_TIP = ('Listed under the topography in CHECKS — FLAGGED '
+                   'CHANNELS. Click to go there.')
 
 
 def excluded_mask(qc):
@@ -625,23 +587,20 @@ def header_count_line(qc, recorded=True, sample=False):
     return text
 
 
-SHOW_ITEMS = ('All channels', 'Flagged', 'Excluded', 'Queued for re-detect',
-              'Dead')
+SHOW_ITEMS = ('All channels', 'Amp flagged', 'Excluded', 'Dead',
+              'Queued for re-detect')
 
 
 def show_mask(qc, item, sample=False):
-    """Rows of the QC frame kept by a Show item (``Flagged`` counts the
-    amplitude flag only during live sample review; an excluded channel is
-    never ``Flagged`` or ``Dead``)."""
+    """Rows of the QC frame kept by a Show item (R5.1): ``Amp flagged`` =
+    amp flag hard or soft (dead has its own item); an excluded channel is
+    never ``Amp flagged`` or ``Dead``. ``sample`` is accepted for callers;
+    the items no longer depend on it."""
     if not len(qc):
         return pd.Series([], dtype=bool)
     exc = excluded_mask(qc)
-    if item == 'Flagged' and sample:
+    if item == 'Amp flagged':
         return qc['flag'].isin(['hard', 'soft']) & ~exc
-    if item == 'Flagged':
-        chk = qc['checks_flag'] if 'checks_flag' in qc.columns else ''
-        return (qc['flag'].isin(['hard', 'soft']) | pd.Series(
-            chk, index=qc.index).isin(['hard', 'soft'])) & ~exc
     if item == 'Excluded':
         return exc
     if item == 'Queued for re-detect':
@@ -652,19 +611,25 @@ def show_mask(qc, item, sample=False):
     return pd.Series(True, index=qc.index)
 
 
-#: Sort combo: ``label -> (column key, descending)``; ``None`` key is the
-#: checks order (hard, soft, none; then by largest check z).
+#: Sort combo (R5.0): ``(label, column key, descending)``; the first is the
+#: default. ``Amp z ↓`` sorts by |z|.
 SORT_ITEMS = (
-    ('Checks (hard first)', None, True),
-    ('Off-band share ↓', 'pct_off_band', True),
-    ('At-floor share ↓', 'pct_dur_floor', True),
-    ('Amp / bg ↑', 'med_amp_ratio', False),
-    ('Amp / thr ↑', 'med_thresh_ratio', False),
-    ('Low prominence share ↓', 'pct_low_prom', True),
+    ('Amp flag (hard first)', 'flag', True),
     ('Amp z ↓', 'amp_z', True),
+    ('Mean amp ↓', 'mean_amp', True),
+    ('Density ↓', 'density', True),
+    ('Events ↓', 'n', True),
     ('Channel', 'channel', False),
     ('Region', 'region', False),
 )
+DEFAULT_SORT = SORT_ITEMS[0][0]
+
+
+def sort_label_or_default(label):
+    """A stored Sort label if it still exists, else the default (a sort
+    saved on a removed column opens as ``Amp flag (hard first)``)."""
+    return label if any(lab == label for lab, _k, _d in SORT_ITEMS) \
+        else DEFAULT_SORT
 
 
 def topo_caption(col, event_type, stages_text, band=None, min_dur=None):
@@ -748,38 +713,6 @@ def failing_mask(df, col, ratio=None):
     if col == 'med_amp_ratio':
         return num('amp_ratio') < float(ratio)
     return num('thresh_ratio') < float(ratio)
-
-
-def header_tooltips(band=None, min_dur=None, n_no_peak=None):
-    """Header tooltips of the check columns and ``Checks`` (revision 3)."""
-    lo, hi = band if band else (None, None)
-    btxt = f"{lo:g}–{hi:g} Hz" if lo is not None else 'run band'
-    ntxt = '—' if n_no_peak is None else str(int(n_no_peak))
-    return {
-        'pct_off_band': ("Share of this channel's events whose peak frequency, "
-                         "after removing the 1/f background, lies outside the "
-                         f"run band ({btxt}). Events with no spectral peak are "
-                         f"not counted: {ntxt} on this channel."),
-        'pct_low_prom': ("Share of events whose spectral peak stands less than "
-                         "10 dB above the 1/f background. Context only: it "
-                         "follows the channel's signal-to-noise and never sets "
-                         "the checks flag. Under 1 s the label is unreliable."),
-        'pct_dur_floor': ("Share of events lasting no more than 0.05 s longer "
-                          "than the run's minimum duration. Hover a cell for "
-                          "the floor and ceiling shares."),
-        'med_amp_ratio': ("Median, over this channel's events, of event band "
-                          "RMS divided by the median band RMS of the "
-                          "surrounding ±15 s (other events, artefact and "
-                          "other stages left out)."),
-        'med_thresh_ratio': ("Median of the event's detection-signal peak "
-                             "divided by the detection threshold for its run. "
-                             "A value near 1.0 means most events only just "
-                             "crossed the threshold."),
-        'checks_flag': ("Compared with the rest of the montage: off-band "
-                        "share, at-floor share, amp/bg and amp/thr. Low "
-                        "prominence is not used. A problem every channel "
-                        "shares is not flagged; see the Precision report."),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1848,15 +1781,24 @@ KEY_HINTS = {
     'sample': 'A accept · R reject · U unsure · ] [ sample · ? keys',
     'channels': 'F re-detect queue · ? keys',
 }
-REVIEW_STATUS_ITEMS = ('unreviewed', 'reviewed', 'accepted', 'rejected',
-                       'unsure')
-REVIEW_STATUS_CAPTION = 'Your decisions only. Applies to the Epochs tab.'
+#: Show events (R5.4): checkbox label -> decision ('unreviewed' = none)
+SHOW_EVENTS_ITEMS = (('unreviewed', 'unreviewed'), ('accepted', 'accept'),
+                     ('rejected', 'reject'), ('unsure', 'unsure'))
+SHOW_EVENTS_TIP = ("Which of this channel's events to show, by your own "
+                   "decisions. Applies to this tab only.")
+
+
+def shown_chip_text(what, n, total, channel):
+    """``Showing: rejected · 3 of 1,847 on PPOz ✕`` (R5.0)."""
+    return (f"Showing: {what} · {int(n):,} of {int(total):,} on {channel} ✕")
 STRIP_LEGEND = ('grey bars = events per epoch · red = amplitude outliers · '
-                'purple dashes = excluded time · white line = current epoch')
+                'purple = excluded time · white line = current epoch')
 STRIP_LEGEND_SAMPLE = ' · blue ticks = sample events'
 #: the strip legend while a review sample is active: no outlier colour
-STRIP_LEGEND_NO_OUTLIERS = ('grey bars = events per epoch · purple dashes = '
+STRIP_LEGEND_NO_OUTLIERS = ('grey bars = events per epoch · purple = '
                             'excluded time · white line = current epoch')
+#: appended while Show events filters (R5.0)
+STRIP_LEGEND_SHOWN = ' · grey ticks below = epochs with shown events'
 SAVE_LINE = 'Decisions save to {db} as you make them.'
 SAVE_LINE_NO_NAME = 'Set a reviewer name to save decisions.'
 SAVE_LINE_NO_STORE = ('Decisions cannot be saved: this TurtleWave library has '
@@ -1897,7 +1839,6 @@ def cheat_sheet_text(event_type='spindle', undo='Ctrl+Z'):
         '  N P      next / previous epoch with outliers', '',
         'CHANNELS',
         '  F        add the selected channel to the re-detect queue',
-        '  Shift+drag on the epoch strip   select epochs to exclude',
     ])
 
 

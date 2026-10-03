@@ -167,12 +167,10 @@ check('8b', "E3's no-peak events are left out of the off-band denominator",
       repr((qc.loc['E3', 'n_no_peak'], qc.loc['E3', 'n_freq'])))
 check('9a', "E7 at 60 % off-band among 5-10 % channels -> checks_flag hard",
       qc.loc['E7', 'checks_flag'] == 'hard', repr(qc.loc['E7', 'checks_flag']))
-check('9b', "E19 (19 events) shows — and is not flagged",
-      col_cell(win, 'E19', 'pct_off_band') == '—'
-      and qc.loc['E19', 'checks_flag'] == ''
-      and col_cell(win, 'E19', 'pct_off_band', Qt.ToolTipRole)
-      == 'Too few events on this channel to judge (n = 19).',
-      repr(col_cell(win, 'E19', 'pct_off_band', Qt.ToolTipRole)))
+check('9b', "E19 (19 events) has no off-band value and is not flagged",
+      qc.loc['E19', 'pct_off_band'] != qc.loc['E19', 'pct_off_band']
+      and qc.loc['E19', 'checks_flag'] == '',
+      repr(qc.loc['E19', 'pct_off_band']))
 check('9c', "only E7 is flagged on this fixture",
       sorted(qc.index[qc['checks_flag'] != '']) == ['E7'],
       repr(sorted(qc.index[qc['checks_flag'] != ''])))
@@ -194,15 +192,39 @@ check('10', "[10] amplitude flag, amp-flag / dead counts and Queue all "
       and win.qc_widget.counts_lbl.text().split(' · ', 1)[1] == counts_before
       and win.qc_widget.btn_queue_hard.text() == hard_btn_before,
       repr((counts_before, hard_btn_before)))
-hdr = win.qc_widget.model.headerData(rg._QC_COL_INDEX['checks_flag'],
-                                     Qt.Horizontal, Qt.ToolTipRole)
-check('10d', "checks header tooltip is the spec text",
-      hdr == er.header_tooltips()['checks_flag'], repr(hdr))
-check('10e', "check cell text: share as '62 %', ratio as '2.5×'",
-      col_cell(win, 'E7', 'pct_off_band') == f"{qc.loc['E7', 'pct_off_band']:.0f} %"
-      and col_cell(win, 'E7', 'med_amp_ratio').endswith('×'),
-      repr((col_cell(win, 'E7', 'pct_off_band'),
-            col_cell(win, 'E7', 'med_amp_ratio'))))
+qcm = win.qc_widget.model
+heads = [qcm.headerData(i, Qt.Horizontal) for i in range(qcm.columnCount())]
+check('142', "[142] the table's headers are exactly the eight R5.0 columns",
+      heads == ['Channel', 'Region', 'Events', 'Density /min', 'Mean amp µV',
+                'Amp z', 'Amp flag', 'Status']
+      and not {'Checks', 'Off-band', 'Low prom.', 'At floor', 'Amp / bg',
+               'Amp / thr'} & set(heads), repr(heads))
+AMP_TIP = ("Amp flag compares this channel with the other channels in view "
+           "(excluded channels are left out).\n× hard / ▲ soft: the "
+           "channel's mean event amplitude, its 95th percentile or its "
+           "largest event is far from the montage median (robust z above "
+           "3.5 / 2). The cell names which one.\nDEAD: fewer than 15 % of "
+           "the median event count.\nChange the limits in View ▸ Outlier "
+           "threshold….")
+CHK_TIP = ("Channel checks compare each channel with the others in view "
+           "(excluded channels are left out).\nA channel is listed when its "
+           "off-band or at-floor share is well above the montage median, or "
+           "its median signal vs background or amp vs threshold is well "
+           "below it: hard above robust z 3.5, soft above 2, and only if the "
+           "difference is at least 10 percentage points (shares) or 0.3× "
+           "(ratios) and the channel has at least 20 events.\nLow "
+           "prominence is shown on the topography for context and never "
+           "flags.\nA problem every channel shares is not listed; see the "
+           "Precision report.")
+all_txt = [w.text() for w in win.findChildren(QtWidgets.QLabel)]
+check('146', "[146] the Amp flag header tooltip and the flagged-list header "
+      "tooltip are the R5.0 rules with live limits; no footer anywhere",
+      qcm.headerData(rg._QC_COL_INDEX['flag'], Qt.Horizontal,
+                     Qt.ToolTipRole) == AMP_TIP
+      and win.detail_dock_w.flagged.header.toolTip() == CHK_TIP
+      and not any('Hover for the full rule.' in t for t in all_txt)
+      and not hasattr(win.qc_widget, 'footer'),
+      repr(win.detail_dock_w.flagged.header.toolTip()[:80]))
 
 # ===================================================================== 13
 say("\n== 13. No interpretive dock text (revision 3)")
@@ -338,14 +360,23 @@ vals = {}
 for key in ('NREM2', 'NREM3', qcw.COMBINED):
     qcw.stage_buttons[key].click()
     app.processEvents()
-    vals[key] = col_cell(win, 'E50', 'pct_off_band')
+    vals[key] = (f"{win._qc_df.set_index('channel').loc['E50', 'pct_off_band']:.0f} %")
+    rows_by_stage = getattr(win, '_rows_seen', {})
+    rows_by_stage[key] = (
+        [r['channel'] for r in win.detail_dock_w.flagged.rows],
+        win.detail_dock_w.topo_caption.text())
+    win._rows_seen = rows_by_stage
     same_amp = win._qc_df.set_index('channel')[
         ['mean_amp', 'n', 'flag']].equals(amp_before)
     check('53', f"[53] E50 off-band with {key}: amplitude columns unchanged",
           same_amp, repr(vals[key]))
-check('53b', "[53] E50: 50 % with NREM2, 0 % with NREM3, 25 % pooled",
-      vals == {'NREM2': '50 %', 'NREM3': '0 %', qcw.COMBINED: '25 %'},
-      repr(vals))
+check('53b', "[53, 150] E50's off-band share (topography metric and "
+      "flagged list) follows the Stage toggle: 50 % with NREM2, 0 % with "
+      "NREM3, 25 % pooled",
+      vals == {'NREM2': '50 %', 'NREM3': '0 %', qcw.COMBINED: '25 %'}
+      and ('E50' in win._rows_seen['NREM2'][0])
+      != ('E50' in win._rows_seen['NREM3'][0]),
+      repr((vals, {k: v[0] for k, v in win._rows_seen.items()})))
 check('53c', "the stage choice persists in QSettings per event type",
       rg._review_settings().value('review/check_stage/spindle')
       == qcw.COMBINED)
@@ -355,11 +386,14 @@ counts = {it: int(er.show_mask(win.qc_widget.model.df, it).sum())
 texts = [qcw.show_combo.itemText(i) for i in range(qcw.show_combo.count())]
 check('54a', "[54] Show items with live counts", texts ==
       [f"{it} ({counts[it]})" for it in er.SHOW_ITEMS], repr(texts))
+check('144', "[144] Show items: All channels, Amp flagged, Excluded, Dead, "
+      "Queued for re-detect", [t.rsplit(' (', 1)[0] for t in texts] ==
+      ['All channels', 'Amp flagged', 'Excluded', 'Dead',
+       'Queued for re-detect'], repr(texts))
 qcw.show_combo.setCurrentIndex(1)
-flagged = set(qc.index[(qc['checks_flag'].isin(['hard', 'soft']))
-                       | (qc['flag'].isin(['hard', 'soft']))])
-check('54b', "[54] Flagged keeps exactly checks- or amp-flagged rows",
-      set(qcw.visible_channels()) == flagged, repr(sorted(flagged)))
+flagged = set(qc.index[qc['flag'].isin(['hard', 'soft'])])
+check('54b', "[144] Amp flagged keeps exactly the hard or soft amp-flagged "
+      "rows", set(qcw.visible_channels()) == flagged, repr(sorted(flagged)))
 qcw.show_combo.setCurrentIndex(2)
 check('54c', "[54] no excluded channels: 'No channels match \"Excluded\".'",
       qcw.proxy.rowCount() == 0 and qcw.empty_lbl.isVisibleTo(qcw)
@@ -370,16 +404,22 @@ df = win.qc_widget.model.df
 
 
 def expect(key, desc):
-    if key is None:
-        rank = df['checks_flag'].map({'hard': 2, 'soft': 1}).fillna(0)
-        d = df.assign(_k=rank * 1000 + df['checks_z'].fillna(0))
+    if key == 'flag':
+        rank = df['flag'].map({'hard': 3, 'soft': 2, 'dead': 1}).fillna(0)
+        d = df.assign(_k=rank * 1000 + df['outlier_score'].fillna(0))
         d = d.sort_values('_k', ascending=False, kind='mergesort')
+        return d['channel'].iloc[0], d['channel'].iloc[-1]
+    if key == 'amp_z':
+        d = df.assign(_k=df['amp_z'].abs()).sort_values('_k',
+                                                         ascending=False)
         return d['channel'].iloc[0], d['channel'].iloc[-1]
     v = df[key]
     if key in ('channel', 'region'):
         d = df.assign(_k=v.astype(str)).sort_values('_k', ascending=not desc)
         return d['channel'].iloc[0], d['channel'].iloc[-1]
     d = df[v.notna()].sort_values(key, ascending=not desc)
+    if d.empty:                  # e.g. density with no scoring: all missing
+        return None, None
     last = df[v.isna()]['channel'].iloc[-1] if v.isna().any() else \
         d['channel'].iloc[-1]
     return d['channel'].iloc[0], last
@@ -391,33 +431,39 @@ for label, key, desc in er.SORT_ITEMS:
     vis = qcw.visible_channels()
     f, l = expect(key, desc)
     di = df.set_index('channel')
-    kk = key or 'checks_z'
+    kk = {'flag': 'outlier_score'}.get(key, key)
 
     def same(a, b):
         va, vb = di.loc[a, kk], di.loc[b, kk]
-        if key is None:
-            return (di.loc[a, 'checks_flag'] == di.loc[b, 'checks_flag']
+        if key == 'flag':
+            return (di.loc[a, 'flag'] == di.loc[b, 'flag']
                     and (va == vb or (va != va and vb != vb)))
+        if key == 'amp_z':
+            return abs(va) == abs(vb)
         return va == vb or (va != va and vb != vb)
-    ok_first = vis[0] == f or same(vis[0], f)       # ties may come in any order
-    ok_last = vis[-1] == l or same(vis[-1], l)
-    if key is not None and key not in ('channel', 'region') and \
+    ok_first = f is None or vis[0] == f or same(vis[0], f)   # ties: any order
+    ok_last = l is None or vis[-1] == l or same(vis[-1], l)
+    if key not in ('channel', 'region', 'flag', 'amp_z') and \
             df[key].isna().any():
         ok_last = df.set_index('channel').loc[vis[-1], key] != \
             df.set_index('channel').loc[vis[-1], key]       # missing last
     check('55', f"[55] Sort '{label}': first {f}, last as expected",
           ok_first and ok_last, repr((vis[0], vis[-1], f, l)))
 hdr = qcw.table.horizontalHeader()
-qcw.table.sortByColumn(rg._QC_COL_INDEX['pct_off_band'], Qt.DescendingOrder)
+qcw.table.sortByColumn(rg._QC_COL_INDEX['mean_amp'], Qt.DescendingOrder)
 app.processEvents()
 c1 = qcw.sort_combo.currentText()
 qcw.table.sortByColumn(rg._QC_COL_INDEX['n'], Qt.AscendingOrder)
 app.processEvents()
 c2 = qcw.sort_combo.currentText()
-check('55b', "[55] header Off-band descending selects 'Off-band share ↓'; "
-      "Events selects 'Column header'",
-      c1 == 'Off-band share ↓' and c2 == 'Column header', repr((c1, c2)))
-qcw.sort_combo.setCurrentText('Checks (hard first)')
+sorts = [qcw.sort_combo.itemText(i) for i in range(qcw.sort_combo.count())]
+check('55b', "[55, 143] header Mean amp descending selects 'Mean amp ↓'; "
+      "Events ascending selects 'Column header'; the Sort items are the "
+      "R5.0 list", c1 == 'Mean amp ↓' and c2 == 'Column header'
+      and sorts == ['Amp flag (hard first)', 'Amp z ↓', 'Mean amp ↓',
+                    'Density ↓', 'Events ↓', 'Channel', 'Region',
+                    'Column header'], repr((c1, c2, sorts)))
+qcw.sort_combo.setCurrentText('Amp flag (hard first)')
 n_chk = int(qc['checks_flag'].isin(['hard', 'soft']).sum())
 n_amp = int(qc['flag'].isin(['hard', 'soft']).sum())
 n_dead = int((qc['flag'] == 'dead').sum())
@@ -425,24 +471,10 @@ line0 = qcw.counts_lbl.text()
 check('56a', "[56] header count line", line0 ==
       f"{n_chk} checks flagged · {n_amp} amp flagged · {n_dead} dead",
       repr(line0))
-check('57', "[57] Checks cells: hard off-band, unflagged, dead",
-      col_cell(win, 'E70', 'checks_flag') ==
-      f"× HARD · off-band {qc.loc['E70', 'pct_off_band']:.0f} %"
-      and col_cell(win, 'E5', 'checks_flag') == '—'
-      and col_cell(win, 'E90', 'checks_flag') == '— dead channel',
-      repr((col_cell(win, 'E70', 'checks_flag'),
-            col_cell(win, 'E90', 'checks_flag'))))
-check('58a', "[58] low prominence 90 % alone: no checks flag, no reasons, "
-      "untinted cell", qc.loc['E40', 'checks_flag'] == ''
-      and qc.loc['E40', 'checks_reasons'] == ''
-      and not isinstance(col_cell(win, 'E40', 'pct_low_prom',
-                                  Qt.BackgroundRole), QtGui.QColor),
+check('58a', "[58] low prominence 90 % alone: no checks flag, no reasons",
+      qc.loc['E40', 'checks_flag'] == ''
+      and qc.loc['E40', 'checks_reasons'] == '',
       repr(qc.loc['E40', 'checks_reasons']))
-ftip = col_cell(win, 'E41', 'pct_dur_floor', Qt.ToolTipRole)
-check('59a', "[59] At floor tooltip with floor and ceiling shares", ftip ==
-      f"At the floor (0.5 s): 12 % · at the ceiling (3 s): 4 % · "
-      f"{int(qc.loc['E41', 'n_bound'])} events with a duration bound.",
-      repr(ftip))
 check('59b', "[59] 0 % floor, 40 % ceiling: not flagged",
       qc.loc['E42', 'checks_flag'] == '')
 # bottom bar (R4.4, R4.5)
@@ -512,7 +544,6 @@ check('104a', "[104] Exclude channel (bottom bar and Epochs tab) writes "
 check('106a', "[106] an excluded row is not judged: Amp flag and Checks "
       "read —; the header counts it only in ' · 2 excluded'",
       col_cell(win, 'E62', 'flag') == '—'
-      and col_cell(win, 'E62', 'checks_flag') == '—'
       and qcw.counts_lbl.text().endswith(' · 2 excluded')
       and qcw.counts_lbl.text().startswith(
           f"{n_checks_included(qcw.model.df)} checks flagged · "), repr(qcw.counts_lbl.text()))
@@ -652,27 +683,6 @@ check('111b', "[111] empty queue: the link is hidden and the export says "
 line1 = qcw.counts_lbl.text()
 check('56b', "[56] with nothing excluded the header has no excluded part",
       'excluded' not in line1, repr(line1))
-foot = qcw.footer.text()
-ftip = qcw.footer.toolTip()
-check('62a', "[102] footer: the one R4.0 line with the live limits, no "
-      "line break; the full rule in the tooltip", foot ==
-      '× hard / ▲ soft: the channel stands out from the others (robust z '
-      'above 3.5 / 2). Low prominence never flags. Hover for the full rule.'
-      and '\n' not in foot and not qcw.footer.wordWrap()
-      and all(t in ftip for t in (
-          'mean event amplitude, its 95th percentile or its largest event',
-          '10 percentage points', '0.3×', 'at least 20 events',
-          'Low prominence is shown for context and never flags.',
-          'Excluded channels are left out of the comparison.',
-          'Change the limits in View ▸ Outlier threshold….'))
-      and len(ftip.split('\n')) == 6, repr(foot))
-check('62c', "[R4.3] slow waves: no low-prominence sentence in the line, "
-      "five tooltip lines; no amp/thr when the method has no ratio",
-      er.footer_text(3.5, 2.0, 'slow_wave') == '× hard / ▲ soft: the '
-      'channel stands out from the others (robust z above 3.5 / 2). Hover '
-      'for the full rule.'
-      and len(er.footer_tooltip(3.5, 2.0, 'slow_wave').split('\n')) == 5
-      and 'amp/thr' not in er.footer_tooltip(3.5, 2.0, 'spindle', False))
 hdrs = [qcw.model.headerData(i, Qt.Horizontal) for i in range(
     qcw.model.columnCount())]
 check('113', "[113] header 'Mean amp µV' (no 'Med amp µV'), with the two "
@@ -690,9 +700,12 @@ check('114a', "[114] one run in view: the top bar names the detector",
       and win.lbl_detector.toolTip() == '', repr(win.lbl_detector.text()))
 win._qc_thresholds.update(hard_z=4.0, soft_z=2.5)
 refresh(win)
-foot = qcw.footer.text()
-check('62b', "[102] after hard 4.0 / soft 2.5", 'above 4 / 2.5)' in foot
-      and 'above 4, soft above 2.5' in qcw.footer.toolTip(), repr(foot))
+tip4 = qcw.model.headerData(rg._QC_COL_INDEX['flag'], Qt.Horizontal,
+                            Qt.ToolTipRole)
+check('62b', "[146] after hard 4.0 / soft 2.5 both rule tooltips carry the "
+      "new limits", '(robust z above 4 / 2.5)' in tip4
+      and 'hard above robust z 4, soft above 2.5'
+      in win.detail_dock_w.flagged.header.toolTip(), repr(tip4))
 win._qc_thresholds.update(hard_z=3.5, soft_z=2.0)
 refresh(win)
 qc = win._qc_df.set_index('channel')
@@ -858,23 +871,17 @@ win = open_window(P2, 'slow_wave')
 refresh(win)
 items = [win.detail_dock_w.topo_combo.itemText(i)
          for i in range(win.detail_dock_w.topo_combo.count())]
-check('11a', "slow waves: low prom. % column hidden, combo item absent",
-      win.qc_widget.table.isColumnHidden(rg._QC_COL_INDEX['pct_low_prom'])
-      and not any('Low-prominence' in t for t in items), repr(items))
+check('11a', "slow waves: the low-prominence topography item is absent",
+      not any('Low-prominence' in t for t in items), repr(items))
 win.close()
 P3 = os.path.join(TMP, 'lac.db')
 build(P3, {f"E{i}": (60, 0.05) for i in range(1, 8)},
       run_kw={'method': 'Lacourse2018'}, row_kw={'method': 'Lacourse2018'})
 win = open_window(P3)
 refresh(win)
-check('11b', "Lacourse2018: amp/thr × is — with the method's tooltip",
-      col_cell(win, 'E1', 'med_thresh_ratio') == '—'
-      and col_cell(win, 'E1', 'med_thresh_ratio', Qt.ToolTipRole)
-      == 'No ratio for Lacourse2018: the stored peak and the detection '
-         'threshold are not the same signal.',
-      repr(col_cell(win, 'E1', 'med_thresh_ratio', Qt.ToolTipRole)))
-check('11c', "spindles keep the low prom. % column",
-      not win.qc_widget.table.isColumnHidden(rg._QC_COL_INDEX['pct_low_prom']))
+check('11b', "Lacourse2018: no amp/thr value (the method has no ratio)",
+      win._qc_df.set_index('channel').loc['E1', 'med_thresh_ratio']
+      != win._qc_df.set_index('channel').loc['E1', 'med_thresh_ratio'])
 # cache: another connection's commit (a re-detection) invalidates it, the
 # GUI's own review write does not
 k0 = win._population_key('spindle', None, None)
@@ -943,10 +950,9 @@ check('12b', "caption says the checks are not recorded",
       'Event checks are not recorded for this run'
       in win.detail_dock_w.checks_caption.text(),
       repr(win.detail_dock_w.checks_caption.text()))
-check('12c', "cells read —, the flagged list says not recorded and the "
-      "header count line starts 'checks not recorded'",
-      col_cell(win, 'E1', 'pct_off_band') == '—'
-      and win.detail_dock_w.flagged.empty.text() ==
+check('12c', "the flagged list says not recorded and the header count line "
+      "starts 'checks not recorded'",
+      win.detail_dock_w.flagged.empty.text() ==
       'Checks not recorded for this run (detected with 4.5 or earlier).'
       and win.qc_widget.counts_lbl.text().startswith('checks not recorded · '),
       repr((win.detail_dock_w.flagged.empty.text(),
@@ -1059,14 +1065,14 @@ items0 = [qcw.sort_combo.itemText(i) for i in range(qcw.sort_combo.count())]
 hdr.setSortIndicator(-1, Qt.AscendingOrder)
 app.processEvents()
 items1 = [qcw.sort_combo.itemText(i) for i in range(qcw.sort_combo.count())]
-hdr.setSortIndicator(rg._QC_COL_INDEX['n'], Qt.DescendingOrder)   # a click
+hdr.setSortIndicator(rg._QC_COL_INDEX['n'], Qt.AscendingOrder)    # a click
 app.processEvents()
 check('98', "[98] setSortIndicator(-1) never adds 'Column header'; a real "
       "header sort on Events does", 'Column header' not in items0
       and items1 == items0
       and qcw.sort_combo.currentText() == 'Column header',
       repr((items1, qcw.sort_combo.currentText())))
-qcw.sort_combo.setCurrentText('Checks (hard first)')
+qcw.sort_combo.setCurrentText('Amp flag (hard first)')
 win.close()
 
 # two runs in view -> detector: — with the tooltip; none -> the other tooltip
@@ -1320,16 +1326,13 @@ check('w4', "[sign-off 1] the Event panel header line wraps only at its "
 win.tabs.setCurrentIndex(0)
 app.processEvents()
 fm = qcw.table.fontMetrics()
-wc = qcw.table.columnWidth(rg._QC_COL_INDEX['checks_flag'])
 ws = qcw.table.columnWidth(rg._QC_COL_INDEX['verdict'])
-check('w5', "[sign-off 2] Checks is at least 170 px and fits '× HARD · "
-      "off-band 70 %'; Status is at least 170 px and fits '× excluded · "
-      "↻ re-detect' (the cell shown for E7)",
-      wc >= 170 and fm.horizontalAdvance('× HARD · off-band 70 %') + 10 <= wc
-      and ws >= 170
+check('w5', "[sign-off 2] Status is at least 170 px and fits '× excluded "
+      "· ↻ re-detect' (the cell shown for E7)",
+      ws >= 170
       and fm.horizontalAdvance('× excluded · ↻ re-detect') + 10 <= ws
       and col_cell(win, 'E7', 'verdict') == '× excluded · ↻ re-detect',
-      repr((wc, ws, fm.horizontalAdvance('× excluded · ↻ re-detect'))))
+      repr((ws, fm.horizontalAdvance('× excluded · ↻ re-detect'))))
 win.resize(2400, 1000)                  # room for the whole bar on one line
 app.processEvents()
 row = [qcw.btn_open, qcw.btn_exclude, qcw.btn_redetect, qcw.queue_link,
@@ -1441,7 +1444,110 @@ check('136', "[136-141] removed: tray signals and layout, the re-detect "
       and all(len(v) == 2 for v in rg.PHYSIO_ROWS.values())
       and "ev.get('peak_freq')" not in er_src
       and 'first-difference' not in er_src and 'first-difference' not in src
-      and '\n' not in er.footer_text(3.5, 2.0, 'spindle'))
+      and not hasattr(er, 'footer_text'))
+import frontend.review_sample_widgets as rsw                  # noqa: E402
+import frontend.sample_review as srv                           # noqa: E402
+pr_src = open(rsw.__file__, encoding='utf-8').read()
+check('182', "[182-191] removed: the strip selection (Shift+drag view box, "
+      "its range, Exclude N epochs…), the footer and the check-column "
+      "helpers, the REVIEW STATUS group, the F chip, the long report's "
+      "controls",
+      not any(hasattr(rg, n) for n in (
+          '_EpochStripViewBox', 'exclude_epochs_text', 'SAMPLE_HIDDEN_COLS'))
+      and not any(hasattr(rg.EpochsPanel, n) for n in (
+          '_on_shift_drag', '_clear_strip_range', '_mark_strip_range',
+          '_reset_region', '_region_fill', '_default_region'))
+      and not any(hasattr(er, n) for n in (
+          'footer_text', 'footer_tooltip', 'header_tooltips', 'checks_cell',
+          'checks_tooltip', 'at_floor_tooltip', 'REVIEW_STATUS_ITEMS',
+          'REVIEW_STATUS_CAPTION'))
+      and not any(hasattr(rg.FilterDock, n) for n in (
+          'review_status_allowed', 'reviewStatusChanged',
+          '_on_reviewed_click', '_sync_reviewed'))
+      and not hasattr(rg.ChannelQCModel, '_check_cell')
+      and not any(hasattr(srv, n) for n in (
+          'agreement_text', 'reason_lines', 'now_hhmm', 'PRECISION_MEANING'))
+      and not any(w in pr_src for w in (
+          'thr_spin', 'Pooling rule', 'As RA protocol classes',
+          'Why rejected', 'Whole night', 'dis_btn'))
+      and 'Shift+drag' not in src and 'f_chip' not in src)
+
+# R5.1: stored sort fallback, the checks link, the frozen Channel column, the
+# interpolation legend, no F chip
+rg._review_settings().setValue('review/channels_sort', 'Off-band share ↓')
+win = open_window(P1)
+win.resize(1400, 900)
+win.show()
+refresh(win)
+qcw = win.qc_widget
+check('143', "[143] a stored sort on a removed column opens as 'Amp flag "
+      "(hard first)'", qcw.sort_combo.currentText() == 'Amp flag (hard first)',
+      repr(qcw.sort_combo.currentText()))
+dk = win.detail_dock_w
+n_rows = len(dk.flagged.rows)
+link_ok = (qcw.counts_lbl.text().startswith(f"{n_rows} checks flagged · ")
+           and "<a href='checks'" in qcw.counts_lbl.html()
+           and qcw.counts_lbl.toolTip() == 'Listed under the topography in '
+           'CHECKS — FLAGGED CHANNELS. Click to go there.')
+scroll = win.detail_dock.widget()
+scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+app.processEvents()
+qcw.counts_lbl.linkActivated.emit('checks')
+app.processEvents()
+hdr_pos = dk.flagged.header.mapTo(scroll.viewport(), QtCore.QPoint(0, 0))
+check('145', "[145] '{c} checks flagged' (c = the dock list's rows) is a "
+      "link with its tooltip; activating it brings the list header into "
+      "view and flashes it", link_ok
+      and 0 <= hdr_pos.y() <= scroll.viewport().height()
+      and rg.THEME['accent'] in dk.flagged.header.styleSheet(),
+      repr((qcw.counts_lbl.text(), hdr_pos.y())))
+qcw.select_channel('E7')
+qcw.table.setFixedWidth(360)            # narrower than the eight columns
+app.processEvents()
+hs = qcw.table.horizontalScrollBar()
+hs.setValue(hs.maximum())
+app.processEvents()
+fz = qcw.table.frozen
+fidx = fz.currentIndex()
+fch = qcw.model.channel_at(qcw.proxy.mapToSource(fidx).row()) \
+    if fidx.isValid() else None
+check('147', "[147] scrolled fully right, the Channel column stays at the "
+      "left edge and shows the selected row's channel",
+      hs.maximum() > 0 and fz.isVisible() and fz.x() <= 2
+      and fz.width() >= 80 and fch == 'E7'
+      and fz.model() is qcw.table.model()
+      and fz.selectionModel() is qcw.table.selectionModel(),
+      repr((hs.maximum(), fz.x(), fz.width(), fch)))
+qcw.table.setMinimumWidth(0)
+qcw.table.setMaximumWidth(16777215)
+fd = win.filter_dock
+fd.populate_channels([f"E{i}" for i in range(1, 9)])
+fd.decorate_channels(interp_set={'E5'})
+leg_on = (fd.interp_legend.isVisibleTo(fd), fd.interp_legend.text(),
+          fd.interp_legend.toolTip())
+fd.decorate_channels(interp_set=set())
+check('148', "[148] '~ = interpolated' under the channel list with its "
+      "tooltip while a listed channel is interpolated; hidden with none",
+      leg_on == (True, '~ = interpolated', 'Interpolated channel: its '
+                 'signal was rebuilt from neighbouring channels, not '
+                 'recorded.') and not fd.interp_legend.isVisibleTo(fd),
+      repr(leg_on))
+row_texts = [w.text() for w in qcw.action_row.findChildren(QtWidgets.QLabel)]
+q0 = set(win._redetect_queue)
+win._flag_selected_qc_row()
+q1 = set(win._redetect_queue)
+tip1 = qcw.btn_redetect.toolTip()
+win._flag_selected_qc_row()
+check('149', "[149] no 'F' chip beside the queue button; F still toggles "
+      "the selected row; the tooltip ends '(F).'",
+      'F' not in row_texts and q1 == q0 ^ {'E7'}
+      and set(win._redetect_queue) == q0
+      and tip1 == ('Remove this channel from the re-detect queue (F).'
+                   if 'E7' in q1 else
+                   'Add this channel to the re-detect queue (F).')
+      and qcw.btn_redetect.toolTip().endswith('re-detect queue (F).'),
+      repr((row_texts, tip1)))
+win.close()
 
 say("\n" + "=" * 78)
 check('settings', "the real review-GUI preferences file was not "

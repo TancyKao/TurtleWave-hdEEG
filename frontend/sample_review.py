@@ -8,7 +8,6 @@ and 11) and reads what the GUI needs from ``review_sample_designs`` /
 imports without it.
 """
 
-import datetime as _dt
 import json
 import math
 
@@ -44,13 +43,19 @@ FLAGGED_NOTE = ('Flagged events (off-band, low prominence, amplitude under '
                 'estimate is not biased by this.')
 OUTSIDE_SAMPLE = 'Saved, outside the review sample: not counted in precision.'
 FILTER_OFF = 'Event filter off while reviewing the sample.'
-PRECISION_MEANING = ('What precision means here: of the events the detector '
-                     'found, the share the reviewer accepted. Unsure events '
-                     'are left out and counted separately.')
-CONVENTION_NOTE = ('A lab convention, not a published standard. Change it '
-                   'here; it is saved with the export.')
 NO_DECISIONS = 'No sample events decided yet. Press ] in the Epochs tab to start.'
-NO_SECOND = 'A second reviewer has not decided any of this sample yet.'
+NO_SECOND = 'No second reviewer yet.'
+PICKER_LOCKED_TIP = ("Finish your own review first, so other reviewers' "
+                     "decisions do not influence yours.")
+EXPORT_CSV_TIP = ('Writes the table as CSV. The figures are also saved in '
+                  'neural_events.db, table review_precision.')
+LIST_HINT = 'Double-click an event to open it in the Epochs tab.'
+CONVENTION_NOTE = 'A lab convention, not a published standard.'
+#: the Precision rule setting (fraction, and 'point estimate' or
+#: 'lower 95 % bound'); the same QSettings keys as before
+POOL_THRESHOLD_KEY, POOL_ESTIMATE_KEY = ('review/pool_threshold',
+                                         'review/pool_estimate')
+ESTIMATES = ('point estimate', 'lower 95 % bound')
 
 CSV_COLUMNS = ('subject', 'event_type', 'method', 'freq_lower', 'freq_upper',
                'run_id', 'sample_id', 'seed', 'reviewer', 'region', 'stage',
@@ -246,25 +251,34 @@ def compared_value(row, estimate):
                    else row.get('p_hat'))
 
 
-def cell_text(row, threshold=0.80, estimate='point estimate'):
-    """``0.93  (0.70–0.99)  n 15``; ``n too small (6)``; ``—``.
+def pct(v):
+    """A fraction as a whole percent (``0.934`` -> ``93``)."""
+    return int(round(100 * float(v)))
 
-    Returns ``(text, level)``: level ``'warn'`` below the rule,
-    ``'muted'`` too small, ``None`` otherwise.
+
+def cell_text(row, threshold=0.80, estimate='point estimate', mark=True):
+    """One report table cell (R5.0): ``(text, level, tooltip)``.
+
+    ``93 %``; below the rule ``54 % ▼`` (level ``'warn'``; only when
+    ``mark``); too few decided ``—`` (level ``'muted'``). The tooltip gives
+    the confidence range and the counts.
     """
     if row is None:
-        return '—', 'muted'
+        return '—', 'muted', 'No events of the sample in this group.'
     n = int(row.get('n_decided') or 0)
-    if n < MIN_DECIDED:
-        return f"n too small ({n})", 'muted'
     p, lo, hi = (_finite(row.get(k)) for k in ('p_hat', 'ci_lo', 'ci_hi'))
-    if p is None:
-        return f"n too small ({n})", 'muted'
-    text = f"{p:.2f}  ({lo:.2f}–{hi:.2f})  n {n}"
+    if n < MIN_DECIDED or p is None:
+        return ('—', 'muted', f"Only {n} decided here; at least "
+                f"{MIN_DECIDED} are needed to judge.")
+    a, r = int(row.get('n_accept') or 0), int(row.get('n_reject') or 0)
+    u = int(row.get('n_unsure') or 0)
+    tip = (f"{pct(p)} % (95 % confidence {pct(lo)}–{pct(hi)} %) · {n} "
+           f"decided: {a} accepted, {r} rejected"
+           + (f", {u} unsure" if u else ''))
     v = compared_value(row, estimate)
-    if v is not None and v < threshold:
-        return text + ' below', 'warn'
-    return text, None
+    if mark and v is not None and v < threshold:
+        return f"{pct(p)} % ▼", 'warn', tip
+    return f"{pct(p)} %", None, tip
 
 
 def judged_groups(df):
@@ -286,51 +300,144 @@ def group_label(domain):
     return f"{region} · {stage}"
 
 
+def below_groups(df, threshold=0.80, estimate='point estimate'):
+    """Judged region × stage rows under the rule, lowest first."""
+    judged, _small = judged_groups(df)
+    rows = [r for r in judged if compared_value(r, estimate) < threshold]
+    return sorted(rows, key=lambda r: compared_value(r, estimate))
+
+
 def verdict_text(df, threshold=0.80, estimate='point estimate'):
-    """The pooling verdict sentence (spec section 11)."""
+    """The verdict line and its level (R5.5, with the user's wording for a
+    pass): ``Every region ≥ 80 %`` (``ok``) or ``Check parietal · NREM2
+    (54 %): below 80 %.`` (``warn``). Returns ``(text, level)``."""
     judged, small = judged_groups(df)
     lower = estimate == 'lower 95 % bound'
-    below = [r for r in judged if compared_value(r, estimate) < threshold]
-    tail = (f" {small} group{'s' if small != 1 else ''} with too few events "
-            f"{'were' if small != 1 else 'was'} not judged." if small else '')
+    t = pct(threshold)
     if not judged:
         return ('Not judged: no region × stage group has enough decided '
-                'events yet.' + tail)
+                'events yet.', 'warn')
+    below = below_groups(df, threshold, estimate)
     if not below:
-        return (f"Poolable under this rule: all {len(judged)} region × stage "
-                f"groups have precision of at least {threshold:.2f}." + tail)
+        text = (f"Every region's lower bound ≥ {t} %" if lower
+                else f"Every region ≥ {t} %")
+        if small:
+            text += f" ({small} group(s) too small to judge)"
+        return text, 'ok'
 
     def g(r):
         if lower:
-            return (f"{group_label(r['domain'])} lower bound "
-                    f"{r['ci_lo']:.2f}")
-        return (f"{group_label(r['domain'])} {r['p_hat']:.2f} "
-                f"({r['ci_lo']:.2f}–{r['ci_hi']:.2f})")
+            return (f"{group_label(r['domain'])} (lower bound "
+                    f"{pct(r['ci_lo'])} %)")
+        return f"{group_label(r['domain'])} ({pct(r['p_hat'])} %)"
     names = [g(r) for r in below[:3]]
     if len(below) == 1:
-        body = f"{names[0]} is below {threshold:.2f}."
+        body = names[0]
+    elif len(below) == 2:
+        body = f"{names[0]} and {names[1]}"
+    elif len(below) == 3:
+        body = f"{names[0]}, {names[1]} and {names[2]}"
     else:
-        more = f" and {len(below) - 3} more" if len(below) > 3 else ''
-        body = (', '.join(names[:-1]) + f" and {names[-1]}{more} are below "
-                f"{threshold:.2f}.")
-    return 'Not poolable under this rule: ' + body + tail
+        body = f"{', '.join(names)} and {len(below) - 3} more"
+    return f"Check {body}: below {t} %.", 'warn'
 
 
-def reason_lines(labels, reason_label):
-    """``[(label, count)]`` of this reviewer's rejected sample events, by
-    count descending, and the M7 line counts ``(fp_artifact, fp_other)``."""
-    from turtlewave_hdEEG.dbwrite import review_category
+def reason_counts(labels, reason_label):
+    """``[(token, label lower case, count)]`` of rejected events, by count
+    (then label)."""
     counts = {}
-    fp = {'FP-artifact': 0, 'FP-other': 0}
     for dec, reason in labels.values():
-        if dec != 'reject':
-            continue
-        counts[reason] = counts.get(reason, 0) + 1
-        fp[review_category(dec, reason)] += 1
-    rows = sorted(((reason_label.get(r, 'No reason given') if r else
-                    'No reason given', n) for r, n in counts.items()),
-                  key=lambda t: (-t[1], t[0]))
-    return rows, (fp['FP-artifact'], fp['FP-other'])
+        if dec == 'reject':
+            counts[reason or ''] = counts.get(reason or '', 0) + 1
+    rows = [(tok, (reason_label.get(tok, tok) if tok else
+                   'no reason given').lower(), n)
+            for tok, n in counts.items()]
+    return sorted(rows, key=lambda t: (-t[2], t[1]))
+
+
+def report_sentence(name, labels, n_total, reason_label, links=False,
+                    accent='#5a8fce'):
+    """``TK reviewed 120 of 120 sampled events: 119 accepted, 1 rejected
+    (artefact 1).`` (R5.0); with ``links`` the reasons and ``{u} unsure``
+    are HTML links ``reason:{token}`` / ``unsure``."""
+    import html as _html
+    vals = list(labels.values())
+    a = sum(1 for d, _r in vals if d == 'accept')
+    r = sum(1 for d, _r in vals if d == 'reject')
+    u = sum(1 for d, _r in vals if d == 'unsure')
+
+    def link(href, text):
+        t = _html.escape(text)
+        return (f"<a href='{href}' style='color:{accent}'>{t}</a>"
+                if links else text)
+    reasons = reason_counts(labels, reason_label)
+    parts = [link(f"reason:{tok}", f"{lab} {n}")
+             for tok, lab, n in reasons[:3]]
+    rtxt = ', '.join(parts)
+    if len(reasons) > 3:
+        rtxt += f" and {len(reasons) - 3} more"
+    esc = _html.escape if links else (lambda x: x)
+    text = (f"{esc(str(name))} reviewed {len(vals)} of {int(n_total)} "
+            f"sampled events: {a} accepted, {r} rejected")
+    if r:
+        text += f" ({rtxt})"
+    if u:
+        text += ", " + link('unsure', f"{u} unsure")
+    return text + '.'
+
+
+def precision_line(df):
+    """``Estimated precision: 99 % (95 % confidence 95–100 %)`` from the
+    whole-night (weighted) row, or ``None``."""
+    row = _row(df, 'scope', 'all')
+    if row is None:
+        return None
+    p, lo, hi = (_finite(row.get(k)) for k in ('p_hat', 'ci_lo', 'ci_hi'))
+    if p is None or lo is None or hi is None:
+        return None
+    return (f"Estimated precision: {pct(p)} % (95 % confidence {pct(lo)}–"
+            f"{pct(hi)} %)")
+
+
+def precision_tip(name):
+    return (f"Of the events the detector found, the share {name} accepted, "
+            f"weighted to all of the night's events. Unsure events are left "
+            f"out.")
+
+
+def report_title(design, reviewer):
+    """``Spindles · Moelle2011 11–16 Hz · reviewer TK``."""
+    ev = EVENT_PLURAL.get(design.get('event_type'), design.get('event_type'))
+    ev = str(ev)[:1].upper() + str(ev)[1:]
+    return (f"{ev} · {design.get('method')} "
+            f"{float(design.get('freq_lower')):g}–"
+            f"{float(design.get('freq_upper')):g} Hz · reviewer {reviewer}")
+
+
+def second_reviewer_line(current, labels, n_total):
+    """``(text, finished)`` of the second-reviewer line (R5.0); agreement is
+    given only once ``current`` has decided every sample event."""
+    mine = labels.get(current, {})
+    finished = len(mine) >= int(n_total) > 0
+    others = [o for o in labels if o not in (current, 'consensus')
+              and labels[o]]
+    if not others:
+        return NO_SECOND, finished
+    other = max(others, key=lambda o: (len(set(labels[o]) & set(mine)),
+                                       len(labels[o])))
+    if not finished:
+        return (f"{other} has also reviewed this sample. Agreement is shown "
+                f"once you have decided all {int(n_total)} events."), False
+    res = agreement(mine, labels[other])
+    if res is None:
+        return (f"Second reviewer {other}: no events you both decided."), True
+    n = res['n_shared']
+    agree = int(round(res['percent_agreement'] * n))
+    k = res['kappa']
+    ktxt = (f"Cohen's kappa {k:.2f}" if k == k
+            else "Cohen's kappa not defined")
+    return (f"Second reviewer {other}: agreement {100 * agree / n:.0f} % on "
+            f"{n} events you both decided ({ktxt})."), True
 
 
 def agreement(a, b):
@@ -343,27 +450,6 @@ def agreement(a, b):
     res['uuids'] = common
     res['disagree'] = [u for u in common if a[u][0] != b[u][0]]
     return res
-
-
-def agreement_text(res):
-    """``Agreed on 34 of 40 (85 %) …`` -- percent agreement three-way
-    (accept / reject / unsure) over every event both reviewers decided;
-    kappa over the events neither marked unsure."""
-    n = res['n_shared']
-    agree = int(round(res['percent_agreement'] * n))
-    k, m = res['kappa'], res['n_both_decided']
-    if m == 0:
-        ktxt = ("Cohen's kappa not computed: no events both reviewers "
-                "decided without an unsure")
-    elif k != k:
-        ktxt = (f"Cohen's kappa not defined on the {m} events neither "
-                f"reviewer marked unsure (no variation in decisions)")
-    else:
-        ktxt = (f"Cohen's kappa {k:.2f} on the {m} events neither reviewer "
-                f"marked unsure")
-    return (f"Agreed on {agree} of {n} ({100 * agree / n:.0f} %, accept / "
-            f"reject / unsure, over every event both reviewers decided) · "
-            f"{ktxt}")
 
 
 def csv_filename(design):
@@ -383,7 +469,8 @@ def csv_rows(design, frames, threshold, estimate):
         run_ids = str(run_ids or '')
     out = []
     for reviewer, df in frames.items():
-        whole_ok = verdict_text(df, threshold, estimate).startswith('Poolable')
+        judged, _small = judged_groups(df)
+        whole_ok = bool(judged) and not below_groups(df, threshold, estimate)
         for _, r in df.iterrows():
             if r['domain_type'] == 'region_stage':
                 region, stage = str(r['domain']).split('|')
@@ -487,7 +574,3 @@ def existing_sample_note(design, counts):
     return (f"A sample of {n} was drawn on {date}{dec}. Drawing a new one "
             f"keeps that sample and its decisions; the Precision report will "
             f"use the new sample.")
-
-
-def now_hhmm():
-    return _dt.datetime.now().strftime('%H:%M')

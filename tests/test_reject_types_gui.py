@@ -598,7 +598,7 @@ check('5c', "widened source keeps the NORMAL colour",
 dock.set_denominator_mask(['Artefact', 'Arousal', 'Move'],
                           'assumed (not recorded)', pending_marks=3)
 check('5c', "assumed + pending marks",
-      dock.mask_caption.text().endswith('· + 3 marks you added')
+      dock.mask_caption.text().endswith('· + 3 excluded ranges you added')
       and 'assumed (not recorded)' in dock.mask_caption.text(),
       repr(dock.mask_caption.text()))
 check('5c', "warning colour when assumed",

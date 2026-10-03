@@ -42,6 +42,9 @@ gui_settings_guard.isolate()     # before any frontend import
 
 import frontend.eeg_review_gui as rg                          # noqa: E402
 from frontend import sample_review as sr                      # noqa: E402
+from frontend import event_review as er                       # noqa: E402
+import frontend.review_sample_widgets as rsw                  # noqa: E402
+import pandas as pd                                           # noqa: E402
 from turtlewave_hdEEG import dbwrite, review_sampling as rs   # noqa: E402
 import review_population_fixture as fx                        # noqa: E402
 
@@ -561,41 +564,223 @@ def wilson(k, n, z=1.959963984540054):
 
 
 lo, hi = wilson(14, 15)
-want = f"{14 / 15:.2f}  ({lo:.2f}–{hi:.2f})  n 15"
-check('45', "frontal NREM2 14 accept / 1 reject: Wilson cell",
-      dlg.cells[('frontal', 'NREM2')] == want,
-      repr((dlg.cells[('frontal', 'NREM2')], want)))
-check('46', "a group with 6 decided reads 'n too small (6)'; the verdict "
-      "says groups were not judged",
-      dlg.cells[('occipital', 'NREM2')] == 'n too small (6)'
-      and 'were not judged.' in dlg.verdict.text(), repr(dlg.verdict.text()))
-dlg.thr_spin.setValue(0.80)
-check('47a', "rule 0.80 with a group at 0.53: not poolable",
-      dlg.verdict.text().startswith('Verdict        Not poolable under this '
-                                    'rule: frontal · NREM3 0.53'),
+c_fn2 = dlg.cells[('frontal', 'NREM2')]
+check('45', "[174] frontal NREM2 14 accept / 1 reject: '93 %' with the "
+      "Wilson range and the counts in the tooltip",
+      c_fn2 == (f"{round(100 * 14 / 15)} %",
+                f"{round(100 * 14 / 15)} % (95 % confidence "
+                f"{round(100 * lo)}–{round(100 * hi)} %) · 15 decided: 14 "
+                f"accepted, 1 rejected"), repr(c_fn2))
+check('46', "[174] a group with 6 decided reads '—' with the too-small "
+      "tooltip; frontal NREM3 (53 %) is marked '▼'",
+      dlg.cells[('occipital', 'NREM2')] == (
+          '—', 'Only 6 decided here; at least 10 are needed to judge.')
+      and dlg.cells[('frontal', 'NREM3')][0] == '53 % ▼'
+      and all(re.match(r'^(\d+ %( ▼)?|—)$', t)
+              for t, _tip in dlg.cells.values()), repr(dlg.cells))
+check('47a', "[173] rule 80 % with a group at 53 %: the verdict names it, "
+      "in the warn colour", dlg.verdict.text()
+      == 'Check frontal · NREM3 (53 %): below 80 %.'
+      and dlg.verdict_level == 'warn' and '#e0a334' in dlg.verdict.styleSheet(),
       repr(dlg.verdict.text()))
-check('47b', "the cell below the rule reads ' below' in warn colour",
-      dlg.cells[('frontal', 'NREM3')].endswith(' below'))
-dlg.thr_spin.setValue(0.50)
-check('47c', "rule 0.50: poolable", dlg.verdict.text().startswith(
-    'Verdict        Poolable under this rule: all 2 region × stage groups '
-    'have precision of at least 0.50.'), repr(dlg.verdict.text()))
-dlg.close()
-dlg2 = win._open_report()
-check('47d', "the threshold survives a reopen (QSettings)",
-      abs(dlg2.thr_spin.value() - 0.50) < 1e-9)
-dlg2.est_combo.setCurrentText('lower 95 % bound')
-check('47e', "lower-bound rule quotes the lower bound",
-      'lower bound' in dlg2.verdict.text(), repr(dlg2.verdict.text()))
-dlg2.est_combo.setCurrentText('point estimate')
-dlg2.thr_spin.setValue(0.80)
-counts = [n for _, n in dlg2.reason_rows]
-fa_fo = re.search(r'FP-artifact (\d+) · FP-other (\d+)', dlg2.reasons.text())
-check('48', "reasons by count, descending; M7 line sums to the rejected "
-      "total (FP-artifact = artefact + eye movement)",
-      counts == sorted(counts, reverse=True) and fa_fo is not None
-      and int(fa_fo.group(1)) == 5 and int(fa_fo.group(2)) == 3
-      and sum(counts) == 8, repr((dlg2.reason_rows, dlg2.reasons.text())))
+# the verdict wording on synthetic frames [173, ruling]
+def frame(groups):
+    rows = [{'domain_type': 'region_stage', 'domain': f"{r}|{st}",
+             'n_decided': 20, 'n_accept': 0, 'n_reject': 0, 'n_unsure': 0,
+             'p_hat': p, 'ci_lo': p - 0.1, 'ci_hi': min(1.0, p + 0.05)}
+            for (r, st), p in groups.items()]
+    return pd.DataFrame(rows)
+
+
+ok_df = frame({('frontal', 'NREM2'): 0.95, ('central', 'NREM2'): 0.9})
+four = frame({('frontal', 'NREM2'): 0.5, ('central', 'NREM2'): 0.6,
+              ('parietal', 'NREM2'): 0.7, ('occipital', 'NREM2'): 0.75})
+small = pd.concat([ok_df, pd.DataFrame([{
+    'domain_type': 'region_stage', 'domain': 'temporal|NREM3',
+    'n_decided': 4, 'p_hat': 1.0, 'ci_lo': 0.5, 'ci_hi': 1.0}])])
+check('173b', "[173, ruling] pass reads 'Every region ≥ 80 %' (ok); with "
+      "groups too small it says how many; the lower-bound rule says so; "
+      "four groups short: three listed then ' and 1 more'",
+      sr.verdict_text(ok_df, 0.8) == ('Every region ≥ 80 %', 'ok')
+      and sr.verdict_text(ok_df, 0.9, 'lower 95 % bound')
+      == ("Check central · NREM2 (lower bound 80 %) and frontal · NREM2 "
+          "(lower bound 85 %): below 90 %.", 'warn')
+      and sr.verdict_text(ok_df, 0.7, 'lower 95 % bound')
+      == ("Every region's lower bound ≥ 70 %", 'ok')
+      and sr.verdict_text(small, 0.8)
+      == ('Every region ≥ 80 % (1 group(s) too small to judge)', 'ok')
+      and sr.verdict_text(four, 0.8)[0] == (
+          'Check frontal · NREM2 (50 %), central · NREM2 (60 %), parietal · '
+          'NREM2 (70 %) and 1 more: below 80 %.')
+      and not any('Looks trustworthy' in t for t in (
+          sr.verdict_text(ok_df, 0.8)[0], sr.verdict_text(small, 0.8)[0])),
+      repr(sr.verdict_text(four, 0.8)))
+# the sentence [171]
+labs = {f"u{i}": ('accept', None) for i in range(119)}
+labs['r1'] = ('reject', 'artefact')
+check('171', "[171] the sentence: 119/1 with one reason; with 2 unsure; "
+      "with five reasons, three then ' and 2 more'; the fixture's TK line",
+      sr.report_sentence('TK', labs, 120, er.REASON_LABEL)
+      == 'TK reviewed 120 of 120 sampled events: 119 accepted, 1 rejected '
+         '(artefact 1).'
+      and sr.report_sentence('TK', dict(labs, s1=('unsure', None),
+                                        s2=('unsure', None)), 122,
+                             er.REASON_LABEL).endswith(', 2 unsure.')
+      and sr.report_sentence('TK', {'a': ('accept', None)}, 120,
+                             er.REASON_LABEL)
+      == 'TK reviewed 1 of 120 sampled events: 1 accepted, 0 rejected.'
+      and sr.report_sentence('TK', {f"x{k}": ('reject', t) for k, t in
+                                    enumerate(['artefact'] * 3
+                                              + ['arousal'] * 2
+                                              + ['too-short', 'other',
+                                                 'eye-movement',
+                                                 'not-in-raw'])},
+                             9, er.REASON_LABEL).endswith(
+          '(artefact 3, arousal 2, eye movement 1 and 3 more).')
+      and dlg._sentence_text == 'TK reviewed 40 of 120 sampled events: 32 '
+      'accepted, 8 rejected (artefact 4, arousal 2, eye movement 1 and 1 '
+      'more).', repr(dlg._sentence_text))
+scope = sr._row(dlg.frames['TK'], 'scope', 'all')
+m = re.match(r'^Estimated precision: (\d+) % \(95 % confidence (\d+)–(\d+) '
+             r'%\)$', dlg.precision.text())
+check('172', "[172] the precision line: the weighted whole-night estimate "
+      "in whole percent, with its tooltip", m is not None
+      and [int(x) for x in m.groups()] == [round(100 * scope[k]) for k in
+                                           ('p_hat', 'ci_lo', 'ci_hi')]
+      and dlg.precision.toolTip().startswith(
+          'Of the events the detector found, the share TK accepted'),
+      repr(dlg.precision.text()))
+BANNED_R = ('Pooling rule', 'As RA protocol classes',
+            'What precision means here', 'Saved to', 'Why rejected',
+            'Whole night', 'Looks trustworthy')
+dlg.resize(1280, 800)
+app.processEvents()
+texts_r = [w.text() for w in dlg.findChildren(QtWidgets.QLabel)] + [
+    w.text() for w in dlg.findChildren(QtWidgets.QPushButton)]
+ys = [w.mapTo(dlg, QtCore.QPoint(0, 0)).y() for w in (
+    dlg.title, dlg.sentence, dlg.precision, dlg.verdict, dlg.grid,
+    dlg.second, dlg.copy_btn)]
+btns = [b.text() for b in (dlg.copy_btn, dlg.export_btn, dlg.close_btn)]
+check('170', "[170] title, sentence, precision line, verdict, table, "
+      "second-reviewer line and the three buttons, in that order; none of "
+      "the removed parts; window title names the subject",
+      ys == sorted(ys) and btns == ['Copy summary', 'Export CSV…', 'Close']
+      and not [t for t in texts_r for w in BANNED_R if w in t]
+      and dlg.windowTitle() == 'Precision report · sub-fx'
+      and dlg._title_text == 'Spindles · Moelle2011 9–12 Hz · reviewer TK'
+      and dlg.export_btn.toolTip() == 'Writes the table as CSV. The figures '
+      'are also saved in neural_events.db, table review_precision.',
+      repr((ys, [t for t in texts_r for w in BANNED_R if w in t])))
+check('176a', "[176] two reviewers, TK not finished: the picker is there "
+      "but disabled with its tooltip; the line withholds agreement",
+      dlg.reviewer_combo.isVisibleTo(dlg)
+      and not dlg.reviewer_combo.isEnabled()
+      and dlg.reviewer_combo.toolTip() == "Finish your own review first, so "
+      "other reviewers' decisions do not influence yours."
+      and dlg.second.text() == 'JS has also reviewed this sample. Agreement '
+      'is shown once you have decided all 120 events.',
+      repr(dlg.second.text()))
+# the reason list [177]
+dlg.sentence.linkActivated.emit('reason:artefact')
+app.processEvents()
+rows_l = [dlg.event_list.item(k).text()
+          for k in range(dlg.event_list.count())]
+hdr_l = dlg.list_hdr.text()
+vis_l = dlg.event_list.isVisibleTo(dlg) and dlg.list_hint.isVisibleTo(dlg)
+first_u = dlg.event_list.item(0).data(Qt.UserRole) if rows_l else None
+dlg.event_list.itemDoubleClicked.emit(dlg.event_list.item(0))
+app.processEvents()
+selected = win.epochs_panel._selected_uuid
+dlg.sentence.linkActivated.emit('reason:artefact')
+app.processEvents()
+check('177', "[177] the 'artefact 4' link lists the four events "
+      "('{channel} · {hms1} · {stage}'); double-click selects one in the "
+      "Epochs tab and the report stays open; the link again closes it",
+      hdr_l == 'Rejected as artefact (4)' and vis_l and len(rows_l) == 4
+      and all(re.match(r'^[A-Za-z0-9]+ · \d\d:\d\d:\d\d\.\d · NREM[23]$', r)
+              for r in rows_l)
+      and dlg.list_hint.text() == 'Double-click an event to open it in the '
+      'Epochs tab.' and selected == first_u and dlg.isVisible()
+      and win.tabs.currentIndex() == 1
+      and not dlg.event_list.isVisibleTo(dlg), repr((hdr_l, rows_l[:2])))
+dlg.copy_summary()
+clip = QtWidgets.QApplication.clipboard().text().split('\n')
+check('179', "[179] Copy summary: exactly the title line, sentence, "
+      "precision line and verdict", clip == [
+          'Spindles · Moelle2011 9–12 Hz · reviewer TK', dlg._sentence_text,
+          dlg.precision.text(), dlg.verdict.text()], repr(clip))
+dlg.show()
+app.processEvents()
+check('180', "[180] fits 1280 × 800 with the list closed: 4 regions × 3 "
+      "columns, no table scroll bar", dlg.grid.rowCount() == 4
+      and dlg.grid.columnCount() == 3
+      and dlg.sizeHint().height() <= 800 and dlg.sizeHint().width() <= 1280
+      and dlg.minimumSizeHint().height() <= 800
+      and not dlg.grid.verticalScrollBar().isVisible()
+      and not dlg.grid.horizontalScrollBar().isVisible(),
+      repr((dlg.sizeHint(), dlg.grid.size())))
+# the Precision rule [178]
+t_def = (rg._review_settings().value('review/pool_threshold', 0.80),
+         rg._review_settings().value('review/pool_estimate',
+                                     'point estimate'))
+seen_rule = {}
+
+
+def drive_rule(d):
+    seen_rule['title'] = d.windowTitle()
+    seen_rule['start'] = (d.pct_spin.value(), d.est_combo.currentText())
+    d.pct_spin.setValue(90)
+    d.save()
+    return QtWidgets.QDialog.Accepted
+
+
+win._exec_dialog = drive_rule
+win._open_precision_rule()
+app.processEvents()
+check('178', "[178] Review ▸ Precision rule… opens 'Precision rule' at the "
+      "default (80 %, point estimate); Save at 90 % changes the open "
+      "report's verdict and persists in the same QSettings keys",
+      seen_rule == {'title': 'Precision rule',
+                    'start': (80, 'point estimate')}
+      and dlg.verdict.text() == 'Check frontal · NREM3 (53 %): below 90 %.'
+      and abs(float(rg._review_settings().value('review/pool_threshold'))
+              - 0.90) < 1e-9
+      and float(t_def[0]) == 0.80
+      and any(a.text() == 'Precision rule…' for a in
+              win.findChildren(QtWidgets.QAction)),
+      repr((seen_rule, dlg.verdict.text())))
+rg._review_settings().setValue('review/pool_threshold', 0.80)
+dlg._render()
+check('50a', "[181] opening the report wrote review_precision rows",
+      before == 0 and after > 0, repr((before, after)))
+out = os.path.join(TMP, 'export.csv')
+path = dlg.export_csv(out)
+with open(path, newline='') as fh:
+    rd = csv.DictReader(fh)
+    cols = rd.fieldnames
+    rows_csv = list(rd)
+check('50b', "[181] the CSV has exactly the listed columns",
+      tuple(cols) == sr.CSV_COLUMNS, repr(cols))
+check('50c', "one row per reviewer × region × stage plus whole-night rows",
+      len(rows_csv) == 2 * (8 + 1)
+      and sum(r['region'] == 'all' for r in rows_csv) == 2,
+      repr(len(rows_csv)))
+check('50d', "default file name next to the database",
+      os.path.basename(dlg.default_csv_path())
+      == 'sub-fx_spindle_Moelle2011_9-12Hz_review_precision.csv'
+      and os.path.dirname(dlg.default_csv_path()) == os.path.dirname(P2),
+      repr(dlg.default_csv_path()))
+check('50e', "export status names the reviewers and the path",
+      win.status_bar.currentMessage() == f"Exported precision for 2 reviewers "
+                                         f"to {out}.",
+      repr(win.status_bar.currentMessage()))
+# TK finishes the sample: agreement appears, the picker unlocks [176]
+for u in rows:
+    if u not in tk:
+        dbwrite.store_event_review(con, u, 'accept', 'TK')
+con.commit()
+dlg.refresh()
+app.processEvents()
 a = np.array([tk[u] for u in both])
 b = np.array([('reject' if tk[u] == 'accept' else 'accept') if u in flip
               else tk[u] for u in both])
@@ -603,57 +788,43 @@ po = np.mean(a == b)
 pa, pb = np.mean(a == 'accept'), np.mean(b == 'accept')
 pe = pa * pb + (1 - pa) * (1 - pb)
 kappa = (po - pe) / (1 - pe)
-check('49', "agreement 34 of 40 (85 %) and kappa equal to the hand value",
-      dlg2.agree.text().startswith('Agreed on 34 of 40 (85 %, accept / '
-                                   'reject / unsure, over every event both '
-                                   'reviewers decided)')
-      and f"Cohen's kappa {kappa:.2f} on the 40 events neither reviewer "
-          f"marked unsure" in dlg2.agree.text(),
-      repr((dlg2.agree.text(), round(kappa, 2))))
-check('49c', "kappa wording when nobody decided without an unsure",
-      "no events both reviewers decided" in sr.agreement_text(
-          {'n_shared': 3, 'percent_agreement': 1.0, 'kappa': float('nan'),
-           'n_both_decided': 0}))
-check('49b', "Show the 6 disagreements lists six events",
-      dlg2.dis_btn.text() == 'Show the 6 disagreements'
-      and dlg2.dis_list.count() == 6)
-check('50a', "opening the report wrote review_precision rows",
-      before == 0 and after > 0, repr((before, after)))
-out = os.path.join(TMP, 'export.csv')
-path = dlg2.export_csv(out)
-with open(path, newline='') as fh:
-    rd = csv.DictReader(fh)
-    cols = rd.fieldnames
-    rows_csv = list(rd)
-check('50b', "CSV has exactly the listed columns",
-      tuple(cols) == sr.CSV_COLUMNS, repr(cols))
-check('50c', "one row per reviewer × region × stage plus whole-night rows",
-      len(rows_csv) == 2 * (8 + 1)
-      and sum(r['region'] == 'all' for r in rows_csv) == 2,
-      repr(len(rows_csv)))
-check('50d', "default file name next to the database",
-      os.path.basename(dlg2.default_csv_path())
-      == 'sub-fx_spindle_Moelle2011_9-12Hz_review_precision.csv'
-      and os.path.dirname(dlg2.default_csv_path()) == os.path.dirname(P2),
-      repr(dlg2.default_csv_path()))
-check('50e', "export status names the reviewers and the path",
-      win.status_bar.currentMessage() == f"Exported precision for 2 reviewers "
-                                         f"to {out}.",
-      repr(win.status_bar.currentMessage()))
-dlg2.copy_summary()
-check('50f', "Copy summary puts the verdict on the clipboard",
-      'Not poolable under this rule' in QtWidgets.QApplication.clipboard()
-      .text())
-dlg2.resize(1280, 800)
-dlg2.show()
+check('176b', "[176] once TK has decided all 120: the picker is enabled "
+      "and the line gives agreement and kappa (34 of 40, hand kappa)",
+      dlg.reviewer_combo.isEnabled() and re.match(
+          r"^Second reviewer .+: agreement \d+ % on \d+ events you both "
+          r"decided \(Cohen's kappa -?\d\.\d\d\)\.$", dlg.second.text())
+      is not None and dlg.second.text() == (
+          f"Second reviewer JS: agreement 85 % on 40 events you both "
+          f"decided (Cohen's kappa {kappa:.2f})."), repr(dlg.second.text()))
+dlg.reviewer_combo.setCurrentText('JS')
 app.processEvents()
-check('51', "fits 1280 × 800: size hint within it and no grid scroll bar "
-      "for 4 regions × 3 columns", dlg2.grid.rowCount() == 4
-      and dlg2.minimumSizeHint().height() <= 800
-      and dlg2.minimumSizeHint().width() <= 1280
-      and not dlg2.grid.verticalScrollBar().isVisible(),
-      repr((dlg2.minimumSizeHint(), dlg2.grid.verticalScrollBar().isVisible())))
-dlg2.close()
+check('176c', "the enabled picker switches the report to JS",
+      dlg._title_text.endswith('reviewer JS')
+      and dlg._sentence_text.startswith('JS reviewed 40 of 120'),
+      repr(dlg._title_text))
+dlg.close()
+
+
+class _OneReviewer:
+    """The report's source with only TK's decisions."""
+
+    def __init__(self, src):
+        self.__dict__.update(src.__dict__)
+        self._src = src
+
+    def labels(self):
+        return {'TK': self._src.labels()['TK']}
+
+    def __getattr__(self, name):
+        return getattr(self._src, name)
+
+
+one = rsw.PrecisionReportDialog(_OneReviewer(win._report.src), win)
+check('175', "[175] one reviewer: no picker and 'No second reviewer yet.'",
+      not one.reviewer_combo.isVisibleTo(one)
+      and one.second.text() == 'No second reviewer yet.',
+      repr(one.second.text()))
+one.close()
 win.close()
 
 
@@ -689,9 +860,10 @@ app.processEvents()
 rings_before = len(dk.ring_items)
 rows_before = len(dk.flagged.rows)
 qw = win.qc_widget
-qw.sort_combo.setCurrentText('Checks (hard first)')
+qw.sort_combo.setCurrentText('Amp flag (hard first)')
 app.processEvents()
 sorted_before = qw.visible_channels()
+link_before = "<a href='checks'" in qw.counts_lbl.html()
 win._start_sample()
 app.processEvents()
 win.on_qc_channel_selected('O2')
@@ -709,9 +881,6 @@ check('dock-s', "sample active: no channel flag words in the dock, the "
       and '\n' not in dk.facts_line.text(),
       repr((rings_before, rows_before, leak)))
 qw = win.qc_widget
-SIX = ('checks_flag', 'pct_off_band', 'pct_low_prom', 'pct_dur_floor',
-       'med_amp_ratio', 'med_thresh_ratio')
-hidden_cols = [qw.table.isColumnHidden(rg._QC_COL_INDEX[k]) for k in SIX]
 tops = [(dk.topo_combo.itemText(i), dk.topo_combo.model().item(i).isEnabled(),
          dk.topo_combo.itemData(i, Qt.ToolTipRole))
         for i in range(3, dk.topo_combo.count())]
@@ -728,48 +897,43 @@ visible_cells = [col_cell(win, ch, k)
                  # (no scored minutes), so it says nothing about sample mode
                  if k != 'density'
                  and not qw.table.isColumnHidden(rg._QC_COL_INDEX[k])]
-check('96', "[96] the six check columns are hidden (not dashed); no "
-      "visible cell is — because of sample mode; Topo check items disabled",
-      hidden_cols == [True] * 6 and '—' not in visible_cells
+check('96', "[96, R5.1] the table has no check columns at all; no visible "
+      "cell is — because of sample mode; Topo check items disabled",
+      [h for _k, h in rg._QC_COLS] == ['Channel', 'Region', 'Events',
+                                       'Density /min', 'Mean amp µV',
+                                       'Amp z', 'Amp flag', 'Status']
+      and '—' not in visible_cells
       and tops and all(not en and tip == 'Hidden while you review the '
                        'sample.' for _t, en, tip in tops),
-      repr((hidden_cols, [c for c in visible_cells if c == '—'])))
+      repr([c for c in visible_cells if c == '—']))
 stage_b = qw.stage_group.buttons()
 win.tabs.setCurrentIndex(0)              # the status bar's Channels summary
 app.processEvents()
-check('97', "[97] Stage buttons disabled with the R4.0 tooltip (the "
+check('97', "[97, 145] Stage buttons disabled with the R4.0 tooltip (the "
       "checked one still checked); the header count starts 'checks hidden "
-      "· '", stage_b and all(not b.isEnabled() for b in stage_b)
+      "· ' and is not a link (it was before the sample)", stage_b and all(not b.isEnabled() for b in stage_b)
       and all(b.toolTip() == 'Stages apply to the channel checks, which are '
               'hidden while you review the sample.' for b in stage_b)
       and sum(b.isChecked() for b in stage_b) == 1
       and qw.counts_lbl.text().startswith('checks hidden · ')
+      and '<a' not in qw.counts_lbl.html() and link_before
+      and qw.counts_lbl.toolTip() == ''
       and ' · checks hidden · ' in win.seg_position.text()
       and 'soft checks' not in win.seg_position.text(),
       repr((qw.counts_lbl.text(), win.seg_position.text())))
-sort_items = {qw.sort_combo.itemText(i): (
-    qw.sort_combo.model().item(i).isEnabled(),
-    qw.sort_combo.itemData(i, Qt.ToolTipRole))
-    for i in range(qw.sort_combo.count())}
-check_sorts = [lab for lab, k, _d in rg._er.SORT_ITEMS
-               if k is None or k in rg._er.CHECK_COLUMNS]
-check('sort-s', "[R4.1, 98] sample active: the check sort fell back to "
-      "'Channel' (O2, flagged, is not on top), the check sorts are disabled "
-      "with the tooltip, no 'Column header' item appeared",
-      sorted_before[0] == 'O2'
-      and qw.sort_combo.currentText() == 'Channel'
-      and qw.visible_channels() == sorted(qw.visible_channels())
-      and qw.visible_channels()[0] != 'O2'
-      and all(not sort_items[l][0] and sort_items[l][1]
-              == 'Hidden while you review the sample.' for l in check_sorts)
-      and sort_items['Amp z ↓'][0] and sort_items['Channel'][0]
+sort_items = [qw.sort_combo.itemText(i) for i in range(qw.sort_combo.count())]
+check('sort-s', "[R5.1, 98] sample mode leaves the sort as it was (no Sort "
+      "item is check-based any more); no 'Column header' appeared",
+      qw.visible_channels() == sorted_before
+      and qw.sort_combo.currentText() == 'Amp flag (hard first)'
       and 'Column header' not in sort_items
-      and 'Channel order' not in sort_items,
-      repr((sorted_before[:2], qw.visible_channels()[:3],
-            qw.sort_combo.currentText())))
+      and all(qw.sort_combo.model().item(i).isEnabled()
+              for i in range(qw.sort_combo.count())),
+      repr((sorted_before[:2], qw.visible_channels()[:3])))
 n_flag_s = qw.show_combo.itemText(1)
-check('tbl-f', "[99] sample active: Show > Flagged counts amplitude flags only",
-      n_flag_s == f"Flagged ({int(qw.model.df['flag'].isin(['hard', 'soft']).sum())})",
+check('tbl-f', "[99, 144] sample active: Show > Amp flagged counts amplitude "
+      "flags only", n_flag_s == f"Amp flagged "
+      f"({int(qw.model.df['flag'].isin(['hard', 'soft']).sum())})",
       repr(n_flag_s))
 # no check filter during sample review
 win._open_in_epochs('O2')
@@ -801,25 +965,23 @@ win.on_qc_channel_selected('O2')
 app.processEvents()
 check('95b', "[95] the banner's button ends the sample and the banner goes",
       not win._sample_active and not qw.sample_banner.isVisibleTo(qw))
-check('sort-e', "after Exit: the previous sort ('Checks (hard first)', "
-      "O2 on top) is back, every Sort item is enabled, no 'Column header'",
-      qw.sort_combo.currentText() == 'Checks (hard first)'
+check('sort-e', "after Exit: the sort ('Amp flag (hard first)') is as "
+      "before, every Sort item is enabled, no 'Column header'",
+      qw.sort_combo.currentText() == 'Amp flag (hard first)'
       and qw.visible_channels() == sorted_before
       and qw.sort_combo.findText('Column header') < 0
       and all(qw.sort_combo.model().item(i).isEnabled()
               for i in range(qw.sort_combo.count())),
       repr((qw.sort_combo.currentText(), qw.visible_channels()[:3])))
-check('tbl-e', "[96] after Exit: the check columns, the header count, the "
-      "Stage buttons and the Topo items are back",
-      [qw.table.isColumnHidden(rg._QC_COL_INDEX[k]) for k in SIX]
-      == [False] * 6
-      and all(b.isEnabled() and b.toolTip() == ''
-              for b in qw.stage_group.buttons())
-      and col_cell(win, 'O2', 'checks_flag').startswith('× HARD')
+check('tbl-e', "[96, 145] after Exit: the header count (a link again), "
+      "the Stage buttons and the Topo items are back",
+      all(b.isEnabled() and b.toolTip() == ''
+          for b in qw.stage_group.buttons())
       and qw.counts_lbl.text()[0].isdigit()
+      and "<a href='checks'" in qw.counts_lbl.html()
       and all(dk.topo_combo.model().item(i).isEnabled()
               for i in range(3, dk.topo_combo.count())),
-      repr((col_cell(win, 'O2', 'checks_flag'), qw.counts_lbl.text())))
+      repr(qw.counts_lbl.text()))
 check('dock-e', "after Exit the rings, the list and the facts are back",
       len(dk.ring_items) == rings_before
       and len(dk.flagged.rows) == rows_before
@@ -951,6 +1113,37 @@ check('out-s', "[BLOCK] sample active, first sample event a 900 µV outlier, "
       and ep._epoch == epoch_before and ep._outlier_epoch_indices() == []
       and 'µV' not in evp.row('outlier')['tooltip'].split('Detector')[0],
       repr((leaks, rank_rows()[:2], ep.epoch_lbl.text())))
+# [169] Show events in sample mode reads only TK's own decisions: an event
+# only JS decided counts as unreviewed; the undecided outlier sample event
+# passes 'unreviewed' and still shows no outlier tint or label
+other_u = next(u for u in ep._ev['uuid'] if u != target
+               and u not in ep._reviews)
+dbwrite.store_event_review(win.db.conn, other_u, 'reject', 'JS',
+                           reason='artefact')
+win.db.conn.commit()
+ep.set_reviews(win._reviews_for_slice(ep._df))
+n_unrev = int(sum(1 for u in ep._ev['uuid'] if u not in ep._reviews))
+for k in ('accepted', 'rejected', 'unsure'):
+    ep.show_checks[k].setChecked(False)
+app.processEvents()
+ep.select_event(target)
+app.processEvents()
+chip169 = ep.shown_chip_text()
+marks169 = trace_marks()
+ticks169 = list(ep.shown_tick_epochs)
+want169 = sorted({ep.index_at(t) for t in ep._ev.loc[
+    ~ep._ev['uuid'].isin(list(ep._reviews)), '_start']})
+ep.shown_chip_x.click()
+app.processEvents()
+check('169', "[169] sample mode, two reviewers: JS's decision counts as "
+      "unreviewed for TK in the chip and the ticks; the undecided outlier "
+      "sample event passing the filter has no outlier tint or label",
+      chip169 == f"Showing: unreviewed · {n_unrev} of "
+      f"{int(ep._ev['uuid'].notna().sum())} on {ep._channel} ✕"
+      and other_u not in ep._reviews and ticks169 == want169
+      and marks169 == (0, 0, 0), repr((chip169, marks169)))
+ep.select_event(target)
+app.processEvents()
 win._auto_advance = False
 press(win, Qt.Key_U)
 press(win, Qt.Key_Return)
@@ -970,6 +1163,20 @@ check('81b', "[81, 121] after A the reading words appear (coloured, "
       and ' · flagged: ' in evp.sample_lbl.text()
       and not evp.hidden_lbl.isVisibleTo(evp)
       and trace_marks()[0] == 2, repr((t[:120], trace_marks())))
+bt = evp.btn
+saved161 = {d: b.isChecked() for d, b in bt.items()}
+press(win, Qt.Key_R)
+armed161 = ({d: b.isChecked() for d, b in bt.items()},
+            bt['reject'].styleSheet())
+press(win, Qt.Key_Escape)
+back161 = {d: b.isChecked() for d, b in bt.items()}
+check('161', "[161] sample mode, sample event: after A only Accept is "
+      "checked; R arms Reject (border, not checked) with Accept still "
+      "checked; Esc returns to Accept only",
+      saved161 == {'accept': True, 'reject': False, 'unsure': False}
+      and armed161[0] == saved161
+      and armed161[1] == rg.EventDecisionPanel.ARMED_QSS
+      and back161 == saved161, repr((saved161, armed161, back161)))
 press(win, Qt.Key_Z, Qt.ControlModifier)
 t = panel_text()
 check('81c', "[81] Ctrl+Z (back to unsure) hides them again",

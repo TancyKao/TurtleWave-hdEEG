@@ -192,9 +192,11 @@ check('4.1', "_goto_epoch(index_at(60.5)) shows a 1 s window [60, 61]",
 check('4.2', "header names the epoch, its 1 s length and stage",
       panel.epoch_lbl.text().startswith('Epoch 3/6 · 00:01:00–00:01:01 (1 s) · NREM2'),
       repr(panel.epoch_lbl.text()))
-r0, r1 = panel.region.getRegion()
-check('4.3', "brush sits inside the 1 s window", 60 < r0 < r1 < 61,
-      repr((r0, r1)))
+panel._on_brush_drag(59.0, 62.0, True)   # a drag past both edges
+r0, r1 = panel._brush
+check('4.3', "a brush drawn past the 1 s window is clipped to it",
+      (r0, r1) == (60.0, 61.0) and panel.region.isVisible(), repr((r0, r1)))
+panel.clear_range()
 check('4.4', "strip marker covers the epoch",
       tuple(panel._ov_marker.getRegion()) == (60.0, 61.0),
       repr(panel._ov_marker.getRegion()))
@@ -205,14 +207,11 @@ x = np.asarray(bars[0].opts['x'], dtype=float) if bars else np.array([])
 check('4.5', "strip bars are 95 % of each epoch, centred on it",
       len(bars) == 2 and np.allclose(sorted(w), sorted(0.95 * np.array(
           [30, 30, 1, 30, 2, 30]))) and 60.5 in list(x), repr((list(w), list(x))))
-panel._on_shift_drag(*panel.snap(60.3, 62), True)
-check('4.6', "shift-drag snaps to epoch edges and counts epochs",
-      tuple(panel._strip_range.getRegion()) == (60.0, 91.0)
-      and panel.mark_n_btn.text() == 'Exclude 2 epochs…',
-      repr((panel._strip_range.getRegion(), panel.mark_n_btn.text())))
-check('4.7', "the strip view box snaps with the panel's table",
-      panel._strip_vb._snapped(91.5, 92.5) == (91.0, 93.0),
-      repr(panel._strip_vb._snapped(91.5, 92.5)))
+check('4.6', "[R5.2] the epoch strip has no range tool (no Shift+drag "
+      "range, no Exclude N epochs…); the table still snaps to epoch edges",
+      not hasattr(panel, '_strip_range') and not hasattr(panel, 'mark_n_btn')
+      and panel._epochs.snap(60.3, 62) == (60.0, 91.0),
+      repr(panel._epochs.snap(60.3, 62)))
 panel._next()
 check('4.8', "Next from the 1 s epoch goes to the 30 s epoch at 61 s",
       panel.raw_plot.getPlotItem().vb.viewRange()[0] == [61.0, 91.0],
@@ -225,12 +224,13 @@ check('4.9', "marked-range row counts epochs from the table",
 dock = rg.ChannelDetailDock()
 dock.set_epoch_table(tb)
 jumps = []
-dock.gotoEpochRequested.connect(jumps.append)
+dock.exclusionClicked.connect(jumps.append)
 dock.set_marked([{'id': 1, 'start_time': 60.0, 'end_time': 61.0}])
 btn = dock._marked_layout.itemAt(0).widget().layout().itemAt(0).widget()
 btn.click()
-check('4.10', "detail dock: a 1 s mark reads '(1 ep)' and jumps to epoch 2",
-      btn.text().endswith('(1 ep)') and jumps == [2], repr((btn.text(), jumps)))
+check('4.10', "detail dock: a 1 s mark reads '(1 ep)'; its row selects that "
+      "excluded range (the Epochs tab pages to it)",
+      btn.text().endswith('(1 ep)') and jumps == [1], repr((btn.text(), jumps)))
 dock.update_channel('Cz', events, {'_epochs': tb, '_event_type': 'spindle'})
 worst = [dock.worst_list.item(i).data(0x0100)
          for i in range(dock.worst_list.count())]
@@ -290,9 +290,10 @@ check('6.3', "outlier frame identical to the old fixed-grid path",
 upanel = rg.EpochsPanel()
 upanel.set_channel('Cz', uev, uev, epochs=ut, trec=300.0)
 upanel._goto_epoch(upanel.index_at(75))
-check('6.4', "30 s window, brush at t0+13..t0+17, no length in the header",
+check('6.4', "30 s window, no brush until one is drawn (R5.2), no length "
+      "in the header",
       upanel.raw_plot.getPlotItem().vb.viewRange()[0] == [60.0, 90.0]
-      and tuple(upanel.region.getRegion()) == (73.0, 77.0)
+      and not upanel.has_brush() and not upanel.region.isVisible()
       and '(30 s)' not in upanel.epoch_lbl.text()
       and upanel.epoch_lbl.text().startswith('Epoch 3/10 · 00:01:00–00:01:30 · NREM2'),
       repr((upanel.region.getRegion(), upanel.epoch_lbl.text())))

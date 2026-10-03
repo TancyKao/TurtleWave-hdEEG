@@ -199,137 +199,162 @@ class DrawSampleDialog(QtWidgets.QDialog):
         return None if it is None else it.text()
 
 
-class PrecisionReportDialog(QtWidgets.QDialog):
-    """Non-modal ``Precision report`` (spec section 11).
+def pool_rule():
+    """``(threshold fraction, estimate)`` of the Precision rule setting
+    (default 80 % on the point estimate)."""
+    st = _settings()
+    try:
+        t = float(st.value(sr.POOL_THRESHOLD_KEY, 0.80))
+    except (TypeError, ValueError):
+        t = 0.80
+    est = str(st.value(sr.POOL_ESTIMATE_KEY, 'point estimate'))
+    return t, (est if est in sr.ESTIMATES else 'point estimate')
 
-    ``source`` supplies the data: ``design`` (dict), ``labels()`` ->
-    ``{reviewer: {uuid: (decision, reason)}}``, ``frame(reviewer)`` ->
-    ``compute_review_precision`` frame (written to ``review_precision``),
-    ``event_line(uuid)`` -> ``'PPOz 01:53:32.9'``, ``db_name`` and
-    ``current_reviewer``. ``eventRequested(uuid)`` asks the window to select
-    an event (double-click on a disagreement).
+
+class PrecisionRuleDialog(QtWidgets.QDialog):
+    """Review ▸ ``Precision rule…`` (R5.5): the pooling rule, saved in the
+    existing ``QSettings`` keys."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Precision rule')
+        lay = QtWidgets.QVBoxLayout(self)
+        t, est = pool_rule()
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('Call a region × stage group '
+                                       'trustworthy when its precision is '
+                                       'at least'))
+        self.pct_spin = QtWidgets.QSpinBox()
+        self.pct_spin.setRange(50, 99)
+        self.pct_spin.setValue(int(round(100 * t)))
+        row.addWidget(self.pct_spin)
+        row.addWidget(QtWidgets.QLabel('% using the'))
+        self.est_combo = QtWidgets.QComboBox()
+        self.est_combo.addItems(list(sr.ESTIMATES))
+        self.est_combo.setCurrentText(est)
+        row.addWidget(self.est_combo)
+        row.addWidget(QtWidgets.QLabel('.'))
+        lay.addLayout(row)
+        note = QtWidgets.QLabel(sr.CONVENTION_NOTE)
+        note.setStyleSheet(f"color:{_MUTED};font-size:11px;")
+        lay.addWidget(note)
+        box = QtWidgets.QDialogButtonBox()
+        box.addButton('Cancel', QtWidgets.QDialogButtonBox.RejectRole)
+        self.save_btn = box.addButton('Save',
+                                      QtWidgets.QDialogButtonBox.AcceptRole)
+        box.accepted.connect(self.save)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+
+    def save(self):
+        st = _settings()
+        st.setValue(sr.POOL_THRESHOLD_KEY, self.pct_spin.value() / 100.0)
+        st.setValue(sr.POOL_ESTIMATE_KEY, self.est_combo.currentText())
+        self.accept()
+
+
+class PrecisionReportDialog(QtWidgets.QDialog):
+    """Non-modal ``Precision report``, short form (UX spec R5.5).
+
+    Title line, one sentence (its reasons and ``unsure`` open a list of
+    those events), the weighted precision line, a verdict, a region × stage
+    table of percentages, the second-reviewer line, and Copy summary /
+    Export CSV… / Close. ``source`` supplies ``design``, ``n_total``,
+    ``db_path``, ``current_reviewer``, ``labels()`` ->
+    ``{reviewer: {uuid: (decision, reason)}}``, ``frame(reviewer)`` (the
+    ``compute_review_precision`` frame, written to ``review_precision``),
+    ``event_info(uuid)`` -> ``(channel, start_time, stage)`` and
+    ``comments(reviewer)`` -> ``{uuid: comment}``. Double-clicking a listed
+    event emits ``eventRequested(uuid)``.
     """
 
     eventRequested = pyqtSignal(str)
+    MAX_LIST_ROWS = 8
 
     def __init__(self, source, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Precision report')
-        self.setModal(False)
         self.src = source
+        subject = source.design.get('subject') or '—'
+        self.setWindowTitle(f'Precision report · {subject}')
+        self.setModal(False)
         self.frames = {}
+        self._open_list = None
         lay = QtWidgets.QVBoxLayout(self)
-        self.title = QtWidgets.QLabel('Precision report')
+        lay.setSpacing(6)
+        trow = QtWidgets.QHBoxLayout()
+        self.title = QtWidgets.QLabel('')
         self.title.setStyleSheet("font-weight:600;font-size:14px;")
-        lay.addWidget(self.title)
-        self.header = QtWidgets.QLabel('')
-        self.header.setWordWrap(True)
-        lay.addWidget(self.header)
-        self.sub = QtWidgets.QLabel('')
-        self.sub.setWordWrap(True)
-        self.sub.setStyleSheet(f"color:{_MUTED};")
-        lay.addWidget(self.sub)
-        top = QtWidgets.QHBoxLayout()
-        top.addWidget(QtWidgets.QLabel('Precision for'))
+        trow.addWidget(self.title)
+        # the reviewer picker, only with two or more reviewers (R5.5)
         self.reviewer_combo = QtWidgets.QComboBox()
-        top.addWidget(self.reviewer_combo)
-        meaning = QtWidgets.QLabel(sr.PRECISION_MEANING)
-        meaning.setWordWrap(True)
-        meaning.setStyleSheet(f"color:{_MUTED};font-size:11px;")
-        top.addWidget(meaning, 1)
-        lay.addLayout(top)
+        self.reviewer_combo.setVisible(False)
+        self.reviewer_combo.currentTextChanged.connect(
+            lambda *_: self._render())
+        trow.addWidget(self.reviewer_combo)
+        trow.addStretch()
+        lay.addLayout(trow)
         self.empty = QtWidgets.QLabel(sr.NO_DECISIONS)
         lay.addWidget(self.empty)
         self.body = QtWidgets.QWidget()
         bl = QtWidgets.QVBoxLayout(self.body)
         bl.setContentsMargins(0, 0, 0, 0)
-        self.grid = QtWidgets.QTableWidget(0, 3)
-        self.grid.setHorizontalHeaderLabels(['NREM2', 'NREM3', 'All stages'])
-        self.grid.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.grid.horizontalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.Stretch)
-        self.grid.setMaximumHeight(200)
-        bl.addWidget(self.grid)
-        self.whole = QtWidgets.QLabel('')
-        bl.addWidget(self.whole)
-        rule = QtWidgets.QHBoxLayout()
-        rule.addWidget(QtWidgets.QLabel('Pooling rule   precision of at least'))
-        self.thr_spin = QtWidgets.QDoubleSpinBox()
-        self.thr_spin.setRange(0.50, 0.99)
-        self.thr_spin.setSingleStep(0.01)
-        self.thr_spin.setDecimals(2)
-        self.thr_spin.setValue(float(_settings().value('review/pool_threshold',
-                                                       0.80)))
-        rule.addWidget(self.thr_spin)
-        rule.addWidget(QtWidgets.QLabel('using the'))
-        self.est_combo = QtWidgets.QComboBox()
-        self.est_combo.addItems(['point estimate', 'lower 95 % bound'])
-        self.est_combo.setCurrentText(str(_settings().value(
-            'review/pool_estimate', 'point estimate')))
-        rule.addWidget(self.est_combo)
-        rule.addWidget(QtWidgets.QLabel('in every region × stage group'))
-        rule.addStretch()
-        bl.addLayout(rule)
-        conv = QtWidgets.QLabel(sr.CONVENTION_NOTE)
-        conv.setStyleSheet(f"color:{_MUTED};font-size:11px;")
-        bl.addWidget(conv)
+        bl.setSpacing(6)
+        self.sentence = QtWidgets.QLabel('')
+        self.sentence.setTextFormat(Qt.RichText)
+        self.sentence.setWordWrap(True)
+        self.sentence.setStyleSheet("font-size:13px;")
+        self.sentence.linkActivated.connect(self.toggle_list)
+        bl.addWidget(self.sentence)
+        self.precision = QtWidgets.QLabel('')
+        self.precision.setStyleSheet("font-size:13px;")
+        bl.addWidget(self.precision)
         self.verdict = QtWidgets.QLabel('')
         self.verdict.setWordWrap(True)
         bl.addWidget(self.verdict)
-        self.reasons_hdr = QtWidgets.QLabel('')
-        self.reasons_hdr.setStyleSheet("font-weight:600;")
-        bl.addWidget(self.reasons_hdr)
-        self.reasons = QtWidgets.QLabel('')
-        self.reasons.setStyleSheet(
-            "font-family:'IBM Plex Mono',monospace;font-size:11px;")
-        bl.addWidget(self.reasons)
-        self.agree_hdr = QtWidgets.QLabel('')
-        self.agree_hdr.setStyleSheet("font-weight:600;")
-        bl.addWidget(self.agree_hdr)
-        self.agree = QtWidgets.QLabel('')
-        self.agree.setWordWrap(True)
-        bl.addWidget(self.agree)
-        self.dis_btn = QtWidgets.QPushButton('')
-        self.dis_btn.clicked.connect(self._toggle_disagreements)
-        bl.addWidget(self.dis_btn)
-        self.dis_list = QtWidgets.QListWidget()
-        self.dis_list.setMaximumHeight(120)
-        self.dis_list.setVisible(False)
-        self.dis_list.itemDoubleClicked.connect(
+        self.grid = QtWidgets.QTableWidget(0, 0)
+        self.grid.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.grid.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.grid.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeToContents)
+        self.grid.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.grid.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        bl.addWidget(self.grid, 0, Qt.AlignLeft)
+        self.list_hdr = QtWidgets.QLabel('')
+        self.list_hdr.setStyleSheet("font-weight:600;")
+        bl.addWidget(self.list_hdr)
+        self.event_list = QtWidgets.QListWidget()
+        self.event_list.itemDoubleClicked.connect(
             lambda it: self.eventRequested.emit(str(it.data(Qt.UserRole))))
-        bl.addWidget(self.dis_list)
+        bl.addWidget(self.event_list)
+        self.list_hint = QtWidgets.QLabel(sr.LIST_HINT)
+        self.list_hint.setStyleSheet(f"color:{_MUTED};font-size:11px;")
+        bl.addWidget(self.list_hint)
+        self.second = QtWidgets.QLabel('')
+        self.second.setWordWrap(True)
+        bl.addWidget(self.second)
         lay.addWidget(self.body)
+        lay.addStretch()
         foot = QtWidgets.QHBoxLayout()
-        self.footer = QtWidgets.QLabel('')
-        self.footer.setStyleSheet(f"color:{_MUTED};font-size:11px;")
-        foot.addWidget(self.footer, 1)
+        foot.addStretch()
         self.copy_btn = QtWidgets.QPushButton('Copy summary')
         self.copy_btn.clicked.connect(self.copy_summary)
         self.export_btn = QtWidgets.QPushButton('Export CSV…')
+        self.export_btn.setToolTip(sr.EXPORT_CSV_TIP)
         self.export_btn.clicked.connect(lambda: self.export_csv())
-        close = QtWidgets.QPushButton('Close')
-        close.clicked.connect(self.close)
-        for b in (self.copy_btn, self.export_btn, close):
+        self.close_btn = QtWidgets.QPushButton('Close')
+        self.close_btn.clicked.connect(self.close)
+        for b in (self.copy_btn, self.export_btn, self.close_btn):
             foot.addWidget(b)
         lay.addLayout(foot)
-        self.thr_spin.valueChanged.connect(self._rule_changed)
-        self.est_combo.currentTextChanged.connect(self._rule_changed)
-        self.reviewer_combo.currentTextChanged.connect(
-            lambda *_: self._render())
-        self.resize(1100, 720)
+        self._show_list(None)
         self.refresh()
 
     # ---- data ------------------------------------------------------------
     def threshold(self):
-        return float(self.thr_spin.value())
+        return pool_rule()[0]
 
     def estimate(self):
-        return self.est_combo.currentText()
-
-    def _rule_changed(self, *_):
-        _settings().setValue('review/pool_threshold', self.threshold())
-        _settings().setValue('review/pool_estimate', self.estimate())
-        self._render()
+        return pool_rule()[1]
 
     def refresh(self):
         """Re-read labels, recompute and write ``review_precision`` for
@@ -340,82 +365,103 @@ class PrecisionReportDialog(QtWidgets.QDialog):
             if rv == 'consensus' or not lab:
                 continue
             self.frames[rv] = self.src.frame(rv)
-        keep = self.reviewer_combo.currentText() or self.src.current_reviewer
+        cur = self.src.current_reviewer
+        keep = self.reviewer_combo.currentText() or cur
+        names = sorted(self.frames)
+        if cur and cur not in names and cur in self.labels:
+            names.append(cur)
         self.reviewer_combo.blockSignals(True)
         self.reviewer_combo.clear()
-        self.reviewer_combo.addItems(sorted(self.frames))
+        self.reviewer_combo.addItems(names)
         i = self.reviewer_combo.findText(keep or '')
+        if i < 0:
+            i = self.reviewer_combo.findText(cur or '')
         self.reviewer_combo.setCurrentIndex(max(0, i))
         self.reviewer_combo.blockSignals(False)
-        self.saved_at = sr.now_hhmm()
         self._render()
+
+    def shown_reviewer(self):
+        """The reviewer the report is about: the current one, unless the
+        (enabled) picker shows another."""
+        if self.reviewer_combo.isVisible() and \
+                self.reviewer_combo.isEnabled() and \
+                self.reviewer_combo.currentText():
+            return self.reviewer_combo.currentText()
+        return self.src.current_reviewer
 
     # ---- rendering -------------------------------------------------------
     def _render(self):
         d = self.src.design
-        ev = sr.EVENT_PLURAL.get(d.get('event_type'), d.get('event_type'))
-        self.header.setText(
-            f"{d.get('subject') or '—'} · {ev} · {d.get('method')} "
-            f"{float(d.get('freq_lower')):g}–{float(d.get('freq_upper')):g} Hz"
-            f" · {self.src.run_text}")
-        who = []
-        for rv in sorted(self.labels):
-            lab = self.labels[rv]
-            u = sum(1 for v in lab.values() if v[0] == 'unsure')
-            who.append(f"{rv}: {len(lab)} decided, {u} unsure")
-        self.sub.setText(
-            f"Sample of {self.src.n_total} drawn "
-            f"{str(d.get('drawn_at') or '')[:10]} (seed {d.get('seed')})"
-            + (' · ' + ' · '.join(who) if who else ''))
-        has = bool(self.frames)
+        cur = self.src.current_reviewer
+        n_total = self.src.n_total
+        second, finished = sr.second_reviewer_line(cur, self.labels, n_total)
+        reviewers = [r for r in self.labels if r != 'consensus'
+                     and self.labels[r]]
+        many = len(reviewers) >= 2
+        self.reviewer_combo.setVisible(many)
+        self.reviewer_combo.setEnabled(many and finished)
+        self.reviewer_combo.setToolTip('' if finished
+                                       else sr.PICKER_LOCKED_TIP)
+        if many and not finished:
+            self.reviewer_combo.blockSignals(True)
+            self.reviewer_combo.setCurrentText(cur or '')
+            self.reviewer_combo.blockSignals(False)
+        rv = self.shown_reviewer()
+        self.title.setText(sr.report_title(d, rv)[:-len(str(rv))].rstrip()
+                           if many else sr.report_title(d, rv))
+        self._title_text = sr.report_title(d, rv)
+        self.second.setText(second)
+        has = rv in self.frames
         self.empty.setVisible(not has)
         self.body.setVisible(has)
         self.copy_btn.setEnabled(has)
         self.export_btn.setEnabled(has)
-        self.footer.setText(
-            f"Saved to {self.src.db_name} (table review_precision) at "
-            f"{self.saved_at}." if has else '')
         if not has:
             return
-        rv = self.reviewer_combo.currentText()
         df = self.frames[rv]
+        labels = self.labels.get(rv, {})
+        self._sentence_text = sr.report_sentence(rv, labels, n_total,
+                                                 er.REASON_LABEL)
+        self.sentence.setText(sr.report_sentence(
+            rv, labels, n_total, er.REASON_LABEL, links=True, accent=_ACCENT))
+        line = sr.precision_line(df) or ''
+        self.precision.setText(line)
+        self.precision.setToolTip(sr.precision_tip(rv) if line else '')
+        text, level = sr.verdict_text(df, self.threshold(), self.estimate())
+        self.verdict.setText(text)
+        self.verdict_level = level
+        self.verdict.setStyleSheet(
+            "font-size:13px;font-weight:600;color:"
+            + ('#69b35d' if level == 'ok' else _WARN) + ";")
         self._fill_grid(df)
-        scope = sr._row(df, 'scope', 'all')
-        stxt, _lvl = sr.cell_text(scope, 0.0)
-        self.whole.setText(f"Whole night   {stxt.rsplit('  n ', 1)[0]}  "
-                           f"weighted to the night's events, all regions and "
-                           f"stages")
-        self.verdict.setText('Verdict        ' + sr.verdict_text(
-            df, self.threshold(), self.estimate()))
-        lines, (fa, fo) = sr.reason_lines(self.labels.get(rv, {}),
-                                          er.REASON_LABEL)
-        n_rej = sum(n for _, n in lines)
-        self.reasons_hdr.setText(f"Why rejected ({rv}, {n_rej} rejected)")
-        top = max([n for _, n in lines] or [1])
-        width = max([len(l) for l, _ in lines] or [10])
-        self.reason_rows = lines
-        self.reasons.setText('\n'.join(
-            f"  {l:<{width}}  {n:>3}  {'█' * max(1, round(12 * n / top))}"
-            for l, n in lines)
-            + f"\n  As RA protocol classes: FP-artifact {fa} · FP-other {fo}")
-        self._fill_agreement(rv)
+        if self._open_list is not None:
+            self._show_list(self._open_list)
 
     def _fill_grid(self, df):
-        rs = df[df['domain_type'] == 'region_stage']
+        rs_rows = df[df['domain_type'] == 'region_stage']
         regions = [r for r in sr.REGION_ORDER
-                   if any(str(x).startswith(r + '|') for x in rs['domain'])]
+                   if any(str(x).startswith(r + '|') for x in rs_rows['domain'])]
+        stages = [st for st in sr.STAGE_ORDER
+                  if any(str(x).endswith('|' + st) for x in rs_rows['domain'])]
+        stages += sorted({str(x).split('|')[1] for x in rs_rows['domain']}
+                         - set(stages))
+        cols = stages + ['All stages']
+        self.grid.clear()
         self.grid.setRowCount(len(regions))
+        self.grid.setColumnCount(len(cols))
+        self.grid.setHorizontalHeaderLabels(cols)
         self.grid.setVerticalHeaderLabels(regions)
         self.cells = {}
         for i, region in enumerate(regions):
-            for j, stage in enumerate(('NREM2', 'NREM3', None)):
+            for j, stage in enumerate(stages + [None]):
                 row = (sr._row(df, 'region_stage', f"{region}|{stage}")
                        if stage else sr._row(df, 'region', region))
-                text, lvl = sr.cell_text(row, self.threshold(),
-                                         self.estimate())
-                if stage is None and lvl == 'warn':
-                    text, lvl = text[:-len(' below')], None
+                text, lvl, tip = sr.cell_text(row, self.threshold(),
+                                              self.estimate(),
+                                              mark=stage is not None)
                 it = QtWidgets.QTableWidgetItem(text)
+                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                it.setToolTip(tip)
                 if lvl == 'warn':
                     it.setForeground(QtGui.QColor(_WARN))
                     f = it.font()
@@ -424,53 +470,66 @@ class PrecisionReportDialog(QtWidgets.QDialog):
                 elif lvl == 'muted':
                     it.setForeground(QtGui.QColor(_MUTED))
                 self.grid.setItem(i, j, it)
-                self.cells[(region, stage or 'All stages')] = text
+                self.cells[(region, stage or 'All stages')] = (text, tip)
+        self.grid.resizeColumnsToContents()
+        h = (self.grid.horizontalHeader().height()
+             + sum(self.grid.rowHeight(i) for i in range(len(regions))) + 4)
+        w = (self.grid.verticalHeader().width()
+             + sum(self.grid.columnWidth(j) for j in range(len(cols))) + 4)
+        self.grid.setFixedSize(max(w, 200), h)
 
-    def _fill_agreement(self, rv):
-        others = [o for o in self.labels if o not in (rv, 'consensus')
-                  and set(self.labels[o]) & set(self.labels.get(rv, {}))]
-        self.dis_list.clear()
-        self.dis_list.setVisible(False)
-        if not others:
-            self.agree_hdr.setText('Agreement')
-            self.agree.setText(sr.NO_SECOND)
-            self.dis_btn.setVisible(False)
-            self.agreement = None
+    # ---- the reason / unsure list ------------------------------------------
+    def toggle_list(self, key):
+        """A link in the sentence: open its list, or close it when it is the
+        one already open."""
+        self._show_list(None if key == self._open_list else key)
+
+    def _show_list(self, key):
+        self._open_list = key
+        self.event_list.clear()
+        on = key is not None and self.shown_reviewer() in self.frames
+        for w in (self.list_hdr, self.event_list, self.list_hint):
+            w.setVisible(on)
+        if not on:
             return
-        other = max(others, key=lambda o: len(set(self.labels[o])
-                                               & set(self.labels[rv])))
-        res = sr.agreement(self.labels[rv], self.labels[other])
-        self.agreement = res
-        self.agree_hdr.setText(f"Agreement between {rv} and {other}   on "
-                               f"{res['n_shared']} events both decided")
-        self.agree.setText(sr.agreement_text(res))
-        n_dis = len(res['disagree'])
-        self.dis_btn.setVisible(n_dis > 0)
-        self.dis_btn.setText(f"Show the {n_dis} disagreements")
-        for u in res['disagree']:
-            a, b = self.labels[rv][u], self.labels[other][u]
-            it = QtWidgets.QListWidgetItem(
-                f"{self.src.event_line(u)} · {rv} "
-                f"{er.decision_word(a[0], a[1])} · {other} "
-                f"{er.decision_word(b[0], b[1])}")
+        rv = self.shown_reviewer()
+        labels = self.labels.get(rv, {})
+        if key == 'unsure':
+            uuids = [u for u, (d, _r) in labels.items() if d == 'unsure']
+            self.list_hdr.setText(f"Marked unsure ({len(uuids)})")
+        else:
+            tok = key.split(':', 1)[1]
+            uuids = [u for u, (d, r) in labels.items()
+                     if d == 'reject' and (r or '') == tok]
+            lab = (er.REASON_LABEL.get(tok, tok) if tok
+                   else 'no reason given').lower()
+            self.list_hdr.setText(f"Rejected as {lab} ({len(uuids)})")
+        comments = self.src.comments(rv) if callable(
+            getattr(self.src, 'comments', None)) else {}
+        rows = []
+        for u in uuids:
+            ch, start, stage = self.src.event_info(u)
+            rows.append((float(start or 0), u, ch, start, stage))
+        for _t, u, ch, start, stage in sorted(rows):
+            text = f"{ch} · {er.fmt_hms1(start)} · {stage}"
+            c = str(comments.get(u) or '').strip()
+            if c:
+                text += f"  “{c if len(c) <= 60 else c[:59] + '…'}”"
+            it = QtWidgets.QListWidgetItem(text)
             it.setData(Qt.UserRole, u)
-            self.dis_list.addItem(it)
-
-    def _toggle_disagreements(self):
-        self.dis_list.setVisible(not self.dis_list.isVisible())
+            self.event_list.addItem(it)
+        rh = self.event_list.sizeHintForRow(0) if uuids else 18
+        self.event_list.setFixedHeight(
+            rh * min(max(len(uuids), 1), self.MAX_LIST_ROWS) + 6)
 
     # ---- output ------------------------------------------------------------
     def summary_text(self):
-        rv = self.reviewer_combo.currentText()
-        parts = [self.title.text(), self.header.text(), self.sub.text(),
-                 f"Precision for {rv}", self.whole.text(),
-                 self.verdict.text(),
-                 f"Pooling rule: precision of at least {self.threshold():.2f}"
-                 f" using the {self.estimate()} (a lab convention)",
-                 self.reasons_hdr.text(), self.reasons.text()]
-        if self.agreement:
-            parts += [self.agree_hdr.text(), self.agree.text()]
-        return '\n'.join(p for p in parts if p)
+        """Title line, sentence, precision line and verdict, one per line."""
+        rv = self.shown_reviewer()
+        if rv not in self.frames:
+            return ''
+        return '\n'.join([self._title_text, self._sentence_text,
+                          self.precision.text(), self.verdict.text()])
 
     def copy_summary(self):
         QtWidgets.QApplication.clipboard().setText(self.summary_text())
