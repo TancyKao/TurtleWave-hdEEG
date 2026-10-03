@@ -285,8 +285,11 @@ See [Decide whether an event is genuine](../how-to/decide-if-an-event-is-genuine
   range** and the primary button on the right. **Clear range** is enabled only
   while an unsaved range or a selected excluded range exists, and `Esc` does the
   same. **Exclude time range…** saves the brush: the time is excluded from
-  analysis for every channel, saved with the review, and applied when detection
-  is re-run; events already detected are not changed. This is separate from
+  analysis for every channel and saved to this review. It takes effect only when
+  you export a re-run package (**File ▸ Export re-run package…**) and re-detect
+  with it; events already detected are not changed. The `<stem>_review-qc.xml`
+  file beside the annotation file is a record of the review and is not read by
+  detection. This is separate from
   rejecting one event with the reason **Artefact**, which labels that event only.
 - **Saved exclusions are visible and removable.** Excluded time you saved is
   drawn with a purple diagonal hatch and a dashed edge, labelled `excluded`, on
@@ -294,10 +297,10 @@ See [Decide whether an event is genuine](../how-to/decide-if-an-event-is-genuine
   inside the hatched range (away from any event) selects it, or you can click its
   row in the dock's **EXCLUDED TIME** list. The hint then reads `Excluded
   {start}–{end} ({d} s), saved by {rater} on {date}.` and the primary button
-  becomes **Remove exclusion**. Removing deletes the range from the review and
-  from the sidecar XML, and the time counts as analysed again in density; the
-  status line says so, and adds `export again to update it` if the range was in a
-  re-run package you exported earlier. There is no confirmation: brush the range
+  becomes **Remove exclusion**. Removing deletes the range from the review
+  (and from its review-qc record), and the time counts as analysed again here.
+  Removing an exclusion does not change a package you already exported: the
+  status line says `Export a new re-run package to apply this at re-detection.` There is no confirmation: brush the range
   again to restore it. Only exclusions made in the review GUI can be removed
   here, not artefacts from the scoring file.
 - **Show events** is a row above the raw trace; see below.
@@ -540,8 +543,13 @@ EEG file, and optionally a Wonambi annotation XML for sleep stages.
 - **Export re-run package…** (File menu, Export menu, or the `n queued` link) —
   a snapshot of the current results plus `channels.csv` (the channels that are
   not excluded), `redetect_channels.csv` (only the queued channels, for
-  `examples/rerun_detection.py --channels`) and a sidecar annotation XML with the
-  excluded time ranges. There is no re-detect request file any more. See
+  `examples/rerun_detection.py --channels`) and a `rerun_sidecar.xml` annotation copy
+  that carries every current time exclusion (each package is complete, so a range
+  exported earlier is included again). After the export the dialog suggests a
+  command: `examples/rerun_detection.py … --channels redetect_channels.csv` when
+  channels are queued, otherwise the event type's detector script with `--annot`;
+  for PAC it says to re-run from `turtlewave_gui`. There is no re-detect request
+  file any more. See
   [Re-run Detection on Reviewer-Selected Channels](../how-to/rerun-detection-on-channels.md).
 
 Channel-level QC verdicts (kept / excluded) and the re-detect queue live in

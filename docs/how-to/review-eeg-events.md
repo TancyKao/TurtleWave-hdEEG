@@ -184,15 +184,19 @@ density and CSV exports are unchanged. Its Status reads `× excluded`.
 1. On the **2 · Epochs** tab, brush a range on the raw trace
 2. Click **Exclude time range…** to save it. **Clear range** discards an unsaved brush
 
-The time is excluded from analysis for every channel. It is saved with the
-review and applied when detection is re-run; events already detected are not
-changed. This is different from rejecting one event with the reason
+The time is excluded from analysis for every channel. It is saved to this
+review, and it takes effect only when you export a re-run package (**File →
+Export re-run package…**) and re-detect with it; events already detected are not
+changed. The `<stem>_review-qc.xml` file beside the annotation file is a record
+of the review and is not read by detection. This is different from rejecting one event with the reason
 **Artefact**, which labels that event only.
 
 A saved range is drawn with a purple hatch and the label `excluded`; an unsaved
 brush is plain blue and says `not saved`. To undo an exclusion, click inside the
 hatched range (away from any event), or its row in the **EXCLUDED TIME** list in
-the right dock, then click **Remove exclusion**. Brush the range again to restore it.
+the right dock, then click **Remove exclusion**. Brush the range again to restore it. Removing an
+exclusion does not change a package you already exported; export a new package
+to apply the removal.
 
 ## Flag Channels for Re-detection
 
@@ -214,9 +218,11 @@ still there when you reopen the GUI.
 **Solution:** choose **File → Export re-run package…** (or click the `n queued ·
 Export re-run package…` link in the bar). It snapshots the current database,
 then writes `channels.csv`, `redetect_channels.csv` (only the queued channels)
-and a sidecar annotation XML with the excluded time ranges. Pass
-`redetect_channels.csv` to `examples/rerun_detection.py --channels`. This GUI
-never runs detection itself.
+and `rerun_sidecar.xml`, an annotation copy that carries every current time
+exclusion (each package is complete). The dialog then suggests a command: pass
+`redetect_channels.csv` to `examples/rerun_detection.py --channels` when channels
+are queued, otherwise run the event type's detector script with `--annot`; for PAC,
+re-run from `turtlewave_gui`. This GUI never runs detection itself.
 
 See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels.md) for the full hand-off flow.
 

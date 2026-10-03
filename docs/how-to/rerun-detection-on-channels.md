@@ -11,19 +11,28 @@ channel's rows in `neural_events.db`.
 
 ## Step 1 — Export the re-run package from the review GUI
 
-In `eeg_review_gui`, use **Export Re-run Package**. This:
+In `eeg_review_gui`, choose **File ▸ Export re-run package…**. This:
 
 1. Snapshots the current `wonambi/*_results` directories, `*.csv` files and
    the database into `<root>/qc_backup/<timestamp>/` — your rollback point.
-2. Writes `rerun_sidecar.xml`: a copy of the base annotation XML with the
-   reviewer's live artefact marks appended as `Artefact` events, under the
-   **same rater the detector will read** (never the original annotation file).
+2. Writes `rerun_sidecar.xml`: a copy of the base annotation XML with **every
+   current time exclusion** the reviewer saved with **Exclude time range…**
+   appended as `Artefact` events, under the **same rater the detector will
+   read** (never the original annotation file). Each package is complete: a range
+   exported in an earlier package is included again, and a range the reviewer has
+   since removed is left out. The `<stem>_review-qc.xml` file beside the
+   annotation file is only a record of the review; detection never reads it, so
+   exclusions reach detection only through this package.
 3. Writes `channels.csv` — the kept channels (whole montage minus any
    excluded channel).
 4. Writes `redetect_channels.csv` — **only** the channels the reviewer
    explicitly queued for re-detection (skipped entirely if none were queued).
 
-Take note of the backup directory path; you'll pass files from it below.
+The dialog ends with a suggested command: `examples/rerun_detection.py …
+--channels redetect_channels.csv` when channels are queued, otherwise the event
+type's detector script with `--annot`. For PAC there is no command-line re-run;
+re-run it from `turtlewave_gui` with `rerun_sidecar.xml`. Take note of the backup
+directory path; you'll pass files from it below.
 
 ## Step 2 — Run the re-run driver
 

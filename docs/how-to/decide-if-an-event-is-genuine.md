@@ -184,8 +184,8 @@ Two consequences follow:
   reviewers' decisions on the same event stay.
 
 To leave a stretch of *time* out of the analysis for every channel, brush it on
-the trace and use **Exclude time range…**; it takes effect when detection is
-re-run. Rejecting with reason `artefact` labels that one event only.
+the trace and use **Exclude time range…**; it takes effect when you export a
+re-run package and re-detect with it. Rejecting with reason `artefact` labels that one event only.
 
 ## See also
 
