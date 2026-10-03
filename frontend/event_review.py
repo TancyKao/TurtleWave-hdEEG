@@ -1082,6 +1082,42 @@ def rerun_summary(n_kept, excluded, queued_excluded):
     return text
 
 
+#: per-event-type detector script for a whole re-run from a package
+RERUN_SCRIPTS = {'spindle': 'examples/hdEEG_spindle_detector.py',
+                 'slow_wave': 'examples/hdEEG_sw_detector.py',
+                 'k_complex': 'examples/hdEEG_kcomplex_detector.py'}
+
+
+def rerun_command(event_type, sidecar, channels_csv, redetect_csv=None,
+                  eeg=None, db=None, method=None, band=None, stages=None):
+    """The command suggested after ``Export re-run package…``.
+
+    With queued channels (``redetect_csv``) it is the scoped re-run,
+    ``examples/rerun_detection.py`` (re-detects only those channels and
+    replaces their rows in the database); without, the detector script of
+    the event type under review over the kept channels. Both read the
+    package's ``rerun_sidecar.xml`` (``--annot``), whose scorer rater holds
+    the excluded time. ``None`` for an event type with no command-line
+    re-run (PAC).
+    """
+    evt = str(event_type)
+    if redetect_csv:
+        if evt not in RERUN_SCRIPTS:
+            return None
+        lo, hi = band if band else ('<lo>', '<hi>')
+        freq = (f"{lo:g} {hi:g}" if isinstance(lo, (int, float))
+                else f"{lo} {hi}")
+        return (f"python examples/rerun_detection.py --annot {sidecar} "
+                f"--eeg {eeg or '<EEG file>'} --db {db or '<database>'} "
+                f"--channels {redetect_csv} --event-type {evt} "
+                f"--method {method or '<method>'} --freq {freq} "
+                f"--stages {' '.join(stages) if stages else '<stages>'}")
+    script = RERUN_SCRIPTS.get(evt)
+    if script is None:
+        return None
+    return f"python {script} --annot {sidecar} --channels {channels_csv}"
+
+
 def detector_text(view):
     """Top-bar detector text: ``Moelle2011 · 11–16 Hz`` for the one run in
     view, ``—`` when several runs (or none) are in view or the run's method

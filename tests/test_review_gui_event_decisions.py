@@ -1690,9 +1690,12 @@ texts = all_texts(win)
 old = [t for t in texts if t == 'Mark as artefact (writes XML)'
        or re.search(r'Mark \d+ epochs? as artefact', t)
        or t in ('Drop channel', 'Mark channel artefact')]
-TIME_TIP = ('Excludes this time from analysis for every channel. It is '
-            'saved with the review and applied when detection is re-run. '
-            'Events already detected are not changed.')
+TIME_TIP = ('Excludes this time from analysis for every channel. It takes '
+            'effect when you export a re-run package (File ▸ Export re-run '
+            'package…) and re-detect with it. Events already detected are '
+            'not changed.')
+REMOVED = ('Removed exclusion {}. Export a new re-run package to apply this '
+           'at re-detection.')
 HINT0 = ('Brush a range on the trace to exclude it, or click a hatched range '
          'to remove it.')
 
@@ -1883,9 +1886,10 @@ check('10.9', "[132] Exclude time range… stores the brushed range as "
       and abs(float(iv['end_time'].iloc[0]) - 43.0) < 1e-6
       and str(iv['evidence_channel'].iloc[0]) == 'Cz'
       and sidecar_ranges() == [(40.0, 43.0)]
-      and win.status_bar.currentMessage().startswith(
-          'Excluded 00:00:40–00:00:43 from analysis for every channel '
-          '(applied at re-detection).'),
+      and win.status_bar.currentMessage() == (
+          'Excluded 00:00:40–00:00:43 for every channel. It takes effect '
+          'when you export a re-run package (File ▸ Export re-run package…) '
+          'and re-detect with it.'),
       repr((iv.to_dict('records'), win.status_bar.currentMessage())))
 mid = int(iv['id'].iloc[0])
 items = ep.exclusion_items(ep.raw_plot).get(mid, [])
@@ -1928,9 +1932,8 @@ check('10.156', "[156, 157] Remove exclusion deletes the row, rewrites the "
       and dens0 is not None and dens1 is not None and dens2 is not None
       and abs((dens0 - dens1) - 3 / 60.0) < 1e-6
       and abs(dens2 - dens0) < 1e-9
-      and win.status_bar.currentMessage() == (
-          'Removed exclusion 00:00:40–00:00:43. It is no longer applied at '
-          're-detection; brush it again to restore it.')
+      and win.status_bar.currentMessage()
+      == REMOVED.format('00:00:40–00:00:43')
       and ep.mark_btn.text() == 'Exclude time range…'
       and not ep.mark_btn.isEnabled() and ep.selected_exclusion() is None,
       repr((dens0, dens1, dens2, win.status_bar.currentMessage())))
@@ -1946,11 +1949,142 @@ app.processEvents()
 sel_from_dock = ep.selected_exclusion()
 ep.mark_btn.click()
 app.processEvents()
-check('10.156b', "[156] the dock list's row selects the range; removing an "
-      "exported one adds 'export again to update it'",
-      sel_from_dock == mid2 and win.status_bar.currentMessage().endswith(
-          'It was in a re-run package you exported earlier; export again '
-          'to update it.'), repr(win.status_bar.currentMessage()))
+check('10.156b', "[156] the dock list's row selects the range; removing it "
+      "says a new re-run package is needed", sel_from_dock == mid2
+      and win.status_bar.currentMessage()
+      == REMOVED.format('00:00:44–00:00:46'),
+      repr(win.status_bar.currentMessage()))
+# no annotation file loaded: removal still clears the review but must not
+# claim the sidecar changed ...
+SIDE10 = os.path.splitext(XML10)[0] + '_review-qc.xml'
+win.annot_file_path = None
+known = win._review_qc_sidecar
+win._review_qc_sidecar = None            # and no sidecar known this session
+ep._goto_epoch(1)
+ep.set_brush(47.0, 49.0)
+ep.mark_btn.click()
+app.processEvents()
+mid3 = int(win.db.get_qc_artefact_intervals()['id'].iloc[0])
+ep.select_exclusion(mid3)
+ep.mark_btn.click()
+app.processEvents()
+check('10.side1', "[follow-up] no annotation file and no sidecar this "
+      "session: the row is removed and the status says the review-qc file "
+      "was not updated", len(win.db.get_qc_artefact_intervals()) == 0
+      and win.status_bar.currentMessage()
+      == REMOVED.format('00:00:47–00:00:49') + ' The review-qc record was '
+      'not updated because no annotation file is loaded.',
+      repr(win.status_bar.currentMessage()))
+# ... and when this session already wrote a sidecar for the recording, it
+# is rewritten from the database rows on both add and remove
+win._review_qc_sidecar = known
+ep._goto_epoch(1)
+ep.set_brush(47.0, 49.0)
+ep.mark_btn.click()
+app.processEvents()
+added = sidecar_ranges()
+mid4 = int(win.db.get_qc_artefact_intervals()['id'].iloc[0])
+ep.select_exclusion(mid4)
+ep.mark_btn.click()
+app.processEvents()
+check('10.side2', "[follow-up] with the session's sidecar on disk and no "
+      "annotation file: adding writes the range into it, removing takes "
+      "it out again, and the status is the normal one",
+      known == SIDE10 and added == [(47.0, 49.0)] and sidecar_ranges() == []
+      and win.status_bar.currentMessage()
+      == REMOVED.format('00:00:47–00:00:49'),
+      repr((added, sidecar_ranges(), win.status_bar.currentMessage())))
+win.annot_file_path = XML10
+
+# [library read] the re-run package carries EVERY current exclusion (not
+# only the ones not yet exported), whole-montage, and names the detector of
+# the event type under review; the review-qc record is chan='(all)' too
+
+
+def artefacts_of(path, rater=None):
+    import xml.etree.ElementTree as ET
+    out = []
+    for r in ET.parse(path).getroot().iter('rater'):
+        if rater is not None and r.get('name') != rater:
+            continue
+        for et in r.iter('event_type'):
+            if et.get('type') != 'Artefact':
+                continue
+            for e in et.iter('event'):
+                out.append((round(float(e.find('event_start').text), 3),
+                            round(float(e.find('event_end').text), 3),
+                            e.find('event_chan').text))
+    return sorted(out)
+
+
+pkg_root = os.path.join(TMP, 'pkg root')
+os.makedirs(pkg_root, exist_ok=True)
+msgs = []
+_gd = QtWidgets.QFileDialog.getExistingDirectory
+_info = QtWidgets.QMessageBox.information
+QtWidgets.QFileDialog.getExistingDirectory = staticmethod(
+    lambda *a, **k: pkg_root)
+QtWidgets.QMessageBox.information = staticmethod(
+    lambda *a, **k: msgs.append(a[2]))
+import time as _time                                           # noqa: E402
+ep._goto_epoch(1)
+ep.set_brush(50.0, 52.0)
+ep.mark_btn.click()
+app.processEvents()
+win.export_rerun_package()
+first_pkg = sorted(os.listdir(os.path.join(pkg_root, 'qc_backup')))
+_time.sleep(1.1)                       # a new time-stamped folder
+ep._goto_epoch(1)
+ep.set_brush(55.0, 57.0)
+ep.mark_btn.click()
+app.processEvents()
+win.export_rerun_package()
+pkgs = sorted(os.listdir(os.path.join(pkg_root, 'qc_backup')))
+side2 = os.path.join(pkg_root, 'qc_backup', pkgs[-1], 'rerun_sidecar.xml')
+cmd_spindle = getattr(win, '_last_rerun_command', '')
+win.on_qc_add_redetect('Cz')
+_time.sleep(1.1)
+win.export_rerun_package()
+cmd_queue = getattr(win, '_last_rerun_command', '')
+win.on_qc_add_redetect('Cz')
+QtWidgets.QFileDialog.getExistingDirectory = _gd
+QtWidgets.QMessageBox.information = _info
+rq = artefacts_of(SIDE10, 'review-qc')
+check('10.pkg', "[library read] the second package holds both exclusions "
+      "(the first was already exported) as chan '(all)' and counts 1 new; "
+      "the review-qc record is chan '(all)' as well",
+      len(first_pkg) == 1 and len(pkgs) >= 2      # second-stamped folders
+      and [(a, b) for a, b, _c in artefacts_of(side2)] == [(50.0, 52.0),
+                                                           (55.0, 57.0)]
+      and {c for _a, _b, c in artefacts_of(side2)} == {'(all)'}
+      and len(msgs) == 3
+      and 'Excluded time ranges appended (all channels): 2 (1 new since the '
+          'last package)' in msgs[1]
+      and rq == [(50.0, 52.0, '(all)'), (55.0, 57.0, '(all)')],
+      repr((pkgs, artefacts_of(side2), rq, msgs[1][-400:] if msgs else '')))
+check('10.cmd', "[library read] the suggested command: the spindle detector "
+      "without a queue; the scoped rerun_detection.py with the run's method, "
+      "band and stages when channels are queued; one per event type",
+      cmd_spindle.startswith('python examples/hdEEG_spindle_detector.py '
+                             '--annot ') and '--channels ' in cmd_spindle
+      and cmd_queue.startswith('python examples/rerun_detection.py --annot ')
+      and '--event-type spindle --method Moelle2011 --freq 9 12 --stages '
+          'NREM2 NREM3' in cmd_queue
+      and 'redetect_channels.csv' in cmd_queue
+      and f"--db {win.db.db_path}" in cmd_queue
+      and er.rerun_command('slow_wave', 's.xml', 'c.csv').startswith(
+          'python examples/hdEEG_sw_detector.py')
+      and er.rerun_command('k_complex', 's.xml', 'c.csv').startswith(
+          'python examples/hdEEG_kcomplex_detector.py')
+      and er.rerun_command('pac', 's.xml', 'c.csv') is None
+      and 'hdEEG_sw_detector' not in cmd_spindle, repr((cmd_spindle,
+                                                       cmd_queue)))
+check('10.rec', "[library read] the tooltips and Design notes say the "
+      "review-qc XML is a record that detection does not read, and that an "
+      "exclusion takes effect through a re-run package",
+      'not read by detection' in rg.REVIEW_QC_RECORD
+      and 'export a re-run package' in ep.mark_btn.toolTip()
+      or 'export a re-run package' in TIME_TIP)
 
 # ---- decision buttons [159, 160] -------------------------------------------
 ep.select_event('u-f')

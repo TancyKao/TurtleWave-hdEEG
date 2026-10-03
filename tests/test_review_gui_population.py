@@ -1357,8 +1357,10 @@ check('s3', "[sign-off 3, 5] strings: the Worst-events tooltip, Design "
       rg._artefact_tooltip(1234.0) == '1234 µV peak-to-peak — exceeds '
       'physiological scale (>1000 µV).'
       and re.search(r'brush a time range and use \\"Exclude time range…\\" '
-                    r'to "\s+"leave it out of analysis for every channel '
-                    r'\(written to a "\s+"sidecar XML', src) is not None
+                    r'to "\s+"leave it out of analysis for every channel\. '
+                    r'It takes effect "\s+"when you export a re-run package',
+                    src) is not None
+      and 'it is not read by detection' in src
       and 'to mark an artefact' not in src
       and 'Excluded time ranges appended (all channels): {n_iv}' in src
       and 'Sidecar artefacts appended' not in src
@@ -1518,8 +1520,58 @@ check('147', "[147] scrolled fully right, the Channel column stays at the "
       and fz.model() is qcw.table.model()
       and fz.selectionModel() is qcw.table.selectionModel(),
       repr((hs.maximum(), fz.x(), fz.width(), fch)))
+# [follow-up] the two views stay row-aligned when the table scrolls
+# vertically, and a click in the Channel column gives the table the keyboard
+qcw.table.setFixedHeight(180)            # fewer rows than channels
+app.processEvents()
+vs = qcw.table.verticalScrollBar()
+vs.setValue(vs.maximum() // 2 + 1)
+app.processEvents()
+r_top = qcw.table.rowAt(100)
+y_main = qcw.table.visualRect(qcw.proxy.index(r_top, 1)).y()
+y_frz = fz.visualRect(qcw.proxy.index(r_top, 0)).y()
+check('147b', "scrolling the table vertically scrolls the Channel column "
+      "with it: same scroll value, rows at the same height",
+      vs.maximum() > 0 and vs.value() > 0
+      and fz.verticalScrollBar().value() == vs.value() and y_main == y_frz
+      and y_main > 60,
+      repr((vs.value(), fz.verticalScrollBar().value(), y_main, y_frz)))
+win.activateWindow()
+win.raise_()
+qcw.show_combo.setFocus()
+app.processEvents()
+focus0 = qcw.show_combo.hasFocus() and not qcw.table.hasFocus()
+r_click = qcw.table.rowAt(20)
+rect = fz.visualRect(qcw.proxy.index(r_click, 0))
+QTest.mouseClick(fz.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+app.processEvents()
+clicked = qcw.model.channel_at(qcw.proxy.mapToSource(
+    qcw.proxy.index(r_click, 0)).row())
+focus1 = qcw.table.hasFocus()
+cur1 = qcw._current_channel()
+QTest.keyClick(qcw.table, Qt.Key_Down)
+app.processEvents()
+below = qcw.model.channel_at(qcw.proxy.mapToSource(
+    qcw.proxy.index(r_click + 1, 0)).row())
+cur2 = qcw._current_channel()
+qset0 = set(win._redetect_queue)
+QTest.keyClick(qcw.table, Qt.Key_F)
+app.processEvents()
+qset1 = set(win._redetect_queue)
+QTest.keyClick(qcw.table, Qt.Key_F)
+app.processEvents()
+check('147c', "a click in the Channel column selects that channel and "
+      "gives the table keyboard focus: Down moves to the next row, F "
+      "toggles that row's queue",
+      focus0 and focus1 and cur1 == clicked and cur2 == below
+      and qset1 == qset0 ^ {below} and set(win._redetect_queue) == qset0,
+      repr((focus0, focus1, clicked, cur1, below, cur2,
+            qset0 ^ qset1)))
 qcw.table.setMinimumWidth(0)
 qcw.table.setMaximumWidth(16777215)
+qcw.table.setMinimumHeight(0)
+qcw.table.setMaximumHeight(16777215)
+qcw.select_channel('E7')
 fd = win.filter_dock
 fd.populate_channels([f"E{i}" for i in range(1, 9)])
 fd.decorate_channels(interp_set={'E5'})

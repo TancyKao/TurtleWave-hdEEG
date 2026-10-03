@@ -1986,14 +1986,19 @@ EXCLUDE_TIP = ('Leaves this channel out of review samples, the re-run export, '
                'exported events are unchanged in 4.6.0. Click again to '
                'include it.')
 EXCLUDE_TIME_TIP = ('Excludes this time from analysis for every channel. It '
-                    'is saved with the review and applied when detection is '
-                    're-run. Events already detected are not changed.')
+                    'takes effect when you export a re-run package (File ▸ '
+                    'Export re-run package…) and re-detect with it. Events '
+                    'already detected are not changed.')
+#: the review-qc sidecar's role, said wherever it is mentioned
+REVIEW_QC_RECORD = ('The review-qc XML beside the annotation file is a record '
+                    'of this review; not read by detection.')
 EXCLUDE_TIME_HINT = ('Brush a range on the trace to exclude it, or click a '
                      'hatched range to remove it.')
 CLEAR_RANGE_TIP = 'Clear the unsaved range (Esc).'
-REMOVE_EXCLUSION_TIP = ('Stop excluding this time. It is deleted from the '
-                        'review and from the sidecar XML, and counts as '
-                        'analysed time again.')
+REMOVE_EXCLUSION_TIP = ('Stop excluding this time. It is deleted from this '
+                        'review (and its review-qc record) and counts as '
+                        'analysed time again here; export a new re-run '
+                        'package to apply this at re-detection.')
 EXCLUDED_PURPLE = '#a371f7'
 
 
@@ -3803,6 +3808,9 @@ class _FrozenColumnTable(QTableView):
         # a click on the frozen header sorts the table by Channel
         self.frozen.horizontalHeader().sectionClicked.connect(
             self._on_frozen_header)
+        # The frozen view takes no focus, so a click in it gives click focus
+        # to this table (its nearest focusable ancestor): arrow keys and F
+        # then act on the clicked channel (tested)
 
     def setModel(self, model):
         super().setModel(model)
@@ -10333,10 +10341,9 @@ class EventReviewGUI(QMainWindow):
         self._refresh_exclusions()
         # after the refresh, whose own summary would replace it
         self.status_bar.showMessage(
-            f"Excluded {_hms(s)}–{_hms(e)} from analysis for every channel "
-            f"(applied at re-detection)."
-            + ("" if ok else " No annotation file is loaded, so it is saved "
-               "in the database only."))
+            f"Excluded {_hms(s)}–{_hms(e)} for every channel. It takes "
+            f"effect when you export a re-run package (File ▸ Export re-run "
+            f"package…) and re-detect with it.")
 
     def _unmark_artefact(self, interval_id):
         """``Remove exclusion`` (or the dock list's ×): delete the range's
@@ -10348,33 +10355,67 @@ class EventReviewGUI(QMainWindow):
         row = next((r for r in self._all_exclusions()
                     if int(r['id']) == int(interval_id)), None)
         self.db.remove_qc_artefact_interval(int(interval_id))
-        self._write_review_qc_sidecar()
+        ok = self._write_review_qc_sidecar()
         self.refresh_qc_dashboard()
         if self.epochs_panel.selected_exclusion() == int(interval_id):
             self.epochs_panel.clear_range()
         self._refresh_exclusions()
-        if row is None:
-            self.status_bar.showMessage("Removed the exclusion.")
-            return
-        msg = (f"Removed exclusion {_hms(row['start_time'])}–"
-               f"{_hms(row['end_time'])}. It is no longer applied at "
-               f"re-detection; brush it again to restore it.")
-        try:
-            exported = int(row.get('exported') or 0) == 1
-        except (TypeError, ValueError):
-            exported = False
-        if exported:
-            msg += (" It was in a re-run package you exported earlier; "
-                    "export again to update it.")
+        rng = (f" {_hms(row['start_time'])}–{_hms(row['end_time'])}"
+               if row is not None else '')
+        msg = (f"Removed exclusion{rng}. Export a new re-run package to "
+               f"apply this at re-detection.")
+        if not ok:
+            # the database row is gone, but the review-qc record file could
+            # not be rewritten: say so
+            msg += (" The review-qc record was not updated because no "
+                    "annotation file is loaded.")
         self.status_bar.showMessage(msg)
+
+    def _rewrite_known_sidecar(self):
+        """Rewrite the review-qc rater of the sidecar this session wrote
+        (``self._review_qc_sidecar``) from ``qc_artefact_intervals``.
+        False when there is none on disk or the rewrite fails."""
+        side = getattr(self, '_review_qc_sidecar', None)
+        if not side or not os.path.exists(side) or self.db is None:
+            return False
+        try:
+            from wonambi.attr import Annotations as WAnn
+            ann = WAnn(side)
+            try:
+                ann.remove_rater('review-qc')
+            except Exception:
+                pass
+            ann.add_rater('review-qc')
+            try:
+                ann.add_event_type('Artefact')
+            except Exception:
+                pass
+            for _, r in self.db.get_qc_artefact_intervals().iterrows():
+                ann.add_event('Artefact', (float(r['start_time']),
+                                           float(r['end_time'])),
+                              chan='(all)')
+            ann.save()
+            return True
+        except Exception as ex:
+            self.status_bar.showMessage(f"Sidecar write failed: {ex}")
+            return False
 
     def _write_review_qc_sidecar(self):
         """Write all qc_artefact_intervals into a SIDECAR Wonambi XML whose
         rater is literally 'review-qc'; back the original up to *.xml.bak on
-        first write. The loaded sleep-scorer XML is never modified."""
+        first write. The loaded sleep-scorer XML is never modified.
+
+        The sidecar is a record of this review; nothing reads the
+        ``review-qc`` rater at detection. Excluded time reaches detection
+        only through ``Export re-run package…``, which writes it under the
+        scorer rater the detector reads. Events are whole-montage
+        (``chan='(all)'``); ``evidence_channel`` is provenance only."""
         if not getattr(self, 'annot_file_path', None) or \
                 not os.path.exists(self.annot_file_path):
-            return False
+            # no annotation file now, but this session wrote a sidecar for
+            # the recording: rewrite it in place from the database rows, so
+            # it never keeps a range the review no longer has
+            return self._rewrite_known_sidecar()
         import shutil
         src = self.annot_file_path
         stem, _ext = os.path.splitext(src)
@@ -10396,13 +10437,14 @@ class EventReviewGUI(QMainWindow):
                 ann.add_event_type('Artefact')
             except Exception:
                 pass
+            # whole-montage, as detection and the density denominator treat
+            # every Artefact; evidence_channel is provenance only
             iv = self.db.get_qc_artefact_intervals()
             for _, r in iv.iterrows():
-                chan = str(r.get('evidence_channel') or '(all)')
                 try:
                     ann.add_event('Artefact',
                                   (float(r['start_time']),
-                                   float(r['end_time'])), chan=chan)
+                                   float(r['end_time'])), chan='(all)')
                 except Exception:
                     pass
             ann.save() if hasattr(ann, 'save') else ann.export(sidecar)
@@ -10590,9 +10632,11 @@ class EventReviewGUI(QMainWindow):
             "robust-outlier flags; the landing triage surface.</li>"
             "<li><b>Epochs</b> — per-channel amplitude strip + raw/filtered "
             "trace; brush a time range and use \"Exclude time range…\" to "
-            "leave it out of analysis for every channel (written to a "
-            "sidecar XML under rater <code>review-qc</code>; original backed "
-            "up to <code>*.xml.bak</code>).</li>"
+            "leave it out of analysis for every channel. It takes effect "
+            "when you export a re-run package (File ▸ Export re-run "
+            "package…) and re-detect with it. A review-qc sidecar XML "
+            "(rater <code>review-qc</code>) keeps a record of this review; "
+            "it is not read by detection.</li>"
             "</ul>"
             "<p>The right dock carries a live scalp topography of the active "
             "QC metric (from the EEGLAB <code>.set</code> chanlocs) and a "
@@ -11192,8 +11236,8 @@ class EventReviewGUI(QMainWindow):
             return
         kept, dropped, redetect = self._rerun_channel_lists()
         if not redetect and not dropped and not len(
-                self.db.get_qc_artefact_intervals(unexported_only=True)):
-            # nothing queued, excluded or newly excluded in time: no package
+                self.db.get_qc_artefact_intervals()):
+            # nothing queued, excluded, or excluded in time: no package
             self.status_bar.showMessage(RERUN_EMPTY_TEXT)
             return
         if not getattr(self, 'annot_file_path', None) or \
@@ -11211,7 +11255,12 @@ class EventReviewGUI(QMainWindow):
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
 
-        intervals = self.db.get_qc_artefact_intervals(unexported_only=True)
+        # every current exclusion goes into every package (a package replaces
+        # the previous one); 'exported' only counts what is new in this one
+        intervals = self.db.get_qc_artefact_intervals()
+        n_new = int((intervals['exported'].fillna(0).astype(int) == 0).sum()) \
+            if len(intervals) and 'exported' in intervals.columns \
+            else len(intervals)
 
         # ---- snapshot originals BEFORE anything can overwrite them --------
         backup = os.path.join(root_dir, "qc_backup", ts)
@@ -11293,9 +11342,16 @@ class EventReviewGUI(QMainWindow):
         # ---- confirm + record ---------------------------------------------
         # Point the re-run driver's --channels at the re-detect list when the
         # reviewer queued any; otherwise fall back to the kept channels.csv.
-        driver_channels = redetect_csv or chan_csv
-        cmd = (f"python examples/hdEEG_sw_detector.py "
-               f"--annot {sidecar} --channels {driver_channels}")
+        evt = self.qc_widget.current_event_type()
+        view = self._pop_view[1] if self._pop_view else None
+        run = ((view or {}).get('res') or {}).get('run') or {}
+        cmd = _er.rerun_command(
+            evt, sidecar, chan_csv, redetect_csv,
+            eeg=getattr(self, 'eeg_file_path', None), db=self.db.db_path,
+            method=(view or {}).get('method') or None,
+            band=(view or {}).get('band'),
+            stages=_er.run_stages(run) or None)
+        self._last_rerun_command = cmd
         redetect_line = (
             f"redetect_channels.csv: {len(redetect)} channel(s) queued for "
             f"re-detect\n"
@@ -11304,10 +11360,14 @@ class EventReviewGUI(QMainWindow):
                + _er.rerun_summary(len(kept), dropped,
                                    self._queued_but_excluded()) +
                f"{redetect_line}"
-               f"Excluded time ranges appended (all channels): {n_iv}\n\n"
+               f"Excluded time ranges appended (all channels): {n_iv}"
+               f" ({n_new} new since the last package)\n\n"
                f"Re-running detection OVERWRITES wonambi/*_results + the DB — "
                f"the snapshot above is your rollback.\n\n"
-               f"Run e.g.:\n  {cmd}\n\nFiles written. OK.")
+               + (f"Run e.g.:\n  {cmd}\n\n" if cmd else
+                  f"There is no command-line re-run for {evt}; re-run it "
+                  f"from turtlewave_gui with rerun_sidecar.xml.\n\n")
+               + "Files written. OK.")
         if len(intervals):
             self.db.mark_artefact_intervals_exported(list(intervals['id']))
         QtWidgets.QMessageBox.information(self, "Re-run package ready", msg)
