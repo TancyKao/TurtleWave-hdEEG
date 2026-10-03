@@ -633,7 +633,9 @@ _warn = QtWidgets.QMessageBox.warning
 QtWidgets.QMessageBox.warning = staticmethod(
     lambda *a, **k: emitted.append(a[2]))
 link_text, link_vis = qcw.queue_link.text(), qcw.queue_link.isVisibleTo(qcw)
-qcw.queue_link.click()
+link_enabled = qcw.queue_link.isEnabled()
+link_tip = qcw.queue_link.toolTip()
+win.export_rerun_package()          # what the link would run
 app.processEvents()
 QtWidgets.QMessageBox.warning = _warn
 kept, excl, redet = win._rerun_channel_lists()
@@ -646,6 +648,8 @@ check('111a', "[110, 111] F queues the selected row too: an excluded "
       "with its status tip; the export list is the queue minus excluded",
       col_cell(win, 'E62', 'verdict') == '× excluded · ↻ re-detect'
       and link_text == '2 queued · Export re-run package…' and link_vis
+      and not link_enabled and link_tip == 'Load the annotation file for '
+      'sub-fx first (File ▸ Open Annotation File…).'
       and len(exp) == 1 and exp[0].statusTip() == 'Writes the queued '
       'channels (redetect_channels.csv) for examples/rerun_detection.py '
       '--channels.' and len(emitted) == 1
@@ -1428,6 +1432,214 @@ check('g5', "[gate 5] the mark images are referenced as url(\"…\") with "
           odd.replace(os.sep, '/') + '/partial.png']
       and rg.qss_url('C:\\a b\\x"y.png') == 'url("C:/a b/x\\"y.png")'
       and light > light0 and light >= 6, repr((light, light0, marks_odd)))
+
+# ---- files of one recording never follow another database [gate] -------
+from wonambi import Dataset as _WD                               # noqa: E402
+from wonambi.attr.annotations import create_empty_annotations    # noqa: E402
+from wonambi.ioeeg import write_edf as _wedf                     # noqa: E402
+from wonambi.utils.simulate import create_data as _cdata         # noqa: E402
+from turtlewave_hdEEG import CustomAnnotations                   # noqa: E402
+
+
+def recording(subject):
+    """A database, an EDF and a scored annotation file for ``subject``."""
+    db_path = os.path.join(TMP, f"{subject}.db")
+    con = fx.open_schema(db_path)
+    fx.add_run(con, RUN)
+    con.execute("UPDATE detection_runs SET subject = ?", (subject,))
+    rows, _a = fx.make_rows('Cz', 30, RUN, rng)
+    fx.insert_rows(con, rows)
+    con.commit()
+    con.close()
+    edf = os.path.join(TMP, f"{subject}_task-psg_eeg.edf")
+    _wedf(_cdata(datatype='ChanTime', n_trial=1, s_freq=1.0,
+                 chan_name=['Cz'], time=(0, 120.0)), edf)
+    xml = os.path.join(TMP, f"{subject}_task-psg.xml")
+    create_empty_annotations(xml, _WD(edf))
+    ann = CustomAnnotations(xml)
+    ann.wonb_annot.add_rater('scorer', epoch_length=30)
+    for k in range(4):
+        ann.wonb_annot.set_stage_for_epoch(k * 30, 'NREM2', save=False)
+    ann.wonb_annot.save()
+    return db_path, edf, xml
+
+
+DB_A, EDF_A, XML_A = recording('sub-aa')
+DB_B, EDF_B, XML_B = recording('sub-bb')
+_open = QtWidgets.QFileDialog.getOpenFileName
+win = rg.EventReviewGUI()
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (DB_A, ''))
+win.open_database()
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_A, ''))
+win.open_annotation_file()
+app.processEvents()
+ready_a = win.annotation_ready()
+win._mark_channel_artefact('Cz', 10.0, 12.0)          # A's exclusion
+side_a = os.path.splitext(XML_A)[0] + '_review-qc.xml'
+snap = {p: open(p, 'rb').read() for p in (XML_A, side_a)}
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (DB_B, ''))
+win.open_database()                                    # B, A's annotation still in memory
+app.processEvents()
+msg_b = win.status_bar.currentMessage()
+after_open = (win.annot_file_path, win.annotations, win._review_qc_sidecar,
+              win.annotation_ready(), win.act_export_rerun.isEnabled(),
+              win.act_export_rerun.toolTip())
+win._mark_channel_artefact('Cz', 30.0, 33.0)          # B's exclusion
+warned = []
+_w = QtWidgets.QMessageBox.warning
+QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a[2]))
+win.on_qc_add_redetect('Cz')
+win.export_rerun_package()
+QtWidgets.QMessageBox.warning = _w
+untouched = all(open(p, 'rb').read() == b for p, b in snap.items())
+check('rec1', "[gate probe] A open with its annotation and an exclusion, "
+      "then database B: A's annotation is unloaded with the message, the "
+      "export and the exclude button are off with the reason, and B's "
+      "exclusion and export write nothing to A's files",
+      ready_a and msg_b.startswith('Annotation file unloaded: it belongs to '
+                                   'sub-aa_task-psg. Load the annotation for '
+                                   'sub-bb.')
+      and after_open[:4] == (None, None, None, False)
+      and after_open[4] is False and after_open[5] == (
+          'Load the annotation file for sub-bb first (File ▸ Open '
+          'Annotation File…).')
+      and not win.epochs_panel._exclude_allowed
+      and untouched and warned and warned[0].startswith(
+          'Load the base annotation XML first'),
+      repr((msg_b, after_open, untouched, warned)))
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_A, ''))
+win.open_annotation_file()                            # the wrong one, again
+app.processEvents()
+refused = (win.annot_file_path, win.status_bar.currentMessage())
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_B, ''))
+win.open_annotation_file()                            # B's own
+app.processEvents()
+check('rec2', "[gate] loading A's annotation into B is undone with the "
+      "message; B's own annotation stays loaded and enables the export and "
+      "the exclude button", refused[0] is None
+      and refused[1].startswith('Annotation file unloaded: it belongs to '
+                                'sub-aa_task-psg.')
+      and win.annot_file_path == XML_B and win.annotation_ready()
+      and win.act_export_rerun.isEnabled()
+      and win.epochs_panel._exclude_allowed, repr(refused))
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (DB_B, ''))
+win.open_database()                                   # reopen B: still matches
+app.processEvents()
+kept_b = win.annot_file_path
+win.load_eeg_file(EDF_A)                              # A's EEG into B
+app.processEvents()
+eeg_a = (win.eeg_file_path, win.eeg_data, win.status_bar.currentMessage())
+win.load_eeg_file(EDF_B)
+app.processEvents()
+QtWidgets.QFileDialog.getOpenFileName = _open
+check('rec3', "[gate] reopening the matching database keeps its annotation; "
+      "A's EEG file is unloaded from B with the message; B's own stays",
+      kept_b == XML_B and eeg_a[0] is None and eeg_a[1] is None
+      and eeg_a[2].startswith('EEG file unloaded: it belongs to '
+                              'sub-aa_task-psg_eeg. Load the EEG file for '
+                              'sub-bb.')
+      and win.eeg_file_path == EDF_B and win.eeg_data is not None,
+      repr(eeg_a[2]))
+win.close()
+# a database that records no subject: nothing to compare, so the files stay
+DB_N, EDF_N, XML_N = recording('sub-nn')
+_c = sqlite3.connect(DB_N)
+_c.execute("UPDATE detection_runs SET subject = NULL")
+_c.commit()
+_c.close()
+win = rg.EventReviewGUI()
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (DB_N, ''))
+win.open_database()
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_N, ''))
+win.open_annotation_file()
+app.processEvents()
+msg_n = win.status_bar.currentMessage()
+QtWidgets.QFileDialog.getOpenFileName = _open
+check('rec4', "[gate] no subject recorded: the annotation stays loaded, "
+      "the export and exclude controls are on, and the status says it "
+      "cannot be checked", win.db.recording_subjects() == []
+      and win.annot_file_path == XML_N and win.annotation_ready()
+      and win.act_export_rerun.isEnabled()
+      and win.epochs_panel._exclude_allowed
+      and msg_n == 'Cannot check that sub-nn_task-psg belongs to this '
+      'database (no subject recorded). Check it is the right recording.',
+      repr(msg_n))
+win.close()
+cmd_sp = er.rerun_command('spindle', '/tmp/pkg root/rerun_sidecar.xml',
+                          '/tmp/pkg root/channels.csv',
+                          '/tmp/pkg root/redetect_channels.csv',
+                          eeg='/data/my eeg.set', db='/data/neural events.db',
+                          method='Moelle2011', band=(11.0, 16.0),
+                          stages=['NREM2', 'NREM3'])
+import shlex as _shlex                                          # noqa: E402
+args = _shlex.split(cmd_sp)
+check('quote', "[gate] paths with spaces are quoted: the POSIX command "
+      "splits back into the exact paths; Windows uses double quotes",
+      args[args.index('--annot') + 1] == '/tmp/pkg root/rerun_sidecar.xml'
+      and args[args.index('--eeg') + 1] == '/data/my eeg.set'
+      and args[args.index('--db') + 1] == '/data/neural events.db'
+      and args[args.index('--channels') + 1]
+      == '/tmp/pkg root/redetect_channels.csv'
+      and er.shell_quote(r'C:\pkg root\x.xml', windows=True)
+      == r'"C:\pkg root\x.xml"'
+      and er.shell_quote(r'C:\pkg\x.xml', windows=True) == r'C:\pkg\x.xml'
+      and all(er.shell_quote(f'C:\\a{c}b\\x.xml', windows=True).startswith('"')
+              for c in '%!^&'), repr(cmd_sp))
+FB = [('sub-02dg', '/d/sub-02dg_ses-1_eeg.set', True),
+      ('sub-02dg', '/d/sub-02dgx_eeg.set', False),
+      ('sub-1', '/d/sub-10_ses-1_eeg.set', False),
+      ('sub-1', '/d/sub-1_ses-1_eeg.set', True),
+      ('sub-MCI042_BL', '/d/MCI042_BL/MCI042_BL_clean_rebuilt.xml', True),
+      ('sub-16js', '/d/16js/16js_staging.xml', True),
+      ('sub-16js', '/d/other/18sb_staging.xml', False),
+      ('sub-02dgx', '/d/sub-02dg.xml', False),
+      ('unknown_subject', '/d/sub-02dg.xml', None),
+      ('sub-02dg', '/d/s.xml', False)]
+got_fb = [(sub, p, er.file_belongs(p, [sub])) for sub, p, _w in FB]
+check('belongs', "[gate] file_belongs: subject (sub- stripped, no case) with "
+      "a boundary on both sides in the file name or its two parent folders; "
+      "unknown_subject or nothing usable -> None",
+      [g for _s, _p, g in got_fb] == [w for _s, _p, w in FB]
+      and er.file_belongs('/d/16JS/x.xml', ['sub-16js']) is True
+      and er.file_belongs('/d/x.xml', ['', 'unknown_subject']) is None
+      and er.file_belongs('/d/MCI042_BL/ses/x.xml', ['MCI042_BL']) is True,
+      repr([t for t, (_a, _b, w) in zip(got_fb, FB) if t[2] != w]))
+# end to end: a cut layout whose subject comes from the folder
+from turtlewave_hdEEG.utils import derive_subject              # noqa: E402
+_fold = os.path.join(TMP, 'MCI042_BL')
+os.makedirs(_fold, exist_ok=True)
+_xml_f = os.path.join(_fold, 'clean_rebuilt.xml')
+_sub_f = derive_subject(annotation_path=_xml_f, root_dir=_fold)
+_db_f, _edf_f, _x0 = recording('folder-src')
+os.makedirs(os.path.join(TMP, 'other'), exist_ok=True)
+import shutil as _sh                                            # noqa: E402
+_sh.copy2(_x0, _xml_f)
+_c = sqlite3.connect(_db_f)
+_c.execute("UPDATE detection_runs SET subject = ?", (_sub_f,))
+_c.commit()
+_c.close()
+win = rg.EventReviewGUI()
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (_db_f, ''))
+win.open_database()
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (_xml_f, ''))
+win.open_annotation_file()
+app.processEvents()
+QtWidgets.QFileDialog.getOpenFileName = _open
+check('rec5', "[gate] non-BIDS cut layout: the subject derived from the "
+      "folder (derive_subject) matches clean_rebuilt.xml in MCI042_BL/, so "
+      "the annotation stays loaded and Export is enabled",
+      _sub_f == 'sub-MCI042_BL' and win.annot_file_path == _xml_f
+      and win.annotation_ready() and win.act_export_rerun.isEnabled()
+      and win.epochs_panel._exclude_allowed
+      and 'unloaded' not in win.status_bar.currentMessage(),
+      repr((_sub_f, win.annot_file_path, win.status_bar.currentMessage())))
+win.close()
 
 # removed code stays removed [136-141]
 er_src = open(er.__file__, encoding='utf-8').read()

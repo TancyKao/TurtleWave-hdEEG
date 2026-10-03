@@ -1771,10 +1771,10 @@ from wonambi.attr.annotations import create_empty_annotations  # noqa: E402
 from wonambi.ioeeg import write_edf as _write_edf              # noqa: E402
 from wonambi.utils.simulate import create_data as _create_data  # noqa: E402
 from turtlewave_hdEEG import CustomAnnotations                 # noqa: E402
-_edf = os.path.join(TMP, 'rev5.edf')
+_edf = os.path.join(TMP, 'sub-fx_rev5.edf')
 _write_edf(_create_data(datatype='ChanTime', n_trial=1, s_freq=1.0,
                         chan_name=['Cz'], time=(0, 120.0)), _edf)
-XML10 = os.path.join(TMP, 'rev5.xml')
+XML10 = os.path.join(TMP, 'sub-fx_rev5.xml')   # sub-fx: the db's subject
 create_empty_annotations(XML10, _WDataset(_edf))
 _ann = CustomAnnotations(XML10)
 _ann.wonb_annot.add_rater('scorer', epoch_length=30)
@@ -1954,47 +1954,55 @@ check('10.156b', "[156] the dock list's row selects the range; removing it "
       and win.status_bar.currentMessage()
       == REMOVED.format('00:00:44–00:00:46'),
       repr(win.status_bar.currentMessage()))
-# no annotation file loaded: removal still clears the review but must not
-# claim the sidecar changed ...
+# Exclusions are saved only with the matching annotation loaded. Removing
+# one after the annotation is gone still clears the review; the review-qc
+# record is rewritten when this session wrote it, else the status says so.
 SIDE10 = os.path.splitext(XML10)[0] + '_review-qc.xml'
-win.annot_file_path = None
-known = win._review_qc_sidecar
-win._review_qc_sidecar = None            # and no sidecar known this session
-ep._goto_epoch(1)
-ep.set_brush(47.0, 49.0)
-ep.mark_btn.click()
-app.processEvents()
-mid3 = int(win.db.get_qc_artefact_intervals()['id'].iloc[0])
-ep.select_exclusion(mid3)
-ep.mark_btn.click()
-app.processEvents()
-check('10.side1', "[follow-up] no annotation file and no sidecar this "
-      "session: the row is removed and the status says the review-qc file "
-      "was not updated", len(win.db.get_qc_artefact_intervals()) == 0
-      and win.status_bar.currentMessage()
-      == REMOVED.format('00:00:47–00:00:49') + ' The review-qc record was '
-      'not updated because no annotation file is loaded.',
-      repr(win.status_bar.currentMessage()))
-# ... and when this session already wrote a sidecar for the recording, it
-# is rewritten from the database rows on both add and remove
-win._review_qc_sidecar = known
 ep._goto_epoch(1)
 ep.set_brush(47.0, 49.0)
 ep.mark_btn.click()
 app.processEvents()
 added = sidecar_ranges()
 mid4 = int(win.db.get_qc_artefact_intervals()['id'].iloc[0])
+known = win._review_qc_sidecar
+win.annot_file_path = None                  # annotation gone, record known
+win._apply_recording_gates()
+gated = (ep.mark_btn.isEnabled(), ep.mark_btn.toolTip())
 ep.select_exclusion(mid4)
-ep.mark_btn.click()
+ep.mark_btn.click()                         # Remove exclusion still works
 app.processEvents()
-check('10.side2', "[follow-up] with the session's sidecar on disk and no "
-      "annotation file: adding writes the range into it, removing takes "
-      "it out again, and the status is the normal one",
+check('10.side2', "[follow-up] with this session's review-qc record on disk "
+      "and the annotation gone: removing rewrites the record without the "
+      "range and the status is the normal one",
       known == SIDE10 and added == [(47.0, 49.0)] and sidecar_ranges() == []
       and win.status_bar.currentMessage()
       == REMOVED.format('00:00:47–00:00:49'),
       repr((added, sidecar_ranges(), win.status_bar.currentMessage())))
 win.annot_file_path = XML10
+win._apply_recording_gates()
+ep._goto_epoch(1)
+ep.set_brush(47.0, 49.0)
+ep.mark_btn.click()
+app.processEvents()
+mid3 = int(win.db.get_qc_artefact_intervals()['id'].iloc[0])
+win.annot_file_path = None
+win._review_qc_sidecar = None               # and no record known
+win._apply_recording_gates()
+ep.select_exclusion(mid3)
+ep.mark_btn.click()
+app.processEvents()
+check('10.side1', "[follow-up] no annotation file and no record known: the "
+      "row is removed and the status says the review-qc record was not "
+      "updated; with no matching annotation, saving a new range is off",
+      len(win.db.get_qc_artefact_intervals()) == 0
+      and win.status_bar.currentMessage()
+      == REMOVED.format('00:00:47–00:00:49') + ' The review-qc record was '
+      'not updated because no annotation file is loaded.'
+      and gated == (False, 'Load the annotation file for sub-fx first '
+                           '(File ▸ Open Annotation File…).'),
+      repr((win.status_bar.currentMessage(), gated)))
+win.annot_file_path = XML10
+win._apply_recording_gates()
 
 # [library read] the re-run package carries EVERY current exclusion (not
 # only the ones not yet exported), whole-montage, and names the detector of

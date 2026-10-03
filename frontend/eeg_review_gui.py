@@ -534,6 +534,25 @@ class EventDatabase:
             return set()
         return {str(r[0]) for r in cur.fetchall()}
 
+    def recording_subjects(self):
+        """The subject ids this database records (``detection_runs.subject``,
+        else ``events.subject``), as a sorted list; empty when none."""
+        out = set()
+        for table in ('detection_runs', 'events'):
+            try:
+                cols = {r[1] for r in self.conn.execute(
+                    f"PRAGMA table_info({table})")}
+                if 'subject' not in cols:
+                    continue
+                out |= {str(r[0]) for r in self.conn.execute(
+                    f"SELECT DISTINCT subject FROM {table} WHERE subject IS "
+                    f"NOT NULL AND subject != ''")}
+            except sqlite3.Error:
+                continue
+            if out:
+                break
+        return sorted(out)
+
     def get_channel_verdicts(self):
         """Return {(channel, event_type): verdict} for resume across sessions."""
         cursor = self.conn.cursor()
@@ -5376,6 +5395,7 @@ class EpochsPanel(QWidget):
         self.region_label.setFont(_f)
         self.region_label.setZValue(11)
         self._brush = None             # (t0, t1) of the unsaved brush
+        self._exclude_allowed, self._exclude_block_tip = True, ''
         self._sel_excl = None          # id of the selected excluded range
         self._excl_items = {}          # id -> [(plot, region item)]
         self._region_programmatic = False
@@ -6721,6 +6741,12 @@ class EpochsPanel(QWidget):
     def selected_exclusion(self):
         return self._sel_excl
 
+    def set_exclude_allowed(self, ok, tip=''):
+        """Whether a new exclusion may be saved (the matching annotation
+        file is loaded); ``tip`` says why not."""
+        self._exclude_allowed, self._exclude_block_tip = bool(ok), tip or ''
+        self._update_range_controls()
+
     def _update_range_controls(self):
         """Hint, ``Clear range`` and the primary button for the current
         state: no range, an unsaved brush, or a selected excluded range."""
@@ -6745,10 +6771,12 @@ class EpochsPanel(QWidget):
             else:
                 self.sel_lbl.setText(EXCLUDE_TIME_HINT)
             btn.setText('Exclude time range…')
-            btn.setToolTip(EXCLUDE_TIME_TIP)
+            allowed = getattr(self, '_exclude_allowed', True)
+            btn.setToolTip(EXCLUDE_TIME_TIP if allowed
+                           else self._exclude_block_tip)
             name = 'primary'
             btn.setEnabled(self._brush is not None
-                           and self._channel is not None)
+                           and self._channel is not None and allowed)
         if btn.objectName() != name:
             btn.setObjectName(name)
             btn.style().unpolish(btn)
@@ -6770,7 +6798,8 @@ class EpochsPanel(QWidget):
         self._mark()
 
     def _mark(self):
-        if self._channel is None or self._brush is None:
+        if self._channel is None or self._brush is None or \
+                not getattr(self, '_exclude_allowed', True):
             return
         s, e = self._sel()
         if e - s < 0.5:
@@ -7674,6 +7703,7 @@ class EventReviewGUI(QMainWindow):
             a = QAction(text, self)
             if slot == self.export_rerun_package:
                 a.setStatusTip(RERUN_STATUS_TIP)
+                self.act_export_rerun2 = a
             a.triggered.connect(slot)
             m_exp.addAction(a)
 
@@ -8370,6 +8400,7 @@ class EventReviewGUI(QMainWindow):
         self._refresh_event_counts()
         self._refresh_status_segments()
         self._refresh_toolbar_state()
+        self._apply_recording_gates()
         n_hard = int((qc['flag'] == 'hard').sum()) if len(qc) else 0
         n_soft = int((qc['flag'] == 'soft').sum()) if len(qc) else 0
         self.status_bar.showMessage(
@@ -10825,16 +10856,104 @@ class EventReviewGUI(QMainWindow):
                     self._apply_default_channels(self._all_db_channels())
                 self.load_channels()
 
+                # files loaded for another recording go (R5 follow-up)
+                self._review_qc_sidecar = None
+                self._check_recording_files()
                 # QC reframe: land on the per-channel dashboard
                 self.refresh_qc_dashboard()
                 self._refresh_chrome()
+                self._show_unload_message()
 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load database: {str(e)}")
 
+    def _recording_name(self):
+        subs = self.db.recording_subjects() if self.db is not None else []
+        if subs:
+            return ', '.join(subs)
+        return (os.path.basename(self.db.db_path) if self.db is not None
+                else 'this database')
+
+    def _check_recording_files(self):
+        """Unload an annotation or EEG file that provably belongs to another
+        recording than the open database's (its recorded subject id is not in
+        the file name), and say so. A database with no subject recorded
+        cannot be checked: the file stays, with a status note. Returns True
+        when something was unloaded."""
+        if self.db is None:
+            return False
+        subs = self.db.recording_subjects()
+        msgs, notes = [], []
+        ap = getattr(self, 'annot_file_path', None)
+        ep_path = getattr(self, 'eeg_file_path', None)
+        # no subject recorded: nothing to compare; keep the file, say so
+        for p in (ap, ep_path):
+            if p and _er.file_belongs(p, subs) is None:
+                notes.append(f"Cannot check that "
+                             f"{os.path.splitext(os.path.basename(p))[0]} "
+                             f"belongs to this database (no subject "
+                             f"recorded). Check it is the right recording.")
+        if ap and _er.file_belongs(ap, subs) is False:
+            self.annotations = None
+            self.annot_file_path = None
+            self._review_qc_sidecar = None
+            msgs.append(f"Annotation file unloaded: it belongs to "
+                        f"{os.path.splitext(os.path.basename(ap))[0]}. Load "
+                        f"the annotation for {self._recording_name()}.")
+        if ep_path and _er.file_belongs(ep_path, subs) is False:
+            self.eeg_data = None
+            self.eeg_file_path = None
+            self._unit_cache = None
+            try:
+                self._refresh_physio_channels()
+            except Exception:
+                pass
+            msgs.append(f"EEG file unloaded: it belongs to "
+                        f"{os.path.splitext(os.path.basename(ep_path))[0]}. "
+                        f"Load the EEG file for {self._recording_name()}.")
+        if msgs or notes:
+            self._unload_msg = ' '.join(msgs + notes)
+            self.status_bar.showMessage(self._unload_msg)
+            self._apply_recording_gates()
+        return bool(msgs)
+
+    def _show_unload_message(self):
+        """Put the unload message back after a refresh replaced it."""
+        msg = getattr(self, '_unload_msg', None)
+        self._unload_msg = None
+        if msg:
+            self.status_bar.showMessage(msg)
+
+    def annotation_ready(self):
+        """A loaded annotation file that is not provably another
+        recording's (a database with no subject recorded cannot be checked;
+        the file is then trusted, with a status note on loading)."""
+        ap = getattr(self, 'annot_file_path', None)
+        if not ap or not os.path.exists(ap) or self.db is None:
+            return False
+        return _er.file_belongs(ap, self.db.recording_subjects()) is not False
+
+    def _apply_recording_gates(self):
+        """Exclude time range… and Export re-run package… need the matching
+        annotation file (the package is built from it)."""
+        ok = self.annotation_ready()
+        tip = ('' if ok else f"Load the annotation file for "
+               f"{self._recording_name() if self.db is not None else 'this recording'} "
+               f"first (File ▸ Open Annotation File…).")
+        self.epochs_panel.set_exclude_allowed(ok, tip)
+        for a in (getattr(self, 'act_export_rerun', None),
+                  getattr(self, 'act_export_rerun2', None)):
+            if a is not None:
+                a.setEnabled(ok)
+                a.setToolTip(tip or RERUN_STATUS_TIP)
+        link = self.qc_widget.queue_link
+        link.setEnabled(ok)
+        link.setToolTip(tip)
+
     def _refresh_chrome(self):
         """Re-derive subject and repaint title / toolbar / status segments."""
         self.subject = self._derive_subject()
+        self._apply_recording_gates()
         self._setWindowTitleFromSubject()
         self._refresh_toolbar_state()
         self._refresh_status_segments()
@@ -10892,6 +11011,12 @@ class EventReviewGUI(QMainWindow):
                     self, "Error", load_failure_message(
                         file_path, tw_error, where=REVIEW_GUI_ERROR_WHERE))
                 return
+        # an EEG file of another recording than the open database goes again
+        if self._check_recording_files():
+            self.load_channels()
+            self._refresh_chrome()
+            self._show_unload_message()
+            return
 
         try:
             names, types, interp = self._eeg_channel_info()
@@ -10998,11 +11123,14 @@ class EventReviewGUI(QMainWindow):
                 if hasattr(self.annotations, 'wonb_annot') and hasattr(self.annotations.wonb_annot, 'start_time'):
                     self.recording_start_time = self.annotations.wonb_annot.start_time
 
+                self._review_qc_sidecar = None
                 self.status_bar.showMessage(f"Annotations loaded: {os.path.basename(file_path)}")
+                self._check_recording_files()
 
                 self._refresh_chrome()
                 if self.db is not None:
                     self.refresh_qc_dashboard()
+                self._show_unload_message()
 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load annotations: {str(e)}")
@@ -11235,6 +11363,12 @@ class EventReviewGUI(QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Warning", "No database loaded")
             return
         kept, dropped, redetect = self._rerun_channel_lists()
+        if getattr(self, 'annot_file_path', None) and \
+                not self.annotation_ready():
+            self.status_bar.showMessage(
+                f"Load the annotation file for {self._recording_name()} "
+                f"first (File ▸ Open Annotation File…).")
+            return
         if not redetect and not dropped and not len(
                 self.db.get_qc_artefact_intervals()):
             # nothing queued, excluded, or excluded in time: no package

@@ -11,6 +11,8 @@ Method Spec ``_scratch/research/event-review/method_spec.md`` (revision 3).
 import datetime as _dt
 import math
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -1088,6 +1090,74 @@ RERUN_SCRIPTS = {'spindle': 'examples/hdEEG_spindle_detector.py',
                  'k_complex': 'examples/hdEEG_kcomplex_detector.py'}
 
 
+def shell_quote(path, windows=None):
+    """A path quoted for the platform's shell, so one with spaces copies and
+    pastes as one argument: ``shlex.quote`` on POSIX, double quotes on
+    Windows (when it contains a space or a shell character)."""
+    import os as _os
+    import shlex
+    text = str(path)
+    if windows is None:
+        windows = _os.name == 'nt'
+    if windows:
+        if text and not any(c in text for c in ' \t&()[]{}^=;!%\'+,`~'):
+            return text
+        return '"' + text.replace('"', '""') + '"'
+    return shlex.quote(text)
+
+
+def file_belongs(path, subjects):
+    """Whether a file belongs to the recording of ``subjects`` (the subject
+    ids the database records).
+
+    Each subject is normalised (a leading ``sub-`` stripped, compared
+    without case; empty ids and ``unknown_subject`` ignored). It matches
+    when it appears, with a non-alphanumeric character or the end of the
+    text on both sides, in the file's name or in the name of its parent or
+    grandparent folder (cut layouts keep the subject in the folder, e.g.
+    ``MCI042_BL/…``). In a name that carries a BIDS ``sub-`` label only
+    that label is compared, so ``sub-1`` matches neither ``sub-10_…`` nor
+    the ``ses-1`` of ``sub-10_ses-1_eeg.set``.
+
+    Returns
+    -------
+    bool or None
+        True on a match, False when none matches, None when there is no
+        usable subject to compare.
+    """
+    import os as _os
+    cores = []
+    for x in subjects or ():
+        t = str(x).strip()
+        if t.lower().startswith('sub-'):
+            t = t[4:]
+        if t and t.lower() != 'unknown_subject':
+            cores.append(t)
+    if not path or not cores:
+        return None
+    p = _os.path.abspath(str(path))
+    parent = _os.path.dirname(p)
+    names = [_os.path.basename(p), _os.path.basename(parent),
+             _os.path.basename(_os.path.dirname(parent))]
+    entity = re.compile(r'(?<![A-Za-z0-9])sub-', re.IGNORECASE)
+    for core in cores:
+        after = re.compile(re.escape(core) + r'(?![A-Za-z0-9])', re.IGNORECASE)
+        pat = re.compile(r'(?<![A-Za-z0-9])' + re.escape(core)
+                         + r'(?![A-Za-z0-9])', re.IGNORECASE)
+        for n in names:
+            if not n:
+                continue
+            m = entity.search(n)
+            if m:
+                # a BIDS name: only its sub- label counts (so sub-1 does not
+                # match the "ses-1" of sub-10_ses-1_eeg.set)
+                if after.match(n, m.end()):
+                    return True
+            elif pat.search(n):
+                return True
+    return False
+
+
 def rerun_command(event_type, sidecar, channels_csv, redetect_csv=None,
                   eeg=None, db=None, method=None, band=None, stages=None):
     """The command suggested after ``Export re-run package…``.
@@ -1101,6 +1171,11 @@ def rerun_command(event_type, sidecar, channels_csv, redetect_csv=None,
     re-run (PAC).
     """
     evt = str(event_type)
+    q = shell_quote
+    sidecar, channels_csv = q(sidecar), q(channels_csv)
+    redetect_csv = q(redetect_csv) if redetect_csv else None
+    eeg = q(eeg) if eeg else None
+    db = q(db) if db else None
     if redetect_csv:
         if evt not in RERUN_SCRIPTS:
             return None
@@ -1108,7 +1183,7 @@ def rerun_command(event_type, sidecar, channels_csv, redetect_csv=None,
         freq = (f"{lo:g} {hi:g}" if isinstance(lo, (int, float))
                 else f"{lo} {hi}")
         return (f"python examples/rerun_detection.py --annot {sidecar} "
-                f"--eeg {eeg or '<EEG file>'} --db {db or '<database>'} "
+                f"--eeg {eeg or q('<EEG file>')} --db {db or q('<database>')} "
                 f"--channels {redetect_csv} --event-type {evt} "
                 f"--method {method or '<method>'} --freq {freq} "
                 f"--stages {' '.join(stages) if stages else '<stages>'}")
