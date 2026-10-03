@@ -115,12 +115,27 @@ database.
 
 ### Population Checks
 
-Five per-channel columns (off-band share, low-prominence share, share at the
+Five per-channel figures (off-band share, low-prominence share, share at the
 duration floor, median amplitude against background and against threshold) are
 aggregated from the stored figures in one query per refresh, in a background
-thread. They are flagged against the rest of the montage with the same robust z
-as the amplitude columns, so a problem shared by every channel is not flagged
-there and shows up in the precision estimate instead.
+thread. They are not table columns: on real data most of them hardly vary from
+channel to channel, and the table keeps to amplitude, which does. They are
+flagged against the rest of the montage with the same robust z as the amplitude
+columns and shown where they are useful: as metrics on the topography and in the
+flagged-channel list in the right dock. A problem shared by every channel is not
+flagged there and shows up in the precision estimate instead. The rules live in
+header tooltips rather than a footer line, so the screen stays clear until you
+ask.
+
+### One Selection Tool, and Exclusions You Can See
+
+Time exclusion has one selection tool, the brush on the trace; the epoch strip
+only pages. A saved exclusion is drawn differently from an unsaved brush (purple
+hatch against plain blue) and can be selected and removed, because an action you
+cannot see or undo is one reviewers avoid using. Likewise, only a saved decision
+makes an Accept, Reject or Unsure button look selected, and the Show events row
+lets you list your own rejected or unsure events again without a separate
+screen.
 
 ### Event Decisions and the Review Sample
 

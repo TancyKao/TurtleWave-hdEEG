@@ -21,9 +21,9 @@ eeg_review_gui
 Two tabs, plus two docks:
 
 - **1 · Channels (QC)** (landing tab) — a sortable per-channel table for the
-  current event type, with a Stage toggle, Show and Sort combos, population-check
-  columns and a `Checks` flag beside the amplitude columns, and actions to
-  exclude a channel, queue it for re-detection or open its epochs
+  current event type, with a Stage toggle, Show and Sort combos, an eight-column
+  amplitude table, and actions to exclude a channel, queue it for re-detection
+  or open its epochs. The channel checks are in the right dock
   (see [Channels Tab](#channels-tab)).
 - **2 · Epochs** — steps through the scored epochs for a single channel, with
   a hypnogram strip, outlier markers, and time-range exclusion. Epochs
@@ -35,8 +35,8 @@ Two tabs, plus two docks:
   selected. Below the filtered trace sit collapsible **Neighbours** and
   **Physiology** groups, and a `REVIEW SAMPLE` bar runs across the top.
 - **Filters dock** (left) — event type, detection method, frequency band, and
-  channel selection, applied globally across both tabs, then a REVIEW STATUS
-  group that applies to the Epochs tab only.
+  channel selection, applied globally across both tabs. A caption `~ =
+  interpolated` sits under the channel list.
 - **Topography & detail dock** (right) — scalp topography for the current QC
   metric, the global worst-events list, the selected channel's detail, and the
   **Event** and **Decision** panels.
@@ -62,7 +62,7 @@ Two tabs, plus two docks:
 |------|------------------|
 | File | Open Database…, Open EEG File…, Open Annotation File…, Export re-run package…, Exit |
 | Edit | Flag selected channel for re-detect (`F`) |
-| Review | Reviewer name…, Show other reviewers (checkable, off at every launch), and the review-sample entries (Draw review sample…, Resume review sample, Exit review sample, Precision report…) |
+| Review | Reviewer name…, Show other reviewers (checkable, off at every launch), the review-sample entries (Draw review sample…, Resume review sample, Exit review sample), Precision report… and Precision rule… |
 | View | Outlier threshold…, toggle Filters dock / Topography & detail dock |
 | Analysis | Refresh QC dashboard |
 | Export | Export QC report…, Export Re-run Package…, Export Figure… |
@@ -71,39 +71,41 @@ Two tabs, plus two docks:
 ## Channels Tab
 
 Top to bottom: a banner (only while a review sample is active), a control row,
-the channel table, a bottom action bar for the selected channel and a one-line
-footer. The right dock holds the topography and, under it, the flagged-channel
+the channel table and a bottom action bar for the selected channel. The right dock holds the topography and, under it, the flagged-channel
 list. The top bar shows `detector: Moelle2011 · 11–16 Hz` for the run in view,
 or `detector: —` when several runs match the Filters dock.
 
 **Banner during sample review.** While a review sample is active, a banner reads
 `Review sample in progress: channel checks are hidden. Exit sample to see them.`
-with an **Exit sample** button. The six check columns (`Checks`, `Off-band`,
-`Low prom.`, `At floor`, `Amp / bg`, `Amp / thr`) are hidden, the Stage buttons
-are disabled, the check-based Sort items are disabled, `Flagged` counts the
-amplitude flag only, and the count line starts `checks hidden`. All return on
-Exit sample.
+with an **Exit sample** button. The channel checks (the flagged-channel list,
+the check metrics and rings on the topography) are hidden, the Stage buttons
+are disabled, and the count line starts `checks hidden` and is not a link. All
+return on Exit sample.
 
 **Control row.**
 
 - **Event type** selects spindles, slow waves or K-complexes.
 - **Stage** is a row of buttons, one per stage of the run (for example `NREM2`
-  and `NREM3`) and a combined button (`NREM2 + NREM3`, the default). It
-  changes only the check columns, the `Checks` flag, the check metrics on the
-  topography and the flagged-channel list. Density and amplitude columns follow
-  the Filters dock. The choice is remembered per event type.
-- **Show** filters the rows: `All channels (n)`, `Flagged (n)` (a `Checks` flag
-  or an amplitude flag of hard or soft), `Excluded (n)`, `Queued for re-detect (n)` and `Dead (n)`. The counts are over all channels.
-- **Sort** orders the rows: `Checks (hard first)` (the default), `Off-band share
-  ↓`, `At-floor share ↓`, `Amp / bg ↑`, `Amp / thr ↑`, `Low prominence share ↓`,
-  `Amp z ↓`, `Channel` and `Region`. Clicking a column header also sorts; the
-  combo then reads `Column header` unless the click matches an item.
+  and `NREM3`) and a combined button (`NREM2 + NREM3`, the default). It changes
+  only the check metrics on the topography and the flagged-channel list. The
+  table's density and amplitude columns follow the Filters dock. The choice is
+  remembered per event type.
+- **Show** filters the rows: `All channels (n)`, `Amp flagged (n)` (an amplitude
+  flag of hard or soft), `Excluded (n)`, `Dead (n)` and `Queued for re-detect
+  (n)`. The counts are over all channels.
+- **Sort** orders the rows: `Amp flag (hard first)` (the default), `Amp z ↓`,
+  `Mean amp ↓`, `Density ↓`, `Events ↓`, `Channel` and `Region`. Clicking a
+  column header also sorts; the combo then reads `Column header` unless the click
+  matches an item. A sort setting saved on a column that no longer exists opens
+  as `Amp flag (hard first)`.
 - A **count line** at the right: `8 checks flagged · 3 amp flagged · 1 dead`,
   plus `· 1 excluded` when any channel is excluded. It counts channels over the
-  whole montage, not the Show filter. On a run without stored figures it starts
-  `checks not recorded`.
+  whole montage, not the Show filter. The `8 checks flagged` part is a link: it
+  scrolls the right dock to **CHECKS — FLAGGED CHANNELS** and flashes its header.
+  On a run without stored figures it starts `checks not recorded`.
 
-**Table columns**, in order:
+**Table columns**, eight in order. The **Channel** column is pinned: it stays at
+the left edge while the table scrolls sideways.
 
 | Header | Cell |
 |---|---|
@@ -113,61 +115,53 @@ Exit sample.
 | `Mean amp µV` | mean amplitude of the channel's events (detection-band signal) |
 | `Amp z` | signed robust z of the amplitude measure furthest from the other channels (mean, 95th percentile or largest event); hover for all three |
 | `Amp flag` | `✓ OK`, `▲ SOFT · mean`, `× HARD · largest event`, `· 95th pct`, or `DEAD`; the text after the dot names the measure that triggered it |
-| `Checks` | `× HARD · off-band 34 %`, `▲ SOFT · …`, `—`, or `— dead channel` |
-| `Off-band` | share of events whose peak lies outside the run band |
-| `Low prom.` | share with `low_prominence`; context only, never tinted |
-| `At floor` | share within 0.05 s of the run's minimum duration |
-| `Amp / bg` | median event amplitude over background |
-| `Amp / thr` | median detection peak over the detection threshold |
 | `Status` | `kept` or `× excluded`, followed by ` · ↻ re-detect` when the channel is queued for re-detection |
 
 There is no State column and no Selection area. A channel queued for
 re-detection reads `kept · ↻ re-detect` or `× excluded · ↻ re-detect` in the
 Status column, and the queue is saved in the database (the `channel_qc` table),
 so it is still there when you reopen the GUI. The status bar shows the
-`re-detect queue: n` count. An excluded channel's own `Amp flag` and `Checks`
-cells read `—`: an excluded channel is not judged.
+`re-detect queue: n` count. An excluded channel's own `Amp flag` cell reads `—`:
+an excluded channel is not judged. A `~` before a channel name in the left dock
+means interpolated; a caption `~ = interpolated` under the channel list explains
+it (shown only when a listed channel is interpolated).
+
+The off-band, low-prominence, at-floor, amp/bg and amp/thr shares and ratios are
+no longer table columns. They live in the right dock's flagged-channel list and
+as metrics on the topography (below).
 
 **Regions** come from the electrode name for 10-20 and 10-5 labels (`Fz`, `F1h`
 and `F2h` are Frontal), and from coordinates only for EGI `E<n>` labels, or when
 the name gives no region. The table, the topography and the review sample use
 the same region.
 
-Hover tooltips: the `Checks` cell lists every flagged column with its value,
-the montage median and the robust z. The `At floor` cell gives the floor share
-and the ceiling share, or says the run has no upper limit. Shares are over
-events for which the figure was computed, so a channel with fewer than 20 such
-events shows `—` and is never flagged on that column. `Amp z` shows the z of the measure that
-triggered the flag.
+**Where the rules are.** There is no footer line. Hover the `Amp flag` header for
+the amplitude rule: a channel is compared with the other channels in view
+(excluded channels are left out); `× hard` / `▲ soft` mean its mean event
+amplitude, its 95th percentile or its largest event is far from the montage
+median (robust z above the hard / soft limit, default 3.5 / 2), and the cell
+names which one; `DEAD` means fewer than 15 % of the median event count. Hover
+the **CHECKS — FLAGGED CHANNELS** header for the checks rule: a channel is listed
+when its off-band or at-floor share is well above the montage median, or its
+median signal vs background or amp vs threshold is well below it (the same
+limits, and only if the difference is at least 10 percentage points for shares
+or 0.3× for ratios and the channel has at least 20 events). Change the limits in
+**View ▸ Outlier threshold…**. A problem every channel shares is not flagged; see
+the Precision report. A channel with fewer than 20 events for a figure is never
+flagged on it. `Amp z` shows the z of the measure that triggered the flag.
 
-**The flag rule, in words.** A channel is compared with the rest of the
-montage, never with a fixed number. It is flagged when its off-band or at-floor
-share is well above the montage median, or its median amp/bg or amp/thr is well
-below it: hard when the robust z is above the hard limit (default 3.5), soft
-above the soft limit (2.0). It also needs a difference from the montage median
-of at least 10 percentage points (shares) or 0.3× (ratios) and at least 20
-events. The limits are those of **View ▸ Outlier threshold…**. Excluded channels
-are left out of the comparison. A problem every channel shares is not flagged;
-see the Precision report.
-
-**Footer.** One line: `× hard / ▲ soft: the channel stands out from the others
-(robust z above 3.5 / 2). Low prominence never flags. Hover for the full rule.`
-The tooltip states the full rule for the amplitude flag (mean, 95th percentile or
-largest event; dead means fewer than 15 % of the median event count) and for the
-checks. The line is the same during sample review.
-
-**Low prominence is context only.** It stays as a column, a topography choice
-and a montage median, but it never sets the `Checks` flag, never appears in the
-`Checks` cell or the flagged-channel list, and its cells are not tinted. It
+**Low prominence is context only.** It stays as a topography choice, but it
+never sets a channel check and never appears in the flagged-channel list. It
 mostly follows a channel's signal-to-noise.
 
-The `Checks` flag is separate from the amplitude `Amp flag`. **Queue all HARD**
+The channel checks are separate from the amplitude `Amp flag`. **Queue all HARD**
 acts on the amplitude flag only.
 
 **Bottom action bar** (for the selected row): **Open in Epochs** (also turns on
 the check filter for the channel's largest-z flagged column), **Exclude channel**
-(**Include channel** once excluded), **Add to re-detect queue** (`F`; **Remove
-from re-detect queue** once queued), then, when something is queued, a link
+(**Include channel** once excluded), **Add to re-detect queue** (**Remove
+from re-detect queue** once queued; the `F` key does the same, and its tooltip
+ends `(F).`), then, when something is queued, a link
 `n queued · Export re-run package…`, and **Queue all HARD (n)**. The buttons are
 disabled with no row selected.
 
@@ -188,7 +182,7 @@ file `examples/rerun_detection.py --channels` reads. See
 **Topography.** The combo offers event density, mean amplitude, maximum
 peak-to-peak and the check metrics (off-band share, low-prominence share
 (context), at-floor share, amp vs background, amp vs threshold). On a check
-metric, each channel with a `Checks` flag has a ring (hard solid, soft dashed)
+metric, each channel with a channel check has a ring (hard solid, soft dashed)
 and up to 12 of them, those with the largest z, carry their name; excluded
 channels are hollow, with a legend line `○ excluded channel (not used for the
 map)`; a caption
@@ -196,7 +190,8 @@ under the colour bar defines the metric and says how many more are ringed.
 Clicking a ringed electrode selects the channel.
 
 **Flagged-channel list** (under the topography, facts only). One row per channel
-with a `Checks` flag, hard first, for the chosen stage:
+with a channel check, hard first, for the chosen stage. Hover its header for the
+checks rule:
 
 ```text
 × HARD  E75 · 34 % of spindles off-band · 61 % of those peak at 8–9 Hz
@@ -283,19 +278,37 @@ See [Decide whether an event is genuine](../how-to/decide-if-an-event-is-genuine
   range is drawn clipped at the edge, marked by a thin line, and a note reads
   `clipped at ±200 µV · largest 984 µV`. The **Full range** checkbox shows the
   whole range; it is off by default and resets when the epoch changes.
-- **Exclude time range…** (formerly "Mark as artefact") and **Exclude N
-  epochs…** exclude the brushed time from analysis for every channel. They are
-  saved with the review and applied when detection is re-run; events already
-  detected are not changed. This is separate from rejecting one event with the
-  reason **Artefact**, which labels that event only.
+- **One selection tool: the brush on the trace.** There is no selection on the
+  epoch strip (no Shift+drag, no "Exclude N epochs…"); a click on the strip
+  pages. Drag on the raw trace to brush a range (blue, labelled `not saved`). The
+  action row under the filtered trace holds a hint on the left, and **Clear
+  range** and the primary button on the right. **Clear range** is enabled only
+  while an unsaved range or a selected excluded range exists, and `Esc` does the
+  same. **Exclude time range…** saves the brush: the time is excluded from
+  analysis for every channel, saved with the review, and applied when detection
+  is re-run; events already detected are not changed. This is separate from
+  rejecting one event with the reason **Artefact**, which labels that event only.
+- **Saved exclusions are visible and removable.** Excluded time you saved is
+  drawn with a purple diagonal hatch and a dashed edge, labelled `excluded`, on
+  the raw and filtered traces; events inside keep their own bands on top. A click
+  inside the hatched range (away from any event) selects it, or you can click its
+  row in the dock's **EXCLUDED TIME** list. The hint then reads `Excluded
+  {start}–{end} ({d} s), saved by {rater} on {date}.` and the primary button
+  becomes **Remove exclusion**. Removing deletes the range from the review and
+  from the sidecar XML, and the time counts as analysed again in density; the
+  status line says so, and adds `export again to update it` if the range was in a
+  re-run package you exported earlier. There is no confirmation: brush the range
+  again to restore it. Only exclusions made in the review GUI can be removed
+  here, not artefacts from the scoring file.
+- **Show events** is a row above the raw trace; see below.
 - The strip legend reads `grey bars = events per epoch · red = amplitude outliers
-  · purple dashes = excluded time · white line = current epoch`.
+  · purple = excluded time · white line = current epoch`, with ` · blue ticks = sample events` in sample mode and ` · grey ticks below = epochs with shown events` while Show events filters.
 
 ## Decision Controls
 
 Buttons **Accept**, **Reject**, **Unsure**; a grid of reason buttons; a comment
 field (500 characters); a `Current` line (`Not reviewed`, `Accepted by TK ·
-14:02`, and so on); **Clear**; **Prev** and **Next** buttons; and a progress line.
+14:02`, and so on); a flat **Clear** that removes your decision on the event; **Prev** and **Next** buttons; and a progress line.
 The checkbox **Go to next unreviewed after deciding** is on by default and its
 setting is kept.
 
@@ -314,7 +327,10 @@ comment; `9` is unused.
 | `8` | Single channel | Wrong morphology |
 | `0` | Other | Other |
 
-The `Artefact` reason labels that one event only; its tooltip points to **Exclude time range…** for leaving time out of the analysis. A reject needs a reason; an unsure does not. Pressing `R` arms a reject and a
+The `Artefact` reason labels that one event only; its tooltip points to **Exclude time range…** for leaving time out of the analysis. Only a saved decision is highlighted: with no decision by you none of Accept,
+Reject and Unsure looks selected, and after `A` only Accept does. While Reject or
+Unsure is armed (waiting for a reason) that button shows a border only, so an
+armed re-decision can sit beside the saved one. A reject needs a reason; an unsure does not. Pressing `R` arms a reject and a
 digit or a click on a grid button writes it. Clicking a grid button with nothing
 armed arms Reject with that reason preselected (hint: `Click {label} again or
 press Enter to reject ({label}).`); a second click on the same reason or `Enter`
@@ -337,15 +353,32 @@ Bands, glyphs, the Current line and progress count only the current reviewer's
 decisions. **Show other reviewers** reveals the rest and asks for confirmation
 once per session.
 
-## Left Dock: REVIEW STATUS
+## Show Events
 
-Under FREQUENCY BAND: checkboxes `unreviewed`, `reviewed` (a parent of the next
-three), `accepted`, `rejected` and `unsure`, all checked at launch and not
-remembered. The caption reads `Your decisions only. Applies to the Epochs tab.`
-An event decided only by another reviewer counts as unreviewed. Events that do
-not pass are drawn at half strength and skipped by `}` and `{`; clicking still
-selects them. The filter does not affect `]` and `[`, sample navigation, epoch
-counts, progress or the Channels tab.
+A row directly above the raw trace: `Show events:` and four checkboxes,
+`unreviewed`, `accepted`, `rejected` and `unsure`, all ticked at launch and not
+remembered. It replaces the former REVIEW STATUS group in the left dock. It uses
+your own decisions only: `unreviewed` means no decision by you, so an event
+decided only by another reviewer counts as unreviewed. It applies to the Epochs
+tab only.
+
+While not all four are ticked:
+
+- a chip reads `Showing: rejected · 3 of 1,847 on PPOz ✕` (`accepted, unsure`
+  when two are ticked); **✕** ticks all four again;
+- events that do not pass are drawn at half strength and skipped by `}` and `{`;
+  clicking still selects them, and a rejected event that passes keeps its ✗ and
+  dashed edge;
+- the epoch strip draws a thin tick along its bottom edge under each epoch that
+  holds a shown event on the channel;
+- **◀ previous shown** and **next shown ▶** appear at the right of the row and do
+  what `{` and `}` do (disabled when nothing matches; `}` then says `No rejected
+  events on PPOz.`).
+
+The filter does not affect `]` and `[`, sample navigation, `EVENT i OF n IN
+EPOCH`, progress or the Channels tab. In live sample review it reads only your own
+decisions, so it reveals nothing about undecided events. The left dock still has
+`Filters apply globally to both tabs.` above the channel list.
 
 ## Keyboard Shortcuts
 
@@ -363,9 +396,9 @@ Suppressed while the comment field has focus. `?` works on both tabs.
 | `Enter` | Confirm an armed decision with the last reject reason; in the comment field, save the comment |
 | `C` | Focus the comment field |
 | `]` / `[` | Next / previous event not yet decided by you on this channel |
-| `}` / `{` | Next / previous event of any status on this channel (only events passing a check or REVIEW STATUS filter, when one is on) |
+| `}` / `{` | Next / previous event of any status on this channel (only events passing a check or Show events filter, when one is on) |
 | `Ctrl+Z` | Undo the last decision (at least 200 steps) |
-| `Esc` | Cancel an armed decision; else leave the comment field; else clear the strip range; else remove the check filter; else clear the selection |
+| `Esc` | Cancel an armed decision; else leave the comment field; else clear the unsaved range or deselect the excluded range (`Clear range`); else remove the check filter; else clear the selection |
 | `?` | Open or close the keys cheat sheet |
 
 In sample mode `]` and `[` step through the undecided sample events in the
@@ -445,21 +478,54 @@ sample; the 30 shared events are a subset used for agreement.
 
 ## Precision Report
 
-A non-modal dialog that reads the current sample's decisions and refreshes when
-one is written in sample mode, or undone. A free-browsing decision or **Clear**
-leaves an open report stale until it is reopened. It shows precision with a 95 % Wilson interval per region and
-stage and for the whole night, a pooling rule with a threshold (default 0.80,
-range 0.50 to 0.99) and an estimate choice (point estimate or lower 95 % bound),
-a one-sentence verdict, the reasons for rejection with their FP-artifact and
-FP-other counts, and agreement between two reviewers. Percent agreement is
-three-way (accept, reject, unsure) over every event both reviewers decided;
-Cohen's kappa leaves out events either reviewer marked unsure. A list of
-disagreements can be opened. Groups with fewer than 10
-decided events read `n too small` and are not judged. The report applies only
-this pooling rule: the library's `TRUSTWORTHY`, `EXCLUDE` and `TOP_UP` verdicts
-and `top_up_region` have no GUI yet. Opening it writes `review_precision` rows;
-**Copy summary** and **Export CSV…** are in the footer. See
-[Validate a detection run](../how-to/validate-a-detection-run.md).
+A non-modal window, titled `Precision report · {subject}`, that refreshes when a
+decision is written in sample mode, or undone. A free-browsing decision or
+**Clear** leaves an open report stale until you reopen it. It fits one screen
+with no scrolling. Top to bottom:
+
+```text
+Spindles · Moelle2011 11–16 Hz · reviewer TK
+TK reviewed 120 of 120 sampled events: 119 accepted, 1 rejected (artefact 1).
+Estimated precision: 99 % (95 % confidence 95–100 %)
+Looks trustworthy (every region ≥ 80 %)
+
+            NREM2   NREM3   All stages
+frontal     100 %   100 %   100 %
+parietal    100 %    93 %    99 %
+
+No second reviewer yet.
+                        [ Copy summary ] [ Export CSV… ] [ Close ]
+```
+
+- **Sentence.** The reasons are links (up to three, then `and n more`; `{u}
+  unsure` is a link too). Clicking one opens a list under the table, `Rejected as
+  artefact (1)`, with rows `channel · time · stage`; clicking it again closes it.
+  Double-click a row to open that event in the Epochs tab; the report stays open.
+- **Precision line.** Precision weighted to all of the night's events with a 95 %
+  Wilson confidence range. Unsure events are left out.
+- **Verdict.** `Looks trustworthy (every region ≥ 80 %)` or `Check parietal ·
+  NREM2 (54 %): below 80 %.` (three groups listed, then `and n more`). Groups
+  with fewer than 10 decided events show `—` and are not judged; the verdict says
+  how many.
+- **Table.** Cells are percentages only; a cell below the rule reads `54 % ▼`.
+  Hover a cell for the confidence range and the counts.
+- **Second reviewer.** With none: `No second reviewer yet.` With two reviewers a
+  picker appears in the title line. Until you have decided every sampled event
+  the picker is disabled and the line reads `{B} has also reviewed this sample.
+  Agreement is shown once you have decided all {n} events.` so another
+  reviewer's decisions cannot influence yours. After that the line gives percent
+  agreement on the events you both decided (three-way, unsure included) and
+  Cohen's kappa (which leaves out events either reviewer marked unsure).
+- **Precision rule.** The threshold (default 80 %) and whether it applies to the
+  point estimate or the lower 95 % bound are set in **Review ▸ Precision rule…**,
+  not in the report. It is a lab convention, not a published standard. The
+  library's `TRUSTWORTHY`, `EXCLUDE` and `TOP_UP` verdicts and `top_up_region`
+  have no GUI yet.
+- **Buttons.** **Copy summary** copies the title line, sentence, precision line
+  and verdict as four lines of text. **Export CSV…** writes the table. Opening
+  the report also writes `review_precision` rows to the database.
+
+See [Validate a detection run](../how-to/validate-a-detection-run.md).
 
 ## Data In / Out
 

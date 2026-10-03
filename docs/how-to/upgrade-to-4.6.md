@@ -68,10 +68,14 @@ database you care about.
       database (the `channel_qc` table gains a `redetect` column), shows in the
       Status column and the Show filter, and **File ▸ Export re-run package…**
       writes `redetect_channels.csv` for `examples/rerun_detection.py --channels`.
-    - *Mark as artefact (writes XML)* is now **Exclude time range…**, and *Mark N
-      epochs as artefact* is **Exclude N epochs…**. The reject reason *Artefact*
+    - *Mark as artefact (writes XML)* is now **Exclude time range…**, with one
+      selection tool (the brush on the trace; the epoch-strip selection and
+      *Mark N epochs as artefact* are gone). Saved exclusions are hatched purple
+      and can be removed with **Remove exclusion**. The reject reason *Artefact*
       keeps its name and labels one event only.
-    - The Channels table says *Mean amp µV* (it was *Med amp µV*), and an amp flag
+    - The Channels table has eight amplitude columns (the check columns and the
+      footer line are gone; the checks are in the right dock's flagged list and on
+      the topography), says *Mean amp µV* (it was *Med amp µV*), and an amp flag
       names the measure that triggered it. Regions come from electrode names for
       10-20 and 10-5 labels.
     - The Event panel shows four rows (Signal vs background, Duration, Peak freq

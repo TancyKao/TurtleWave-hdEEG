@@ -22,25 +22,26 @@ that database. By default they already are — detection writes straight into
 
 **Solution:**
 
-1. On the **1 · Channels (QC)** tab, open the **Show** combo and choose `Flagged`, `Excluded`, `Queued for re-detect` or `Dead`, or leave it on `All channels`
-2. Open the **Sort** combo to order the rows, for example `Checks (hard first)`, `Off-band share ↓` or `Amp z ↓`. Clicking a column header also sorts
-3. Use the **Stage** buttons to set the stages the check columns use
+1. On the **1 · Channels (QC)** tab, open the **Show** combo and choose `Amp flagged`, `Excluded`, `Queued for re-detect` or `Dead`, or leave it on `All channels`
+2. Open the **Sort** combo to order the rows, for example `Amp flag (hard first)`, `Amp z ↓` or `Density ↓`. Clicking a column header also sorts
+3. Use the **Stage** buttons to set the stages used by the channel checks (the flagged-channel list and the check metrics on the topography)
 
 !!! tip
-    The count line above the table (`8 checks flagged · 3 amp flagged · 1 dead`) always counts all channels, whatever Show is set to.
+    The count line above the table (`8 checks flagged · 3 amp flagged · 1 dead`) always counts all channels, whatever Show is set to. Click the `8 checks flagged` part to jump to the flagged-channel list in the right dock. Hover the `Amp flag` header for the rule.
 
 ## Find a Channel That Picks Up the Wrong Thing
 
 **Problem:** You suspect a region detects alpha or noise as events.
 
 **Solution:** On the Channels (QC) tab, switch the topography combo to
-`Off-band share`, then read `At floor`, `Amp / bg` and `Amp / thr`. Set **Show**
-to `Flagged`. Read the flagged-channel list under the topography: it states
-numbers, and you decide what they mean. `Low prom.` is context only and never
-flags. See
+`Off-band share` (then `At-floor share`, `Amp vs background`, `Amp vs
+threshold`). Read the flagged-channel list under the topography (or click `n
+checks flagged` above the table): it states numbers, and you decide what they
+mean. Low prominence is context only and never flags. The table itself has eight
+columns, amplitude only. See
 [Validate a detection run](validate-a-detection-run.md#run-the-population-checks-on-the-channels-tab).
 
-Runs detected with 4.5 or earlier show `—` in these columns.
+For runs detected with 4.5 or earlier the check metrics are not recorded.
 
 ## Select an Event and Record a Decision
 
@@ -51,21 +52,42 @@ Runs detected with 4.5 or earlier show `—` in these columns.
 1. Set **Review ▸ Reviewer name…**.
 2. On the **2 · Epochs** tab, click an event band, or press `]` for the next
    undecided event on the channel.
-3. Press `A` to accept, `R` and a digit `1`–`9` to reject with a reason, or `U`
+3. Press `A` to accept, `R` and a digit `1`–`8` or `0` to reject with a reason, or `U`
    to mark unsure. `Ctrl+Z` undoes.
 
 [Decide whether an event is genuine](decide-if-an-event-is-genuine.md) gives the
 six checks to apply and the reason codes. A decision never removes the event.
 
-## Show Only the Events You Have Not Decided
+## Show Only Some of a Channel's Events
 
-**Problem:** You want to see, among a channel's events, only those still undecided.
+**Problem:** You want to see, among a channel's events, only those you decided a
+certain way, or only those still undecided.
 
-**Solution:** In the left dock, under REVIEW STATUS, clear the boxes you do not
-want: `unreviewed`, `accepted`, `rejected`, `unsure` (`reviewed` ticks the last
-three). Events that do not pass are drawn faint and skipped by `}` and `{`;
-clicking still selects them. The filter uses your own decisions only and applies
-to the Epochs tab. It resets at every launch.
+**Solution:** In the **Show events:** row above the raw trace, untick the boxes
+you do not want: `unreviewed`, `accepted`, `rejected`, `unsure`. Events that do
+not pass are drawn faint and skipped by `}` and `{`; clicking still selects them.
+A chip reads `Showing: rejected · 3 of 1,847 on PPOz ✕`, ticks under the epoch
+strip mark the epochs that hold shown events, and **◀ previous shown** and
+**next shown ▶** step through them. The filter uses your own decisions only,
+applies to the Epochs tab, and resets at every launch. Click **✕** on the chip to
+show everything again.
+
+## Recheck Your Rejected and Unsure Events
+
+**Problem:** You want to look again at the events you rejected or were unsure
+about, for example before you finish a channel.
+
+**Solution:**
+
+1. Drill into the channel (**Open in Epochs**).
+2. In **Show events:**, tick only `rejected` and `unsure`.
+3. Press **next shown ▶** (or `}`) to go to the first one. Look at the raw trace,
+   the Event panel and the neighbours again.
+4. To change your mind, press `A`, or `R` and a reason, or `U`. The decision is
+   replaced and the event stays in view.
+5. Press **next shown ▶** to move on. Click **✕** on the chip when you are done.
+
+`Ctrl+Z` undoes the last change. Your decisions are saved as you make them.
 
 ## Look Up a Key
 
@@ -134,7 +156,7 @@ reconstructed from their neighbours before you review their events.
 
 **Solution:** Look at the Filters dock channel list. An interpolated channel
 shows a trailing ` ~` (for example `Cz ~`), with a tooltip saying it was
-reconstructed from neighbours. The mark is display only. On open, the GUI
+reconstructed from neighbours, and a caption `~ = interpolated` under the list. The mark is display only. On open, the GUI
 shows `Cz`, `Fz` and `Pz` when the file has them, never a channel the file
 types as non-EEG.
 
@@ -159,13 +181,18 @@ density and CSV exports are unchanged. Its Status reads `× excluded`.
 
 **Solution:**
 
-1. On the **2 · Epochs** tab, brush a range on the trace, or shift-drag across the overview strip to select epochs
-2. Click **Exclude time range…** (or **Exclude N epochs…**) to confirm
+1. On the **2 · Epochs** tab, brush a range on the raw trace
+2. Click **Exclude time range…** to save it. **Clear range** discards an unsaved brush
 
 The time is excluded from analysis for every channel. It is saved with the
 review and applied when detection is re-run; events already detected are not
 changed. This is different from rejecting one event with the reason
 **Artefact**, which labels that event only.
+
+A saved range is drawn with a purple hatch and the label `excluded`; an unsaved
+brush is plain blue and says `not saved`. To undo an exclusion, click inside the
+hatched range (away from any event), or its row in the **EXCLUDED TIME** list in
+the right dock, then click **Remove exclusion**. Brush the range again to restore it.
 
 ## Flag Channels for Re-detection
 

@@ -50,11 +50,12 @@ Channels (QC) tab populates with one row per channel.
 
 The **Channels (QC)** tab is the landing surface. Each row is a channel, not
 an individual event — this is a QC triage view, not a per-event review list.
-Beside the amplitude columns you'll also see `Off-band`, `Low prom.`,
-`At floor`, `Amp / bg` and `Amp / thr`, and a `Checks` flag. They summarise
-stored figures for every event on the channel, and a channel is flagged only
-when it differs from the rest of the montage. The **Stage**, **Show** and
-**Sort** controls above the table change what you see.
+The table has eight columns: channel, region, event count, density, mean
+amplitude, a robust z-score of that amplitude, an amplitude flag and a status.
+Hover the `Amp flag` header to see how the flag is decided. Channel checks (for
+example the share of events whose peak lies outside the band) are listed under
+the topography; the `n checks flagged` link above the table takes you there. The
+**Stage**, **Show** and **Sort** controls above the table change what you see.
 
 Use the left filter dock to switch event type (spindle / slow wave /
 K-complex / PAC) and to narrow by method or frequency band. Channels flagged
@@ -90,7 +91,8 @@ epochs, or the prev/next buttons to step one epoch at a time.
 3. Look at the raw trace, then the figures, and press `A` to accept the event.
 4. Select another event, press `R`, then `1` to reject it as an artefact.
 5. Press `Ctrl+Z` (`Cmd+Z` on macOS) to undo the last decision.
-6. Press `?` to open the keys cheat sheet, and `?` or `Esc` to close it.
+6. Notice that only the saved decision looks selected: on an undecided event none of the three buttons is highlighted.
+7. Press `?` to open the keys cheat sheet, and `?` or `Esc` to close it.
 
 !!! success "What you should see"
     The accepted band turns green with a ✓. The `Current` line in the dock reads

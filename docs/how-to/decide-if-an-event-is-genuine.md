@@ -122,6 +122,11 @@ not the numbers.
    a comment.
 5. Press `Ctrl+Z` (`Cmd+Z` on macOS) to undo the last decision.
 
+Only a saved decision looks selected on the three buttons; while a reject or
+unsure waits for a reason its button shows a border only. To come back to events
+you rejected or were unsure about, see
+[Recheck your rejected and unsure events](review-eeg-events.md#recheck-your-rejected-and-unsure-events).
+
 Nothing is written for a reject until you choose a reason. You can also click a
 reason button with nothing armed: that arms Reject with that reason
 preselected, and the hint reads `Click {label} again or press Enter to reject

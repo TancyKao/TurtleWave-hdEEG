@@ -21,60 +21,63 @@ To judge one event once it is on screen, see
 
 ## Run the population checks on the Channels tab
 
-The Channels (QC) tab adds columns per channel for the event type in view,
-computed in a background thread from the stored figures.
+The Channels (QC) tab table has eight columns, all about amplitude and event
+counts. The channel checks, which compare each channel's events with the rest of
+the montage, are computed in a background thread from the stored figures and
+shown in two places: the metrics on the topography and the **CHECKS — FLAGGED
+CHANNELS** list under it.
 
-| Column | What it is | What a high or low value says |
+| Check | What it is | What it says |
 |---|---|---|
-| `Off-band` | share of events whose peak frequency, after removing the 1/f background, lies outside the run band | the channel picks up a rhythm outside the band |
-| `At floor` | share within 0.05 s of the run's minimum duration | many short events at the limit |
-| `Amp / bg` | median event band RMS over the surrounding background RMS | near 1 means events barely stand out |
-| `Amp / thr` | median detection peak over the detection threshold | near 1.0 means most events only just crossed the bar |
-| `Low prom.` | share whose spectral peak stands under 10 dB above the 1/f background | context only; follows signal-to-noise |
+| Off-band share | share of events whose peak frequency, after removing the 1/f background, lies outside the run band | the channel picks up a rhythm outside the band |
+| At-floor share | share within 0.05 s of the run's minimum duration | many short events at the limit |
+| Amp vs background | median event band RMS over the surrounding background RMS | near 1 means events barely stand out |
+| Amp vs threshold | median detection peak over the detection threshold | near 1.0 means most events only just crossed the bar |
+| Low-prominence share | share whose spectral peak stands under 10 dB above the 1/f background | context only; follows signal-to-noise |
 
 To read them:
 
 1. Choose the **Stage** button for the stages you want, or leave the combined
-   `NREM2 + NREM3` button. It sets the check columns, the flag and the list; the
-   amplitude and density columns follow the Filters dock.
-2. Switch the topography combo to `Off-band share`. Flagged channels carry a
+   `NREM2 + NREM3` button. It sets the topography metrics and the list; the table
+   follows the Filters dock.
+2. Switch the topography combo to `Off-band share`. Channels with a check carry a
    ring, and up to 12 carry their name.
-3. Leave **Sort** on `Checks (hard first)`, or set **Show** to `Flagged` to hide
-   the rest. The count line above the table gives the totals.
-4. Read the flagged-channel list under the topography. It states facts only, for
-   example `34 % of spindles off-band · 61 % of those peak at 8–9 Hz`. The
-   most common 1 Hz bin appears when the channel has at least 10 off-band events
-   (the library reports it from 5);
-   hover the row for the share below and above the band. What those peaks are is
-   for you to decide: the list never says.
+3. Click `n checks flagged` in the count line above the table to jump to the
+   list. Use **Show** set to `Amp flagged` to hide the channels the amplitude
+   flag does not mark.
+4. Read the flagged-channel list. It states facts only, for example `34 % of
+   spindles off-band · 61 % of those peak at 8–9 Hz`. The most common 1 Hz bin
+   appears when the channel has at least 10 off-band events (the library reports
+   it from 5); hover the row for the share below and above the band. What those
+   peaks are is for you to decide: the list never says.
 5. Select a channel and use the bottom bar: **Open in Epochs**, **Exclude
-   channel** or **Add to re-detect queue**. Excluding leaves the channel out of
-   review samples, the re-run export, the flag statistics and the topography;
-   it does not change event density or exported events.
+   channel** or **Add to re-detect queue** (the `F` key does the same). Excluding
+   leaves the channel out of review samples, the re-run export, the flag
+   statistics and the topography; it does not change event density or exported
+   events.
 
-**How a channel is flagged.** There are no fixed thresholds. Each channel is
-compared with the rest of the montage. It is flagged when its off-band or
-at-floor share is well above the montage median, or its median amp/bg or amp/thr
-is well below it: hard when the robust z is above the hard limit, soft when above
-the soft limit (set under **View ▸ Outlier threshold…**), and only if it also
-differs from the median by at least 10 percentage points (shares) or 0.3×
-(ratios) and has at least 20 events. The footer under the table states the rule
-with the current limits. A problem every channel shares produces no flags, so a
-uniform topography also deserves a look, and the Precision report is where it
-shows.
+**How a channel is listed.** There are no fixed thresholds, and no footer line:
+hover the list header for the rule. Each channel is compared with the rest of the
+montage. It is listed when its off-band or at-floor share is well above the
+montage median, or its median signal vs background or amp vs threshold is well
+below it: hard when the robust z is above the hard limit, soft when above the soft
+limit (set under **View ▸ Outlier threshold…**), and only if it also differs from
+the median by at least 10 percentage points (shares) or 0.3× (ratios) and has at
+least 20 events. A problem every channel shares produces no entries, so a uniform
+topography also deserves a look, and the Precision report is where it shows.
 
 **Low prominence never flags.** It tracks a channel's signal-to-noise more than
 any off-band rhythm: in synthetic tests, weak genuine spindles under 1 s were
-labelled low-prominence a third to a half of the time. It stays as a column and
-a topography choice for context.
+labelled low-prominence a third to a half of the time. It stays as a topography
+choice for context.
 
 To list the events behind a flagged check, press **Open in Epochs** (it filters
-to the channel's largest-z flagged column). The Epochs tab then shows a removable
+to the channel's largest-z flagged check). The Epochs tab then shows a removable
 chip such as `Showing off-band spindles only (117 of 344) ✕`, and `}` and `{`
 step through those events only. `Esc` removes the filter.
 
-The amplitude `Amp flag`, and **Queue all HARD**, are unchanged: they use the
-amplitude flag, not the `Checks` flag.
+The amplitude `Amp flag` is a separate, table-only flag (hover its header for the
+rule). **Queue all HARD** uses it, not the channel checks.
 
 ## Draw a review sample
 
@@ -209,27 +212,36 @@ difference. The rows are also written to the `review_precision` table, replacing
 the previous rows of that sample, reviewer and label source.
 
 In the GUI, **Precision report…** (on the bar and under **Review**) opens a
-non-modal window that refreshes when a decision is written in sample mode, or
-undone, and writes `review_precision` rows each time. A decision made while
+short, non-modal window that refreshes when a decision is written in sample mode,
+or undone, and writes `review_precision` rows each time. A decision made while
 free-browsing, or **Clear**, leaves an open report stale until you reopen it. It
-shows:
+shows, top to bottom:
 
-- precision with a 95 % Wilson interval for each region and stage, and for the
-  whole night, for the reviewer you pick;
-- a pooling rule: a threshold (default 0.80, range 0.50 to 0.99) applied to the
-  point estimate or the lower 95 % bound in every region and stage group, and
-  one verdict sentence, `Poolable under this rule` or `Not poolable under this
-  rule`. Groups with fewer than 10 decided events read `n too small` and are not
-  judged;
-- the reasons for rejection, with FP-artifact and FP-other counts;
-- agreement between two reviewers: percent agreement is three-way (accept,
-  reject, unsure) over every event both decided; Cohen's kappa leaves out events
-  either reviewer marked unsure. A list of disagreements to
-  open;
-- **Copy summary** and **Export CSV…**.
+- a title line (event type, method and band, reviewer) and one sentence: `TK
+  reviewed 120 of 120 sampled events: 119 accepted, 1 rejected (artefact 1).`
+  The reasons are links: click one to list those events (`Rejected as artefact
+  (1)`), and double-click a row to open that event in the Epochs tab. Click the
+  link again to close the list;
+- `Estimated precision: 99 % (95 % confidence 95–100 %)`, weighted to all of the
+  night's events, with unsure events left out;
+- a verdict: `Looks trustworthy (every region ≥ 80 %)`, or `Check parietal ·
+  NREM2 (54 %): below 80 %.` Groups with fewer than 10 decided events show `—` and
+  are not judged;
+- a region by stage table of percentages (hover a cell for the confidence range
+  and counts; a cell below the rule reads `54 % ▼`);
+- a second-reviewer line. With one reviewer: `No second reviewer yet.` With two,
+  the line stays `{B} has also reviewed this sample. Agreement is shown once you
+  have decided all {n} events.` until you have decided every sampled event, so
+  the other reviewer's decisions cannot influence yours; the reviewer picker is
+  disabled until then too. After that it gives percent agreement on the events you
+  both decided (three-way: accept, reject, unsure) and Cohen's kappa (which leaves
+  out events either reviewer marked unsure);
+- **Copy summary** (four lines of text), **Export CSV…** and **Close**.
 
-The window applies only this pooling rule. The `TRUSTWORTHY`, `EXCLUDE` and
-`TOP_UP` verdicts below and `top_up_region` have no GUI yet; use Python.
+The threshold (default 80 %) and whether it applies to the point estimate or the
+lower 95 % bound are set in **Review ▸ Precision rule…**, not in the report. The
+window applies only this rule. The `TRUSTWORTHY`, `EXCLUDE` and `TOP_UP`
+verdicts below and `top_up_region` have no GUI yet; use Python.
 
 How to read it:
 
