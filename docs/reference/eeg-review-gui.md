@@ -545,10 +545,13 @@ EEG file, and optionally a Wonambi annotation XML for sleep stages.
   not excluded), `redetect_channels.csv` (only the queued channels, for
   `examples/rerun_detection.py --channels`) and a `rerun_sidecar.xml` annotation copy
   that carries every current time exclusion (each package is complete, so a range
-  exported earlier is included again). After the export the dialog suggests a
-  command: `examples/rerun_detection.py … --channels redetect_channels.csv` when
-  channels are queued, otherwise the event type's detector script with `--annot`;
-  for PAC it says to re-run from `turtlewave_gui`. There is no re-detect request
+  exported earlier is included again). After the export the dialog suggests an
+  `examples/rerun_detection.py` command with this recording's files (`--annot
+  rerun_sidecar.xml`, `--eeg`, `--db`, `--event-type`, `--method`, `--freq`,
+  `--stages`): `--channels redetect_channels.csv` when channels are queued,
+  otherwise `--channels channels.csv`, which re-detects every kept channel
+  (excluded channels are not touched and keep their old rows). For PAC it says
+  to re-run from `turtlewave_gui` with `rerun_sidecar.xml`. There is no re-detect request
   file any more. See
   [Re-run Detection on Reviewer-Selected Channels](../how-to/rerun-detection-on-channels.md).
 

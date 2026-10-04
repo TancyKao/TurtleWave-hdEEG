@@ -52,9 +52,11 @@ Note on the GUI hand-off
 folder, ``channels.csv`` (the *kept* channels: whole montage minus dropped) and,
 when the reviewer queued any channel for re-detection,
 ``redetect_channels.csv`` (only those SELECTED channels, one per row, no
-header). Pass ``redetect_channels.csv`` to ``--channels`` here. The file is not
-written when nothing is queued; ``channels.csv`` is the kept list, not the
-re-detect list, so do not pass it in its place.
+header). The dialog suggests this script with this recording's files. Pass
+``redetect_channels.csv`` to ``--channels`` when channels are queued, else
+``channels.csv``: every kept channel is then re-detected, and excluded channels
+are not touched and keep their old rows. ``redetect_channels.csv`` is not
+written when nothing is queued.
 """
 
 import argparse

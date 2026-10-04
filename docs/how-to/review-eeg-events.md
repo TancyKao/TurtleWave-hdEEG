@@ -219,10 +219,13 @@ still there when you reopen the GUI.
 Export re-run package…` link in the bar). It snapshots the current database,
 then writes `channels.csv`, `redetect_channels.csv` (only the queued channels)
 and `rerun_sidecar.xml`, an annotation copy that carries every current time
-exclusion (each package is complete). The dialog then suggests a command: pass
-`redetect_channels.csv` to `examples/rerun_detection.py --channels` when channels
-are queued, otherwise run the event type's detector script with `--annot`; for PAC,
-re-run from `turtlewave_gui`. This GUI never runs detection itself.
+exclusion (each package is complete). The dialog then suggests an
+`examples/rerun_detection.py` command with this recording's files (`--annot
+rerun_sidecar.xml`, `--eeg`, `--db`, `--event-type`, `--method`, `--freq`,
+`--stages`). `--channels` is `redetect_channels.csv` when channels are queued;
+otherwise it is `channels.csv` and every kept channel is re-detected. For PAC,
+re-run from `turtlewave_gui` with `rerun_sidecar.xml`. This GUI never runs
+detection itself.
 
 See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels.md) for the full hand-off flow.
 

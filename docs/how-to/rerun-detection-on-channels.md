@@ -28,10 +28,20 @@ In `eeg_review_gui`, choose **File ▸ Export re-run package…**. This:
 4. Writes `redetect_channels.csv` — **only** the channels the reviewer
    explicitly queued for re-detection (skipped entirely if none were queued).
 
-The dialog ends with a suggested command: `examples/rerun_detection.py …
---channels redetect_channels.csv` when channels are queued, otherwise the event
-type's detector script with `--annot`. For PAC there is no command-line re-run;
-re-run it from `turtlewave_gui` with `rerun_sidecar.xml`. Take note of the backup
+The dialog ends with a suggested `examples/rerun_detection.py` command with this
+recording's files (`--annot rerun_sidecar.xml`, `--eeg`, `--db`, `--event-type`,
+`--method`, `--freq`, `--stages`). With channels queued it says "Re-detects the
+queued channels only:" and passes `--channels redetect_channels.csv`. With
+nothing queued it says "Nothing is queued, so every kept channel (channels.csv)
+is re-detected:" and passes `--channels channels.csv`; excluded channels are not
+touched and keep their old rows. For PAC there is no command-line re-run; re-run
+it from `turtlewave_gui` with `rerun_sidecar.xml`.
+
+!!! warning
+    A whole-montage re-run replaces every kept channel's events. Sample
+    decisions on events whose end time moves become void. The snapshot is the
+    rollback.
+ Take note of the backup
 directory path; you'll pass files from it below.
 
 ## Step 2 — Run the re-run driver
