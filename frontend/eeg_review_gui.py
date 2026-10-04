@@ -11498,7 +11498,10 @@ class EventReviewGUI(QMainWindow):
                f" ({n_new} new since the last package)\n\n"
                f"Re-running detection OVERWRITES wonambi/*_results + the DB — "
                f"the snapshot above is your rollback.\n\n"
-               + (f"Run e.g.:\n  {cmd}\n\n" if cmd else
+               + ((("Re-detects the queued channels only:" if redetect else
+                    "Nothing is queued, so every kept channel "
+                    "(channels.csv) is re-detected:")
+                   + f"\n  {cmd}\n\n") if cmd else
                   f"There is no command-line re-run for {evt}; re-run it "
                   f"from turtlewave_gui with rerun_sidecar.xml.\n\n")
                + "Files written. OK.")

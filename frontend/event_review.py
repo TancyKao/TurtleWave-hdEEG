@@ -1084,10 +1084,8 @@ def rerun_summary(n_kept, excluded, queued_excluded):
     return text
 
 
-#: per-event-type detector script for a whole re-run from a package
-RERUN_SCRIPTS = {'spindle': 'examples/hdEEG_spindle_detector.py',
-                 'slow_wave': 'examples/hdEEG_sw_detector.py',
-                 'k_complex': 'examples/hdEEG_kcomplex_detector.py'}
+#: event types examples/rerun_detection.py can re-detect (its --event-type)
+RERUN_EVENT_TYPES = ('spindle', 'slow_wave', 'k_complex')
 
 
 def shell_quote(path, windows=None):
@@ -1160,37 +1158,29 @@ def file_belongs(path, subjects):
 
 def rerun_command(event_type, sidecar, channels_csv, redetect_csv=None,
                   eeg=None, db=None, method=None, band=None, stages=None):
-    """The command suggested after ``Export re-run package…``.
-
-    With queued channels (``redetect_csv``) it is the scoped re-run,
-    ``examples/rerun_detection.py`` (re-detects only those channels and
-    replaces their rows in the database); without, the detector script of
-    the event type under review over the kept channels. Both read the
-    package's ``rerun_sidecar.xml`` (``--annot``), whose scorer rater holds
-    the excluded time. ``None`` for an event type with no command-line
-    re-run (PAC).
+    """The command suggested after ``Export re-run package…``: always
+    ``examples/rerun_detection.py``, which takes this recording's EEG file,
+    database, method, band and stages explicitly and replaces the rows of
+    exactly the channels it is given (delete, then insert). ``--channels``
+    is ``redetect_channels.csv`` when channels are queued, else
+    ``channels.csv`` (every kept channel). The tutorial detector scripts are
+    not suggested: they hard-code another recording's paths and settings.
+    Paths are quoted for the shell. ``None`` for an event type the script
+    cannot re-detect (PAC).
     """
     evt = str(event_type)
-    q = shell_quote
-    sidecar, channels_csv = q(sidecar), q(channels_csv)
-    redetect_csv = q(redetect_csv) if redetect_csv else None
-    eeg = q(eeg) if eeg else None
-    db = q(db) if db else None
-    if redetect_csv:
-        if evt not in RERUN_SCRIPTS:
-            return None
-        lo, hi = band if band else ('<lo>', '<hi>')
-        freq = (f"{lo:g} {hi:g}" if isinstance(lo, (int, float))
-                else f"{lo} {hi}")
-        return (f"python examples/rerun_detection.py --annot {sidecar} "
-                f"--eeg {eeg or q('<EEG file>')} --db {db or q('<database>')} "
-                f"--channels {redetect_csv} --event-type {evt} "
-                f"--method {method or '<method>'} --freq {freq} "
-                f"--stages {' '.join(stages) if stages else '<stages>'}")
-    script = RERUN_SCRIPTS.get(evt)
-    if script is None:
+    if evt not in RERUN_EVENT_TYPES:
         return None
-    return f"python {script} --annot {sidecar} --channels {channels_csv}"
+    q = shell_quote
+    lo, hi = band if band else (None, None)
+    freq = (f"{lo:g} {hi:g}" if isinstance(lo, (int, float))
+            and isinstance(hi, (int, float)) else f"{q('<lo>')} {q('<hi>')}")
+    return (f"python examples/rerun_detection.py --annot {q(sidecar)} "
+            f"--eeg {q(eeg) if eeg else q('<EEG file>')} "
+            f"--db {q(db) if db else q('<database>')} "
+            f"--channels {q(redetect_csv or channels_csv)} --event-type {evt} "
+            f"--method {q(method) if method else q('<method>')} --freq {freq} "
+            f"--stages {' '.join(q(x) for x in stages) if stages else q('<stages>')}")
 
 
 def detector_text(view):

@@ -2070,23 +2070,43 @@ check('10.pkg', "[library read] the second package holds both exclusions "
           'last package)' in msgs[1]
       and rq == [(50.0, 52.0, '(all)'), (55.0, 57.0, '(all)')],
       repr((pkgs, artefacts_of(side2), rq, msgs[1][-400:] if msgs else '')))
-check('10.cmd', "[library read] the suggested command: the spindle detector "
-      "without a queue; the scoped rerun_detection.py with the run's method, "
-      "band and stages when channels are queued; one per event type",
-      cmd_spindle.startswith('python examples/hdEEG_spindle_detector.py '
-                             '--annot ') and '--channels ' in cmd_spindle
-      and cmd_queue.startswith('python examples/rerun_detection.py --annot ')
-      and '--event-type spindle --method Moelle2011 --freq 9 12 --stages '
-          'NREM2 NREM3' in cmd_queue
-      and 'redetect_channels.csv' in cmd_queue
-      and f"--db {win.db.db_path}" in cmd_queue
-      and er.rerun_command('slow_wave', 's.xml', 'c.csv').startswith(
-          'python examples/hdEEG_sw_detector.py')
-      and er.rerun_command('k_complex', 's.xml', 'c.csv').startswith(
-          'python examples/hdEEG_kcomplex_detector.py')
+import shlex as _shlex                                          # noqa: E402
+
+
+def cmd_args(cmd):
+    a = _shlex.split(cmd)
+    return {k: a[a.index(k) + 1] for k in ('--annot', '--eeg', '--db',
+                                           '--channels', '--event-type',
+                                           '--method')}, a
+
+
+a_all, raw_all = cmd_args(cmd_spindle)
+a_q, raw_q = cmd_args(cmd_queue)
+check('10.cmd', "[rerun] the suggested command is always "
+      "examples/rerun_detection.py with this recording's database, method, "
+      "band and stages; --channels is channels.csv (every kept channel) with "
+      "nothing queued and redetect_channels.csv with a queue; the dialog "
+      "says which; never a tutorial detector script; None for PAC",
+      raw_all[:2] == ['python', 'examples/rerun_detection.py']
+      and raw_q[:2] == ['python', 'examples/rerun_detection.py']
+      and os.path.basename(a_all['--channels']) == 'channels.csv'
+      and os.path.basename(a_q['--channels']) == 'redetect_channels.csv'
+      and os.path.basename(a_all['--annot']) == 'rerun_sidecar.xml'
+      and a_all['--db'] == win.db.db_path == a_q['--db']
+      and a_all['--event-type'] == 'spindle' and a_all['--method'] == 'Moelle2011'
+      and raw_all[raw_all.index('--freq') + 1:raw_all.index('--freq') + 3]
+      == ['9', '12']
+      and raw_all[raw_all.index('--stages') + 1:] == ['NREM2', 'NREM3']
+      and 'every kept channel (channels.csv) is re-detected' in msgs[1]
+      and 'Re-detects the queued channels only:' in msgs[2]
+      and not any('hdEEG_' in c for c in (cmd_spindle, cmd_queue))
+      and all(er.rerun_command(t, 's.xml', 'c.csv').startswith(
+          'python examples/rerun_detection.py') and f'--event-type {t}'
+          in er.rerun_command(t, 's.xml', 'c.csv')
+          for t in ('slow_wave', 'k_complex'))
       and er.rerun_command('pac', 's.xml', 'c.csv') is None
-      and 'hdEEG_sw_detector' not in cmd_spindle, repr((cmd_spindle,
-                                                       cmd_queue)))
+      and not hasattr(er, 'RERUN_SCRIPTS'),
+      repr((cmd_spindle, cmd_queue)))
 check('10.rec', "[library read] the tooltips and Design notes say the "
       "review-qc XML is a record that detection does not read, and that an "
       "exclusion takes effect through a re-run package",
