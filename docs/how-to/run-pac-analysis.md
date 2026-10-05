@@ -49,6 +49,30 @@ instead.
     that way with new ones** — they were computed over a different amount of
     signal.
 
+## Use the PAC Analysis tab
+
+The **PAC Analysis** tab of `turtlewave_gui` sets up the same analysis without
+code.
+
+![PAC Analysis tab](../images/gui_pac_v4.6.0.png)
+
+*The PAC Analysis tab with PAC Type set to SW-Spindle.*
+
+1. **PAC Analysis Method**: **PAC Type** selects the kind of coupling. Here it
+   is `SW-Spindle`.
+2. **Event Selection**: pick the **Slow Wave Method** and **Spindle Method**
+   among the runs stored in the database, and set the **Time Window (s)**. The
+   **Excluded event types** line has a **Change...** link, and a note says that
+   signal inside these events is not used for coupling.
+3. **Advanced Options**: a checkbox that switches on **PAC Method**,
+   **Surrogate Method** and **Correction Method**. It is unticked in the
+   screenshot.
+4. **Channel Selection**: move channels from **Available Channels** to
+   **Selected Channels** with **Add >**, **< Remove**, **Add All >>** and
+   **<< Remove All**.
+5. **Run PAC Analysis**: starts the run. **View Results** is greyed out until
+   it has finished.
+
 ## Run coupling analysis between detected slow waves and spindles
 
 Mirror

@@ -23,8 +23,27 @@ To detect spindles with default parameters:
 2. Click **"Detect Spindles"**
 3. Wait for processing to complete
 
-![Spindle Detection Interface](../images/gui-spindle-detection.png)
-*Spindle Detection tab showing available parameters and channel selection*
+![Spindle Detection tab](../images/gui_spindle_v4.6.0.png)
+
+*The Spindle Detection tab, with the Detection Method list open.*
+
+1. **Detection Method**: the drop-down is open and lists `Moelle2011`,
+   `Ferrarelli2007`, `Lacourse2018`, `Ray2015`, `Martin2013`, `Wamsley2012`,
+   `Nir2011` and `CIRUS`.
+2. **Method-Specific Parameters**: a one-line description of the selected
+   method.
+3. **Detection Parameters**: the threshold and **RMS Parameters** of the
+   method, then **Frequency Range (Hz)**, **Duration Range (s)** and the
+   **Excluded event types** line, which has a **Change...** link.
+4. **Signal Processing Options**: the **Invert Signal** checkbox.
+5. **Sleep Stage Selection**: the stages to search. Here NREM2 and NREM3 are
+   ticked.
+6. **Channel Selection**: move channels from **Available Channels** to
+   **Selected Channels** with **Add >**, **< Remove**, **Add All >>** and
+   **<< Remove All**. **Show non-EEG channels (20)** adds the other channels to
+   the list. Channel names in italics are interpolated channels.
+7. **Detect Spindles**: starts detection. **View Results** and **Export CSV**
+   sit beside it.
 
 Results are written straight into `neural_events.db` in your output
 directory's `wonambi/` folder — there is no per-channel JSON or CSV step, and
@@ -65,8 +84,9 @@ Typical spindle bands are 11-16 Hz (all spindles) or split into slow
 
 **Channel Selection:**
 
-Select the channels of interest before running detection. If no channels are
-selected, all channels will be processed.
+Select the channels of interest before running detection. The GUI does not
+start with an empty selection: it shows the error "No channels selected. Please
+select at least one channel." Click **Add All >>** to run every channel.
 
 ### Running Detection
 
@@ -75,6 +95,24 @@ After configuring parameters:
 1. Click **"Detect Spindles"**
 2. Monitor progress in the status panel
 3. Review detection statistics when complete
+
+![Spindle detection finished message](../images/gui_spindle_detInfo_v4.6.0.png)
+
+*The message box shown when spindle detection finishes (highlighted).*
+
+The highlighted box says that the events were written to the database, gives
+the path of `neural_events.db`, and says that no CSV is written by detection.
+Use **Export CSV** on the tab if you need a flat file. It points you to the
+**Log** tab for the per-stage counts and density.
+
+![Log tab after a spindle run](../images/gui_spindle_detLogInfo_v4.6.0.png)
+
+*The Log tab after a run.*
+
+The Log lists, in order, the excluded event types, the method and its
+parameters, the database that was written, the analysed time per stage used as
+the density denominator, the number of spindles found per channel, and the
+final density line. **Clear Log** empties it.
 
 ## Using the Python API
 

@@ -58,6 +58,13 @@ For runs detected with 4.5 or earlier the check metrics are not recorded.
 [Decide whether an event is genuine](decide-if-an-event-is-genuine.md) gives the
 six checks to apply and the reason codes. A decision never removes the event.
 
+![A rejected event on the epoch strip and trace](../images/gui_review_event_reject2_v4.6.0.png)
+
+*The same event after it was rejected.*
+
+The arrow points to the event's marker in the strip above the raw trace, now an
+outlined square. On the trace the event band carries a `✕` and a dashed red edge.
+
 ## Show Only Some of a Channel's Events
 
 **Problem:** You want to see, among a channel's events, only those you decided a
@@ -190,6 +197,25 @@ Export re-run package…**) and re-detect with it; events already detected are n
 changed. The `<stem>_review-qc.xml` file beside the annotation file is a record
 of the review and is not read by detection. This is different from rejecting one event with the reason
 **Artefact**, which labels that event only.
+
+![An unsaved brushed range](../images/gui_review_event_excludeTimeRange_v4.6.0.png)
+
+*A brushed range that is not yet saved.*
+
+1. **Exclude time range…**: saves the brushed range.
+2. The brushed range, drawn in blue and labelled `not saved` on the raw and
+   filtered traces.
+3. The line `Unsaved range 04:36:11–04:36:17 (6.7 s).` gives its start, end and
+   length. **Clear range** discards it.
+
+![A saved excluded range](../images/gui_review_event_excludeTimeRange2_v4.6.0.png)
+
+*A saved exclusion on channel PPO2h.*
+
+1. The saved range, drawn with a purple hatch and the label `excluded` on the
+   raw and filtered traces.
+2. **EXCLUDED TIME (1 from PPO2h · 1 total)** in the right dock lists the range
+   (`01:17:12–01:17:20 (7.9 s)`) with a `✕` button to remove it.
 
 A saved range is drawn with a purple hatch and the label `excluded`; an unsaved
 brush is plain blue and says `not saved`. To undo an exclusion, click inside the

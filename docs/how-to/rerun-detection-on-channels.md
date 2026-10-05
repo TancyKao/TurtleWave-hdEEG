@@ -11,7 +11,26 @@ channel's rows in `neural_events.db`.
 
 ## Step 1 — Export the re-run package from the review GUI
 
-In `eeg_review_gui`, choose **File ▸ Export re-run package…**. This:
+A time range you exclude in the Epochs tab does not change events already
+detected. It takes effect through this package.
+
+![A saved time exclusion in the Epochs tab](../images/gui_review_event_excludeTimeRange2_v4.6.0.png)
+
+*A saved exclusion (hatched, `excluded`) and its row under **EXCLUDED TIME**.*
+
+The status line at the bottom of the screenshot says the exclusion takes effect
+when you export a re-run package (**File ▸ Export re-run package…**) and
+re-detect with it.
+
+In `eeg_review_gui`, choose **File ▸ Export re-run package…**.
+
+![File menu open with Export re-run package selected](../images/gui_review_event_exportReRunpackage_v4.6.0.png)
+
+*The File menu in the Epochs tab of a slow-wave run (PPOz, epoch 63/755, NREM2).*
+
+The arrow points to **File ▸ Export re-run package…**, the last entry in the File menu.
+
+The export:
 
 1. Snapshots the current `wonambi/*_results` directories, `*.csv` files and
    the database into `<root>/qc_backup/<timestamp>/` — your rollback point.

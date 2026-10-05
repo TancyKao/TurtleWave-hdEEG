@@ -31,7 +31,7 @@ turtlewave_gui
 The TurtleWave window should appear within a few seconds.
 
 !!! success "GUI launched successfully?"
-    Great! You should see the main interface with several tabs: Annotation, Spindle Detection, Slow Wave Detection, and PAC Analysis.
+    Great! You should see the main interface with these tabs: Setup, Annotation, Spindle Detection, Slow Wave Detection, K-Complex Detection, PAC Analysis and Log.
 
 !!! warning "GUI didn't launch?"
     If nothing happens, verify your installation:
@@ -44,14 +44,31 @@ The TurtleWave window should appear within a few seconds.
 
 Take a moment to familiarize yourself with the layout:
 
-- **Top section** - File selection and output directory
-- **Tab area** - Different analysis types (Annotation, Spindle Detection, Slow Wave Detection, PAC Analysis)
-- **Bottom panel** - Status messages and progress
+- **Setup tab** - Data Selection (EEG file, output directory, annotation file), excluded event types and dataset information
+- **Other tabs** - Annotation, the detection tabs (Spindle, Slow Wave, K-Complex, PAC Analysis) and the Log
+- **Status line** - Messages at the bottom of the window
 
-![TurtleWave GUI Setup Tab](../images/gui-setup-tab.png)
-*The main TurtleWave interface showing the Setup tab*
+![TurtleWave GUI Setup tab with data loaded](../images/gui_setup_tab_v4.6.0.png)
 
-You'll spend most of your time in the top section and the Annotation tab.
+*The Setup tab after a recording has been loaded.*
+
+The numbered markers in the screenshot are:
+
+1. **EEG Data File**: the recording to analyse. **Browse...** opens a file picker.
+2. **Output Directory**: the folder where results are written.
+3. **Annotation File (Optional)**: an existing Wonambi XML file with sleep stages.
+   Leave it empty if you are going to generate one in Step 3.
+4. **Excluded event types**: time marked with a ticked type (here Artefact,
+   Arousal and Movement) is not searched for events and is left out of the
+   density denominator. Respiratory and Snoring are unticked. **Restore
+   defaults** returns to the standard selection.
+5. **Dataset Information**: what the loader read from the file, including the
+   recording start and end, signal duration, sampling rate, channel counts, the
+   reference and the interpolated channels.
+6. The status line at the bottom, which reads `Data loaded successfully` once
+   **Load Data** has finished.
+
+You'll spend most of your time in the Setup tab and the Annotation tab.
 
 ## Step 2: Load Your EEG Data
 
@@ -59,12 +76,12 @@ Now let's load some data to analyze.
 
 ### Select Your EEG File
 
-1. Click the **"Select EEG File"** button (top left)
+1. On the **Setup** tab, click **Browse...** beside **EEG Data File**
 2. Navigate to your EEG data file
-3. Select a file with extension `.edf`, `.set`, or `.fif`
-4. Click **"Open"**
+3. Select a file with extension `.set`, `.edf` or `.bdf`
+4. Click **Open**
 
-The file path should now appear in the interface.
+The file path should now appear in the **EEG Data File** box.
 
 !!! example "Don't have data handy?"
     No problem! TurtleWave includes test data in the `tests/` directory of your installation. Look for files like `synthetic_sleep_eeg.set` to practice with.
@@ -73,17 +90,16 @@ The file path should now appear in the interface.
 
 Results need somewhere to go:
 
-1. Click **"Select Output Directory"**
+1. Click **Browse...** beside **Output Directory**
 2. Choose a folder where you want results saved
-3. Click **"Select Folder"**
+3. Click **Choose** (or **Open**, depending on your system)
 
 !!! tip "Organization tip"
     Create a dedicated `results/` folder for each subject or recording session. This keeps your analysis organized as your project grows.
 
-You should now see both paths displayed in the GUI, along with dataset information on the right panel.
+If you already have an annotation file, select it with **Browse...** beside **Annotation File (Optional)**. Otherwise leave it empty and generate one in Step 3.
 
-![Data Loaded Successfully](../images/gui-data-loaded.png)
-*Interface after successfully loading EEG data - note the dataset information panel on the right*
+Finally, click **Load Data**. You should now see the paths in the three boxes, the **Dataset Information** panel (marker 5 in the screenshot above) and the message `Data loaded successfully`.
 
 You're ready to process!
 
@@ -97,11 +113,18 @@ Think of annotations as a map of your recording. Without them, TurtleWave would 
 
 ### Run the Annotation
 
-1. Navigate to the **Annotation** tab (should already be selected)
-2. Review the default settings (they work well for most cases)
-3. Click **"Generate Annotations"**
+1. Open the **Annotation** tab
+2. Review the **Annotation Options** (**Process Artifacts**, **Process Arousals** and **Process Sleep Stages** are ticked by default and work well for most cases)
+3. Click **Generate Annotations**
 
 The process will start, and you'll see progress updates in the status panel.
+
+![TurtleWave GUI Annotation tab](../images/gui_annotation_v4.6.0.png)
+
+*The Annotation tab, with the three Annotation Options ticked.*
+
+**Generate Annotations** starts the annotation. **View Annotation File**
+stays greyed out until the file exists.
 
 !!! note "What's happening behind the scenes"
     TurtleWave is analyzing your data to identify:
@@ -121,7 +144,7 @@ This typically takes 2-5 minutes depending on your recording length.
 
 ### Confirm Success
 
-Wait for the message: "Annotation complete"
+Wait for the message "Annotations have been generated successfully". The status line reads `Annotations generated successfully`.
 
 !!! success "Annotation finished?"
     Excellent! You've completed the foundation step. The annotations are automatically saved in your output directory as an XML file.
@@ -132,33 +155,54 @@ Now for the exciting part—detecting actual sleep events!
 
 ### What Are Sleep Spindles?
 
-Sleep spindles are brief bursts of brain activity (11-16 Hz) that occur during sleep, particularly in stage N2. They're important markers of memory consolidation and sleep quality.
+Sleep spindles are brief bursts of brain activity (roughly 9-16 Hz, depending on the definition) that occur during sleep, particularly in stage N2. They're important markers of memory consolidation and sleep quality.
 
 ### Configure Detection
 
 1. Switch to the **Spindle Detection** tab
 2. Review the default parameters:
-    - **Frequency range:** 11-16 Hz (typical for spindles)
-    - **Duration:** 0.5-2.0 seconds
-    - **Detection threshold:** Default (works for most data)
+    - **Detection Method:** `Moelle2011`
+    - **Frequency Range (Hz):** Min 9.00, Max 12.00
+    - **Duration Range (s):** Min 0.50, Max 3.00 (the tab fills these from the selected method, so they change when you pick another method)
+    - **Threshold (σ):** the method's own default
+    - **Sleep Stage Selection:** the stages to search; tick NREM2 and NREM3 for this tutorial
 
 For this tutorial, keep the defaults—they're optimized for typical sleep recordings.
 
-![Spindle Detection Interface](../images/gui-spindle-detection.png)
-*Spindle Detection tab showing parameter options and channel selection*
+![Spindle Detection tab](../images/gui_spindle_v4.6.0.png)
+
+*The Spindle Detection tab, with the Detection Method list open.*
+
+1. **Detection Method**: the drop-down is open and lists `Moelle2011`,
+   `Ferrarelli2007`, `Lacourse2018`, `Ray2015`, `Martin2013`, `Wamsley2012`,
+   `Nir2011` and `CIRUS`.
+2. **Method-Specific Parameters**: a one-line description of the selected
+   method.
+3. **Detection Parameters**: the threshold and **RMS Parameters** of the
+   method, then **Frequency Range (Hz)**, **Duration Range (s)** and the
+   **Excluded event types** line, which has a **Change...** link.
+4. **Signal Processing Options**: the **Invert Signal** checkbox.
+5. **Sleep Stage Selection**: the stages to search. Here NREM2 and NREM3 are
+   ticked.
+6. **Channel Selection**: move channels from **Available Channels** to
+   **Selected Channels** with **Add >**, **< Remove**, **Add All >>** and
+   **<< Remove All**. **Show non-EEG channels (20)** adds the other channels to
+   the list. Channel names in italics are interpolated channels.
+7. **Detect Spindles**: starts detection. **View Results** and **Export CSV**
+   sit beside it.
 
 !!! tip "About these parameters"
     The defaults work well for most adult sleep data. As you gain experience, you might adjust these based on your specific research questions or population characteristics.
 
 ### Run Detection
 
-Click **"Run Spindle Detection"**
+Select at least one channel (**Add >** or **Add All >>**), then click **Detect Spindles**
 
 You'll see:
 
-- Progress updates as each channel is processed
-- A running count of detected spindles
-- Estimated time remaining
+- Progress messages in the **Log** tab as each channel is processed
+- A count of the spindles found in each channel
+- The status line changes to `Spindle detection completed` at the end
 
 !!! note "Processing time"
     For a typical overnight recording with 64 channels, expect 5-10 minutes. High-density arrays (128+ channels) take longer but use the same simple workflow.
@@ -166,6 +210,20 @@ You'll see:
 ### Watch the Progress
 
 As detection runs, the status panel shows which channels are being processed. This is normal—TurtleWave analyzes each channel independently, then combines results.
+
+When detection ends, a message box confirms it:
+
+![Spindle detection finished message](../images/gui_spindle_detInfo_v4.6.0.png)
+
+*The message box shown when spindle detection finishes (highlighted).*
+
+The highlighted box says that the events were written to the database, gives the path of `neural_events.db`, and says that no CSV is written by detection. Use **Export CSV** on the tab if you need a flat file. It points you to the **Log** tab for the per-stage counts and density.
+
+![Log tab after a spindle run](../images/gui_spindle_detLogInfo_v4.6.0.png)
+
+*The Log tab after a run.*
+
+The Log lists, in order, the excluded event types, the method and its parameters, the database that was written, the analysed time per stage used as the density denominator, the number of spindles found per channel, and the final density line. **Clear Log** empties it.
 
 !!! success "Detection complete?"
     Fantastic! You've just detected your first sleep spindles. Let's see what you found.
@@ -176,11 +234,11 @@ Time to examine what you've accomplished!
 
 ### Check the Statistics
 
-After detection completes, the Results panel displays:
+After detection completes, the **Log** tab reports:
 
-- **Total spindles detected** - Across all channels and sleep stages
-- **Distribution by sleep stage** - Where spindles occurred
-- **Channel-wise counts** - Which brain regions showed most activity
+- **Total spindles detected** - Across all selected channels
+- **Spindle density per stage** - Events per minute of searched time
+- **Channel-wise counts** - Which channels showed most activity
 
 Take a moment to review these numbers. They tell the story of your data.
 

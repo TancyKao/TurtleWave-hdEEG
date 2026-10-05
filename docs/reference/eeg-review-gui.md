@@ -70,6 +70,37 @@ Two tabs, plus two docks:
 
 ## Channels Tab
 
+![Channels (QC) tab of the review GUI](../images/gui_review_channels_v4.6.0.png)
+
+*The Channels (QC) tab with a spindle run loaded.*
+
+1. **File** menu, open: **Open Database…**, **Open EEG File…**, **Open Annotation File…** and **Export re-run package…**.
+2. The source indicators `DB`, `XML` and `EEG 277 ch` in the top bar, with the
+   recording length (`rec 5h 21m`) and total sleep time (`TST 5h 1m`) beside
+   them.
+3. **EVENT TYPE** in the Filters dock: **Slow wave**, **Spindle** (ticked, with
+   its event count), **K-complex** and **PAC**.
+4. **METHOD** (`All Methods`) and **FREQUENCY BAND** (`All Frequencies`) lists.
+5. **CHANNELS**: a search box, the channel list with `~` marking interpolated
+   channels, and the **All** and **None** buttons.
+6. The **1 · Channels (QC)** tab, next to **2 · Epochs**.
+7. **Stage** buttons: `NREM2`, `NREM3` and `NREM2 + NREM3`.
+8. The **Show** (`All channels (257)`) and **Sort** (`Amp z ↓`) lists.
+9. The **Topography & detail** dock, with the topography list set to `Event
+   density` and the scalp map below it.
+10. **WORST EVENTS — ALL CHANNELS · spindle**: the global list; a click jumps to
+    that channel and epoch.
+11. **SELECTED CHANNEL**: the detail of the channel selected in the table
+    (`PPOz`).
+12. The **EVENT** and **DECISION** panels. They are inactive here because no
+    event is selected; select one on the Epochs tab.
+13. **Queue all HARD (23)**, in the bar under the table beside **Open in
+    Epochs**, **Exclude channel** and **Add to re-detect queue** for the
+    selected channel.
+14. The status bar summary: reviewer, event type, method, band, channel count,
+    check counts and `channel(s) excluded`.
+15. The status-bar message about the selected event.
+
 Top to bottom: a banner (only while a review sample is active), a control row,
 the channel table and a bottom action bar for the selected channel. The right dock holds the topography and, under it, the flagged-channel
 list. The top bar shows `detector: Moelle2011 · 11–16 Hz` for the run in view,
@@ -266,6 +297,32 @@ show. An undecided sample event is drawn without the outlier mark on the trace.
 See [Decide whether an event is genuine](../how-to/decide-if-an-event-is-genuine.md).
 
 ## Epochs Tab Layout
+
+![Epochs tab of the review GUI](../images/gui_review_event_v4.6.0.png)
+
+*The Epochs tab with one outlier event selected on channel TP8.*
+
+1. The **2 · Epochs** tab.
+2. The drill header (`DRILL: CHANNEL`, `TP8 · spindle · n=415 · density 1.29
+   ev/min`), the `Outlier rule` line and the epoch strip below them.
+3. The **Show events** row: `unreviewed`, `accepted`, `rejected`, `unsure`.
+4. The `filtered 9–12 Hz (from events)` trace under the raw trace, with its
+   **Full range** checkbox. The `clipped at …` note on each trace shows when a
+   sample lies beyond the drawn range.
+5. **Channel-level: Exclude channel**, under the **Clear range** and **Exclude
+   time range…** row.
+6. The **Neighbours** rows: `TP8 · target`, then the nearest channels by rank,
+   with a bar under a trace where an event was detected on that channel.
+7. The epoch navigation: **Prev**, **◀◀ Prev outlier**, **Next outlier ▶▶**
+   and **Next**, with the epoch label `Epoch 614/755 · 04:35:32–04:36:02 ·
+   NREM2 · 1 events (1 outlier)`.
+8. **SELECTED CHANNEL** and **EVENT 1 OF 1 IN EPOCH**: `Signal vs background`,
+   `Duration`, `Peak freq` and `Amplitude outlier`.
+9. **DECISION**: **Accept A**, **Reject R**, **Unsure U**, the reason grid, the
+   comment field, **Prev** and **Next**, and the progress line.
+10. **WORST EPOCHS ON TP8**.
+11. **ROBUST Z-SCORES**: `mean amp`, `p95 amp` and `max p2p`.
+12. The status-bar message for the selected event.
 
 - The centre column is a vertical splitter. The top pane holds the epoch strip,
   navigation, the raw and filtered traces and the action rows; the bottom pane
@@ -484,17 +541,30 @@ sample; the 30 shared events are a subset used for agreement.
 A non-modal window, titled `Precision report · {subject}`, that refreshes when a
 decision is written in sample mode, or undone. A free-browsing decision or
 **Clear** leaves an open report stale until you reopen it. It fits one screen
-with no scrolling. Top to bottom:
+with no scrolling.
+
+![Precision report window](../images/gui_review_event_precision_report_v4.6.0.png)
+
+*The Precision report window opened over a finished sample.*
+
+1. **Exit sample**, on the Review Sample bar.
+2. **Precision report…**, on the same bar.
+3. The window `Precision report · sub-02dg`.
+
+Top to bottom, the window shows:
 
 ```text
-Spindles · Moelle2011 11–16 Hz · reviewer TK
-TK reviewed 120 of 120 sampled events: 119 accepted, 1 rejected (artefact 1).
-Estimated precision: 99 % (95 % confidence 95–100 %)
-Looks trustworthy (every region ≥ 80 %)
+Spindles · Moelle2011 9–12 Hz · reviewer TK
+TK reviewed 120 of 120 sampled events: 117 accepted, 3 rejected (artefact 1, eye movement 1, too short 1).
+Estimated precision: 98 % (95 % confidence 92–100 %)
+Every region ≥ 80 %
 
             NREM2   NREM3   All stages
 frontal     100 %   100 %   100 %
-parietal    100 %    93 %    99 %
+central      92 %   100 %    93 %
+parietal    100 %    92 %    99 %
+temporal    100 %    92 %   100 %
+occipital   100 %   100 %   100 %
 
 No second reviewer yet.
                         [ Copy summary ] [ Export CSV… ] [ Close ]
@@ -506,8 +576,8 @@ No second reviewer yet.
   Double-click a row to open that event in the Epochs tab; the report stays open.
 - **Precision line.** Precision weighted to all of the night's events with a 95 %
   Wilson confidence range. Unsure events are left out.
-- **Verdict.** `Looks trustworthy (every region ≥ 80 %)` or `Check parietal ·
-  NREM2 (54 %): below 80 %.` (three groups listed, then `and n more`). Groups
+- **Verdict.** `Every region ≥ 80 %` (`Every region's lower bound ≥ 80 %` when the rule
+  uses the lower 95 % bound) or `Check parietal · NREM2 (54 %): below 80 %.` (three groups listed, then `and n more`). Groups
   with fewer than 10 decided events show `—` and are not judged; the verdict says
   how many.
 - **Table.** Cells are percentages only; a cell below the rule reads `54 % ▼`.

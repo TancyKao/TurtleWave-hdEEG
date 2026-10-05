@@ -25,6 +25,14 @@ own. For the reasoning behind each, see
   **Help ▸ What the event figures mean**) opens a short explanation that works
   without a network connection. Hover any row for the numbers behind it.
 
+![Reviewer name prompt](../images/gui_review_event_reject_v4.6.0.png)
+
+*The `Reviewer name` prompt, opened by the first decision of a session.*
+
+The prompt asks for your name or initials (here `TK`) and has **Cancel** and
+**OK**. Behind it, **Reject** is armed in the **DECISION** panel and the reason
+grid is waiting, with `1 Artefact` outlined.
+
 ## What the Event panel shows
 
 Under the header `EVENT i OF n IN EPOCH`, one line gives the time, the channel,
@@ -100,6 +108,18 @@ Where: the **Neighbours** group under the filtered trace. The target is on top
 and a short bar under a neighbour's trace marks an event the detector found on
 that channel. All rows share one scale, given in the legend.
 
+![Neighbours group under the traces](../images/gui_review_event_det_neighbors_v4.6.0.png)
+
+*A spindle on TP8 with the Neighbours group open.*
+
+1. The raw trace. The two thin blue lines mark the start and end of the
+   selected event.
+2. The filtered 9–12 Hz trace for the same window.
+3. The **Neighbours** group: `TP8 · target` on top, then the nearest channels
+   labelled by rank (`TTP8 · 1 · detected`, `TP8h · 2 · detected`, and so on).
+   A `~` before a name (`~TPP8`) marks an interpolated channel, and the bar under
+   a trace marks the event detected on that channel.
+
 ### 6. Check the eye and muscle channels
 
 A rise in chin muscle activity, or eye movements, during the burst means an
@@ -110,6 +130,22 @@ mark the start and end of the event. Each row is scaled to its own signal in thi
 epoch, and the label at its right gives the size of that scale; where the file
 states no unit the label says `no unit in file`, so compare the shape and timing,
 not the numbers.
+
+![Physiology group under the traces](../images/gui_review_event_physiology_v4.6.0.png)
+
+*The Physiology group for an outlier event on TP8.*
+
+1. The **2 · Epochs** tab.
+2. The pink box and arrow (added to the screenshot) show that the selected
+   event sits at the same moment on every row: the raw trace, the filtered
+   trace and the physiology rows. The arrow runs from the current epoch on the
+   overview strip.
+3. **Channel-level: Exclude channel**.
+4. The **PHYSIOLOGY (4)** group header, below the collapsed **NEIGHBOURS**
+   header.
+5. The four rows: `EOG · VEOG`, `EOG · HEOG`, `Chin EMG · EMGChin` and
+   `ECG · ECG`. The label at the right of each row gives its scale (for example
+   `±0.05 · no unit in file`), and the line under them lists the filters used.
 
 ## Record the decision
 

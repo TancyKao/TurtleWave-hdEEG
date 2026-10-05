@@ -111,6 +111,20 @@ To draw it in the GUI:
    newest. If the run has no stored figures, the dialog says the sample is
    stratified by region and stage only.
 
+![The REVIEW SAMPLE bar and the Draw review sample dialog](../images/gui_review_draw_sample_v4.6.0.png)
+
+*The Draw review sample dialog, opened from the Epochs tab.*
+
+1. **Draw sample…**, on the `REVIEW SAMPLE` bar, which reads `No review sample
+   for this run yet.`
+2. The `Draw review sample` dialog: the `Subject` and `Events` lines (here
+   `sub-02dg` and `spindles · Moelle2011 9–12 Hz · run 2026-10-01 (9f438a5)`),
+   **Sample size** (`120`), **Seed** (`77296`, with the note `random; keep it
+   to redraw the same sample`), the table of `Region × stage`, `events in
+   run`, `in sample` and `of which flagged`, and **Cancel** and **Draw**. The
+   note under the table says that event checks are not recorded for this run,
+   so the sample is stratified by region and stage only.
+
 The preview in the dialog comes from the library. To see the allocation from
 Python without writing anything, call `preview_allocation` with the same
 arguments as `draw_review_sample`; it returns the cells with their sizes and
@@ -166,6 +180,24 @@ region needs more.
    While you work, the bar shows the time left at your own pace; the done state
    shows `· done` with no estimate.
 
+![The Epochs tab during sample review](../images/gui_review_draw_sample2_v4.6.0.png)
+
+*A sample event under review, before any decision.*
+
+1. The `REVIEW SAMPLE` bar in sample mode: `0 of 120 in sample · 0 unsure`, with
+   **Exit sample**, **Precision report…** and **Show other reviewers**.
+2. The event row above the raw trace: one square per event in this epoch; the
+   outlined one is the selected event. Sample events are the blue ticks on the
+   epoch strip.
+3. The **Neighbours** group, open for `CCP4`.
+4. **SELECTED CHANNEL** and **EVENT 5 OF 7 IN EPOCH**, with the line `Sample
+   event 1 of 120 · central · NREM2` and `Labels hidden until you accept or
+   reject this sample event.`
+5. **DECISION**, with `Progress  0 of 120 in sample` and the checkbox **Go to
+   next sample event after deciding**.
+6. The status bar: `Reviewer: TK`, the channel and epoch, and `Decisions save to
+   neural_events.db as you make them.`
+
 Decisions on events outside the sample are saved, and the status line says
 `Saved, outside the review sample: not counted in precision.`
 
@@ -214,18 +246,34 @@ the previous rows of that sample, reviewer and label source.
 In the GUI, **Precision report…** (on the bar and under **Review**) opens a
 short, non-modal window that refreshes when a decision is written in sample mode,
 or undone, and writes `review_precision` rows each time. A decision made while
-free-browsing, or **Clear**, leaves an open report stale until you reopen it. It
-shows, top to bottom:
+free-browsing, or **Clear**, leaves an open report stale until you reopen it.
+
+![Precision report window](../images/gui_review_event_precision_report_v4.6.0.png)
+
+*The Precision report opened over a finished sample.*
+
+1. **Exit sample**, on the `REVIEW SAMPLE` bar, which reads `120 of 120 in
+   sample · 0 unsure · done`.
+2. **Precision report…**, on the same bar.
+3. The window `Precision report · sub-02dg`: the sentence `TK reviewed 120 of
+   120 sampled events: 117 accepted, 3 rejected (artefact 1, eye movement 1,
+   too short 1)`, `Estimated precision: 98 % (95 % confidence 92–100 %)`, the
+   green verdict `Every region ≥ 80 %`, the region by stage table, `No second
+   reviewer yet.`, and the buttons **Copy summary**, **Export CSV…** and
+   **Close**.
+
+The window shows, top to bottom:
 
 - a title line (event type, method and band, reviewer) and one sentence: `TK
-  reviewed 120 of 120 sampled events: 119 accepted, 1 rejected (artefact 1).`
+  reviewed 120 of 120 sampled events: 117 accepted, 3 rejected (artefact 1, eye movement 1,
+  too short 1).`
   The reasons are links: click one to list those events (`Rejected as artefact
   (1)`), and double-click a row to open that event in the Epochs tab. Click the
   link again to close the list;
-- `Estimated precision: 99 % (95 % confidence 95–100 %)`, weighted to all of the
+- `Estimated precision: 98 % (95 % confidence 92–100 %)`, weighted to all of the
   night's events, with unsure events left out;
-- a verdict: `Looks trustworthy (every region ≥ 80 %)`, or `Check parietal ·
-  NREM2 (54 %): below 80 %.` Groups with fewer than 10 decided events show `—` and
+- a verdict: `Every region ≥ 80 %`, or `Check parietal · NREM2 (54 %): below
+  80 %.` Groups with fewer than 10 decided events show `—` and
   are not judged;
 - a region by stage table of percentages (hover a cell for the confidence range
   and counts; a cell below the rule reads `54 % ▼`);

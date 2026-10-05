@@ -57,6 +57,37 @@ example the share of events whose peak lies outside the band) are listed under
 the topography; the `n checks flagged` link above the table takes you there. The
 **Stage**, **Show** and **Sort** controls above the table change what you see.
 
+![Channels (QC) tab of the review GUI](../images/gui_review_channels_v4.6.0.png)
+
+*The Channels (QC) tab with a spindle run loaded.*
+
+1. **File** menu, open: **Open Database…**, **Open EEG File…**, **Open Annotation File…** and **Export re-run package…**.
+2. The source indicators `DB`, `XML` and `EEG 277 ch` in the top bar, with the
+   recording length (`rec 5h 21m`) and total sleep time (`TST 5h 1m`) beside
+   them.
+3. **EVENT TYPE** in the Filters dock: **Slow wave**, **Spindle** (ticked, with
+   its event count), **K-complex** and **PAC**.
+4. **METHOD** (`All Methods`) and **FREQUENCY BAND** (`All Frequencies`) lists.
+5. **CHANNELS**: a search box, the channel list with `~` marking interpolated
+   channels, and the **All** and **None** buttons.
+6. The **1 · Channels (QC)** tab, next to **2 · Epochs**.
+7. **Stage** buttons: `NREM2`, `NREM3` and `NREM2 + NREM3`.
+8. The **Show** (`All channels (257)`) and **Sort** (`Amp z ↓`) lists.
+9. The **Topography & detail** dock, with the topography list set to `Event
+   density` and the scalp map below it.
+10. **WORST EVENTS — ALL CHANNELS · spindle**: the global list; a click jumps to
+    that channel and epoch.
+11. **SELECTED CHANNEL**: the detail of the channel selected in the table
+    (`PPOz`).
+12. The **EVENT** and **DECISION** panels. They are inactive here because no
+    event is selected; select one on the Epochs tab.
+13. **Queue all HARD (23)**, in the bar under the table beside **Open in
+    Epochs**, **Exclude channel** and **Add to re-detect queue** for the
+    selected channel.
+14. The status bar summary: reviewer, event type, method, band, channel count,
+    check counts and `channel(s) excluded`.
+15. The status-bar message about the selected event.
+
 Use the left filter dock to switch event type (spindle / slow wave /
 K-complex / PAC) and to narrow by method or frequency band. Channels flagged
 as outliers (hard or soft, based on a robust z-score against the rest of the
@@ -83,9 +114,35 @@ epochs, or the prev/next buttons to step one epoch at a time.
 
 ## Step 5: Look at One Event and Record a Decision
 
+![Epochs tab of the review GUI](../images/gui_review_event_v4.6.0.png)
+
+*The Epochs tab with one outlier event selected on channel TP8.*
+
+1. The **2 · Epochs** tab.
+2. The drill header (`DRILL: CHANNEL`, `TP8 · spindle · n=415 · density 1.29
+   ev/min`), the `Outlier rule` line and the epoch strip below them.
+3. The **Show events** row: `unreviewed`, `accepted`, `rejected`, `unsure`.
+4. The `filtered 9–12 Hz (from events)` trace under the raw trace, with its
+   **Full range** checkbox. The `clipped at …` note on each trace shows when a
+   sample lies beyond the drawn range.
+5. **Channel-level: Exclude channel**, under the **Clear range** and **Exclude
+   time range…** row.
+6. The **Neighbours** rows: `TP8 · target`, then the nearest channels by rank,
+   with a bar under a trace where an event was detected on that channel.
+7. The epoch navigation: **Prev**, **◀◀ Prev outlier**, **Next outlier ▶▶**
+   and **Next**, with the epoch label `Epoch 614/755 · 04:35:32–04:36:02 ·
+   NREM2 · 1 events (1 outlier)`.
+8. **SELECTED CHANNEL** and **EVENT 1 OF 1 IN EPOCH**: `Signal vs background`,
+   `Duration`, `Peak freq` and `Amplitude outlier`.
+9. **DECISION**: **Accept A**, **Reject R**, **Unsure U**, the reason grid, the
+   comment field, **Prev** and **Next**, and the progress line.
+10. **WORST EPOCHS ON TP8**.
+11. **ROBUST Z-SCORES**: `mean amp`, `p95 amp` and `max p2p`.
+12. The status-bar message for the selected event.
+
 1. In the Epochs tab, click one of the shaded bands on the raw trace. We've
-   selected an event, and the **Event** panel in the right dock fills with its
-   duration, half-wave count, peak frequency and amplitude figures.
+   selected an event, and the **Event** panel in the right dock fills with
+   four rows: Signal vs background, Duration, Peak freq and Amplitude outlier.
 2. Press **Review ▸ Reviewer name…** and enter your initials if the GUI hasn't
    asked yet. Nothing is saved without a name.
 3. Look at the raw trace, then the figures, and press `A` to accept the event.
