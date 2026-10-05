@@ -5,11 +5,26 @@ it points every ``QSettings`` in the default format at a temporary INI
 directory. :func:`untouched` then says whether the real review-GUI
 preferences file (macOS: ``~/Library/Preferences/
 com.turtlewave.eeg_review_gui.plist``) kept its modification time and size.
+
+Importing this module also gives Qt's ``offscreen`` platform the system
+fonts on Windows. With the PyQt5 wheels that platform finds no fonts there
+(``QFontDatabase().families()`` is empty): every character measures as a
+fixed 17 px box and nothing is painted, so text widths come out about twice
+the real ones and glyph images are blank. ``QT_QPA_FONTDIR`` points it at
+``%WINDIR%\\Fonts`` (82 families on windows-latest); it must be set before
+the ``QApplication`` exists, and an explicit value is kept. The native
+``windows`` platform is unaffected.
 """
 import os
+import sys
 import tempfile
 
-from PyQt5 import QtCore
+if (sys.platform == 'win32'
+        and os.environ.get('QT_QPA_PLATFORM', '').startswith('offscreen')):
+    os.environ.setdefault('QT_QPA_FONTDIR', os.path.join(
+        os.environ.get('WINDIR', r'C:\Windows'), 'Fonts'))
+
+from PyQt5 import QtCore                                    # noqa: E402
 
 REAL_PLIST = os.path.expanduser(
     '~/Library/Preferences/com.turtlewave.eeg_review_gui.plist')
