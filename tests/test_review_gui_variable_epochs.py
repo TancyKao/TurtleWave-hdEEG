@@ -217,8 +217,8 @@ check('4.8', "Next from the 1 s epoch goes to the 30 s epoch at 61 s",
       panel.raw_plot.getPlotItem().vb.viewRange()[0] == [61.0, 91.0],
       repr(panel.raw_plot.getPlotItem().vb.viewRange()[0]))
 panel._set_ranges([{'id': 7, 'start_time': 60.0, 'end_time': 91.0}])
-check('4.9', "marked-range row counts epochs from the table",
-      panel.ranges_list.item(0).text().endswith('(2 epochs)'),
+check('4.9', "marked-range row gives the range's duration (31 s), not an "
+      "epoch count", panel.ranges_list.item(0).text().endswith('(31 s)'),
       repr(panel.ranges_list.item(0).text()))
 
 dock = rg.ChannelDetailDock()
@@ -228,26 +228,37 @@ dock.exclusionClicked.connect(jumps.append)
 dock.set_marked([{'id': 1, 'start_time': 60.0, 'end_time': 61.0}])
 btn = dock._marked_layout.itemAt(0).widget().layout().itemAt(0).widget()
 btn.click()
-check('4.10', "detail dock: a 1 s mark reads '(1 epoch)'; its row selects "
+check('4.10', "detail dock: a 1 s mark reads '(1 s)'; its row selects "
       "that excluded range (the Epochs tab pages to it)",
-      btn.text().endswith('(1 epoch)') and jumps == [1],
+      btn.text().endswith('(1 s)') and jumps == [1],
       repr((btn.text(), jumps)))
 # durations in plain words, and a readable remove button [real screen]
-dock.set_marked([{'id': 2, 'start_time': 60.0, 'end_time': 91.0},
+# 10-70 s spans parts of three epochs but only one whole one: the old
+# epoch count read '1 epoch' for a 60 s range [gate]
+dock.set_marked([{'id': 2, 'start_time': 10.0, 'end_time': 70.0},
                  {'id': 3, 'start_time': 100.2, 'end_time': 105.6},
-                 {'id': 4, 'start_time': 200.0, 'end_time': 200.35}])
+                 {'id': 4, 'start_time': 200.0, 'end_time': 200.35},
+                 {'id': 5, 'start_time': 300.0, 'end_time': 425.0}])
 _rows = [dock._marked_layout.itemAt(i).widget().layout()
-         for i in range(3)]
+         for i in range(4)]
 _txt = [r.itemAt(0).widget().text() for r in _rows]
 _x = [r.itemAt(r.count() - 1).widget() for r in _rows]
-check('4.10b', "dock durations read '2 epochs' / '5.4 s' / '350 ms' (no "
-      "'sub'); the remove button shows '×', is >= 28 px wide and says "
-      "'Remove exclusion'",
-      _txt[0].endswith('(2 epochs)') and _txt[1].endswith('(5.4 s)')
-      and _txt[2].endswith('(350 ms)') and not any('sub' in t for t in _txt)
+check('4.10b', "dock rows always give the duration: '60 s' / '5.4 s' / "
+      "'350 ms' / '2 min 05 s' (no epoch count, no 'sub'); the remove "
+      "button shows '×', is >= 28 px wide and says 'Remove exclusion'",
+      _txt[0].endswith('(60 s)') and _txt[1].endswith('(5.4 s)')
+      and _txt[2].endswith('(350 ms)') and _txt[3].endswith('(2 min 05 s)')
+      and not any('sub' in t or 'epoch' in t for t in _txt)
       and all(x.text() == '×' and x.width() >= 28
               and x.toolTip() == 'Remove exclusion' for x in _x),
       repr((_txt, [(x.text(), x.width(), x.toolTip()) for x in _x])))
+_cases = [(0, 0.35), (0, 0.9996), (0, 1.0), (0, 5.44), (0, 60.0),
+          (0, 119.94), (0, 119.96), (0, 120.0), (0, 125.0), (5, 3605.4)]
+_want = ['350 ms', '1 s', '1 s', '5.4 s', '60 s', '119.9 s', '2 min 00 s', '2 min 00 s',
+         '2 min 05 s', '60 min 00 s']
+check('4.10c', "_span_text: ms below 1 s, one-decimal seconds below 120 s, "
+      "'M min SS s' from 120 s", [rg._span_text(a, b) for a, b in _cases]
+      == _want, repr([rg._span_text(a, b) for a, b in _cases]))
 dock.update_channel('Cz', events, {'_epochs': tb, '_event_type': 'spindle'})
 worst = [dock.worst_list.item(i).data(0x0100)
          for i in range(dock.worst_list.count())]

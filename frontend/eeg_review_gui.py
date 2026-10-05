@@ -1505,15 +1505,18 @@ class EpochTable:
                                     & (self.ends <= b + tol)))
 
 
-def _span_text(table, t0, t1):
-    """Length of an excluded range for a list row: whole epochs when it
-    covers any (``'1 epoch'``, ``'2 epochs'``), else ``'5.4 s'`` or
-    ``'350 ms'``."""
-    n_ep = table.count_in(t0, t1)
-    if n_ep >= 1:
-        return f"{n_ep} epoch{'' if n_ep == 1 else 's'}"
+def _span_text(t0, t1):
+    """Length of an excluded range for a list row, always as a duration
+    (a free-brushed range need not line up with epochs): ``'350 ms'``,
+    ``'5.4 s'``, ``'60 s'``, and ``'2 min 05 s'`` from 120 s up."""
     dur = abs(float(t1) - float(t0))
-    return f"{dur:.1f} s" if dur >= 1 else f"{int(round(dur * 1000))} ms"
+    ms = int(round(dur * 1000))
+    if ms < 1000:
+        return f"{ms} ms"
+    if round(dur, 1) < 120:
+        return f"{round(dur, 1):g} s"
+    m, sec = divmod(int(round(dur)), 60)
+    return f"{m} min {sec:02d} s"
 
 
 def _epoch_len_text(seconds):
@@ -3230,7 +3233,7 @@ class ChannelDetailDock(QWidget):
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)
             rl.setSpacing(4)
-            dtxt = _span_text(self._table_for(t1), t0, t1)
+            dtxt = _span_text(t0, t1)
             lbl = QPushButton(f"{_hms(t0)}–{_hms(t1)}  ({dtxt})")
             lbl.setFlat(True)
             lbl.setStyleSheet(
@@ -5684,12 +5687,7 @@ class EpochsPanel(QWidget):
             self.strip_hdr.setText(
                 f"Outlier rule: n/a — insufficient spread (n={self._amp_n})")
 
-        n = 0 if df_slice is None else len(df_slice)
-        dens = ''
-        if n and trec:
-            dens = f" · density {n / (trec / 60.0):.2f} ev/min"
-        self.title.setText(f"<b>{channel}</b> · {self._event_type} · "
-                           f"n={n}{dens}")
+        self._set_title(trec)
         # channel dropdown (montage-wide)
         chans = []
         if all_events is not None and len(all_events):
@@ -5723,6 +5721,49 @@ class EpochsPanel(QWidget):
                 pass
         self._goto_epoch(start_ep)
 
+    def _set_title(self, trec):
+        """``<b>Cz</b> · spindle · n=9 · density 0.42 ev/min`` (no density
+        without a recording length)."""
+        df_slice = self._df
+        n = 0 if df_slice is None else len(df_slice)
+        dens = ''
+        if n and trec:
+            dens = f" · density {n / (trec / 60.0):.2f} ev/min"
+        self.title.setText(f"<b>{self._channel}</b> · {self._event_type} · "
+                           f"n={n}{dens}")
+
+    def set_epoch_table(self, epochs, trec=None):
+        """Replace the epoch table of the open drill without re-drilling: an
+        annotation file opened (or unloaded) after the channel was drilled.
+        ``epochs`` is an :class:`EpochTable` or ``None`` (a synthetic 30 s
+        grid over ``trec``, unstaged). Keeps the channel, its events, the
+        reviews and the selected event; recomputes the per-epoch outliers,
+        redraws the hypnogram, strip and header, and pages to the epoch that
+        holds the selected event's start, else the current window start."""
+        if trec:
+            self._trec = float(trec)
+        if self._channel is None:
+            self._epochs = _as_epoch_table(epochs, None, self._trec)
+            self._hypno = list(self._epochs.stages) if epochs else None
+            return
+        t_now = self.span(self._epoch)[0]
+        if self._selected_uuid is not None and self._ev is not None:
+            hit = self._ev[self._ev['uuid'] == self._selected_uuid]
+            if len(hit):
+                t_now = float(hit['_start'].iloc[0])
+        self._epochs = _as_epoch_table(epochs, None, self._trec)
+        self._hypno = list(self._epochs.stages) if epochs else None
+        self._agg = _compute_epoch_outliers(
+            self._df, epochs=self._epochs, amp_col=self._amp_col)
+        self._n_max = int(self._agg['n_events'].max()) \
+            if len(self._agg) else 1
+        self._set_title(self._trec if trec else None)
+        self._set_hypno(self._hypno)
+        self._set_ranges(getattr(self, '_marked', []) or [])
+        self._render_strip()
+        self._update_shown()
+        self._goto_epoch(self._epochs.index_at(t_now))
+
     def _on_chan_combo(self, ch):
         if ch and ch != self._channel:
             # re-drill through the window (keeps DB/slice logic in one place)
@@ -5752,7 +5793,7 @@ class EpochsPanel(QWidget):
             t0, t1 = float(m['start_time']), float(m['end_time'])
             it = QtWidgets.QListWidgetItem(
                 f"{_hms(t0)} – {_hms(t1)}  "
-                f"({_span_text(self._epochs, t0, t1)})")
+                f"({_span_text(t0, t1)})")
             it.setData(Qt.UserRole, int(m['id']))
             it.setData(Qt.UserRole + 1, float(t0))   # for jump-to
             self.ranges_list.addItem(it)
@@ -10285,6 +10326,15 @@ class EventReviewGUI(QMainWindow):
         self._epoch_table_cache = (ann, table)
         return table
 
+    def _refresh_epoch_table(self):
+        """Give an open Epochs drill the epoch table of the annotation file
+        now loaded (or the unstaged grid when none is), without re-drilling;
+        an annotation opened after the drill otherwise leaves the grid."""
+        ep = self.epochs_panel
+        if ep._channel is None:
+            return
+        ep.set_epoch_table(self._epoch_table(), self._recording_seconds())
+
     def _marked_for(self, ch):
         """Channel-scoped artefact intervals (evidence_channel == ch)."""
         if self.db is None:
@@ -10909,6 +10959,7 @@ class EventReviewGUI(QMainWindow):
             self.annotations = None
             self.annot_file_path = None
             self._review_qc_sidecar = None
+            self._refresh_epoch_table()
             msgs.append(f"Annotation file unloaded: it belongs to "
                         f"{os.path.splitext(os.path.basename(ap))[0]}. Load "
                         f"the annotation for {self._recording_name()}.")
@@ -11142,6 +11193,8 @@ class EventReviewGUI(QMainWindow):
                 self._refresh_chrome()
                 if self.db is not None:
                     self.refresh_qc_dashboard()
+                # a drill opened before this file still shows the grid
+                self._refresh_epoch_table()
                 self._show_unload_message()
 
             except Exception as e:

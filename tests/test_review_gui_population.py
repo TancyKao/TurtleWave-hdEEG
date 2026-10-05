@@ -1569,6 +1569,104 @@ check('rec4', "[gate] no subject recorded: the annotation stays loaded, "
       'database (no subject recorded). Check it is the right recording.',
       repr(msg_n))
 win.close()
+
+# ---- an annotation opened after the drill reaches the Epochs tab [real] --
+import xml.etree.ElementTree as _ET                              # noqa: E402
+DB_E, EDF_E, XML_E = recording('sub-ep')
+EXACT = [(0, 30, 'NREM2'), (30, 31, 'NREM2'), (31, 61, 'NREM3'),
+         (61, 90, 'NREM3'), (90, 120, 'REM')]
+_t = _ET.parse(XML_E)
+_st = next(r for r in _t.getroot().iter('rater')
+           if r.get('name') == 'scorer').find('stages')
+for _e in list(_st):
+    _st.remove(_e)
+for _a, _b, _s in EXACT:
+    _e = _ET.SubElement(_st, 'epoch')
+    _ET.SubElement(_e, 'epoch_start').text = str(_a)
+    _ET.SubElement(_e, 'epoch_end').text = str(_b)
+    _ET.SubElement(_e, 'stage').text = _s
+    _ET.SubElement(_e, 'quality').text = 'Good'
+_t.write(XML_E)
+import sqlite3 as _sq3                                           # noqa: E402
+_c = _sq3.connect(DB_E)       # one event at 40 s, inside the 31-61 s epoch
+_c.execute("UPDATE events SET start_time = 40.0, end_time = 40.8 WHERE "
+           "rowid = (SELECT MIN(rowid) FROM events)")
+_c.commit()
+_c.close()
+win = rg.EventReviewGUI()
+win._ask_reviewer_name = lambda prefill: ('TK', True)
+win.set_reviewer_name('TK')
+win.show()
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (DB_E, ''))
+win.open_database()
+win.qc_widget.evt_combo.setCurrentText('spindle')
+win.refresh_qc_dashboard()
+win.on_qc_drill('Cz', switch_tab=True)
+app.processEvents()
+ep = win.epochs_panel
+grid_n = len(ep._epochs)
+grid_lbl = ep.epoch_lbl.text()
+grid_ok = (set(ep._epochs.stages) == {''} and ' · — · ' in grid_lbl
+           and np.allclose(ep._epochs.durations, 30.0))
+# select an event in the 31-61 s exact epoch (it sits in the 30-60 s grid
+# epoch now), then open the annotation WITHOUT re-drilling
+_evs = ep._ev.sort_values('_start')
+_pick = _evs[(_evs['_start'] >= 31.0) & (_evs['_start'] < 60.0)]
+_uuid = str(_pick['uuid'].iloc[0]) if len(_pick) else None
+ep._goto_epoch(1)
+if _uuid:
+    ep.select_event(_uuid, emit=False)
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_E, ''))
+win.open_annotation_file()
+app.processEvents()
+tb_e = ep._epochs
+lbl_e = ep.epoch_lbl.text()
+check('rec6', "[real screen] drill first, then Open Annotation File: the "
+      "Epochs tab shows the scorer's 5 exact epochs and their stages "
+      "without a re-drill (was the unstaged 30 s grid, header '—'); the "
+      "channel and the selected event are kept, on the epoch holding it",
+      grid_ok and _uuid is not None
+      and len(tb_e) == len(EXACT)
+      and [(float(a), float(b), s) for a, b, s in
+           zip(tb_e.starts, tb_e.ends, tb_e.stages)]
+      == [(float(a), float(b), s) for a, b, s in EXACT]
+      and ep._hypno == [s for _a, _b, s in EXACT]
+      and ep._channel == 'Cz' and ep._selected_uuid == _uuid
+      and ep._epoch == 2 and lbl_e.startswith('Epoch 3/5 · ')
+      and ' · NREM3 · ' in lbl_e and ' · — · ' not in lbl_e,
+      repr((grid_n, grid_lbl, len(tb_e), list(tb_e.stages), lbl_e,
+            ep._selected_uuid, _uuid)))
+# the other direction: A's annotation opened into this database is unloaded,
+# and the tab drops its staging back to the grid
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_A, ''))
+win.open_annotation_file()
+app.processEvents()
+lbl_u = ep.epoch_lbl.text()
+st_u = (win.annotations is None, len(ep._epochs), set(ep._epochs.stages),
+        ep._hypno, ep._channel)
+# and when another recording's database is opened over a staged drill, the
+# unload in the recording check (not Open Annotation File) does the same
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (XML_E, ''))
+win.open_annotation_file()
+app.processEvents()
+staged_again = len(ep._epochs) == len(EXACT)
+QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (DB_A, ''))
+win.open_database()
+app.processEvents()
+lbl_d = ep.epoch_lbl.text()
+QtWidgets.QFileDialog.getOpenFileName = _open
+check('rec7', "[real screen] an annotation unloaded as another "
+      "recording's takes its stages off the open Epochs tab: back to the "
+      "unstaged 30 s grid, header '—'",
+      st_u == (True, grid_n, {''}, None, 'Cz') and ' · — · ' in lbl_u,
+      repr((st_u, lbl_u)))
+check('rec8', "[real screen] opening another recording's database unloads "
+      "the annotation and the open Epochs tab loses its staging (unstaged "
+      "grid, header '—')", staged_again and win.annotations is None
+      and set(ep._epochs.stages) == {''} and ep._hypno is None
+      and ' · — · ' in lbl_d,
+      repr((staged_again, len(ep._epochs), lbl_d)))
+win.close()
 cmd_sp = er.rerun_command('spindle', '/tmp/pkg root/rerun_sidecar.xml',
                           '/tmp/pkg root/channels.csv',
                           '/tmp/pkg root/redetect_channels.csv',
