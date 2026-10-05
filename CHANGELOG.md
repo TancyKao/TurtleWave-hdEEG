@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.0] — 2026-10-02
+## [4.6.0] — 2026-10-05
 
 Per-event review is sample-based validation of a detection run. Review decisions are evidence about the detector and never remove events unless `exclude_rejected` is asked for.
 
