@@ -1630,6 +1630,28 @@ check('10.4', "[123] VEOG spanning ±0.05: half-range between 0.05 and 0.1, "
       and all(abs((vr[c][1] - vr[c][0]) / 2 - sc[c][1]) < 1e-9 for c in sc)
       and all(w.height() == 44 for _k, _c, w in ep.physio.rows),
       repr({c: v[2] for c, v in sc.items()}))
+_ti = ep.physio.row_text_items
+
+
+def _backed(item, w):
+    # dark, mostly opaque fill, drawn above every trace in its row
+    c = item.fill.color()
+    curves = [it for it in w.getPlotItem().items
+              if isinstance(it, pg.PlotDataItem)]
+    return (item.fill.style() == QtCore.Qt.SolidPattern
+            and c.alpha() >= 150 and max(c.red(), c.green(), c.blue()) <= 40
+            and curves and item.zValue() > max(x.zValue() for x in curves))
+
+
+check('10.4b', "[real screen] each physiology row's label and scale text "
+      "sit on a dark semi-opaque backing above the trace, and read the "
+      "row title / scale", set(_ti) == set(sc)
+      and all(_backed(t, w) and _backed(r, w)
+              and t.textItem.toPlainText() == f"{rg.PHYSIO_ROWS[k][0]} · {c}"
+              and r.textItem.toPlainText() == sc[c][2]
+              for k, c, w in ep.physio.rows for t, r in [_ti[c]]),
+      repr({c: (t.fill.color().getRgb(), t.zValue())
+            for c, (t, _r) in _ti.items()}))
 check('10.5', "[124] physiology legend", ep.physio.legend.text() ==
       'EOG 0.3–15 Hz · chin EMG above 10 Hz · ECG unfiltered · each row '
       'scaled to its own signal in this epoch · no unit stated in this file '

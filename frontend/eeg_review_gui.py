@@ -1505,6 +1505,17 @@ class EpochTable:
                                     & (self.ends <= b + tol)))
 
 
+def _span_text(table, t0, t1):
+    """Length of an excluded range for a list row: whole epochs when it
+    covers any (``'1 epoch'``, ``'2 epochs'``), else ``'5.4 s'`` or
+    ``'350 ms'``."""
+    n_ep = table.count_in(t0, t1)
+    if n_ep >= 1:
+        return f"{n_ep} epoch{'' if n_ep == 1 else 's'}"
+    dur = abs(float(t1) - float(t0))
+    return f"{dur:.1f} s" if dur >= 1 else f"{int(round(dur * 1000))} ms"
+
+
 def _epoch_len_text(seconds):
     """Epoch length for the Epochs header: ``'1 s'``, ``'2.5 s'``,
     ``'5 min 12 s'`` (60 s and over), ``'2 min'``."""
@@ -3219,15 +3230,7 @@ class ChannelDetailDock(QWidget):
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)
             rl.setSpacing(4)
-            dur = t1 - t0
-            table = self._table_for(t1)
-            n_ep = table.count_in(t0, t1)
-            if n_ep >= 1:
-                dtxt = f"{n_ep} ep"
-            elif dur >= 1:
-                dtxt = f"{dur:.1f}s sub"
-            else:
-                dtxt = f"{int(dur * 1000)}ms sub"
+            dtxt = _span_text(self._table_for(t1), t0, t1)
             lbl = QPushButton(f"{_hms(t0)}–{_hms(t1)}  ({dtxt})")
             lbl.setFlat(True)
             lbl.setStyleSheet(
@@ -3236,8 +3239,10 @@ class ChannelDetailDock(QWidget):
             lbl.clicked.connect(
                 lambda _=False, i=mid: self.exclusionClicked.emit(int(i)))
             x = QPushButton("×")
-            x.setMaximumWidth(24)
-            x.setStyleSheet("color:#f85149;font-weight:600;")
+            x.setFixedWidth(32)
+            x.setToolTip('Remove exclusion')
+            x.setStyleSheet("color:#f85149;font-weight:600;font-size:15px;"
+                            "padding:0 6px;")
             x.clicked.connect(
                 lambda _=False, i=mid: self.unmarkArtefactRequested.emit(i))
             rl.addWidget(lbl, 1)
@@ -5024,6 +5029,7 @@ class PhysioStrip(_Collapsible):
         ts, data, sf, got = out
         idx = {c: i for i, c in enumerate(got)}
         self.row_scales = {}
+        self.row_text_items = {}       # channel -> (title item, scale item)
         for kind, ch, w in self.rows:
             label, filt = PHYSIO_ROWS[kind]
             title = f"{label} · {ch}"
@@ -5041,12 +5047,18 @@ class PhysioStrip(_Collapsible):
             w.setYRange(centre - half, centre + half, padding=0)
             scale = _er.physio_scale_label(half, self._unit(ch))
             self.row_scales[ch] = (centre, half, scale)
-            t = pg.TextItem(title, anchor=(0, 0), color=THEME['text_2'])
+            # dark backing so the trace never runs through the text
+            t = pg.TextItem(title, anchor=(0, 0), color=THEME['text_2'],
+                            fill=pg.mkBrush(10, 10, 10, 200))
             t.setPos(t0, centre + half)
+            t.setZValue(20)
             w.addItem(t, ignoreBounds=True)
-            r = pg.TextItem(scale, anchor=(1, 0), color=THEME['text_3'])
+            r = pg.TextItem(scale, anchor=(1, 0), color=THEME['text_2'],
+                            fill=pg.mkBrush(10, 10, 10, 200))
             r.setPos(t1, centre + half)
+            r.setZValue(20)
             w.addItem(r, ignoreBounds=True)
+            self.row_text_items[ch] = (t, r)
         self._update_legend()
 
 
@@ -5740,7 +5752,7 @@ class EpochsPanel(QWidget):
             t0, t1 = float(m['start_time']), float(m['end_time'])
             it = QtWidgets.QListWidgetItem(
                 f"{_hms(t0)} – {_hms(t1)}  "
-                f"({self._epochs.count_in(t0, t1)} ep)")
+                f"({_span_text(self._epochs, t0, t1)})")
             it.setData(Qt.UserRole, int(m['id']))
             it.setData(Qt.UserRole + 1, float(t0))   # for jump-to
             self.ranges_list.addItem(it)

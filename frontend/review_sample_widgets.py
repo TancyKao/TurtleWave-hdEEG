@@ -471,12 +471,21 @@ class PrecisionReportDialog(QtWidgets.QDialog):
                     it.setForeground(QtGui.QColor(_MUTED))
                 self.grid.setItem(i, j, it)
                 self.cells[(region, stage or 'All stages')] = (text, tip)
+        # Size the table to its content from size hints: before the dialog
+        # is shown the headers have no laid-out width yet, and a width taken
+        # from them clipped the last column ("All s", cells cut off).
         self.grid.resizeColumnsToContents()
-        h = (self.grid.horizontalHeader().height()
-             + sum(self.grid.rowHeight(i) for i in range(len(regions))) + 4)
-        w = (self.grid.verticalHeader().width()
-             + sum(self.grid.columnWidth(j) for j in range(len(cols))) + 4)
-        self.grid.setFixedSize(max(w, 200), h)
+        hh, vh = self.grid.horizontalHeader(), self.grid.verticalHeader()
+        hfm = hh.fontMetrics()
+        for j, name in enumerate(cols):
+            self.grid.setColumnWidth(j, max(self.grid.columnWidth(j),
+                                            hfm.horizontalAdvance(name) + 24))
+        fw = 2 * self.grid.frameWidth()
+        w = (vh.sizeHint().width() + fw + 2
+             + sum(self.grid.columnWidth(j) for j in range(len(cols))))
+        h = (hh.sizeHint().height() + fw + 2
+             + sum(self.grid.rowHeight(i) for i in range(len(regions))))
+        self.grid.setFixedSize(w, h)
 
     # ---- the reason / unsure list ------------------------------------------
     def toggle_list(self, key):

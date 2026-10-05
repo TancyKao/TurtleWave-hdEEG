@@ -218,7 +218,7 @@ check('4.8', "Next from the 1 s epoch goes to the 30 s epoch at 61 s",
       repr(panel.raw_plot.getPlotItem().vb.viewRange()[0]))
 panel._set_ranges([{'id': 7, 'start_time': 60.0, 'end_time': 91.0}])
 check('4.9', "marked-range row counts epochs from the table",
-      panel.ranges_list.item(0).text().endswith('(2 ep)'),
+      panel.ranges_list.item(0).text().endswith('(2 epochs)'),
       repr(panel.ranges_list.item(0).text()))
 
 dock = rg.ChannelDetailDock()
@@ -228,9 +228,26 @@ dock.exclusionClicked.connect(jumps.append)
 dock.set_marked([{'id': 1, 'start_time': 60.0, 'end_time': 61.0}])
 btn = dock._marked_layout.itemAt(0).widget().layout().itemAt(0).widget()
 btn.click()
-check('4.10', "detail dock: a 1 s mark reads '(1 ep)'; its row selects that "
-      "excluded range (the Epochs tab pages to it)",
-      btn.text().endswith('(1 ep)') and jumps == [1], repr((btn.text(), jumps)))
+check('4.10', "detail dock: a 1 s mark reads '(1 epoch)'; its row selects "
+      "that excluded range (the Epochs tab pages to it)",
+      btn.text().endswith('(1 epoch)') and jumps == [1],
+      repr((btn.text(), jumps)))
+# durations in plain words, and a readable remove button [real screen]
+dock.set_marked([{'id': 2, 'start_time': 60.0, 'end_time': 91.0},
+                 {'id': 3, 'start_time': 100.2, 'end_time': 105.6},
+                 {'id': 4, 'start_time': 200.0, 'end_time': 200.35}])
+_rows = [dock._marked_layout.itemAt(i).widget().layout()
+         for i in range(3)]
+_txt = [r.itemAt(0).widget().text() for r in _rows]
+_x = [r.itemAt(r.count() - 1).widget() for r in _rows]
+check('4.10b', "dock durations read '2 epochs' / '5.4 s' / '350 ms' (no "
+      "'sub'); the remove button shows '×', is >= 28 px wide and says "
+      "'Remove exclusion'",
+      _txt[0].endswith('(2 epochs)') and _txt[1].endswith('(5.4 s)')
+      and _txt[2].endswith('(350 ms)') and not any('sub' in t for t in _txt)
+      and all(x.text() == '×' and x.width() >= 28
+              and x.toolTip() == 'Remove exclusion' for x in _x),
+      repr((_txt, [(x.text(), x.width(), x.toolTip()) for x in _x])))
 dock.update_channel('Cz', events, {'_epochs': tb, '_event_type': 'spindle'})
 worst = [dock.worst_list.item(i).data(0x0100)
          for i in range(dock.worst_list.count())]

@@ -578,6 +578,38 @@ check('46', "[174] a group with 6 decided reads '—' with the too-small "
       and dlg.cells[('frontal', 'NREM3')][0] == '53 % ▼'
       and all(re.match(r'^(\d+ %( ▼)?|—)$', t)
               for t, _tip in dlg.cells.values()), repr(dlg.cells))
+# All stages column: pooled region value, and fully visible [real screen]
+dlg.show()
+app.processEvents()
+_g = dlg.grid
+_last = _g.columnCount() - 1
+_df = dlg.frames[dlg.shown_reviewer()]
+
+
+def _pooled(region):
+    # independent of cell_text: the library's region row, as a whole percent
+    hit = _df[(_df['domain_type'] == 'region') & (_df['domain'] == region)]
+    if not len(hit) or int(hit.iloc[0]['n_decided']) < 10:
+        return '—'
+    return f"{int(round(100 * float(hit.iloc[0]['p_hat'])))} %"
+
+
+_regions = [_g.verticalHeaderItem(i).text() for i in range(_g.rowCount())]
+_stages = {k[1] for k in dlg.cells} - {'All stages'}
+check('46b', "[real screen] All stages cells equal the pooled region value, "
+      "the column header is not clipped, and the sample spans >= 2 stages",
+      _g.horizontalHeaderItem(_last).text() == 'All stages'
+      and len(_stages) >= 2
+      and any(_pooled(r) != '—' for r in _regions)
+      and all(_g.item(i, _last).text() == _pooled(r)
+              and _g.item(i, _last).text() != '' for i, r in
+              enumerate(_regions))
+      and _g.columnViewportPosition(_last) + _g.columnWidth(_last)
+      <= _g.viewport().width()
+      and _g.horizontalHeader().fontMetrics().horizontalAdvance('All stages')
+      < _g.columnWidth(_last),
+      repr((_g.columnViewportPosition(_last), _g.columnWidth(_last),
+            _g.viewport().width(), _stages)))
 check('47a', "[173] rule 80 % with a group at 53 %: the verdict names it, "
       "in the warn colour", dlg.verdict.text()
       == 'Check frontal · NREM3 (53 %): below 80 %.'
