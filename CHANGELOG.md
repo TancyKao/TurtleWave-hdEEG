@@ -52,6 +52,9 @@ Per-event figures and detection thresholds are not recorded for runs made before
 - Review GUI: each re-run package carries every current exclusion; a second package used to drop ranges exported in the first.
 - Review GUI: the suggested re-run command names the right script for the event type and quotes paths.
 - Review GUI: with nothing queued, the suggested re-run command re-detected a different recording (a tutorial script with hard-coded paths); it is now always rerun_detection.py with this recording's files.
+- Review GUI: the precision report's All stages column was cut off, hiding each region's pooled value.
+- Review GUI: a channel opened before the annotation file showed epochs without stages until the channel was changed.
+- Review GUI: excluded ranges show their length; the "sub" label and an understated epoch count are gone.
 
 ## [4.5.0] — 2026-10-01
 
