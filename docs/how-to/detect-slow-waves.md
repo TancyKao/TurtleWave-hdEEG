@@ -75,8 +75,26 @@ To detect slow waves with default parameters:
 2. Click **"Detect Slow Waves"**
 3. Wait for processing to complete
 
-![Slow Wave Detection Interface](../images/gui-slow-wave-detection.png)
-*Slow Wave Detection tab showing available parameters and channel selection*
+![Slow Wave Detection tab](../images/gui_slowwave_v4.6.0.png)
+
+*The Slow Wave Detection tab, with the Detection Method list open.*
+
+1. **Detection Method**: the drop-down is open and lists `Massimini2004`,
+   `AASM/Massimini2004`, `Ngo2015` and `Staresina2015`.
+2. **Method-Specific Parameters**: a short description of the selected method.
+3. **Parameters for Massimini2004**: the controls for the selected method, here
+   **Filter Settings** (**Filter Order**, **Frequency Range (Hz)**),
+   **Trough Duration (Negative Half-Wave)**, **Amplitude Thresholds**
+   (**Negative Peak Threshold (µV)**, **Peak-to-Peak Threshold (µV)**) and
+   **Signal Processing Options** (**Invert Signal**), followed by the
+   **Excluded event types** line with its **Change...** link.
+4. **Sleep Stage Selection**: the stages to search. Here NREM2 and NREM3 are
+   ticked.
+5. **Channel Selection**: move channels from **Available Channels** to
+   **Selected Channels** with **Add >**, **< Remove**, **Add All >>** and
+   **<< Remove All**.
+6. **Detect Slow Waves**: starts detection. **View Results** and **Export CSV**
+   sit beside it.
 
 Results are written straight into `neural_events.db` in your output
 directory's `wonambi/` folder — there is no per-channel JSON or CSV step, and
@@ -139,8 +157,9 @@ limitations to know about on those two methods:
 
 **Channel Selection:**
 
-Select the channels of interest before running detection. If no channels are
-selected, all channels will be processed.
+Select the channels of interest before running detection. The GUI does not
+start with an empty selection: it shows the error "No channels selected. Please
+select at least one channel." Click **Add All >>** to run every channel.
 
 ### Running Detection
 

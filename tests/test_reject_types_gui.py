@@ -45,6 +45,9 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gui_settings_guard                                    # noqa: E402
+gui_settings_guard.isolate()   # before any frontend import
 from PyQt5 import QtWidgets                                   # noqa: E402
 import frontend.turtlewave_gui as tg                          # noqa: E402
 import frontend.eeg_review_gui as rg                          # noqa: E402
@@ -595,7 +598,7 @@ check('5c', "widened source keeps the NORMAL colour",
 dock.set_denominator_mask(['Artefact', 'Arousal', 'Move'],
                           'assumed (not recorded)', pending_marks=3)
 check('5c', "assumed + pending marks",
-      dock.mask_caption.text().endswith('· + 3 marks you added')
+      dock.mask_caption.text().endswith('· + 3 excluded ranges you added')
       and 'assumed (not recorded)' in dock.mask_caption.text(),
       repr(dock.mask_caption.text()))
 check('5c', "warning colour when assumed",
@@ -603,6 +606,8 @@ check('5c', "warning colour when assumed",
       dock.mask_caption.styleSheet())
 
 say("\n" + "=" * 78)
+check('settings', "the real review-GUI preferences file was not "
+      "touched", *gui_settings_guard.untouched())
 say(f"{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
 for f in FAILURES:
     say("  FAILED: " + f)

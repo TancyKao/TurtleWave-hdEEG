@@ -278,6 +278,219 @@ def default_review_channels(channels, chan_type=None):
 
 
 # ---------------------------------------------------------------------------
+# Review GUI: neighbouring channels and the physiology strip
+# ---------------------------------------------------------------------------
+
+def nearest_channels(target, coords, candidates, k=6):
+    """The ``k`` candidates nearest ``target`` on the 2-D electrode layout.
+
+    Parameters
+    ----------
+    target : str
+        Channel to centre on; never returned.
+    coords : dict
+        ``{label: (x, y)}``; ``target`` and candidates without a position are
+        skipped.
+    candidates : sequence of str
+        Channels allowed (EEG-type only, in the caller's terms).
+    k : int, optional
+        At most this many. Default 6.
+
+    Returns
+    -------
+    list of str
+        Nearest first; ties keep candidate order. Empty when ``target`` has
+        no position.
+    """
+    if not coords or target not in coords:
+        return []
+    tx, ty = (float(v) for v in coords[target])
+    scored = []
+    for i, ch in enumerate(candidates):
+        if ch == target or ch not in coords:
+            continue
+        x, y = (float(v) for v in coords[ch])
+        scored.append(((x - tx) ** 2 + (y - ty) ** 2, i, ch))
+    scored.sort()
+    return [ch for _, _, ch in scored[:int(k)]]
+
+
+def neighbour_channels(target, candidates, coords=None, region_of=None,
+                       selected=None, k=6):
+    """Neighbours of ``target`` for the review GUI, and how they were chosen.
+
+    By electrode position when ``coords`` place the target; else the
+    candidates in the same region (``region_of(label)``, file order); else
+    the reviewer's selected channels.
+
+    Returns
+    -------
+    (list of str, str, str or None)
+        Channels, the source (``'position'``, ``'region'`` or
+        ``'selected'``) and the target's region (``None`` unless the region
+        rule was used).
+    """
+    candidates = [c for c in candidates if c != target]
+    near = nearest_channels(target, coords or {}, candidates, k)
+    if near:
+        return near, 'position', None
+    if callable(region_of):
+        reg = region_of(target)
+        if reg and reg != 'other':
+            same = [c for c in candidates if region_of(c) == reg][:int(k)]
+            if same:
+                return same, 'region', reg
+    pool = set(candidates)
+    chosen = [c for c in (selected or []) if c != target and c in pool]
+    return chosen[:int(k)], 'selected', None
+
+
+def _kind_of(chan_type):
+    t = '' if chan_type is None else str(chan_type).strip().upper()
+    if 'EOG' in t:
+        return 'eog'
+    if 'EMG' in t:
+        return 'emg'
+    if 'ECG' in t or 'EKG' in t:
+        return 'ecg'
+    return None
+
+
+def physio_channels(channels, chan_type):
+    """EOG / chin EMG / ECG channels for the physiology strip.
+
+    Only positively typed channels count (``header['chan_type']`` containing
+    ``EOG``, ``EMG``, ``ECG`` or ``EKG``); names alone are never trusted.
+
+    Returns
+    -------
+    dict
+        Any of ``'eog'`` (list of at most two, file order), ``'emg'`` (one
+        channel, a name containing ``chin`` or ``subment`` first) and
+        ``'ecg'`` (the first). Empty when the file types none of them.
+    """
+    channels = [] if channels is None else [str(c) for c in channels]
+    types = _types_for(channels, chan_type)
+    if types is None:
+        return {}
+    eog, emg, ecg = [], [], []
+    for ch, t in zip(channels, types):
+        kind = _kind_of(t)
+        if kind == 'eog':
+            eog.append(ch)
+        elif kind == 'emg':
+            emg.append(ch)
+        elif kind == 'ecg':
+            ecg.append(ch)
+    out = {}
+    if eog:
+        out['eog'] = eog[:2]
+    if emg:
+        chin = [c for c in emg if 'CHIN' in c.upper() or 'SUBMENT' in c.upper()]
+        out['emg'] = (chin or emg)[0]
+    if ecg:
+        out['ecg'] = ecg[0]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Channel units (physiology strip scale labels)
+# ---------------------------------------------------------------------------
+
+_MICROVOLT = {'uv', 'µv', 'μv', 'microv', 'microvolt', 'microvolts'}
+
+
+def normalise_unit(unit):
+    """A unit string as the file states it, or ``None`` when it states none.
+
+    ``None``, ``''``, ``'n/a'``, ``'na'``, ``'none'`` and ``'unknown'`` give
+    ``None``; every spelling of microvolts gives ``'µV'``; anything else is
+    returned stripped.
+    """
+    if unit is None:
+        return None
+    text = str(unit).strip()
+    if text.lower() in ('', 'n/a', 'na', 'nan', 'none', 'unknown'):
+        return None
+    if text.lower() in _MICROVOLT:
+        return 'µV'
+    return text
+
+
+def _sidecar_units(eeg_path):
+    """``{channel: unit}`` from a BIDS ``*_channels.tsv`` beside the EEG
+    file (the one whose name stem the EEG file name starts with, else the
+    only one in the folder); ``{}`` when there is none."""
+    import csv
+    import glob
+    import os
+    if not eeg_path:
+        return {}
+    folder = os.path.dirname(os.path.abspath(str(eeg_path)))
+    stem = os.path.basename(str(eeg_path))
+    found = sorted(glob.glob(os.path.join(folder, '*_channels.tsv')))
+    match = [f for f in found
+             if stem.startswith(os.path.basename(f)[:-len('_channels.tsv')])]
+    pick = match[0] if match else (found[0] if len(found) == 1 else None)
+    if pick is None:
+        return {}
+    out = {}
+    try:
+        with open(pick, newline='', encoding='utf-8') as fh:
+            for row in csv.DictReader(fh, delimiter='\t'):
+                if row.get('name'):
+                    out[str(row['name'])] = row.get('units')
+    except (OSError, csv.Error, UnicodeDecodeError):
+        return {}
+    return out
+
+
+def channel_units(header, eeg_path=None):
+    """The unit the file states for each channel.
+
+    Sources, the first that states a unit for the channel wins: ``header['chan_unit']`` (a
+    ``{channel: unit}`` dict or a list aligned with ``header['chan_name']``),
+    an EDF header's ``orig['physical_dim']``, then a BIDS ``*_channels.tsv``
+    beside ``eeg_path``.
+
+    Parameters
+    ----------
+    header : dict or None
+        Dataset header.
+    eeg_path : str or None, optional
+        Path of the EEG file, for the sidecar lookup. Default ``None``.
+
+    Returns
+    -------
+    dict
+        ``{channel: unit or None}`` for every channel a source names;
+        ``None`` means the file states no unit (``'n/a'`` included). A
+        channel missing from the dict has no stated unit either. An EEGLAB
+        ``.set`` carries no unit, so without a sidecar every channel is
+        missing.
+    """
+    header = header if hasattr(header, 'get') else {}
+    names = [str(c) for c in (header.get('chan_name') or [])]
+    out = {}
+    sources = [header.get('chan_unit')]
+    orig = header.get('orig')
+    if hasattr(orig, 'get'):
+        sources.append(orig.get('physical_dim'))
+    sources.append(_sidecar_units(eeg_path))
+    for src in sources:
+        if src is None:
+            continue
+        pairs = (src.items() if hasattr(src, 'items')
+                 else zip(names, list(src)))
+        for ch, unit in pairs:
+            # an earlier source that names the channel without a unit
+            # ('' or 'n/a') does not block a later source that states one
+            if out.get(str(ch)) is None:
+                out[str(ch)] = normalise_unit(unit)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Setup tab: Dataset Information text
 # ---------------------------------------------------------------------------
 

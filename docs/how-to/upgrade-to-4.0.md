@@ -117,6 +117,14 @@ the old **Export Reviewed Events…** menu action. If you had a review workflow
 built around per-event verdicts, it now operates at channel granularity
 instead.
 
+!!! note "Historical: 4.6 reintroduced event decisions"
+    This step describes 4.0. Since 4.6 the Epochs tab records accept, reject and
+    unsure decisions per event, and a stratified review sample estimates
+    precision. They are validation evidence, not a return to per-event
+    curation, and rejected events stay in the database. See
+    [Validate a detection run](validate-a-detection-run.md) and
+    [Upgrade to 4.6](upgrade-to-4.6.md).
+
 See the [EEG Review GUI Tutorial](../tutorials/eeg-review-gui-tutorial.md) and
 [EEG Review GUI Architecture](../explanation/eeg-review-gui-architecture.md)
 for the current workflow — parts of both predate this redesign and are being

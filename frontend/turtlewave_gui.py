@@ -4,6 +4,12 @@
 TurtleWave hdEEG GUI
 A graphical user interface for the TurtleWave hdEEG package, combining annotation
 and spindle detection functionalities in a user-friendly interface.
+
+Importing this module sets the environment variable
+``TURTLEWAVE_QUIET_WONAMBI=1`` when it is not already set (``setdefault``),
+before the first ``turtlewave_hdEEG`` import, so the GUI does not print
+Wonambi's two harmless DeprecationWarnings. Export
+``TURTLEWAVE_QUIET_WONAMBI=0`` to see them.
 """
 
 import os
@@ -21,6 +27,13 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, QVB
 import logging
 
 # Try importing the required packages
+# Hide Wonambi's two harmless DeprecationWarnings (the fooof notice and a
+# NumPy scalar conversion) in the GUI. The library reads this variable before
+# its first Wonambi import, so it must be set before the import below; a call
+# after it would be too late for the fooof notice. setdefault: export
+# TURTLEWAVE_QUIET_WONAMBI=0 to see the warnings.
+os.environ.setdefault('TURTLEWAVE_QUIET_WONAMBI', '1')
+
 try:
     from turtlewave_hdEEG import LargeDataset, XLAnnotations, ParalEvents, ParalSWA, ParalKC, CustomAnnotations
     from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave, ImprovedDetectSpindle, ImprovedDetectKComplex

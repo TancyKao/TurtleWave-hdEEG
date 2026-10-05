@@ -29,6 +29,9 @@ import tempfile
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gui_settings_guard                                    # noqa: E402
+gui_settings_guard.isolate()   # before any frontend import
 
 
 # The events table as the detectors create it (eventprocessor.py / swprocessor.py).
@@ -408,4 +411,7 @@ if __name__ == "__main__":
     test_count_db_events_reads_joint_tokens()
     test_pac_channel_lookup_survives_stage_mismatch()
     test_qc_denominator_end_to_end()
+    ok, detail = gui_settings_guard.untouched()
+    assert ok, f"real review-GUI preferences changed: {detail}"
+    print("[ok] the real review-GUI preferences file was not touched")
     print("\nAll frontend stage-token tests passed.")

@@ -214,8 +214,10 @@ class ParalPAC:
             Deprecated alias for ``reject_types``; mapped onto it when given.
         cycle_idx : list or None
             Sleep cycle indices to include
-        cat : tuple
-            Category specification for data selection
+        cat : tuple, optional
+            Wonambi ``fetch`` concatenation flags ``(cycle, stage,
+            discontinuous, evt_type)``. Default ``(1, 1, 1, 0)``. ``None``
+            means the default; any other non-tuple raises ``ValueError``.
         nbins : int
             Number of phase bins
         phase_freq : tuple
@@ -367,6 +369,10 @@ class ParalPAC:
         smallest defensible reject set for PAC and report it alongside the
         result.
         """
+        from .utils import resolve_cat
+        # Same validation as the detectors: None -> (1, 1, 1, 0), anything
+        # that is not four 0/1 flags raises before any channel is read.
+        cat = resolve_cat(cat)
         from tensorpac import Pac
         import sys
         import sqlite3

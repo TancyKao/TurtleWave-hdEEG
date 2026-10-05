@@ -22,12 +22,87 @@ that database. By default they already are — detection writes straight into
 
 **Solution:**
 
-1. On the **1 · Channels (QC)** tab, use the **Outlier:** dropdown next to the event type selector
-2. Choose `hard`, `soft`, `dead`, or `ok` to filter the table, or `any` to see every flagged channel
-3. Click a column header to sort (e.g. by density or max peak-to-peak amplitude)
+1. On the **1 · Channels (QC)** tab, open the **Show** combo and choose `Amp flagged`, `Excluded`, `Queued for re-detect` or `Dead`, or leave it on `All channels`
+2. Open the **Sort** combo to order the rows, for example `Amp flag (hard first)`, `Amp z ↓` or `Density ↓`. Clicking a column header also sorts
+3. Use the **Stage** buttons to set the stages used by the channel checks (the flagged-channel list and the check metrics on the topography)
 
 !!! tip
-    The count strip above the table (HARD / SOFT / DEAD / OK) always reflects the full, unfiltered channel count for the current event type.
+    The count line above the table (`8 checks flagged · 3 amp flagged · 1 dead`) always counts all channels, whatever Show is set to. Click the `8 checks flagged` part to jump to the flagged-channel list in the right dock. Hover the `Amp flag` header for the rule.
+
+## Find a Channel That Picks Up the Wrong Thing
+
+**Problem:** You suspect a region detects alpha or noise as events.
+
+**Solution:** On the Channels (QC) tab, switch the topography combo to
+`Off-band share` (then `At-floor share`, `Amp vs background`, `Amp vs
+threshold`). Read the flagged-channel list under the topography (or click `n
+checks flagged` above the table): it states numbers, and you decide what they
+mean. Low prominence is context only and never flags. The table itself has eight
+columns, amplitude only. See
+[Validate a detection run](validate-a-detection-run.md#run-the-population-checks-on-the-channels-tab).
+
+For runs detected with 4.5 or earlier the check metrics are not recorded.
+
+## Select an Event and Record a Decision
+
+**Problem:** You want to say whether one event is genuine.
+
+**Solution:**
+
+1. Set **Review ▸ Reviewer name…**.
+2. On the **2 · Epochs** tab, click an event band, or press `]` for the next
+   undecided event on the channel.
+3. Press `A` to accept, `R` and a digit `1`–`8` or `0` to reject with a reason, or `U`
+   to mark unsure. `Ctrl+Z` undoes.
+
+[Decide whether an event is genuine](decide-if-an-event-is-genuine.md) gives the
+six checks to apply and the reason codes. A decision never removes the event.
+
+![A rejected event on the epoch strip and trace](../images/gui_review_event_reject2_v4.6.0.png)
+
+*The same event after it was rejected.*
+
+The arrow points to the event's marker in the strip above the raw trace, now an
+outlined square. On the trace the event band carries a `✕` and a dashed red edge.
+
+## Show Only Some of a Channel's Events
+
+**Problem:** You want to see, among a channel's events, only those you decided a
+certain way, or only those still undecided.
+
+**Solution:** In the **Show events:** row above the raw trace, untick the boxes
+you do not want: `unreviewed`, `accepted`, `rejected`, `unsure`. Events that do
+not pass are drawn faint and skipped by `}` and `{`; clicking still selects them.
+A chip reads `Showing: rejected · 3 of 1,847 on PPOz ✕`, ticks under the epoch
+strip mark the epochs that hold shown events, and **◀ previous shown** and
+**next shown ▶** step through them. The filter uses your own decisions only,
+applies to the Epochs tab, and resets at every launch. Click **✕** on the chip to
+show everything again.
+
+## Recheck Your Rejected and Unsure Events
+
+**Problem:** You want to look again at the events you rejected or were unsure
+about, for example before you finish a channel.
+
+**Solution:**
+
+1. Drill into the channel (**Open in Epochs**).
+2. In **Show events:**, tick only `rejected` and `unsure`.
+3. Press **next shown ▶** (or `}`) to go to the first one. Look at the raw trace,
+   the Event panel and the neighbours again.
+4. To change your mind, press `A`, or `R` and a reason, or `U`. The decision is
+   replaced and the event stays in view.
+5. Press **next shown ▶** to move on. Click **✕** on the chip when you are done.
+
+`Ctrl+Z` undoes the last change. Your decisions are saved as you make them.
+
+## Look Up a Key
+
+**Problem:** You forgot a key or the reason numbers.
+
+**Solution:** Press `?` on either tab, or choose **Help ▸ Keyboard shortcuts…**.
+The sheet lists the keys and the reason grid for the event type you are on. The
+top bar also shows the main keys for the current tab.
 
 ## Filter by Event Type, Method, or Frequency Band
 
@@ -67,7 +142,7 @@ These filters apply globally, across both the Channels (QC) and Epochs tabs.
 **Solution:**
 
 1. Select the channel's row in the Channels (QC) table
-2. Click **Drill into epochs ▸**
+2. Click **Open in Epochs** in the bar under the table (for a channel with a `Checks` flag it also filters the events to the flagged check)
 3. On the **2 · Epochs** tab, use **P** / **N** to jump between outlier epochs, or the prev/next buttons to step one epoch at a time
 
 On a cut recording (see
@@ -88,29 +163,66 @@ reconstructed from their neighbours before you review their events.
 
 **Solution:** Look at the Filters dock channel list. An interpolated channel
 shows a trailing ` ~` (for example `Cz ~`), with a tooltip saying it was
-reconstructed from neighbours. The mark is display only. On open, the GUI
+reconstructed from neighbours, and a caption `~ = interpolated` under the list. The mark is display only. On open, the GUI
 shows `Cz`, `Fz` and `Pz` when the file has them, never a channel the file
 types as non-EEG.
 
-## Mark a Channel as an Artefact
+## Exclude a Channel
 
-**Problem:** A channel is unusable for the current event type and should be excluded going forward.
-
-**Solution:**
-
-1. Select the channel on the **1 · Channels (QC)** tab
-2. Click **Mark channel artefact**
-
-The button toggles — click **Unmark channel artefact** to reverse it. Marked channels are excluded from exports and get a ⚑ tag in the channel filter list.
-
-## Mark a Time Range as Artefact
-
-**Problem:** Only part of a channel's recording is bad, not the whole channel.
+**Problem:** A channel is unusable for the current event type and should not count.
 
 **Solution:**
 
-1. On the **2 · Epochs** tab, shift-drag across the overview strip to select a range
-2. Click **Mark N epochs as artefact** to confirm
+1. Select the channel on the **1 · Channels (QC)** tab (or drill into it)
+2. Click **Exclude channel**
+
+The button is one toggle: it reads **Include channel** while the channel is
+excluded, and clicking it again reverses the exclusion. In 4.6.0 an excluded
+channel is left out of review samples, of the re-run export, of the flag
+statistics and of the topography. Its events stay in the database, and event
+density and CSV exports are unchanged. Its Status reads `× excluded`.
+
+## Exclude a Time Range
+
+**Problem:** Only part of the recording is bad, not the whole channel.
+
+**Solution:**
+
+1. On the **2 · Epochs** tab, brush a range on the raw trace
+2. Click **Exclude time range…** to save it. **Clear range** discards an unsaved brush
+
+The time is excluded from analysis for every channel. It is saved to this
+review, and it takes effect only when you export a re-run package (**File →
+Export re-run package…**) and re-detect with it; events already detected are not
+changed. The `<stem>_review-qc.xml` file beside the annotation file is a record
+of the review and is not read by detection. This is different from rejecting one event with the reason
+**Artefact**, which labels that event only.
+
+![An unsaved brushed range](../images/gui_review_event_excludeTimeRange_v4.6.0.png)
+
+*A brushed range that is not yet saved.*
+
+1. **Exclude time range…**: saves the brushed range.
+2. The brushed range, drawn in blue and labelled `not saved` on the raw and
+   filtered traces.
+3. The line `Unsaved range 04:36:11–04:36:17 (6.7 s).` gives its start, end and
+   length. **Clear range** discards it.
+
+![A saved excluded range](../images/gui_review_event_excludeTimeRange2_v4.6.0.png)
+
+*A saved exclusion on channel PPO2h.*
+
+1. The saved range, drawn with a purple hatch and the label `excluded` on the
+   raw and filtered traces.
+2. **EXCLUDED TIME (1 from PPO2h · 1 total)** in the right dock lists the range
+   (`01:17:12–01:17:20 (7.9 s)`) with a `✕` button to remove it.
+
+A saved range is drawn with a purple hatch and the label `excluded`; an unsaved
+brush is plain blue and says `not saved`. To undo an exclusion, click inside the
+hatched range (away from any event), or its row in the **EXCLUDED TIME** list in
+the right dock, then click **Remove exclusion**. Brush the range again to restore it. Removing an
+exclusion does not change a package you already exported; export a new package
+to apply the removal.
 
 ## Flag Channels for Re-detection
 
@@ -118,19 +230,28 @@ The button toggles — click **Unmark channel artefact** to reverse it. Marked c
 
 **Solution:**
 
-- Select the channel and press **F**, or click **Add to re-detect queue**
+- Select the channel and press **F**, or click **Add to re-detect queue** (the button then reads **Remove from re-detect queue**)
 - To queue every currently HARD-flagged channel at once, click **Queue all HARD**
 
-The re-detect queue count is shown in the status bar and in the **RE-DETECT QUEUE** section of the selection tray, where you can remove channels with the chip's ✕.
+A queued channel reads `kept · ↻ re-detect` in the Status column, and **Show ▸
+Queued for re-detect** lists them. The queue is saved in the database, so it is
+still there when you reopen the GUI.
 
-## Hand Off Flagged Channels to a Re-run
+## Hand Off Queued Channels to a Re-run
 
-**Problem:** You've flagged channels and want to hand them off to a re-run.
+**Problem:** You've queued channels and want to re-run detection on them.
 
-**Solution:** there are two hand-off formats, depending on which detector script picks them up:
-
-- **Analysis → Build re-detect request…** (or the **Build re-detect request…** button on the Channels tab) previews and saves `redetect_request.json` next to the annotation XML, for `turtlewave_gui` to pick up. This GUI never runs detection itself.
-- **Export → Export Re-run Package…** snapshots the current database/CSVs, then writes a `channels.csv` and a sidecar annotation XML (with any marked artefact ranges folded in) for the local `--annot`/`--channels` detector scripts (e.g. `examples/hdEEG_spindle_detector.py`).
+**Solution:** choose **File → Export re-run package…** (or click the `n queued ·
+Export re-run package…` link in the bar). It snapshots the current database,
+then writes `channels.csv`, `redetect_channels.csv` (only the queued channels)
+and `rerun_sidecar.xml`, an annotation copy that carries every current time
+exclusion (each package is complete). The dialog then suggests an
+`examples/rerun_detection.py` command with this recording's files (`--annot
+rerun_sidecar.xml`, `--eeg`, `--db`, `--event-type`, `--method`, `--freq`,
+`--stages`). `--channels` is `redetect_channels.csv` when channels are queued;
+otherwise it is `channels.csv` and every kept channel is re-detected. For PAC,
+re-run from `turtlewave_gui` with `rerun_sidecar.xml`. This GUI never runs
+detection itself.
 
 See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels.md) for the full hand-off flow.
 
@@ -143,7 +264,7 @@ See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels
 1. **Export → Export QC report…**
 2. Choose a location and filename
 
-This writes a Markdown summary — channel count, dropped channels, global artefact windows, and the full flagged-channel table — for the current event type.
+This writes a Markdown summary — channel count, excluded channels, excluded time ranges, and the full flagged-channel table — for the current event type.
 
 ## Troubleshooting
 
@@ -189,7 +310,10 @@ This writes a Markdown summary — channel count, dropped channels, global artef
 
 ## See Also
 
+- [Decide whether an event is genuine](decide-if-an-event-is-genuine.md) - The six checks and reason codes
+- [Validate a detection run](validate-a-detection-run.md) - Population checks, review sample and precision
 - [Tutorial: Your First EEG Event Review Session](../tutorials/eeg-review-gui-tutorial.md) - Learn the basics
 - [Reference: EEG Review GUI](../reference/eeg-review-gui.md) - Technical specifications
 - [Explanation: Review GUI Architecture](../explanation/eeg-review-gui-architecture.md) - Understand how it works
 - [How to Upgrade to turtlewave-hdEEG 4.0](upgrade-to-4.0.md#step-5-adjust-to-the-review-gui-workflow-change) - What changed from the pre-4.0 per-event review workflow
+- [How to Upgrade to turtlewave-hdEEG 4.6](upgrade-to-4.6.md) - Event decisions and the review sample

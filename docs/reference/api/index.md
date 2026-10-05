@@ -19,6 +19,8 @@ This section provides detailed technical documentation for all TurtleWave hdEEG 
 ### Database & Provenance
 
 - [**Direct-to-Database Write**](dbwrite.md) - the `write_db=None` (default) detection path, `detection_runs` provenance, DB → CSV export
+- [**Event Metrics**](event_metrics.md) - per-event review figures computed at detection time
+- [**Review Sampling**](review_sampling.md) - stratified review sample, weighted precision and rater agreement
 - [**Event Density**](density.md) - per-channel density derived on read from `neural_events.db`
 - [**Journal-Mode CLI**](cli.md) - `turtlewave_set_journal_mode` console script for converting a database's SQLite journal mode
 - [**Re-run Guards**](rerun.md) - Correctness guards for scoped channel re-detection

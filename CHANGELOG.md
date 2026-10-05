@@ -7,7 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0] - 2026-10-01
+## [4.6.0] — 2026-10-05
+
+Per-event review is sample-based validation of a detection run. Review decisions are evidence about the detector and never remove events unless `exclude_rejected` is asked for.
+
+Per-event figures and detection thresholds are not recorded for runs made before 4.6; re-detect to get them.
+
+### Added
+
+- Per-event figures stored at detection time: duration-bound and splice-proximity flags, half-waves above background, 1/f-corrected peak frequency with its prominence, amplitude against background and against the detector threshold, and slow-wave half-wave shape.
+- `detection_thresholds` table holding the thresholds each detection run used.
+- `event_reviews` table and `events_reviewed` view for per-event review decisions.
+- `exclude_rejected` on `event_density` and `export_events_to_csv`.
+- `review_sampling`: stratified review samples, precision estimates and label agreement between reviewers.
+- `event_population_summary` for per-channel, per-stage population checks.
+- Review GUI: population checks and a stage toggle on the Channels tab.
+- Review GUI: event selection and an Event panel for recording decisions, with four rows: Signal vs background, Duration, Peak freq and Amplitude outlier.
+- Review GUI: reason grids per event type.
+- Review GUI: neighbouring-channel view and an EOG/EMG/ECG strip, both scaled from the data.
+- Review GUI: reviewer name recorded with every decision.
+- Review GUI: review-sample mode, blind to flags until a decision is made, and a precision report.
+- `quiet_wonambi_warnings` and the `TURTLEWAVE_QUIET_WONAMBI` variable silence two Wonambi deprecation warnings; the GUIs and example scripts turn it on by default.
+
+### Changed
+
+- Detectors' `cat` defaults to `(1, 1, 1, 0)`; the previous `None` default failed every channel.
+- The review GUI no longer adds review columns to the `events` table.
+- CSV exports gain the per-event figure and detector-value columns.
+- Review GUI: one "Exclude channel" toggle replaces "Drop channel" and "Mark channel artefact".
+- Review GUI: "Mark as artefact" is now "Exclude time range…".
+- Review GUI: excluded channels are left out of the flag statistics and the topography.
+- Review GUI: the re-detect queue is saved in the database.
+- Review GUI: regions come from electrode names for 10-20 and 10-5 labels.
+- Review GUI: the amplitude flag names the measure that triggered it.
+- Review GUI: excluded time ranges take effect only through File ▸ Export re-run package…; the review-qc file is a record.
+- Review GUI: an annotation or EEG file from a different recording than the open database is unloaded, and Exclude time range and Export re-run package stay disabled until the matching annotation is loaded.
+
+### Removed
+
+- Review GUI: the Selection area and "Build re-detect request…".
+
+### Fixed
+
+- Review GUI: each re-run package carries every current exclusion; a second package used to drop ranges exported in the first.
+- Review GUI: the suggested re-run command names the right script for the event type and quotes paths.
+- Review GUI: with nothing queued, the suggested re-run command re-detected a different recording (a tutorial script with hard-coded paths); it is now always rerun_detection.py with this recording's files.
+- Review GUI: the precision report's All stages column was cut off, hiding each region's pooled value.
+- Review GUI: a channel opened before the annotation file showed epochs without stages until the channel was changed.
+- Review GUI: excluded ranges show their length; the "sub" label and an understated epoch count are gone.
+
+## [4.5.0] — 2026-10-01
 
 Staging of recordings that had data cut out (EEGLAB `boundary` events) was misaligned before 4.5.0, because `etc.stages` was imported as stored. Emotion 16js/18sb, MCI clean_rebuilt and LocalSleep excerpt outputs built on the header staging import should be re-annotated and re-detected, and not pooled with pre-4.5 rows.
 

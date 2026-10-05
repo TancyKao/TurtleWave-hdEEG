@@ -137,6 +137,56 @@ jobs:
         run: |
           python tests/test_review_gui_variable_epochs.py
 
+      - name: Run event review decision tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_event_reviews.py
+
+      - name: Run detection threshold tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_detection_thresholds.py
+
+      - name: Run event metric tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_event_metrics.py
+
+      - name: Run detection-time event figure tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_event_figures_detection.py
+
+      - name: Run review sampling tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_review_sampling.py
+
+      - name: Run review GUI event-decision tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_review_gui_event_decisions.py
+
+      - name: Run review GUI population tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_review_gui_population.py
+
+      - name: Run review GUI sample-mode tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_review_gui_sample.py
+
+      - name: Run Wonambi warning-silencing tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_quiet_warnings.py
+
+      - name: Run GUI warning-silencing tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_gui_quiet_warnings.py
+
       - name: Run cycle detection unit tests
         if: ${{ !cancelled() }}
         run: |

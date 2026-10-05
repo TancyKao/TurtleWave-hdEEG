@@ -183,6 +183,50 @@ def reject_key(reject_types):
                             if str(t).strip()}))
 
 
+#: Default concatenation for detection: concatenate cycles, stages and
+#: discontinuous signal, keep event types separate. What the GUI and the Gadi
+#: drivers pass, and the only value under which a channel gets ONE threshold.
+DEFAULT_CAT = (1, 1, 1, 0)
+
+
+def resolve_cat(cat):
+    """Validate Wonambi's ``cat`` argument, filling in the default.
+
+    ``wonambi.trans.fetch`` indexes ``cat`` and raises a bare ``TypeError``
+    on ``None``, which the processors used to catch per channel and record as
+    a failure on every channel.
+
+    Parameters
+    ----------
+    cat : tuple or list or None
+        Four 0/1 flags ``(cycle, stage, discontinuous, evt_type)``. ``None``
+        means :data:`DEFAULT_CAT`.
+
+    Returns
+    -------
+    tuple of int
+        Four ints, each 0 or 1.
+
+    Raises
+    ------
+    ValueError
+        If ``cat`` is not ``None`` and not a length-4 tuple/list of 0/1.
+    """
+    if cat is None:
+        return DEFAULT_CAT
+    if not isinstance(cat, (tuple, list)) or len(cat) != 4:
+        raise ValueError(
+            f"cat must be a tuple of four 0/1 flags (cycle, stage, "
+            f"discontinuous, evt_type), e.g. {DEFAULT_CAT}; got {cat!r}")
+    # `c in (0, 1)` accepts 0/1 ints, floats and bools and rejects strings.
+    if not all(isinstance(c, (int, float, np.integer)) and c in (0, 1)
+               for c in cat):
+        raise ValueError(
+            f"cat must hold only 0/1 flags (cycle, stage, discontinuous, "
+            f"evt_type); got {cat!r}")
+    return tuple(int(c) for c in cat)
+
+
 def missing_json_message(json_dir, file_pattern, max_listed=25):
     """Build the error text for a ``file_pattern`` that matched no JSON file.
 
@@ -1443,3 +1487,90 @@ def read_channels_from_csv(csv_file_path):
     except Exception as e:
         logger.error(f"Error reading channel CSV {csv_file_path}: {e}")
         return None
+
+
+#: Environment variable that makes ``import turtlewave_hdEEG`` call
+#: :func:`quiet_wonambi_warnings` before it imports Wonambi (opt-in).
+QUIET_WONAMBI_ENV = 'TURTLEWAVE_QUIET_WONAMBI'
+
+_FOOOF_DEPRECATION = r'\s*The `fooof` package is being deprecated'
+_NDIM_SCALAR_DEPRECATION = (r'Conversion of an array with ndim > 0 to a '
+                            r'scalar is deprecated')
+
+
+def quiet_wonambi_warnings():
+    """Silence two harmless DeprecationWarnings of the pinned Wonambi 7.15.
+
+    Neither can be fixed at source while ``wonambi==7.15`` and
+    ``numpy==1.26.4`` stay pinned, and both are noise in a batch log:
+
+    * ``fooof`` 1.1 announces its replacement by ``specparam`` when
+      ``wonambi/widgets/analysis.py`` imports it, which happens on any
+      ``import wonambi``. turtlewave never uses ``fooof``.
+    * NumPy >= 1.25 warns "Conversion of an array with ndim > 0 to a scalar
+      is deprecated" from ``wonambi/trans/analyze.py`` (``float(...)`` of a
+      one-element array in ``event_params``), once per call site.
+
+    Nothing else is silenced: the second filter matches that message in
+    module ``wonambi.trans.analyze`` only, and warnings other than the
+    ``fooof`` notice raised while ``fooof`` is imported here are re-issued.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``fooof/__init__.py`` calls ``warnings.simplefilter('always')``
+    immediately before it warns, so no filter installed beforehand (this
+    function's, ``-W`` or ``PYTHONWARNINGS``) can stop that notice. The only
+    way is to import ``fooof`` first inside ``warnings.catch_warnings``,
+    which this function does when ``fooof`` is installed and not yet
+    imported. That also undoes ``fooof``'s process-wide ``'always'`` filter,
+    so Python's default warning policy stays in force (it is that blanket
+    filter which makes the NumPy warning above print on every event).
+
+    It therefore only prevents the ``fooof`` notice when called BEFORE the
+    first ``import wonambi`` -- and ``import turtlewave_hdEEG`` imports
+    Wonambi. A script gets that order by setting the environment variable
+    :data:`QUIET_WONAMBI_ENV` to ``1`` before importing the package::
+
+        import os
+        os.environ.setdefault('TURTLEWAVE_QUIET_WONAMBI', '1')
+        from turtlewave_hdEEG import ParalEvents
+
+    Called after Wonambi is imported it still silences the NumPy warning
+    (its filter is inserted in front of ``fooof``'s) but cannot take back a
+    notice already printed. The library never calls it unless that variable
+    is set, so a user's own warnings stay visible by default. Idempotent:
+    repeated calls leave one copy of each filter.
+    """
+    import importlib.util
+    import sys
+    import warnings
+
+    if 'fooof' not in sys.modules:
+        try:
+            installed = importlib.util.find_spec('fooof') is not None
+        except (ImportError, ValueError):
+            installed = False
+        if installed:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                try:
+                    import fooof  # noqa: F401
+                except Exception:
+                    # Wonambi guards the same import with ImportError; a
+                    # broken fooof must not stop a detection script here.
+                    pass
+            for w in caught:
+                if (issubclass(w.category, DeprecationWarning)
+                        and re.match(_FOOOF_DEPRECATION, str(w.message))):
+                    continue
+                warnings.warn_explicit(w.message, w.category, w.filename,
+                                       w.lineno)
+    warnings.filterwarnings('ignore', message=_FOOOF_DEPRECATION,
+                            category=DeprecationWarning)
+    warnings.filterwarnings('ignore', message=_NDIM_SCALAR_DEPRECATION,
+                            category=DeprecationWarning,
+                            module=r'wonambi\.trans\.analyze')

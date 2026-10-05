@@ -11,19 +11,57 @@ channel's rows in `neural_events.db`.
 
 ## Step 1 — Export the re-run package from the review GUI
 
-In `eeg_review_gui`, use **Export Re-run Package**. This:
+A time range you exclude in the Epochs tab does not change events already
+detected. It takes effect through this package.
+
+![A saved time exclusion in the Epochs tab](../images/gui_review_event_excludeTimeRange2_v4.6.0.png)
+
+*A saved exclusion (hatched, `excluded`) and its row under **EXCLUDED TIME**.*
+
+The status line at the bottom of the screenshot says the exclusion takes effect
+when you export a re-run package (**File ▸ Export re-run package…**) and
+re-detect with it.
+
+In `eeg_review_gui`, choose **File ▸ Export re-run package…**.
+
+![File menu open with Export re-run package selected](../images/gui_review_event_exportReRunpackage_v4.6.0.png)
+
+*The File menu in the Epochs tab of a slow-wave run (PPOz, epoch 63/755, NREM2).*
+
+The arrow points to **File ▸ Export re-run package…**, the last entry in the File menu.
+
+The export:
 
 1. Snapshots the current `wonambi/*_results` directories, `*.csv` files and
    the database into `<root>/qc_backup/<timestamp>/` — your rollback point.
-2. Writes `rerun_sidecar.xml`: a copy of the base annotation XML with the
-   reviewer's live artefact marks appended as `Artefact` events, under the
-   **same rater the detector will read** (never the original annotation file).
+2. Writes `rerun_sidecar.xml`: a copy of the base annotation XML with **every
+   current time exclusion** the reviewer saved with **Exclude time range…**
+   appended as `Artefact` events, under the **same rater the detector will
+   read** (never the original annotation file). Each package is complete: a range
+   exported in an earlier package is included again, and a range the reviewer has
+   since removed is left out. The `<stem>_review-qc.xml` file beside the
+   annotation file is only a record of the review; detection never reads it, so
+   exclusions reach detection only through this package.
 3. Writes `channels.csv` — the kept channels (whole montage minus any
-   dropped channel).
+   excluded channel).
 4. Writes `redetect_channels.csv` — **only** the channels the reviewer
    explicitly queued for re-detection (skipped entirely if none were queued).
 
-Take note of the backup directory path; you'll pass files from it below.
+The dialog ends with a suggested `examples/rerun_detection.py` command with this
+recording's files (`--annot rerun_sidecar.xml`, `--eeg`, `--db`, `--event-type`,
+`--method`, `--freq`, `--stages`). With channels queued it says "Re-detects the
+queued channels only:" and passes `--channels redetect_channels.csv`. With
+nothing queued it says "Nothing is queued, so every kept channel (channels.csv)
+is re-detected:" and passes `--channels channels.csv`; excluded channels are not
+touched and keep their old rows. For PAC there is no command-line re-run; re-run
+it from `turtlewave_gui` with `rerun_sidecar.xml`.
+
+!!! warning
+    A whole-montage re-run replaces every kept channel's events. Sample
+    decisions on events whose end time moves become void. The snapshot is the
+    rollback.
+ Take note of the backup
+directory path; you'll pass files from it below.
 
 ## Step 2 — Run the re-run driver
 
@@ -99,6 +137,30 @@ If a re-run needs to be undone, restore the snapshotted files from
 `qc_backup/<timestamp>/` (the `wonambi/*_results` directories, any `.csv`
 files, and the database copy) over the current ones. The `rerun_log` table
 records the exact `backup_path` used for each re-run.
+
+## Troubleshooting
+
+### Export re-run package is greyed out
+
+**Export re-run package…**, **Exclude time range…** and the `n queued` link are
+disabled when the loaded annotation file does not belong to the open database.
+The tooltip reads `Load the annotation file for {subject} first (File ▸ Open
+Annotation File…).` The package is built from that annotation file, so the GUI
+will not export from another recording's.
+
+1. Read the status bar. After you open a file it may say
+   `Annotation file unloaded: it belongs to {stem}. Load the annotation for {subject}.`
+2. Choose **File ▸ Open Annotation File…** and open the annotation for the
+   subject named in the tooltip.
+3. If the file is the right one but is still unloaded, its name and the two
+   folders above it do not contain the subject. This happens with a generically
+   named file (for example `annotations.xml`) three or more folders below the
+   subject folder. Rename the file to include the subject, such as
+   `sub-01_annotations.xml`, and open it again.
+
+If the status bar says `Cannot check that {stem} belongs to this database (no
+subject recorded). Check it is the right recording.`, the file stays loaded and
+the controls stay enabled. Confirm yourself that it is the right recording.
 
 ## See also
 

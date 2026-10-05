@@ -28,6 +28,13 @@ table; `event_density` raises rather than silently falling back to
 `export_*_density_to_csv` methods against that JSON directory instead, or
 back-fill `analysed_time` for the recording.
 
+Since 4.6, `exclude_rejected=True` leaves events a reviewer rejected out of the
+numerator; `reviewer=` limits that to one reviewer's rejections. It is off by
+default, and the denominator never changes: rejecting an event does not change
+which seconds were analysed. A channel whose every event was rejected keeps its
+zero row. See [Validate a detection run](../../how-to/validate-a-detection-run.md#leave-rejected-events-out-of-density-or-an-export).
+The `v_event_density_reviewed` view is the SQL counterpart.
+
 `stage=None` prefers the stage set the matching detection run actually
 searched (recovered from `processing_status` / `detection_runs`), which
 includes a stage that was analysed and produced no events. Only when the
