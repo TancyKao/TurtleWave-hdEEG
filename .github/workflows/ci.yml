@@ -67,6 +67,11 @@ jobs:
         run: |
           python tests/test_reject_types_gui.py
 
+      - name: Run slow-wave published-band GUI tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_sw_published_band_gui.py
+
       - name: Run slow-wave amplitude-floor tests
         if: ${{ !cancelled() }}
         run: |
