@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.2] — 2026-10-06
+## [4.6.2] — 2026-10-07
 
 4.6.1 was not published to PyPI; its changes ship in 4.6.2.
 
