@@ -67,6 +67,11 @@ jobs:
         run: |
           python tests/test_reject_types_gui.py
 
+      - name: Run slow-wave published-band GUI tests (offscreen)
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_sw_published_band_gui.py
+
       - name: Run slow-wave amplitude-floor tests
         if: ${{ !cancelled() }}
         run: |
@@ -141,6 +146,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           python tests/test_event_reviews.py
+
+      - name: Run review carry-over tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_review_carryover.py
 
       - name: Run detection threshold tests
         if: ${{ !cancelled() }}

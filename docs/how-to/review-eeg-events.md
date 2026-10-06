@@ -255,6 +255,15 @@ detection itself.
 
 See [Re-run Detection on Reviewer-Selected Channels](rerun-detection-on-channels.md) for the full hand-off flow.
 
+## Keep Decisions When a Channel Is Re-detected
+
+From 4.6.1, when a re-detect replaces a channel's events, your decisions on that
+channel move to the matching new event (same channel, method and band, start
+within 0.1 s) and keep their place in the review sample. Decisions with no match
+(the event moved, is gone, or the new event uses a different method or band)
+stay detached and need a fresh look. Nothing is deleted. The run log reports the
+carried and unmatched counts.
+
 ## Export a QC Report
 
 **Problem:** You need a record of the QC pass to attach to a study log.

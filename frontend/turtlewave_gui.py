@@ -273,6 +273,55 @@ def plan_annotation_actions(process_artifacts, process_arousals, process_stages)
     return steps
 
 
+#: Slow-wave methods whose filter is a published low-pass, not a band the
+#: user sets: Ngo et al. 2015 (3.5 Hz) and Staresina et al. 2015 (1.25 Hz).
+PUBLISHED_BAND_SW_METHODS = ('Ngo2015', 'Staresina2015')
+
+
+def published_sw_band(method):
+    """``(lower, upper)`` Hz of a slow-wave method whose filter is published.
+
+    Read from Wonambi's own defaults for the method: the lower edge of its
+    ``det_filt`` and the cut-off of its ``lowpass``, which is the filter the
+    method actually applies. Ngo2015 -> ``(0.5, 3.5)``, Staresina2015 ->
+    ``(0.5, 1.25)``.
+
+    This is what the slow-wave tab sends as ``frequency`` for these methods.
+    ``ImprovedDetectSlowWave`` uses the upper bound as the low-pass, and
+    ``ParalSWA`` stores the pair as the run's band token, so the filter and
+    the stored band are both the published ones. The duration is the
+    published one too (:func:`published_sw_duration`), shown read-only.
+    """
+    if method not in PUBLISHED_BAND_SW_METHODS:
+        raise ValueError(f"{method!r} has no published band; "
+                         f"expected one of {PUBLISHED_BAND_SW_METHODS}")
+    from wonambi.detect import DetectSlowWave
+    det = DetectSlowWave(method)
+    return (float(det.det_filt['freq'][0]), float(det.lowpass['freq']))
+
+
+#: Tooltip on the read-only duration boxes of Ngo2015 / Staresina2015.
+PUBLISHED_DURATION_TIP = ("Published value; the detector does not take a "
+                          "custom duration for this method.")
+
+
+def published_sw_duration(method):
+    """``(min_s, max_s)`` whole-wave duration a published-band slow-wave
+    method is detected with: Wonambi's ``DetectSlowWave(method).duration``.
+    Ngo2015 -> ``(0.833, 2.0)``, Staresina2015 -> ``(0.8, 2.0)``.
+
+    ``ImprovedDetectSlowWave`` keeps this for these two methods whatever
+    ``min_dur`` / ``max_dur`` it is given (by design; see
+    ``extensions.py``), so the tab shows it read-only and sends ``None``.
+    """
+    if method not in PUBLISHED_BAND_SW_METHODS:
+        raise ValueError(f"{method!r} has no published duration; "
+                         f"expected one of {PUBLISHED_BAND_SW_METHODS}")
+    from wonambi.detect import DetectSlowWave
+    lo, hi = DetectSlowWave(method).duration
+    return (float(lo), float(hi))
+
+
 class LoggingOutput(QtCore.QObject):
     """Class to capture and redirect logging to the GUI"""
     text_written = QtCore.pyqtSignal(str)
@@ -1322,6 +1371,16 @@ class TurtleWaveGUI(QMainWindow):
                 freq_spin.setValue(detector.lowpass.get('freq', 3.5))
                 freq_layout.addWidget(freq_spin)
                 filter_layout.addLayout(freq_layout)
+
+                # Read-only: the method's published low-pass. Nothing on
+                # this tab ever sent these two boxes, so editing them changed
+                # nothing; the detector's low-pass is the upper bound of the
+                # published band sent at run time (published_sw_band).
+                lowpass_tip = (f"Published {method_name} low-pass, fixed. "
+                               f"The duration boxes below do not change it.")
+                for w in (order_spin, freq_spin):
+                    w.setEnabled(False)
+                    w.setToolTip(lowpass_tip)
                 
                 filter_group.setLayout(filter_layout)
                 self.method_params_layout.addWidget(filter_group)
@@ -1348,7 +1407,6 @@ class TurtleWaveGUI(QMainWindow):
                 min_dur_spin.setDecimals(3)
                 min_dur_spin.setRange(0.01, 5.0)
                 min_dur_spin.setSingleStep(0.05)
-                min_dur_spin.setValue(detector.min_dur)
                 dur_layout.addWidget(min_dur_spin)
 
                 dur_layout.addWidget(QLabel("Max (s):"))
@@ -1356,9 +1414,19 @@ class TurtleWaveGUI(QMainWindow):
                 max_dur_spin.setDecimals(3)
                 max_dur_spin.setRange(0.1, 10.0)
                 max_dur_spin.setSingleStep(0.1)
-                max_dur_spin.setValue(detector.max_dur)
                 dur_layout.addWidget(max_dur_spin)
-                
+
+                # Read-only at the duration the detector really uses: it
+                # ignores min_dur / max_dur for these two methods (by design,
+                # extensions.py), so an editable box did nothing.
+                pub_min, pub_max = published_sw_duration(method_name)
+                for spin, val in ((min_dur_spin, pub_min),
+                                  (max_dur_spin, pub_max)):
+                    spin.setValue(val)
+                    spin.setEnabled(False)
+                    spin.setToolTip(PUBLISHED_DURATION_TIP)
+                dur_group.setToolTip(PUBLISHED_DURATION_TIP)
+
                 dur_group.setLayout(dur_layout)
                 self.method_params_layout.addWidget(dur_group)
                 
@@ -1368,35 +1436,19 @@ class TurtleWaveGUI(QMainWindow):
                     "max": max_dur_spin
                 }
                 
-                # MODIFIED: Add calculated frequency range display based on duration
-                freq_group = QGroupBox("Calculated Frequency Range")
+                # The band the run uses and stores: the method's published
+                # one, read-only. It used to be derived from the duration
+                # boxes (1/max_dur - 1/min_dur), which moved the detector's
+                # low-pass with every duration edit.
+                band_lo, band_hi = published_sw_band(method_name)
+                freq_group = QGroupBox("Frequency Band (published)")
                 freq_layout = QVBoxLayout()
-                
-                # Calculate frequency range based on duration
-                min_freq = 1.0 / detector.max_dur
-                max_freq = 1.0 / detector.min_dur
-                
-                info_text = QLabel(f"Based on duration: {min_freq:.2f} - {max_freq:.2f} Hz")
-                info_text.setAlignment(QtCore.Qt.AlignCenter)
-                freq_layout.addWidget(info_text)
-                
-                # Setup connections to update frequency range when duration changes
-                def update_freq_range():
-                    try:
-                        min_dur = min_dur_spin.value()
-                        max_dur = max_dur_spin.value()
-                        if min_dur > 0 and max_dur > 0:
-                            min_freq = 1.0 / max_dur
-                            max_freq = 1.0 / min_dur
-                            info_text.setText(f"Based on duration: {min_freq:.2f} - {max_freq:.2f} Hz")
-                        else:
-                            info_text.setText("Error: Duration values must be greater than zero")
-                    except ZeroDivisionError:
-                        info_text.setText("Error: Duration values cannot be zero")
-                
-                min_dur_spin.valueChanged.connect(update_freq_range)
-                max_dur_spin.valueChanged.connect(update_freq_range)
-                
+                self.sw_band_label = QLabel(
+                    f"{band_lo:g}–{band_hi:g} Hz · low-pass at {band_hi:g} Hz "
+                    f"as published; the duration boxes do not change it")
+                self.sw_band_label.setAlignment(QtCore.Qt.AlignCenter)
+                self.sw_band_label.setWordWrap(True)
+                freq_layout.addWidget(self.sw_band_label)
                 freq_group.setLayout(freq_layout)
                 self.method_params_layout.addWidget(freq_group)
                 
@@ -1576,12 +1628,18 @@ class TurtleWaveGUI(QMainWindow):
                 
                 
             elif self.sw_method in ["Ngo2015", "Staresina2015"]:
-                # Get duration range from specific widgets
-                dur_widgets = self.sw_param_widgets["duration"]
-                min_dur = dur_widgets["min"].value()
-                max_dur = dur_widgets["max"].value()
+                # None: the detector uses the method's published duration
+                # for these two methods whatever it is given, so sending the
+                # (read-only) boxes would record values that were not used.
+                # ParalSWA records None as "the method's published
+                # criterion"; the duration actually used is logged below.
+                min_dur = None
+                max_dur = None
                 
-                frequency = (1.0/max_dur, 1.0/min_dur) if min_dur > 0 and max_dur > 0 else (0.5, 1.25)
+                # The published band, never 1/duration: the detector uses
+                # its upper bound as the low-pass and the database stores the
+                # pair as the run's band (see published_sw_band).
+                frequency = published_sw_band(self.sw_method)
                 # These methods don't use trough_duration
                 trough_duration = None
                 
@@ -1634,7 +1692,11 @@ class TurtleWaveGUI(QMainWindow):
             #  Log the appropriate duration parameter based on method 
             if self.sw_method in ["Massimini2004", "AASM/Massimini2004"]:
                 self.write_log(f"Trough duration: {trough_duration[0]:.2f}-{trough_duration[1]:.2f} s")
-            else:
+            elif self.sw_method in PUBLISHED_BAND_SW_METHODS:
+                d_lo, d_hi = published_sw_duration(self.sw_method)
+                self.write_log(f"Duration range: {d_lo:g}-{d_hi:g} s "
+                               f"(published; not settable for this method)")
+            elif min_dur is not None and max_dur is not None:
                 self.write_log(f"Duration range: {min_dur:.2f}-{max_dur:.2f} s")
                 
             # Only the Massimini family takes microvolt amplitude criteria
@@ -1860,6 +1922,11 @@ class TurtleWaveGUI(QMainWindow):
                 else:
                     parameters_summary['min_dur'] = params.get('min_dur')
                     parameters_summary['max_dur'] = params.get('max_dur')
+                    if params['method'] in PUBLISHED_BAND_SW_METHODS:
+                        # min_dur/max_dur are None (the published criterion);
+                        # name the duration the detector actually used
+                        parameters_summary['duration'] = list(
+                            published_sw_duration(params['method']))
                     if params['method'] == "Ngo2015":
                         parameters_summary['peak_thresh_sigma'] = params.get('peak_thresh_sigma')
                         parameters_summary['ptp_thresh_sigma'] = params.get('ptp_thresh_sigma')

@@ -3846,8 +3846,13 @@ def _create_reviewed_views(conn, logger=None):
 
 
 def rematch_orphaned_reviews(conn, tolerance_s=0.1, dry_run=True,
-                             logger=None):
+                             logger=None, channels=None, event_type=None):
     """Propose (or apply) a new event for each orphaned review.
+
+    A detection run that replaces channels (``replace_channels=``) calls this
+    itself, scoped to the channels it replaced, through
+    :func:`carry_over_reviews`; call it directly to inspect or re-key the
+    orphans of other channels, or after changing ``tolerance_s``.
 
     A review is orphaned when its uuid is no longer in ``events``. Its
     successor must be the SAME detection: an event of the same
@@ -3871,9 +3876,20 @@ def rematch_orphaned_reviews(conn, tolerance_s=0.1, dry_run=True,
         is ``'proposed'`` onto its candidate: ``uuid``, ``run_id`` and
         ``start_time`` take the new event's values, ``reviewed_at``, the
         decision, method and band are kept, and ``comment`` gains a
-        ``[rematched from <old uuid>, dt=<s>]`` note. Nothing else is written.
+        ``[rematched from <old uuid>, dt=<s>]`` note. A review-sample event
+        (``review_samples``) whose uuid is the old one takes the new uuid
+        too, keeping its draw-time ``end_time``, so the carried decision
+        still counts for that sample event and the sample's 0.05 s end-time
+        rule still voids it when the re-detected event ends elsewhere.
+        Nothing else is written, and nothing is ever deleted.
     logger : logging.Logger or None, optional
         Logger for the summary. Default ``None``.
+    channels : str or sequence of str or None, optional
+        Only consider orphaned reviews of these channels. Default ``None``
+        (every channel).
+    event_type : str or None, optional
+        Only consider orphaned reviews of this event type. Default ``None``
+        (every type).
 
     Returns
     -------
@@ -3916,6 +3932,11 @@ def rematch_orphaned_reviews(conn, tolerance_s=0.1, dry_run=True,
             'status', 'applied']
     orphans = read_event_reviews(conn, include_orphaned=True)
     orphans = orphans[orphans['orphaned']]
+    chan_scope = _review_filter_values(channels)
+    if chan_scope is not None:
+        orphans = orphans[orphans['channel'].astype(str).isin(chan_scope)]
+    if event_type is not None:
+        orphans = orphans[orphans['event_type'] == str(event_type)]
     if orphans.empty or not _table_columns(conn, 'events'):
         return pd.DataFrame(columns=cols)
 
@@ -3991,32 +4012,170 @@ def rematch_orphaned_reviews(conn, tolerance_s=0.1, dry_run=True,
     prop = result['status'] == 'proposed'
     dup = result.loc[prop].duplicated(['new_uuid', 'reviewer'], keep=False)
     result.loc[dup.index[dup.values], 'status'] = 'conflict'
-    if not dry_run:
+    if not dry_run and (result['status'] == 'proposed').any():
         has_run = 'run_id' in _table_columns(conn, 'events')
-        for i, rec in result.iterrows():
-            if rec['status'] != 'proposed':
-                continue
-            new_run = None
-            if has_run:
-                new_run = conn.execute(
-                    "SELECT run_id FROM events WHERE uuid = ?",
-                    (rec['new_uuid'],)).fetchone()[0]
-            note = f"[rematched from {rec['old_uuid']}, dt={rec['dt']:.3f}s]"
-            conn.execute(
-                "UPDATE event_reviews SET uuid = ?, run_id = ?, "
-                "start_time = ?, comment = CASE WHEN comment IS NULL OR "
-                "comment = '' THEN ? ELSE comment || ' ' || ? END "
-                "WHERE uuid = ? AND reviewer = ?",
-                (rec['new_uuid'], new_run, float(rec['new_start_time']),
-                 note, note, rec['old_uuid'], rec['reviewer']))
-            result.at[i, 'applied'] = True
-        conn.commit()
+        moved = {}
+        try:
+            for i, rec in result.iterrows():
+                if rec['status'] != 'proposed':
+                    continue
+                new_run = None
+                if has_run:
+                    new_run = conn.execute(
+                        "SELECT run_id FROM events WHERE uuid = ?",
+                        (rec['new_uuid'],)).fetchone()[0]
+                note = (f"[rematched from {rec['old_uuid']}, "
+                        f"dt={rec['dt']:.3f}s]")
+                conn.execute(
+                    "UPDATE event_reviews SET uuid = ?, run_id = ?, "
+                    "start_time = ?, comment = CASE WHEN comment IS NULL OR "
+                    "comment = '' THEN ? ELSE comment || ' ' || ? END "
+                    "WHERE uuid = ? AND reviewer = ?",
+                    (rec['new_uuid'], new_run, float(rec['new_start_time']),
+                     note, note, rec['old_uuid'], rec['reviewer']))
+                result.at[i, 'applied'] = True
+                moved.setdefault(rec['old_uuid'], set()).add(rec['new_uuid'])
+            n_samples = _rekey_review_samples(conn, moved, logger=logger)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            result['applied'] = False
+            raise
+        if logger is not None and n_samples:
+            logger.info("Re-keyed %d review-sample event(s) onto their "
+                        "rematched successor", n_samples)
     if logger is not None:
         counts = result['status'].value_counts().to_dict()
         logger.info("Orphaned reviews: %d (%s); %s", len(result), counts,
                     'dry run, nothing written' if dry_run else
                     f"{int(result['applied'].sum())} re-keyed")
     return result
+
+
+def _rekey_review_samples(conn, moved, logger=None):
+    """Point review-sample events at the successor their reviews moved to.
+
+    ``moved`` maps an old uuid to the set of new uuids its applied reviews
+    were re-keyed onto (one, unless something is badly wrong). Only
+    ``review_samples.uuid`` changes: ``end_time`` stays the value stored at
+    the draw, so ``review_sampling``'s end-time rule still judges whether
+    the successor is the event that was sampled, and ``sort_key`` /
+    ``prn`` stay the draw-time keys that selected it. A sample that already
+    holds the new uuid is left alone (warned). Does not commit.
+
+    Returns
+    -------
+    int
+        Sample rows re-keyed.
+    """
+    if not moved or not _table_columns(conn, 'review_samples'):
+        return 0
+    log = logger if logger is not None else logging.getLogger(__name__)
+    n = 0
+    for old, news in moved.items():
+        if len(news) != 1:
+            log.warning("Review-sample event %s: reviews moved to %d "
+                        "different events %s; sample left on the old uuid",
+                        old, len(news), sorted(news))
+            continue
+        new = next(iter(news))
+        for (sid,) in conn.execute(
+                "SELECT sample_id FROM review_samples WHERE uuid = ?",
+                (old,)).fetchall():
+            if conn.execute(
+                    "SELECT 1 FROM review_samples WHERE sample_id = ? "
+                    "AND uuid = ?", (sid, new)).fetchone():
+                log.warning("Review sample %s already holds event %s; its "
+                            "old event %s stays in the sample as missing",
+                            sid, new, old)
+                continue
+            conn.execute("UPDATE review_samples SET uuid = ? "
+                         "WHERE sample_id = ? AND uuid = ?", (new, sid, old))
+            n += 1
+    return n
+
+
+def carry_over_reviews(conn, event_type, channels, tolerance_s=0.1,
+                       logger=None):
+    """Re-attach earlier review decisions after a channel was re-detected.
+
+    Runs :func:`rematch_orphaned_reviews` with ``dry_run=False``, limited
+    to the orphaned reviews of ``event_type`` on ``channels``. A decision
+    moves only onto the SAME detection (same method, band and channel,
+    start within ``tolerance_s``); everything else stays orphaned, as it
+    was. Called by :func:`write_channel_events` after every successful
+    replace, so a detection run with ``replace_channels=`` does this
+    without being asked.
+
+    The rematch is scoped by channel and event type, not by run, so it
+    also re-attaches OLDER orphaned reviews of that channel and event type
+    (left by an earlier re-detect that had no successor then) whenever an
+    exact same-method, same-band successor now exists.
+
+    Never raises: a database without ``event_reviews`` (written before
+    4.6), an empty one, or a failure inside the rematch (rolled back,
+    logged as a warning) all return. The replaced events are already
+    committed by then and are not affected.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Open write connection with no transaction pending.
+    event_type : str
+        Event type of the run that replaced the channels.
+    channels : str or sequence of str
+        The replaced channels.
+    tolerance_s : float, optional
+        Largest start-time difference accepted, in seconds. Default 0.1,
+        as :func:`rematch_orphaned_reviews`.
+    logger : logging.Logger or None, optional
+        Logger for the one-line summary (INFO when any orphaned review was
+        in scope). Defaults to this module's logger.
+
+    Returns
+    -------
+    dict or None
+        ``{'carried': n, 'unmatched': n, 'near_miss': n}``: decisions
+        re-keyed; decisions left orphaned because nothing (or nothing
+        unambiguous) matched (``no_match``, ``ambiguous``, ``conflict``,
+        ``method_unknown``); and decisions left orphaned whose nearest event
+        differs only in method or band (``method_changed``,
+        ``band_changed``, reported but never applied). ``None`` when the
+        rematch failed.
+    """
+    log = logger if logger is not None else logging.getLogger(__name__)
+    chans = _review_filter_values(channels) or []
+    counts = {'carried': 0, 'unmatched': 0, 'near_miss': 0}
+    if not chans or not _table_columns(conn, 'event_reviews'):
+        return counts
+    try:
+        res = rematch_orphaned_reviews(conn, tolerance_s=tolerance_s,
+                                       dry_run=False, logger=None,
+                                       channels=chans, event_type=event_type)
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.warning("Could not carry review decisions over to the re-detected "
+                    "%s events on %s (%s). The decisions are kept, orphaned; "
+                    "rematch_orphaned_reviews can re-attach them later.",
+                    event_type, ', '.join(chans), e)
+        return None
+    if res.empty:
+        log.debug("Review carry-over (%s on %s): no orphaned decisions",
+                  event_type, ', '.join(chans))
+        return counts
+    near = res['status'].isin(['method_changed', 'band_changed'])
+    counts['carried'] = int(res['applied'].sum())
+    counts['near_miss'] = int((near & ~res['applied']).sum())
+    counts['unmatched'] = len(res) - counts['carried'] - counts['near_miss']
+    log.info("Review carry-over (%s on %s): %d decision(s) carried over, "
+             "%d left unmatched, %d near miss(es) with a different method or "
+             "band not applied (see rematch_orphaned_reviews)",
+             event_type, ', '.join(chans), counts['carried'],
+             counts['unmatched'], counts['near_miss'])
+    return counts
 
 
 def record_run(conn, run_id, event_type, method, citation, params_json,
@@ -4790,7 +4949,7 @@ def write_channel_events(conn, run_id, event_type, channel, method,
                          freq_lower, freq_upper, stage_key, events, batched,
                          recording_start_time, n_fft_sec, logger=None,
                          replace=False, replace_methods=None,
-                         thresholds=None):
+                         thresholds=None, carry_reviews=True):
     """Write one channel's events + status in a single transaction.
 
     Opens an explicit transaction, ``INSERT OR REPLACE`` s every event row
@@ -4871,6 +5030,13 @@ def write_channel_events(conn, run_id, event_type, channel, method,
         criterion), ``method``, ``values``, ``units`` and optionally
         ``segment_idx``, ``seg_start``, ``seg_end``. ``None`` or empty writes
         nothing (CIRUS, or a caller that has none).
+    carry_reviews : bool, optional
+        When ``replace`` is True and the write committed, re-attach this
+        channel's orphaned review decisions of ``event_type`` to the same
+        detections in the new rows (:func:`carry_over_reviews`), in a second
+        transaction. Default True; False leaves them orphaned for a later
+        :func:`rematch_orphaned_reviews`. Ignored unless ``replace`` is True.
+        A failure there is logged, never raised.
 
     Returns
     -------
@@ -4981,6 +5147,11 @@ def write_channel_events(conn, run_id, event_type, channel, method,
     except Exception:
         conn.rollback()
         raise
+    if replace and carry_reviews:
+        # After the commit, never inside it: a failure here must not undo
+        # the channel's events (carry_over_reviews rolls back only its own
+        # updates and does not raise).
+        carry_over_reviews(conn, event_type, [channel], logger=logger)
     return len(events)
 
 

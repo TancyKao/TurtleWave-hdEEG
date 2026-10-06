@@ -131,6 +131,26 @@ source of truth after a re-run.
     per-channel artefact marking and a per-channel `fetch`, tracked as a
     follow-up.
 
+## Keep your review decisions
+
+From 4.6.1, when a re-run replaces a channel's events, each accept/reject
+decision on that channel moves to the matching new event: same channel, same
+method, same band, start within 0.1 s. A decision keeps its place in the review
+sample. Decisions with no match (the event moved, is gone, or the new event
+uses a different method or band) stay detached and need a fresh look. Nothing
+is deleted. The run log reports how many decisions were carried and how many
+were unmatched.
+
+## Write results to the recording's own database
+
+Re-run results must go into the recording's own `wonambi/neural_events.db`.
+Never set the detection GUI's Output Directory to a `qc_backup/<timestamp>`
+folder: that creates a separate database under a wrong subject.
+
+The re-detect queue is not cleared automatically. After a successful re-run,
+take the channel off the queue (select it and press **F**, or click **Remove
+from re-detect queue**).
+
 ## Roll back a re-run
 
 If a re-run needs to be undone, restore the snapshotted files from

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.1] — 2026-10-06
+
+Ngo2015 runs from the detection GUI are stored as 0.5–3.5 Hz from 4.6.1 on; do not pool them with earlier GUI rows.
+
+### Added
+
+- Re-detecting a channel keeps earlier review decisions: each moves to the detection with the same channel, method and band that starts within 0.1 s and keeps its place in the review sample; unmatched ones are kept and reported.
+
+### Changed
+
+- Detection GUI: the band, low-pass and duration boxes are read-only for Ngo2015 and Staresina2015.
+
+### Fixed
+
+- Detection GUI: Ngo2015 ran with a ~1.2 Hz low-pass instead of its published 3.5 Hz; Ngo2015 and Staresina2015 now use their published band and duration.
+
 ## [4.6.0] — 2026-10-05
 
 Per-event review is sample-based validation of a detection run. Review decisions are evidence about the detector and never remove events unless `exclude_rejected` is asked for.
