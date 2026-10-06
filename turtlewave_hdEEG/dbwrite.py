@@ -4107,6 +4107,11 @@ def carry_over_reviews(conn, event_type, channels, tolerance_s=0.1,
     replace, so a detection run with ``replace_channels=`` does this
     without being asked.
 
+    The rematch is scoped by channel and event type, not by run, so it
+    also re-attaches OLDER orphaned reviews of that channel and event type
+    (left by an earlier re-detect that had no successor then) whenever an
+    exact same-method, same-band successor now exists.
+
     Never raises: a database without ``event_reviews`` (written before
     4.6), an empty one, or a failure inside the rematch (rolled back,
     logged as a warning) all return. The replaced events are already

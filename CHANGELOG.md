@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Ngo2015 runs from the detection GUI are stored as 0.5–3.5 Hz from 4.6.1 on; do not pool them with earlier GUI rows.
 
+### Added
+
+- Re-detecting a channel keeps earlier review decisions: each moves to the detection with the same channel, method and band that starts within 0.1 s and keeps its place in the review sample; unmatched ones are kept and reported.
+
 ### Changed
 
 - Detection GUI: the band, low-pass and duration boxes are read-only for Ngo2015 and Staresina2015.

@@ -401,10 +401,63 @@ def test_processor_replace_channels():
           f"{target[:8]}... (dt=0.030 s)")
 
 
+def test_rematch_failure_rolls_back_every_rekey():
+    """A failure midway through applying the rematch undoes every re-key."""
+    print("\n4. Failure midway through applying rematch updates:")
+    with Workdir() as tmp:
+        conn = _db(tmp)
+        _write(conn, 'Cz', [(100.0, 100.8), (200.0, 200.8)])
+        old = [_uid('Cz', 100.0), _uid('Cz', 200.0)]
+        for u in old:
+            dbwrite.store_event_review(conn, u, 'accept', 'alice')
+        new = _write(conn, 'Cz', [(100.0, 100.8), (200.0, 200.8)],
+                     stage='NREM2,NREM3', replace=True, run_id='run-2',
+                     carry_reviews=False)
+        # carry_reviews=False leaves both decisions orphaned; then make the
+        # SECOND re-key fail.
+        before = conn.execute(
+            "SELECT uuid, reviewer, comment, start_time, run_id "
+            "FROM event_reviews ORDER BY uuid").fetchall()
+        assert len(before) == 2
+        assert {r[0] for r in before} == set(old), before
+        assert not set(old) & set(new)
+        conn.execute(
+            "CREATE TRIGGER fail_second BEFORE UPDATE ON event_reviews "
+            "WHEN (SELECT COUNT(*) FROM event_reviews "
+            "WHERE comment LIKE '[rematched%') >= 1 "
+            "BEGIN SELECT RAISE(ABORT, 'boom'); END")
+        conn.commit()
+        raised = False
+        try:
+            dbwrite.rematch_orphaned_reviews(
+                conn, dry_run=False, channels=['Cz'], event_type='spindle')
+        except sqlite3.Error:
+            raised = True
+        assert raised, "the trigger did not make the rematch fail"
+        assert not conn.in_transaction
+        after = conn.execute(
+            "SELECT uuid, reviewer, comment, start_time, run_id "
+            "FROM event_reviews ORDER BY uuid").fetchall()
+        assert after == before, (before, after)
+        # carry_over_reviews swallows the same failure, warns, returns None
+        log, cap = _logger()
+        assert dbwrite.carry_over_reviews(conn, 'spindle', ['Cz'],
+                                          logger=log) is None
+        assert [r for r in cap.lines if r[0] == logging.WARNING], cap.lines
+        after = conn.execute(
+            "SELECT uuid, reviewer, comment, start_time, run_id "
+            "FROM event_reviews ORDER BY uuid").fetchall()
+        assert after == before
+        conn.close()
+    print("   [ok] second UPDATE failed: first re-key rolled back, rows "
+          "unchanged, carry_over_reviews warned and returned None")
+
+
 TESTS = [
     test_carry_over_on_replace,
     test_no_or_empty_or_broken_reviews_table,
     test_processor_replace_channels,
+    test_rematch_failure_rolls_back_every_rekey,
 ]
 
 
