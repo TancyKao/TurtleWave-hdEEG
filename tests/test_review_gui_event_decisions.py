@@ -2249,6 +2249,142 @@ check('10.12', "[119, 116] the panel: header line, four rows, nothing from "
       repr((evp.event_line.text(), evp.row_text('outlier'))))
 win.close()
 
+# ======================================================================= 11
+say("\n== 11. Decisions after the GUI is reopened [real data, sub-02dg]")
+# The user rejected three PPOz spindles, closed the GUI and reopened it: the
+# bands were plain and 'Show events: rejected' read '0 of 344'. Decisions
+# are shown for the current reviewer only, and a new window has none. Now
+# opening a database that holds decisions asks for the name, prefilled with
+# the saved one (user decision: never set it silently).
+import sqlite3 as _sq3                                          # noqa: E402
+DB11 = make_db(os.path.join(TMP, 'reopen.db'))
+_c = _sq3.connect(DB11)
+for _u in ('u-f', 'u-g', 'u-h'):
+    dbwrite.store_event_review(_c, _u, 'reject', 'TK', reason='eye-movement')
+_c.commit()
+_c.close()
+DB11_NONE = make_db(os.path.join(TMP, 'no_reviews.db'))
+REJ11 = ('u-f', 'u-g', 'u-h')
+_open11 = QtWidgets.QFileDialog.getOpenFileName
+
+
+def reopened(saved, answer, db=DB11):
+    """A new window, as at startup, with ``saved`` in the settings (None: no
+    name ever saved); File ▸ Open Database… on ``db`` with the reviewer
+    dialog answering ``answer``. Returns the window, its prompts (the
+    prefills) and the status message right after opening."""
+    st = rg._review_settings()
+    if saved is None:
+        st.remove('review/reviewer_name')
+    else:
+        st.setValue('review/reviewer_name', saved)
+    st.sync()
+    w = rg.EventReviewGUI()
+    asked11 = []
+    w._ask_reviewer_name = lambda prefill: (asked11.append(prefill)
+                                            or answer)
+    QtWidgets.QFileDialog.getOpenFileName = staticmethod(
+        lambda *a, **k: (db, ''))
+    w.open_database()
+    QtWidgets.QFileDialog.getOpenFileName = _open11
+    msg = w.status_bar.currentMessage()
+    w.qc_widget.evt_combo.setCurrentText('spindle')
+    w.on_qc_drill('Cz', switch_tab=True)
+    app.processEvents()
+    return w, asked11, msg
+
+
+def rejected_chip(w):
+    ep_ = w.epochs_panel
+    ep_.set_status_filter({'reject'})
+    text = ep_.shown_chip_lbl.text()
+    ep_.set_status_filter(None)
+    return text
+
+
+w11, asked11, msg11 = reopened('TK', ('TK', True))
+ep11 = w11.epochs_panel
+chip11 = rejected_chip(w11)
+check('11.1', "[real data] opening a database with decisions asks for the "
+      "reviewer once, prefilled with the saved 'TK'; OK shows TK's three "
+      "rejects at once (bands and Show events: rejected)",
+      asked11 == ['TK'] and w11.reviewer_name == 'TK'
+      and w11.seg_reviewer.text() == 'Reviewer: TK'
+      and all(ep11._decision_of(u) == 'reject' for u in REJ11)
+      and chip11 == 'Showing: rejected · 3 of 9 on Cz',
+      repr((asked11, w11.reviewer_name, chip11,
+            [ep11._decision_of(u) for u in REJ11])))
+# re-drill and tab changes do not ask again
+w11.on_qc_drill('Fz', switch_tab=True)
+w11.on_qc_drill('Cz', switch_tab=True)
+w11.tabs.setCurrentIndex(0)
+w11.tabs.setCurrentIndex(1)
+app.processEvents()
+check('11.2', "no second prompt on a re-drill or a tab change",
+      asked11 == ['TK'], repr(asked11))
+w11.close()
+
+w11, asked11, msg11 = reopened('TK', ('', False))
+ep11 = w11.epochs_panel
+chip11 = rejected_chip(w11)
+check('11.3', "Cancel: no name is set ('Reviewer: not set'), the status "
+      "says decisions are hidden and how to set the name, and Show events: "
+      "rejected finds 0", asked11 == ['TK'] and w11.reviewer_name == ''
+      and w11.seg_reviewer.text() == 'Reviewer: not set'
+      and msg11 == 'Decisions are hidden until you set a reviewer name '
+      '(Review ▸ Reviewer name…).'
+      and all(ep11._decision_of(u) is None for u in REJ11)
+      and chip11 == 'Showing: rejected · 0 of 9 on Cz',
+      repr((asked11, w11.reviewer_name, msg11, chip11)))
+w11.close()
+
+w11, asked11, _m = reopened('TK', ('  TK  ' + 'x' * 60, True))
+check('11.4', "the name typed at the prompt is cleaned like any typed name "
+      "(stripped, at most 40 characters)",
+      w11.reviewer_name == ('TK  ' + 'x' * 60)[:40], repr(w11.reviewer_name))
+w11.close()
+
+w11, asked11, _m = reopened(None, ('', False))
+check('11.5', "no name ever saved: the prompt opens empty",
+      asked11 == [''] and w11.reviewer_name == '', repr(asked11))
+w11.close()
+
+# a file of another recording unloaded by the same Open Database: its
+# message must survive the prompt [gate]
+_other = os.path.join(TMP, 'sub-zz_other', 'sub-zz_eeg.xml')
+os.makedirs(os.path.dirname(_other), exist_ok=True)
+with open(_other, 'w') as _fh:
+    _fh.write('<annotations/>')
+UNLOAD11 = ('Annotation file unloaded: it belongs to sub-zz_eeg. Load the '
+            'annotation for sub-fx.')
+for _ans, _tag in ((('', False), 'Cancel'), (('TK', True), 'OK')):
+    rg._review_settings().setValue('review/reviewer_name', 'TK')
+    w11 = rg.EventReviewGUI()
+    w11.annot_file_path = _other
+    _asked = []
+    w11._ask_reviewer_name = lambda p, a=_ans: (_asked.append(p) or a)
+    QtWidgets.QFileDialog.getOpenFileName = staticmethod(
+        lambda *a, **k: (DB11, ''))
+    w11.open_database()
+    QtWidgets.QFileDialog.getOpenFileName = _open11
+    _msg = w11.status_bar.currentMessage()
+    _want = (UNLOAD11 + ' Decisions are hidden until you set a reviewer name '
+             '(Review ▸ Reviewer name…).' if _tag == 'Cancel' else UNLOAD11)
+    check(f'11.7{_tag[0].lower()}', f"[gate] {_tag} at the prompt after an "
+          f"annotation of another recording was unloaded: the unload message "
+          f"stays" + (" with the hidden-decisions sentence appended"
+                      if _tag == 'Cancel' else ''),
+          _asked == ['TK'] and w11.annot_file_path is None and _msg == _want
+          and w11.reviewer_name == ('' if _tag == 'Cancel' else 'TK'),
+          repr((_asked, _msg)))
+    w11.close()
+
+w11, asked11, msg11 = reopened('TK', ('TK', True), db=DB11_NONE)
+check('11.6', "a database without decisions opens with no prompt and no "
+      "name set", asked11 == [] and w11.reviewer_name == ''
+      and 'Decisions are hidden' not in msg11, repr((asked11, msg11)))
+w11.close()
+
 say("\n" + "=" * 78)
 check('settings', "the real review-GUI preferences file was not "
       "touched", *gui_settings_guard.untouched())

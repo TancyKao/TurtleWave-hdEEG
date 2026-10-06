@@ -2,7 +2,7 @@
 turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 """
 
-__version__ = '4.6.1'
+__version__ = '4.6.2'
 
 # Opt-in only: with TURTLEWAVE_QUIET_WONAMBI=1 in the environment, silence the
 # two Wonambi 7.15 DeprecationWarnings BEFORE Wonambi is imported below (the
