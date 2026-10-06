@@ -869,6 +869,15 @@ class EventDatabase:
         self.conn.commit()
         return True
 
+    def has_event_reviews(self):
+        """True when the database holds at least one saved decision (any
+        reviewer); False with no ``event_reviews`` table or no rows."""
+        try:
+            return self.conn.execute(
+                "SELECT 1 FROM event_reviews LIMIT 1").fetchone() is not None
+        except sqlite3.Error:
+            return False
+
     def get_reviews_for(self, uuids, reviewer=None):
         """Decisions on the given events.
 
@@ -7564,7 +7573,9 @@ class EventReviewGUI(QMainWindow):
         self.db = None
         self.eeg_data = None
         self.annotations = None
-        self.reviewer_name = ""   # provenance field; intentionally unset
+        # provenance field; asked when a database with decisions is opened
+        # (prefilled with the last session's name) or on the first decision
+        self.reviewer_name = ""
         self.selected_event_uuid = None   # event picked on the Epochs trace
         # decision state (spec section 5) and session-only review settings
         self._armed = None                # 'reject' | 'unsure' while armed
@@ -9224,6 +9235,34 @@ class EventReviewGUI(QMainWindow):
                     else "Reviewer: not set")
         return self.reviewer_name
 
+    #: Status line after the reviewer prompt on opening is cancelled.
+    DECISIONS_HIDDEN_MSG = ("Decisions are hidden until you set a reviewer "
+                            "name (Review ▸ Reviewer name…).")
+
+    def _prompt_reviewer_for_database(self, keep_msg=None):
+        """On opening a database that holds saved decisions, ask for the
+        reviewer name (the Review ▸ Reviewer name… dialog), prefilled with
+        the current or last saved name; nothing is set without OK.
+
+        Decisions are shown for the current reviewer only, so a window with
+        no name showed none of them after a restart. OK sets the name and
+        the decisions appear at once; Cancel leaves the name as it was and,
+        when none is set, says the decisions are hidden. Called once per
+        database opened, never on a drill or a tab change. ``keep_msg`` is a
+        status message that must survive the prompt (a file just unloaded
+        as another recording's): it stays, with the hidden-decisions
+        sentence appended when no name is set. Returns True when a name is
+        set afterwards."""
+        if self.db is None or not self.db.has_event_reviews():
+            return bool(self.reviewer_name)
+        self._prompt_reviewer_name()
+        parts = [keep_msg] if keep_msg else []
+        if not self.reviewer_name:
+            parts.append(self.DECISIONS_HIDDEN_MSG)
+        if parts:
+            self.status_bar.showMessage(' '.join(parts))
+        return bool(self.reviewer_name)
+
     def _prompt_reviewer_name(self):
         """Review ▸ Reviewer name… and the status-bar segment."""
         prefill = self.reviewer_name or str(
@@ -10132,6 +10171,10 @@ class EventReviewGUI(QMainWindow):
         w.start()
 
     def _on_population_ready(self, key, res):
+        if getattr(self, 'is_closing', False):
+            # the window closed (and its database with it) while the read ran
+            self._pop_worker = None
+            return
         conn = getattr(self.db, 'conn', None)
         if key[4] != id(conn):        # a database opened since the read began
             if self._pop_worker is not None and self._pop_worker.key == key:
@@ -10924,7 +10967,12 @@ class EventReviewGUI(QMainWindow):
                 # QC reframe: land on the per-channel dashboard
                 self.refresh_qc_dashboard()
                 self._refresh_chrome()
+                unload_msg = getattr(self, '_unload_msg', None)
                 self._show_unload_message()
+                # decisions are shown for the current reviewer only: ask
+                # who is reviewing now, once per database opened; a file
+                # unloaded just now is still reported afterwards
+                self._prompt_reviewer_for_database(keep_msg=unload_msg)
 
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load database: {str(e)}")
