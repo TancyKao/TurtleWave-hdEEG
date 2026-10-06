@@ -41,7 +41,12 @@ jobs:
       - name: Check distribution
         run: twine check dist/*
 
+      # TestPyPI is a rehearsal, not a gate: when it is down (4.6.1 never
+      # reached PyPI because TestPyPI reset every upload) the release must
+      # still publish. A failure here shows as a warning and the PyPI step
+      # below runs anyway.
       - name: Upload to TestPyPI
+        continue-on-error: true
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
