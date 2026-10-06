@@ -446,7 +446,8 @@ def test_shifted_replace_orphans():
         def _write(starts, replace):
             dbwrite.write_channel_events(
                 conn, 'run-x', 'spindle', 'Cz', 'Moelle2011', 11, 16, 'NREM2',
-                _events(starts), [], None, None, replace=replace)
+                _events(starts), [], None, None, replace=replace,
+                carry_reviews=False)   # the manual rematch is under test
 
         _write([100.0, 200.0, 300.0], replace=False)
         old = dbwrite.event_uuid5('spindle', 'Cz', 200.0, 'Moelle2011', 11, 16,
@@ -818,7 +819,8 @@ def _put(conn, rows, run_method, replace=False, replace_methods=None,
     dbwrite.write_channel_events(
         conn, run_id, event_type, channel, run_method, band[0], band[1],
         'NREM2', evs, [], None, None, replace=replace,
-        replace_methods=replace_methods)
+        replace_methods=replace_methods,
+        carry_reviews=False)   # the manual rematch is under test
     return [e['uuid'] for e in evs]
 
 

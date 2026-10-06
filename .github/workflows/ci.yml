@@ -147,6 +147,11 @@ jobs:
         run: |
           python tests/test_event_reviews.py
 
+      - name: Run review carry-over tests
+        if: ${{ !cancelled() }}
+        run: |
+          python tests/test_review_carryover.py
+
       - name: Run detection threshold tests
         if: ${{ !cancelled() }}
         run: |
