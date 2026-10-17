@@ -65,7 +65,14 @@ class ParalPAC:
     A class for parallel detection and analysis of phase-amplitude coupling (PAC)
     across multiple channels of high-density EEG data.
     """
-    
+
+    #: Surrogates per comodulogram cell (tensorpac's own default), used when
+    #: ``idpac[1] != 0``.
+    COMOD_N_PERM = 200
+    #: Seed for the comodulogram surrogates, so the normalised map and its
+    #: p-values are identical run to run.
+    COMOD_RANDOM_STATE = 5
+
     def __init__(self, dataset, annotations=None, rootpath=None, log_level=logging.INFO, log_file=None):
         """
         Initialize the ParalPAC object.
@@ -239,7 +246,15 @@ class ParalPAC:
         filter_opts : dict
             Signal filtering options
         event_opts : dict
-            Event processing options
+            Event processing options. ``'sw_method'`` / ``'spindle_method'``
+            select the stored detector method; ``'sw_freq_range'`` /
+            ``'spindle_freq_range'`` select the stored detection band, which
+            must match the band the events were stored under EXACTLY
+            (``freq_lower = lo AND freq_upper = hi``), not merely lie inside
+            it. Before 4.6.3 the band was a range filter, so a database
+            holding two runs of the same method at nested bands (say
+            11-16 Hz and 12-15 Hz) pooled both into one PAC estimate.
+            ``'buffer'`` is the padding in seconds read around each event.
         invert : bool
             Whether to invert signal polarity
         use_detected_events : bool
@@ -488,6 +503,10 @@ class ParalPAC:
         logger.info(f"Method: {methods[idpac[0]]}")
         logger.info(f"Surrogate: {surrogates[idpac[1]]}")
         logger.info(f"Correction: {corrections[idpac[2]]}")
+        if idpac[1] == 0:
+            logger.info(
+                f"idpac={tuple(idpac)} computes no surrogates, so the MI "
+                f"p-value (median_mi_pval) is undefined and stored as NaN.")
         
         # Log filtering options
         logger.info(f"Using {adap_bands_phase} bands for phase frequency")
@@ -625,9 +644,11 @@ class ParalPAC:
                                 query += " AND method = ?"
                                 params.append(event_opts['sw_method'])
                             # Add frequency range filter if specified
-                            if 'sw_freq_range' in event_opts and event_opts['sw_freq_range'] and len(event_opts['sw_freq_range']) == 2:
-                                query += " AND freq_lower >= ? AND freq_upper <= ?"
-                                params.extend(event_opts['sw_freq_range'])
+                            sw_band = self._requested_band(
+                                event_opts.get('sw_freq_range'))
+                            if sw_band is not None:
+                                query += " AND freq_lower = ? AND freq_upper = ?"
+                                params.extend(sw_band)
 
                             # Add stage filter if specified. Resolved to the
                             # tokens the database actually holds, so this
@@ -666,12 +687,18 @@ class ParalPAC:
                             slow_wave_events = cursor.fetchall()
                             
                             logger.info(f"Found {len(slow_wave_events)} slow wave events for channel {ch}")
+                            if not slow_wave_events and sw_band is not None:
+                                self._warn_band_mismatch(
+                                    cursor, 'slow_wave',
+                                    event_opts.get('sw_method'), ch, sw_band)
                             
                             if pair_with_spindles:
                                 logger.info("Looking for slow wave-spindle pairs")
                                 
                                 # Initialize list for paired events
                                 paired_events = []
+                                pair_sp_band = self._requested_band(
+                                    event_opts.get('spindle_freq_range'))
                                 
                                 # For each slow wave, find spindles that occur within the time window
                                 for sw in slow_wave_events:
@@ -702,9 +729,9 @@ class ParalPAC:
                                         spindle_params.append(event_opts['spindle_method'])
                                     
                                     # Add frequency range filter if specified
-                                    if 'spindle_freq_range' in event_opts and event_opts['spindle_freq_range'] and len(event_opts['spindle_freq_range']) == 2:
-                                        spindle_query += " AND freq_lower >= ? AND freq_upper <= ?"
-                                        spindle_params.extend(event_opts['spindle_freq_range'])
+                                    if pair_sp_band is not None:
+                                        spindle_query += " AND freq_lower = ? AND freq_upper = ?"
+                                        spindle_params.extend(pair_sp_band)
 
                                     cursor.execute(spindle_query, spindle_params)
                                     related_spindles = cursor.fetchall()
@@ -731,6 +758,11 @@ class ParalPAC:
                                 
                                 if len(paired_events) == 0:
                                     logger.warning(f"No slow wave-spindle pairs found for channel {ch}")
+                                    if pair_sp_band is not None:
+                                        self._warn_band_mismatch(
+                                            cursor, 'spindle',
+                                            event_opts.get('spindle_method'),
+                                            ch, pair_sp_band)
                                     continue
                                 
                                 # Create segments from paired events
@@ -817,9 +849,11 @@ class ParalPAC:
                                 params.append(event_opts['spindle_method'])
 
                             # Add frequency range filter if specified
-                            if 'spindle_freq_range' in event_opts and event_opts['spindle_freq_range'] and len(event_opts['spindle_freq_range']) == 2:
-                                query += " AND freq_lower >= ? AND freq_upper <= ?"
-                                params.extend(event_opts['spindle_freq_range'])
+                            sp_band = self._requested_band(
+                                event_opts.get('spindle_freq_range'))
+                            if sp_band is not None:
+                                query += " AND freq_lower = ? AND freq_upper = ?"
+                                params.extend(sp_band)
 
 
                             # Add stage filter if specified. Resolved to the
@@ -852,6 +886,11 @@ class ParalPAC:
                             
                             if len(spindle_events) == 0:
                                 logger.warning(f"No spindle events found for channel {ch}")
+                                if sp_band is not None:
+                                    self._warn_band_mismatch(
+                                        cursor, 'spindle',
+                                        event_opts.get('spindle_method'),
+                                        ch, sp_band)
                                 continue
                             
                             # Create segments from spindles
@@ -1001,7 +1040,14 @@ class ParalPAC:
                 mi = np.zeros((longamp.shape[0], 1))
                 mi_raw_blocks = np.zeros((longamp.shape[0], 1))
                 mi_pv = np.zeros((longamp.shape[0], 1))
-                
+
+                # idpac[1] == 0 asks for no surrogates. tensorpac then leaves
+                # `surrogates` as None and infer_pvalues raises on it, which
+                # used to abort the whole channel (caught per channel, so the
+                # channel simply had no result). There is no null to test
+                # against, so the p-value is undefined: store NaN, not 0 or 1.
+                has_surrogates = idpac[1] != 0
+
                 for row in range(longamp.shape[0]):
                     pha_data = np.zeros((1))
                     amp_data = np.zeros((1))
@@ -1026,7 +1072,8 @@ class ParalPAC:
                     raw_block = np.ravel(np.asarray(pac.pac, dtype=float))
                     mi_raw_blocks[row] = (float(raw_block[0]) if raw_block.size
                                           else np.nan)
-                    mi_pv[row] = pac.infer_pvalues(p=0.95, mcp='fdr')[0][0]
+                    mi_pv[row] = (pac.infer_pvalues(p=0.95, mcp='fdr')[0][0]
+                                  if has_surrogates else np.nan)
                 
                 # 10. Calculate preferred phase
                 # Normalize amplitude by sum (to get probability distribution)
@@ -1382,6 +1429,70 @@ class ParalPAC:
 
         return resolved_type, resolved_method
     
+    @staticmethod
+    def _requested_band(freq_range):
+        """Normalise an ``event_opts`` band to ``(lo, hi)`` floats, or None.
+
+        Parameters
+        ----------
+        freq_range : sequence of float or None
+            The ``'sw_freq_range'`` / ``'spindle_freq_range'`` entry.
+
+        Returns
+        -------
+        tuple of float or None
+            ``(lo, hi)`` when a two-element band was given, else ``None``
+            (no band filter).
+        """
+        if freq_range is None or len(freq_range) != 2:
+            return None
+        return (float(freq_range[0]), float(freq_range[1]))
+
+    def _warn_band_mismatch(self, cursor, event_type, method, ch, band):
+        """Warn that an exact band filter selected nothing on ``ch``.
+
+        Lists the distinct ``(freq_lower, freq_upper)`` actually stored for
+        the event type, method and channel, so a caller who asked for a
+        band the detector never ran at sees what is there instead of a
+        bare "no events". Silent when the requested band IS stored: the
+        empty selection then has another cause (stage, pairing window),
+        which the caller already logs.
+
+        Parameters
+        ----------
+        cursor : sqlite3.Cursor
+            Open cursor on the events database.
+        event_type : str
+            ``'slow_wave'`` or ``'spindle'``.
+        method : str or None
+            Detector method filter, or ``None`` for any method.
+        ch : str
+            Channel name.
+        band : tuple of float
+            The requested ``(lo, hi)``.
+        """
+        sql = ("SELECT DISTINCT freq_lower, freq_upper FROM events "
+               "WHERE event_type = ? AND channel = ?")
+        params = [event_type, ch]
+        if method:
+            sql += " AND method = ?"
+            params.append(method)
+        sql += " ORDER BY freq_lower, freq_upper"
+        try:
+            stored = [tuple(r) for r in cursor.execute(sql, params).fetchall()]
+        except Exception as e:  # diagnostics must never abort the run
+            stored = f"<could not query: {e}>"
+        if isinstance(stored, list) and tuple(band) in stored:
+            # The band exists for this scope, so the empty selection has
+            # another cause (stage or the pairing window), already logged.
+            return
+        self.logger.warning(
+            f"No {event_type} events for channel {ch}"
+            f"{' / method ' + str(method) if method else ''} at exactly "
+            f"{band[0]}-{band[1]} Hz. Bands stored for this scope: "
+            f"{stored if stored else 'none'}. The band filter is exact; pass "
+            f"one of the stored bands.")
+
     def _mean_amp(self, pha, amp, nbins=18):
         """
         Calculate mean amplitude in phase bins.
@@ -1447,8 +1558,27 @@ class ParalPAC:
             
         Returns
         -------
-        dict
-            Dictionary containing comodulogram results
+        dict or None
+            ``None`` when no data could be read or the computation failed
+            (the error is logged). Otherwise:
+
+            * ``'comod'`` -- array ``(n_amp, n_pha)``, rows follow
+              ``amp_freqs`` and columns ``phase_freqs``. Normalised by the
+              surrogates as ``idpac[2]`` selects (a z-score under the default
+              ``(2, 3, 4)``); raw when ``idpac[2] == 0``.
+            * ``'pvalues'`` -- array ``(n_amp, n_pha)`` of surrogate
+              p-values (``COMOD_N_PERM`` surrogates seeded with
+              ``COMOD_RANDOM_STATE``), all NaN when ``idpac[1] == 0``.
+            * ``'p_freqs'``, ``'a_freqs'`` -- the bands as ``(n, 2)`` arrays.
+            * ``'output_file'``, ``'fig_file'`` -- the ``.npz`` and ``.png``
+              written to ``out_dir``.
+
+        Notes
+        -----
+        The comodulogram is computed on the stage's segments concatenated
+        into one trace, so the filters see a step at every segment junction.
+        Before 4.6.3 this method raised inside ``filterfit`` on every call and
+        returned ``None``.
         """
         from tensorpac import Pac
 
@@ -1535,84 +1665,81 @@ class ParalPAC:
                 # Calculate sampling frequency
                 s_freq = segments[0]['data'].s_freq
                 
-                # Create PAC object
-                pac = Pac(idpac=idpac, verbose='ERROR')
-                
-                # Prepare phase and amplitude frequency ranges
-                p_freqs = np.array([list(pf) for pf in phase_freqs])
-                a_freqs = np.array([list(af) for af in amp_freqs])
-                
-                # Calculate comodulogram
-                logger.info("Calculating comodulogram...")
-                
-                try:
-                    # Try with permutations first
-                    pac = Pac(idpac=idpac, verbose='ERROR')
-                    comod = pac.filterfit(s_freq, data_array, p_freqs, a_freqs, n_perm=200, verbose=False)
-                    logger.info("Comodulogram generated with statistical testing")
-                except TypeError as e:
-                    if "multiple values for argument 'n_perm'" in str(e):
-                        # Fall back without n_perm if there's a parameter conflict
-                        pac = Pac(idpac=idpac, verbose='ERROR')
-                        comod = pac.filterfit(s_freq, data_array, p_freqs, a_freqs, verbose=False)
-                        logger.warning(
-                            "Statistical testing disabled due to a parameter "
-                            "conflict; comodulogram computed without surrogates")
-                    else:
-                        logger.error(f"Error in filterfit: {e}")
-                        raise e
-               
+                # Phase / amplitude bands as (n_bands, 2) arrays.
+                p_freqs = np.array([list(pf) for pf in phase_freqs], dtype=float)
+                a_freqs = np.array([list(af) for af in amp_freqs], dtype=float)
+
+                # The bands belong to the Pac object, not to filterfit, whose
+                # signature is filterfit(sf, x_pha, x_amp=None, n_perm=200,
+                # ...). The old call passed them positionally, so p_freqs
+                # landed in x_amp and a_freqs collided with n_perm (TypeError);
+                # its fallback then failed the x_pha/x_amp shape assertion, so
+                # this method never produced a comodulogram.
+                pac = Pac(idpac=idpac, f_pha=p_freqs, f_amp=a_freqs,
+                          verbose='ERROR')
+                # No surrogates when idpac[1] == 0 (tensorpac would ignore
+                # n_perm anyway); otherwise a seeded surrogate set, so the
+                # normalised comodulogram and its p-values reproduce.
+                n_perm = 0 if idpac[1] == 0 else self.COMOD_N_PERM
+                logger.info(f"Calculating comodulogram ({len(p_freqs)} phase x "
+                            f"{len(a_freqs)} amplitude bands, n_perm={n_perm}, "
+                            f"random_state={self.COMOD_RANDOM_STATE})...")
+                comod = pac.filterfit(s_freq, data_array, n_perm=n_perm,
+                                      random_state=self.COMOD_RANDOM_STATE,
+                                      verbose=False)
+                # filterfit returns (n_amp, n_pha, n_epochs); the data is a
+                # single concatenated trace, so n_epochs == 1.
+                comod = np.asarray(comod, dtype=float)
+                if comod.ndim == 3:
+                    comod = comod.mean(axis=-1)
+                pvalues = (np.asarray(pac.pvalues, dtype=float)
+                           if n_perm > 0 and pac.pvalues is not None
+                           else np.full(comod.shape, np.nan))
+
                 # Save results
-                stagename = '-'.join(stage)
+                stagename = '-'.join(stage) if stage else 'all'
                 output_file = f"{out_dir}/comodulogram_{chan}_{stagename}.npz"
-                
+
                 np.savez(output_file,
                        comod=comod,
+                       pvalues=pvalues,
                        p_freqs=p_freqs,
                        a_freqs=a_freqs,
                        idpac=idpac,
+                       n_perm=n_perm,
+                       random_state=self.COMOD_RANDOM_STATE,
                        chan=chan,
-                       stage=stage)
-                
+                       stage=stage if stage else 'all')
+
                 logger.info(f"Saved comodulogram to {output_file}")
-                
-                # Create and save plot
+
+                # Plot on band-index axes: the bands need be neither
+                # contiguous nor equally wide (the defaults skip 45-55 Hz),
+                # so a continuous Hz extent -- and the log y-axis the old
+                # plot put under a linear imshow -- would misplace cells.
                 fig = Figure(figsize=(10, 8), dpi=100)
                 ax = fig.add_subplot(111)
-                
-                # Create meshgrid for plotting
-                p_centers = [(p[0] + p[1])/2 for p in phase_freqs]
-                a_centers = [(a[0] + a[1])/2 for a in amp_freqs]
-                
-                # Plot comodulogram as heatmap
-                im = ax.imshow(comod, cmap='viridis', aspect='auto', 
-                             extent=[p_centers[0], p_centers[-1], a_centers[0], a_centers[-1]],
-                             origin='lower')
-                
-                # Add colorbar
+                im = ax.imshow(comod, cmap='viridis', aspect='auto',
+                               origin='lower', interpolation='nearest')
                 cbar = fig.colorbar(im, ax=ax)
                 cbar.set_label('PAC Strength')
-                
-                # Add labels
-                ax.set_xlabel('Phase Frequency (Hz)')
-                ax.set_ylabel('Amplitude Frequency (Hz)')
+                ax.set_xticks(range(len(phase_freqs)))
+                ax.set_xticklabels([f"{p[0]:g}-{p[1]:g}" for p in phase_freqs])
+                ax.set_yticks(range(len(amp_freqs)))
+                ax.set_yticklabels([f"{a[0]:g}-{a[1]:g}" for a in amp_freqs])
+                ax.set_xlabel('Phase band (Hz)')
+                ax.set_ylabel('Amplitude band (Hz)')
                 ax.set_title(f'PAC Comodulogram - {chan} - {stagename}')
-                
-                # Set y-axis to log scale for better visualization
-                ax.set_yscale('log')
-                
-                # Add frequency band labels
-                ax.set_xticks([p[0] for p in phase_freqs] + [phase_freqs[-1][1]])
-                ax.set_yticks([a[0] for a in amp_freqs] + [amp_freqs[-1][1]])
-                
+
                 # Save figure
                 fig_file = f"{out_dir}/comodulogram_{chan}_{stagename}.png"
                 fig.savefig(fig_file, dpi=300, bbox_inches='tight')
-                
+
                 logger.info(f"Saved comodulogram plot to {fig_file}")
                 
                 return {
                     'comod': comod,
+                    'pvalues': pvalues,
                     'p_freqs': p_freqs,
                     'a_freqs': a_freqs,
                     'output_file': output_file,

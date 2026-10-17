@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.3] — Unreleased
+
+Re-run PAC (library or GUI) if your database holds more than one band of a method. Do not pool new Massimini2004 K-complex rows, or Ngo2015/Staresina2015 slow-wave rows detected with the default band, with older ones.
+
+### Added
+
+- `turtlewave_hdEEG.utils`: `resolve_sw_frequency`, `published_sw_band`, `published_sw_duration`, `PUBLISHED_BAND_SW_METHODS`, `DEFAULT_MASSIMINI_SW_BAND`.
+
+### Changed
+
+- CI pinned to ubuntu-24.04.
+- `ParalSWA.detect_slow_waves` with several methods and no `frequency=` raises `ValueError` when the methods' bands differ; pass `frequency=` explicitly.
+
+### Fixed
+
+- `ParalPAC.generate_comodulogram` returned None on every call; it now works, returns p-values and labels plot axes by band.
+- PAC event selection matches the requested band exactly instead of pooling every stored band of that method inside the range; a band never stored selects nothing and warns with the stored bands.
+- PAC with no surrogates (e.g. `idpac=(2,0,0)`) no longer fails silently per channel; the p-value is NaN.
+- Detection GUI PAC runs select events from the chosen detection band only; before, they pooled every stored band of the method.
+- `ParalSWA.detect_slow_waves` without `frequency=` uses the published band for Ngo2015 (0.5–3.5 Hz) and Staresina2015 (0.5–1.25 Hz) instead of a 4 Hz low-pass; new rows carry the new band token, so they do not share a scope with old default runs. Massimini defaults are unchanged.
+- `ParalKC` with `method='Massimini2004'` and no explicit criteria uses Massimini's criteria (−80 µV, 140 µV, 0.3–1.0 s) instead of AASM's, and records the applied criteria in the run parameters. The default method is unchanged.
+
 ## [4.6.2] — 2026-10-07
 
 4.6.1 was not published to PyPI; its changes ship in 4.6.2.

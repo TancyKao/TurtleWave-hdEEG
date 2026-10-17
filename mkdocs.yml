@@ -115,6 +115,7 @@ nav:
       - Upgrade to 4.2: how-to/upgrade-to-4.2.md
       - Upgrade to 4.3: how-to/upgrade-to-4.3.md
       - Upgrade to 4.6: how-to/upgrade-to-4.6.md
+      - Upgrade to 4.6.3: how-to/upgrade-to-4.6.3.md
 
   - Reference:
     - API Reference: reference/api/index.md
