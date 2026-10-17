@@ -72,12 +72,10 @@ mkdocs serve            # http://127.0.0.1:8000
 ```
 turtlewave_hdEEG/   # core library (detectors, processors, exporters)
 frontend/           # PyQt5 GUIs
-examples/           # standalone scripts and HPC batch templates
+examples/           # standalone example scripts
 docs/               # MkDocs Material source
 tests/              # smoke tests
 ```
-
-HPC batch templates in `examples/NCI_commands/` target NCI Gadi (PBS) and use plain pip + venv on the cluster — no conda required.
 
 ## License
 

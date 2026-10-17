@@ -122,7 +122,7 @@ can remove:
 - NumPy's "Conversion of an array with ndim > 0 to a scalar is deprecated",
   raised from `wonambi/trans/analyze.py` once per call site.
 
-The GUIs and the example and Gadi driver scripts now set the environment
+The GUIs and the example scripts now set the environment
 variable `TURTLEWAVE_QUIET_WONAMBI=1` before they import the package, and
 `import turtlewave_hdEEG` then calls `turtlewave_hdEEG.utils.quiet_wonambi_warnings()`
 before it imports Wonambi. Nothing else is silenced. The library never does this

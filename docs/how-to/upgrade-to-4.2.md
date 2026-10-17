@@ -40,16 +40,15 @@ care about, same as any other version.
 - Per-channel JSON is no longer written on the default path. The
   `create_empty_json` parameter is removed from all three detectors — there
   is nothing for it to gate now that the default path writes no JSON at all.
-- The three GUI detection paths and the `_GADI.py` cluster drivers lost their
+- The three GUI detection paths lost their
   export → import → density-CSV block entirely on the default path.
 - `--write-db` is gone from the CLI drivers as a meaningful flag — it's
   accepted for backward compatibility so an existing PBS script doesn't fail
   to parse, and it now names the default rather than opting into anything.
   On `examples/hdEEG_spindle_detector.py`, `hdEEG_sw_detector.py` and
   `hdEEG_kcomplex_detector.py` it's a pure no-op (registered with
-  `help=SUPPRESS`; nothing reads it, so passing it prints nothing). Only the
-  two `_GADI.py` cluster drivers detect it and log a warning that it does
-  nothing. **`--legacy-json` is the new opt-out**, on all five drivers.
+  `help=SUPPRESS`; nothing reads it, so passing it prints nothing).
+  **`--legacy-json` is the new opt-out**, on the example drivers.
 - New `dbwrite.resolve_db_target` **raises** when a database write is
   requested (explicitly or via AUTO) and no path can be resolved, instead of
   silently downgrading to no write — the same class of fix as 4.0.1's
@@ -161,9 +160,8 @@ This is most people: the outputs just get simpler.
   is covered by `processing_status`, not a sentinel JSON file.
 - **Any script passes `--write-db`.** It still runs — the flag is accepted
   and is now a no-op — but update the script when convenient; it no longer
-  does anything. Only the `_GADI.py` cluster drivers (the ones PBS jobs
-  actually invoke) log a warning about it; the three plain
-  `examples/hdEEG_*_detector.py` scripts accept and silently ignore it.
+  does anything. The three plain `examples/hdEEG_*_detector.py` scripts accept
+  and silently ignore it.
 - **You compute density from `stage_durations` or a CSV you built yourself.**
   Switch to `turtlewave_hdEEG.density.event_density`, which reads the
   artefact-free denominator from `analysed_time`. A database written on the

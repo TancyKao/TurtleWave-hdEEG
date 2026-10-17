@@ -154,7 +154,7 @@ for x1, x2 in [(22.5, 27.5), (42.5, 46.5), (61.5, 65.5), (80.5, 83.5)]:
 
 # ---- Lane B: turtlewave_hdEEG ------------------------------------------
 B = 47
-lane(B, 24, "2 · turtlewave_hdEEG", "runs LOCAL or NCI Gadi (PBS) · Python")
+lane(B, 24, "2 · turtlewave_hdEEG", "runs LOCAL or on an HPC cluster · Python")
 by = B + 1.5
 box(ax, 14, by, 17, 9,
     "Input\n\nLargeDataset\n(.set/.fdt/.mat/v7.3)\n+ XLAnnotations\n(Wonambi XML)", fontsize=7.8)
@@ -174,7 +174,7 @@ box(ax, 82, by - 8.5, 15, 5.5,
 arrow(ax, 82, by - 4.5, 82, by - 5.8)
 # HPC note
 ax.text(38, by - 8.2,
-        "HPC batch: submit_all_*.sh → qsub per subject (subjects.txt) → *_GADI.py",
+        "HPC batch: one job per subject → turtlewave_hdEEG detectors",
         ha="center", fontsize=7.8, style="italic", color="#718096")
 
 # ---- Lane C: SnPM_2025 (statistical analysis) --------------------------

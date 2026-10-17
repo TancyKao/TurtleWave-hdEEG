@@ -28,7 +28,7 @@ deprecated" from `wonambi/trans/analyze.py`. It silences nothing else.
 
 `import turtlewave_hdEEG` calls it, before importing Wonambi, only when the
 environment variable named by `QUIET_WONAMBI_ENV` (`TURTLEWAVE_QUIET_WONAMBI`) is
-`1`, `true`, `yes` or `on`. The GUIs and the example and Gadi scripts set the
+`1`, `true`, `yes` or `on`. The GUIs and the example scripts set the
 variable to `1` with `os.environ.setdefault` before their imports, so exporting
 `TURTLEWAVE_QUIET_WONAMBI=0` turns it off. The `fooof` notice can be stopped only
 if the function runs before the first `import wonambi`, because `fooof` resets

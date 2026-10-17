@@ -40,7 +40,7 @@ If you haven't done these steps, refer to the [Getting Started tutorial](../tuto
     cut of `threshold / s_freq` seconds rather than a fixed duration.
     `threshold` was not one number across the codebase: 140 for a direct
     `ParalSWA` call or the GUI's Ngo2015 tab, 75 for the GUI's Staresina2015
-    tab and the previous example script, 40 for the Gadi CLI driver's
+    tab and the previous example script, 40 for the former Gadi CLI driver's
     default — a 0.31-1.09 s cut at 128 Hz depending on which entry point
     wrote the run, shrinking as sampling rate rises (see the CHANGELOG's
     4.3.0 entry for the per-rate figures). It is now gone by default:
@@ -394,9 +394,6 @@ for subject in subjects:
     )
     print(f"{subject}: detected slow waves on {len(slow_waves)} channels")
 ```
-
-For HPC batch runs across many subjects, see `examples/NCI_commands/` and the
-`*_GADI.py` driver scripts referenced in the project README.
 
 ## Next Steps
 

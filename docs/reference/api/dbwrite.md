@@ -38,8 +38,8 @@ A few of these primitives are worth knowing about even outside a detection call:
   `{freq_lo}-{freq_hi}Hz` filename/pattern token — use it on both sides of any
   round-trip that names or re-finds a detector's output.
 - **`verify_channel_coverage`** answers "did every requested channel actually
-  make it into the database" for a completed run; both `_GADI.py` batch
-  drivers call it and exit non-zero on a gap. Its return dict's `failed` and
+  make it into the database" for a completed run; a batch script can call it
+  and exit non-zero on a gap. Its return dict's `failed` and
   `events_only` keys distinguish an in-scope crash from a channel only
   vouched for by (stage-unscoped) event rows, and `scoped_status=False` flags
   a database that predates the per-scope `processing_status` schema, where the

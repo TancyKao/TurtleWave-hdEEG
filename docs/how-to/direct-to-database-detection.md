@@ -100,22 +100,10 @@ its detection scope, so re-detecting an unchanged channel is a true row-level
 no-op under `INSERT OR REPLACE` — but `resume=True` additionally skips the
 re-computation, not just the re-insert.
 
-## Run it on the NCI Gadi cluster
+## Check that every channel was written
 
-The `_GADI.py` driver scripts mirror the same flags:
-
-```bash
-python hdEEG_spindle_detector_GADI.py \
-    --root /scratch/xx99/subjects --subject sub-001 \
-    --method Moelle2011 --stages NREM2,NREM3 --freq 9.0,12.0 \
-    --resume
-```
-
-See `examples/NCI_commands/hdEEG_spindle_detector_GADI.py` and
-`examples/NCI_commands/hdEEG_sw_detector_GADI.py`.
-
-Both drivers verify channel coverage after detection and **exit non-zero if
-any requested channel is missing**, instead of printing "All done" over an
+In a batch script, verify channel coverage after detection and exit non-zero if
+any requested channel is missing, instead of printing "All done" over an
 incomplete run:
 
 ```python
@@ -460,14 +448,12 @@ are deprecated but still work against a legacy JSON directory).
     `--legacy-json` is almost always what you want here.
 
 `--write-db` is still accepted on the spindle/slow-wave/K-complex driver
-scripts and the two `_GADI.py` cluster drivers — it's a true no-op on all
-five: passing it or omitting it resolves to the identical AUTO behaviour,
-because `write_db=True` and `write_db=None` behave identically for
-`detect_spindles` / `detect_slow_waves` / `detect_kcomplexes`. Only the two
-`_GADI.py` drivers actually print anything about it (a one-line warning that
-it's a no-op); `examples/hdEEG_spindle_detector.py`, `hdEEG_sw_detector.py`
-and `hdEEG_kcomplex_detector.py` register it with `help=SUPPRESS` and nothing
-reads it, so passing it there is silent.
+scripts — it's a true no-op on all three: passing it or omitting it resolves
+to the identical AUTO behaviour, because `write_db=True` and `write_db=None`
+behave identically for `detect_spindles` / `detect_slow_waves` /
+`detect_kcomplexes`. `examples/hdEEG_spindle_detector.py`,
+`hdEEG_sw_detector.py` and `hdEEG_kcomplex_detector.py` register it with
+`help=SUPPRESS` and nothing reads it, so passing it is silent.
 
 `analyze_pac` and its driver, `examples/hdEEG_pac_detector.py`, are
 different: there is no `--write-db` flag — the PAC driver's opt-out flag is
