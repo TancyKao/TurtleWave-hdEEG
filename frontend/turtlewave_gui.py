@@ -78,6 +78,14 @@ except ImportError as e:
     KNOWN_REJECT_TYPES = ('Artefact', 'Arousal', 'Resp', 'Move', 'Snore')
     PUBLISHED_BAND_SW_METHODS = ('Ngo2015', 'Staresina2015')
 
+    def published_sw_band(method):
+        raise RuntimeError("TurtleWave hdEEG library not available; "
+                           f"cannot look up the published band of {method}")
+
+    def published_sw_duration(method):
+        raise RuntimeError("TurtleWave hdEEG library not available; "
+                           f"cannot look up the published duration of {method}")
+
 try:
     from frontend.db_connect import connect_events_db
 except ImportError:  # run as a script: frontend/ is on sys.path, not its parent
