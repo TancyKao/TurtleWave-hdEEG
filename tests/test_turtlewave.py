@@ -2272,8 +2272,7 @@ def _pac_coupled_recording(tmp, n_events=50, s_freq=128.0, seed=0):
         Directory to write the EDF and the events database into.
     n_events : int, optional
         Number of coupled slow waves. Default ``50`` -- exactly one surrogate
-        block, so no incomplete block is padded by resampling (that padding
-        draws from an unseeded RNG). Default ``50``.
+        block, so no incomplete block is padded by resampling.
     s_freq : float, optional
         Sampling frequency in Hz. Default ``128.0``.
     seed : int, optional
@@ -2420,6 +2419,64 @@ def test_pac_mi_raw_is_the_unnormalised_modulation_index():
             assert np.isclose(plain_csv['mi_raw'][0], p_raw)
             print(f"[ok] idpac=(2,3,0): mi_raw == mi_norm == {p_raw:.6f}, "
                   f"the same value the z-scored run reports as mi_raw")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pac_is_reproducible_with_a_padded_block():
+    """Two PAC runs on identical input must give identical results.
+
+    With an event count that is not a multiple of 50, the last surrogate
+    block is padded by resampling its own events. That draw used the global,
+    unseeded NumPy generator, so MI moved slightly run to run. The global
+    generator is reseeded to different values before each run here to prove
+    the result no longer depends on global RNG state.
+    """
+    print("\n13c. Testing that PAC is reproducible when the last block is "
+          "padded:")
+
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_pacrep_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            # 73 events: one full block plus a 23-event block padded with 27
+            # resampled events.
+            dataset, db_path = _pac_coupled_recording(tmp, n_events=73)
+            pac = ParalPAC(dataset=dataset, rootpath=tmp,
+                           log_level=logging.CRITICAL)
+
+            def run(global_seed):
+                np.random.seed(global_seed)
+                pac.analyze_pac(
+                    chan=['Cz'], stage=['NREM2'], idpac=(2, 3, 4),
+                    phase_freq=(0.5, 1.25), amp_freq=(11, 16),
+                    use_detected_events=True, event_type='slow_wave',
+                    event_opts={'buffer': 1.0, 'sw_method': 'Massimini2004'},
+                    db_path=db_path, out_dir=os.path.join(tmp, 'pac_out'),
+                    write_db=False, write_csv=False)
+                entry = pac.tracking['event_pac']['Cz']['0.5-1.25Hz_11-16Hz']
+                return {k: entry[k] for k in
+                        ('n_segments', 'mi_raw', 'mi_norm', 'pval',
+                         'preferred_phase_deg', 'mean_vector_length')}
+
+            first = run(1)
+            second = run(987654)
+            print(f"[info] run 1: {first}")
+            print(f"[info] run 2: {second}")
+            assert first['n_segments'] == 73, (
+                f"expected 73 segments, got {first['n_segments']}; the "
+                f"fixture no longer exercises the padded block")
+            for key in first:
+                assert first[key] == second[key], (
+                    f"{key} differs between runs: {first[key]} vs "
+                    f"{second[key]}; the PAC path still draws from the "
+                    f"global RNG")
+            print("[ok] mi_raw, mi_norm, p-value and preferred phase are "
+                  "identical across runs with different global seeds")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -5559,6 +5616,7 @@ if __name__ == "__main__":
     test_cycle_subject_spelling_delete()
     test_pac_twin_delete_is_scoped()
     test_pac_mi_raw_is_the_unnormalised_modulation_index()
+    test_pac_is_reproducible_with_a_padded_block()
     test_stage_token_vocabulary()
     test_detectors_write_joint_stage_token()
     test_mixed_stage_format_database_reads_back()

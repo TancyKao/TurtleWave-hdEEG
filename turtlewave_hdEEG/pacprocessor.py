@@ -1022,12 +1022,17 @@ class ParalPAC:
                 sys.stdout.flush()
                 
                 # 8. If number of events not divisible by block length,
-                # pad incomplete final block with randomly resampled events
+                # pad incomplete final block with randomly resampled events.
+                # A local generator, created per channel and seeded like
+                # pac.fit (random_state=5), keeps the padding -- and so the
+                # MI -- identical run to run, independent of channel order
+                # and of anything else that touched the global NumPy RNG.
+                pad_rng = np.random.default_rng(5)
                 rem = len(segments) % 50
                 if rem > 0:
                     pads = 50 - rem
                     for pad in range(pads):
-                        ran = np.random.randint(0, rem)
+                        ran = int(pad_rng.integers(0, rem))
                         longpha[-1, rem+pad] = longpha[-1, ran]
                         longamp[-1, rem+pad] = longamp[-1, ran]
                 

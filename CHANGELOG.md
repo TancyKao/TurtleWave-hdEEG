@@ -17,7 +17,7 @@ Re-run PAC (library or GUI) if your database holds more than one band of a metho
 
 ### Changed
 
-- CI pinned to ubuntu-24.04.
+- CI pinned to ubuntu-24.04 and moved to the Node 24 releases of checkout (v5) and setup-python (v6).
 - `ParalSWA.detect_slow_waves` with several methods and no `frequency=` raises `ValueError` when the methods' bands differ; pass `frequency=` explicitly.
 
 ### Fixed
@@ -25,6 +25,8 @@ Re-run PAC (library or GUI) if your database holds more than one band of a metho
 - `ParalPAC.generate_comodulogram` returned None on every call; it now works, returns p-values and labels plot axes by band.
 - PAC event selection matches the requested band exactly instead of pooling every stored band of that method inside the range; a band never stored selects nothing and warns with the stored bands.
 - PAC with no surrogates (e.g. `idpac=(2,0,0)`) no longer fails silently per channel; the p-value is NaN.
+- PAC results are reproducible run to run (the last-block padding was unseeded); MI on channels whose event count is not a multiple of 50 shifts once (preferred phase is unaffected).
+- The PAC example's event-count check uses the exact band, matching `ParalPAC`'s selection.
 - Detection GUI PAC runs select events from the chosen detection band only; before, they pooled every stored band of the method.
 - `ParalSWA.detect_slow_waves` without `frequency=` uses the published band for Ngo2015 (0.5–3.5 Hz) and Staresina2015 (0.5–1.25 Hz) instead of a 4 Hz low-pass; new rows carry the new band token, so they do not share a scope with old default runs. Massimini defaults are unchanged.
 - `ParalKC` with `method='Massimini2004'` and no explicit criteria uses Massimini's criteria (−80 µV, 140 µV, 0.3–1.0 s) instead of AASM's, and records the applied criteria in the run parameters. The default method is unchanged.
