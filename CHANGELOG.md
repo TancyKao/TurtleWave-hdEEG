@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.3] — Unreleased
+## [4.6.3] — 2026-10-18
 
 Re-run PAC (library or GUI) if your database holds more than one band of a method. Do not pool new Massimini2004 K-complex rows, or Ngo2015/Staresina2015 slow-wave rows detected with the default band, with older ones.
 
