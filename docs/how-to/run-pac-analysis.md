@@ -95,8 +95,8 @@ event_opts = {
     'buffer': 1.0,               # seconds of context around each event
     'sw_method': 'Staresina2015',
     'spindle_method': 'Moelle2011',
-    'sw_freq_range': None,       # or e.g. [0.5, 2.0] to filter SW events by freq
-    'spindle_freq_range': None,
+    'sw_freq_range': (0.5, 1.25),      # the band the SW run stored; None = any band
+    'spindle_freq_range': (11, 16),    # the band the spindle run stored; None = any band
     'stages': 'NREM2NREM3',      # combined stage string, not a list
 }
 
@@ -249,6 +249,27 @@ re-import them later. If you just want `pac_coupling` as a data frame without
 any of this, query it directly — see
 [Read the database with pandas and R](read-database-with-pandas-and-r.md#read-pac-results).
 
+### Select events by the exact stored band
+
+`sw_freq_range` and `spindle_freq_range` match the band stored with each event
+**exactly** (`freq_lower = lo AND freq_upper = hi`). Pass the band your
+detection run used, for example `(0.5, 1.25)` for a `Staresina2015` run. A band
+that was never stored selects no events: the channel is skipped and a warning
+lists the bands the database does hold for that method. Leave the key `None` to
+take events from every stored band.
+
+!!! warning "Results from databases with nested bands need re-running"
+    Before 4.6.3 the band was a range test (`freq_lower >= lo AND freq_upper <=
+    hi`), so a database holding two runs of one method at nested bands (say
+    11-16 Hz and 12-15 Hz spindles) pooled both into a single PAC estimate.
+    Re-run `analyze_pac` for those databases. See
+    [Upgrade to 4.6.3](upgrade-to-4.6.3.md).
+
+!!! note "`idpac` with no surrogates gives no p-value"
+    With `idpac[1] == 0` (no surrogates) there is no null distribution, so the
+    stored MI p-value (`median_mi_pval`) is NaN. Before 4.6.3 this raised an
+    error that dropped the channel from the run.
+
 ## Generate a comodulogram
 
 To visualize coupling strength across a grid of phase/amplitude bands for one
@@ -264,8 +285,14 @@ comod_result = pac_processor.generate_comodulogram(
     out_dir='data/subject001/wonambi/pac_results',
 )
 if comod_result is not None:
-    comod_matrix = comod_result['comod']
+    comod_matrix = comod_result['comod']     # (n_amp, n_pha), z-scored by default
+    comod_pvalues = comod_result['pvalues']  # same shape; NaN when idpac[1] == 0
 ```
+
+`generate_comodulogram` did not run before 4.6.3. It now returns the
+normalised map and surrogate p-values (200 surrogates per cell, seeded so the
+map is identical run to run). See the
+[PAC Processor reference](../reference/api/pacprocessor.md) for every key.
 
 ## Common Issues
 
@@ -302,4 +329,5 @@ explicit channel list is given — reuse that logic
   loading PAC CSVs from an older run
 - [Upgrade to 4.0](upgrade-to-4.0.md) — the preferred-phase 180-degree fix
 - [Upgrade to 4.2](upgrade-to-4.2.md) — `write_db`/`write_csv` AUTO defaults
+- [Upgrade to 4.6.3](upgrade-to-4.6.3.md) — exact band matching for PAC event selection
 - Reference: [PAC Processor](../reference/api/pacprocessor.md)

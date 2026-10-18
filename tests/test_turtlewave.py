@@ -2272,8 +2272,7 @@ def _pac_coupled_recording(tmp, n_events=50, s_freq=128.0, seed=0):
         Directory to write the EDF and the events database into.
     n_events : int, optional
         Number of coupled slow waves. Default ``50`` -- exactly one surrogate
-        block, so no incomplete block is padded by resampling (that padding
-        draws from an unseeded RNG). Default ``50``.
+        block, so no incomplete block is padded by resampling.
     s_freq : float, optional
         Sampling frequency in Hz. Default ``128.0``.
     seed : int, optional
@@ -2420,6 +2419,64 @@ def test_pac_mi_raw_is_the_unnormalised_modulation_index():
             assert np.isclose(plain_csv['mi_raw'][0], p_raw)
             print(f"[ok] idpac=(2,3,0): mi_raw == mi_norm == {p_raw:.6f}, "
                   f"the same value the z-scored run reports as mi_raw")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pac_is_reproducible_with_a_padded_block():
+    """Two PAC runs on identical input must give identical results.
+
+    With an event count that is not a multiple of 50, the last surrogate
+    block is padded by resampling its own events. That draw used the global,
+    unseeded NumPy generator, so MI moved slightly run to run. The global
+    generator is reseeded to different values before each run here to prove
+    the result no longer depends on global RNG state.
+    """
+    print("\n13c. Testing that PAC is reproducible when the last block is "
+          "padded:")
+
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_pacrep_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            # 73 events: one full block plus a 23-event block padded with 27
+            # resampled events.
+            dataset, db_path = _pac_coupled_recording(tmp, n_events=73)
+            pac = ParalPAC(dataset=dataset, rootpath=tmp,
+                           log_level=logging.CRITICAL)
+
+            def run(global_seed):
+                np.random.seed(global_seed)
+                pac.analyze_pac(
+                    chan=['Cz'], stage=['NREM2'], idpac=(2, 3, 4),
+                    phase_freq=(0.5, 1.25), amp_freq=(11, 16),
+                    use_detected_events=True, event_type='slow_wave',
+                    event_opts={'buffer': 1.0, 'sw_method': 'Massimini2004'},
+                    db_path=db_path, out_dir=os.path.join(tmp, 'pac_out'),
+                    write_db=False, write_csv=False)
+                entry = pac.tracking['event_pac']['Cz']['0.5-1.25Hz_11-16Hz']
+                return {k: entry[k] for k in
+                        ('n_segments', 'mi_raw', 'mi_norm', 'pval',
+                         'preferred_phase_deg', 'mean_vector_length')}
+
+            first = run(1)
+            second = run(987654)
+            print(f"[info] run 1: {first}")
+            print(f"[info] run 2: {second}")
+            assert first['n_segments'] == 73, (
+                f"expected 73 segments, got {first['n_segments']}; the "
+                f"fixture no longer exercises the padded block")
+            for key in first:
+                assert first[key] == second[key], (
+                    f"{key} differs between runs: {first[key]} vs "
+                    f"{second[key]}; the PAC path still draws from the "
+                    f"global RNG")
+            print("[ok] mi_raw, mi_norm, p-value and preferred phase are "
+                  "identical across runs with different global seeds")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -5229,6 +5286,306 @@ def test_reject_types_is_first_class():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+class _ListHandler:
+    """Collect formatted log records from one logger (test helper)."""
+
+    def __init__(self, name):
+        import logging
+        self.records = []
+        outer = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                outer.records.append(record.getMessage())
+
+        self.handler = _H(level=logging.DEBUG)
+        self.logger = logging.getLogger(name)
+        self.logger.addHandler(self.handler)
+
+    def close(self):
+        self.logger.removeHandler(self.handler)
+
+
+def test_comodulogram_runs_and_has_amp_by_phase_shape():
+    """``generate_comodulogram`` returns an ``(n_amp, n_pha)`` map.
+
+    It passed the bands positionally into ``Pac.filterfit(sf, x_pha,
+    x_amp=None, n_perm=200, ...)``, which raised ``TypeError`` (``n_perm``
+    given twice); the fallback then raised on the x_pha/x_amp shape check, so
+    the method returned ``None`` on every call. Also pins that the seeded
+    surrogates reproduce exactly and that ``idpac[1] == 0`` gives NaN
+    p-values instead of crashing.
+    """
+    print("\n30. Testing the PAC comodulogram:")
+
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_comod_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dataset, annot = _synthetic_recording(tmp, ('NREM2', 'NREM2'))
+            pac = ParalPAC(dataset=dataset, annotations=annot, rootpath=tmp,
+                           log_level=logging.CRITICAL)
+            pha = [(0.5, 1.5), (1.5, 4), (4, 8)]
+            amp = [(8, 13), (13, 30)]
+            kw = dict(chan='Cz', stage=['NREM2'], phase_freqs=pha,
+                      amp_freqs=amp, out_dir=os.path.join(tmp, 'comod'))
+
+            res = pac.generate_comodulogram(idpac=(2, 3, 4), **kw)
+            assert res is not None, "generate_comodulogram returned None"
+            comod = res['comod']
+            assert comod.shape == (len(amp), len(pha)), comod.shape
+            assert np.all(np.isfinite(comod)), comod
+            assert res['pvalues'].shape == comod.shape, res['pvalues'].shape
+            assert np.all(np.isfinite(res['pvalues'])), res['pvalues']
+            assert os.path.exists(res['output_file'])
+            assert os.path.exists(res['fig_file'])
+            saved = np.load(res['output_file'])
+            assert np.array_equal(saved['comod'], comod)
+            print(f"[ok] idpac=(2,3,4): comod shape {comod.shape} "
+                  f"(n_amp, n_pha), finite, p-values {res['pvalues'].shape}, "
+                  f".npz + .png written")
+
+            again = pac.generate_comodulogram(idpac=(2, 3, 4), **kw)
+            assert np.array_equal(again['comod'], comod), (
+                "seeded surrogates did not reproduce the z-scored map")
+            assert np.array_equal(again['pvalues'], res['pvalues'])
+            print("[ok] a second run reproduces the surrogate-normalised map "
+                  "and p-values exactly")
+
+            raw = pac.generate_comodulogram(idpac=(2, 0, 0), **kw)
+            assert raw is not None, "idpac=(2,0,0) returned None"
+            assert raw['comod'].shape == (len(amp), len(pha))
+            assert np.all(np.isnan(raw['pvalues'])), raw['pvalues']
+            assert np.all((raw['comod'] > 0) & (raw['comod'] < 1)), (
+                f"raw Tort MI outside (0, 1): {raw['comod']}")
+            print("[ok] idpac=(2,0,0): raw Tort MI in (0, 1), p-values NaN")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pac_event_band_filter_is_exact():
+    """PAC selects events stored at EXACTLY the requested band.
+
+    The filter was ``freq_lower >= lo AND freq_upper <= hi``, so asking for
+    0.1-4 Hz also pooled a 0.5-1.25 Hz run of the same method on the same
+    channel. Also pins the diagnostic for a band nothing was stored at, and
+    that ``idpac=(2, 0, 0)`` (no surrogates) stores a NaN p-value rather than
+    aborting the channel inside tensorpac's ``infer_pvalues``.
+    """
+    print("\n31. Testing the exact PAC event band filter:")
+
+    import logging
+    import uuid as _uuid
+    import warnings
+    from turtlewave_hdEEG import ParalPAC
+
+    tmp = tempfile.mkdtemp(prefix='tw_pacband_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dataset, db_path = _pac_coupled_recording(tmp)
+            # Second run of the same method on the same channel at a band
+            # nested inside the first one: same 50 events, other band.
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT channel, start_time, end_time, duration, stage, "
+                    "method FROM events").fetchall()
+                for r in rows:
+                    conn.execute(
+                        "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (str(_uuid.uuid4()), 'slow_wave') + tuple(r)
+                        + (0.5, 1.25))
+                conn.commit()
+            finally:
+                conn.close()
+
+            pac = ParalPAC(dataset=dataset, rootpath=tmp,
+                           log_level=logging.WARNING)
+            cap = _ListHandler('turtlewave_hdEEG.pacprocessor')
+
+            def run(band, idpac=(2, 3, 4)):
+                pac.tracking = {'event_pac': {}}
+                pac.analyze_pac(
+                    chan=['Cz'], stage=['NREM2'], idpac=idpac,
+                    phase_freq=(0.5, 1.25), amp_freq=(11, 16),
+                    use_detected_events=True, event_type='slow_wave',
+                    event_opts={'buffer': 1.0, 'sw_method': 'Massimini2004',
+                                'sw_freq_range': band},
+                    db_path=db_path, out_dir=os.path.join(tmp, 'pac_out'),
+                    write_db=False, write_csv=True)
+                return pac.tracking['event_pac'].get('Cz', {}).get(
+                    '0.5-1.25Hz_11-16Hz')
+
+            try:
+                for band in ((0.1, 4.0), (0.5, 1.25)):
+                    entry = run(band)
+                    assert entry is not None, f"no PAC result at {band}"
+                    assert entry['n_segments'] == 50, (
+                        f"band {band} selected {entry['n_segments']} events; "
+                        f"exactly the 50 stored at that band expected (100 = "
+                        f"both runs pooled)")
+                print("[ok] 0.1-4.0 Hz and 0.5-1.25 Hz each select their own "
+                      "50 events, not the 100 the range filter pooled")
+
+                cap.records.clear()
+                assert run((0.3, 2.0)) is None, "an unstored band gave a result"
+                hits = [m for m in cap.records if 'Bands stored' in m]
+                assert len(hits) == 1, cap.records
+                assert '(0.1, 4.0)' in hits[0] and '(0.5, 1.25)' in hits[0], (
+                    hits[0])
+                print(f"[ok] an unstored band selects nothing and warns once: "
+                      f"{hits[0][:110]}...")
+
+                entry = run((0.5, 1.25), idpac=(2, 0, 0))
+                assert entry is not None, (
+                    "idpac=(2,0,0) aborted the channel (infer_pvalues on no "
+                    "surrogates)")
+                csv = pd.read_csv(entry['outputfile'])
+                assert np.isnan(csv['median_mi_pval'][0]), csv['median_mi_pval']
+                assert entry['mi_raw'] == entry['mi_norm']
+                print(f"[ok] idpac=(2,0,0): channel completes, "
+                      f"median_mi_pval is NaN, mi_raw == mi_norm "
+                      f"== {entry['mi_raw']:.6f}")
+            finally:
+                cap.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_sw_default_band_follows_the_method():
+    """``frequency=None`` resolves to the method's own band.
+
+    The old default ``(0.1, 4)`` applied to every method; for Ngo2015 and
+    Staresina2015 the upper bound is the low-pass cut-off, so both ran at a
+    4 Hz low-pass instead of the published 3.5 Hz / 1.25 Hz.
+    """
+    print("\n32. Testing the per-method default slow-wave band:")
+
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalSWA, resolve_sw_frequency
+    from turtlewave_hdEEG.extensions import ImprovedDetectSlowWave
+
+    assert resolve_sw_frequency('Ngo2015') == (0.5, 3.5)
+    assert resolve_sw_frequency('Staresina2015') == (0.5, 1.25)
+    assert resolve_sw_frequency('Massimini2004') == (0.1, 4)
+    assert resolve_sw_frequency('AASM/Massimini2004') == (0.1, 4)
+    assert resolve_sw_frequency('Ngo2015', (0.3, 2)) == (0.3, 2)
+    try:
+        resolve_sw_frequency(['Ngo2015', 'Massimini2004'])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("conflicting default bands were accepted")
+    det = ImprovedDetectSlowWave('Ngo2015',
+                                 frequency=resolve_sw_frequency('Ngo2015'))
+    assert det.lowpass['freq'] == 3.5, det.lowpass
+    print("[ok] resolver: Ngo2015 (0.5, 3.5), Staresina2015 (0.5, 1.25), "
+          "Massimini family (0.1, 4); explicit band honoured; mixed defaults "
+          "refused; Ngo2015 detector low-pass 3.5 Hz")
+
+    tmp = tempfile.mkdtemp(prefix='tw_swband_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dataset, annot = _synthetic_recording(tmp, ('NREM2', 'NREM2'))
+            out = os.path.join(tmp, 'wonambi')
+            os.makedirs(out, exist_ok=True)
+            db = os.path.join(out, 'neural_events.db')
+            kw = dict(chan=['Cz'], stage=['NREM2'], json_dir=out, db_path=db,
+                      subject='sub-T', cat=(1, 1, 1, 0))
+            for meth in ('Ngo2015', 'Massimini2004'):
+                ParalSWA(dataset, annot, log_level=logging.CRITICAL
+                         ).detect_slow_waves(method=meth, **kw)
+        conn = sqlite3.connect(db)
+        try:
+            ps = dict((r[0], (r[1], r[2])) for r in conn.execute(
+                "SELECT method, freq_lower, freq_upper FROM processing_status"))
+            runs = dict(conn.execute(
+                "SELECT method, params_json FROM detection_runs").fetchall())
+        finally:
+            conn.close()
+        import json as _json
+        assert ps['Ngo2015'] == (0.5, 3.5), ps
+        assert ps['Massimini2004'] == (0.1, 4.0), ps
+        assert _json.loads(runs['Ngo2015'])['frequency'] == [0.5, 3.5], runs
+        assert _json.loads(runs['Massimini2004'])['frequency'] == [0.1, 4]
+        print(f"[ok] ParalSWA with no frequency: stored bands {ps}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_kcomplex_default_criteria_follow_the_method():
+    """``ParalKC`` criteria default to the method's own.
+
+    They defaulted to the AASM numbers for every method, so
+    ``method='Massimini2004'`` ran with AASM criteria. The default method
+    must resolve to exactly the old values, and provenance must record the
+    numbers applied, not ``None``.
+    """
+    print("\n33. Testing per-method K-complex default criteria:")
+
+    import json as _json
+    import logging
+    import warnings
+    from turtlewave_hdEEG import ParalKC
+
+    res = ParalKC._resolve_criteria(
+        ['AASM/Massimini2004', 'Massimini2004'], (0.1, 4.0),
+        None, None, None, 'normal', 1.0)
+    assert res['AASM/Massimini2004'] == {
+        'trough_duration': [0.25, 1.0], 'neg_peak_thresh': -40.0,
+        'p2p_thresh': 75.0}, res
+    assert res['Massimini2004'] == {
+        'trough_duration': [0.3, 1.0], 'neg_peak_thresh': -80.0,
+        'p2p_thresh': 140.0}, res
+    old = ParalKC._resolve_criteria(['AASM/Massimini2004'], (0.1, 4.0),
+                                    (0.25, 1.0), -40.0, 75.0, 'normal', 1.0)
+    assert old['AASM/Massimini2004'] == res['AASM/Massimini2004'], old
+    print(f"[ok] AASM/Massimini2004 None-defaults == the old explicit "
+          f"(0.25, 1.0)/-40/75; Massimini2004 gets {res['Massimini2004']}")
+
+    tmp = tempfile.mkdtemp(prefix='tw_kccrit_')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            dataset, annot = _synthetic_recording(tmp, ('NREM2', 'NREM2'))
+            out = os.path.join(tmp, 'wonambi')
+            os.makedirs(out, exist_ok=True)
+            db = os.path.join(out, 'neural_events.db')
+            kw = dict(chan=['Cz'], stage=['NREM2'], json_dir=out, db_path=db,
+                      subject='sub-T', cat=(1, 1, 1, 0))
+            n = {}
+            for meth in ('AASM/Massimini2004', 'Massimini2004'):
+                n[meth] = len(ParalKC(dataset, annot,
+                                      log_level=logging.CRITICAL
+                                      ).detect_kcomplexes(method=meth, **kw))
+        conn = sqlite3.connect(db)
+        try:
+            runs = dict(conn.execute(
+                "SELECT method, params_json FROM detection_runs "
+                "WHERE event_type = 'k_complex'").fetchall())
+        finally:
+            conn.close()
+        for meth, (td, neg, p2p) in {
+                'AASM/Massimini2004': ([0.25, 1.0], -40.0, 75.0),
+                'Massimini2004': ([0.3, 1.0], -80.0, 140.0)}.items():
+            p = _json.loads(runs[meth])
+            assert (p['trough_duration'], p['neg_peak_thresh'],
+                    p['p2p_thresh']) == (td, neg, p2p), (meth, p)
+            assert sorted(p['published_criteria']) == [
+                'neg_peak_thresh', 'p2p_thresh', 'trough_duration'], p
+        print(f"[ok] params_json records the applied criteria per method "
+              f"(no None); events: {n}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("TESTING TURTLEWAVE-HDEEG PACKAGE UPDATES")
     print("=======================================")
@@ -5259,6 +5616,7 @@ if __name__ == "__main__":
     test_cycle_subject_spelling_delete()
     test_pac_twin_delete_is_scoped()
     test_pac_mi_raw_is_the_unnormalised_modulation_index()
+    test_pac_is_reproducible_with_a_padded_block()
     test_stage_token_vocabulary()
     test_detectors_write_joint_stage_token()
     test_mixed_stage_format_database_reads_back()
@@ -5284,6 +5642,10 @@ if __name__ == "__main__":
     test_lacourse_state_survives_repeat_calls()
     test_lacourse_duration_bound_drives_yield()
     test_reject_types_is_first_class()
+    test_comodulogram_runs_and_has_amp_by_phase_shape()
+    test_pac_event_band_filter_is_exact()
+    test_sw_default_band_follows_the_method()
+    test_kcomplex_default_criteria_follow_the_method()
 
     print("\nAll tests completed!")
 

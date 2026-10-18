@@ -2,7 +2,7 @@
 turtlewave_hdEEG - Extended Wonambi for large EEG datasets
 """
 
-__version__ = '4.6.2'
+__version__ = '4.6.3'
 
 # Opt-in only: with TURTLEWAVE_QUIET_WONAMBI=1 in the environment, silence the
 # two Wonambi 7.15 DeprecationWarnings BEFORE Wonambi is imported below (the
@@ -57,7 +57,10 @@ from .density import event_density, format_density_table
 from .utils import (derive_subject, normalize_subject, read_channels_from_csv,
                     region_from_label,
                     DEFAULT_REJECT_TYPES, KNOWN_REJECT_TYPES,
-                    resolve_reject_types, reject_key)
+                    resolve_reject_types, reject_key,
+                    PUBLISHED_BAND_SW_METHODS, DEFAULT_MASSIMINI_SW_BAND,
+                    published_sw_band, published_sw_duration,
+                    resolve_sw_frequency)
 from .rerun import (RerunGuardError, verify_rater_match, channel_clean_gate,
                     resolve_rerun_params, resolve_sw_amplitude_thresholds)
 

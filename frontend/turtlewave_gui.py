@@ -62,6 +62,12 @@ try:
     # set the detectors apply when nothing is passed.
     from turtlewave_hdEEG.utils import (DEFAULT_REJECT_TYPES,
                                         KNOWN_REJECT_TYPES)
+    # Published-filter slow-wave methods (Ngo2015, Staresina2015): their band
+    # and duration come from Wonambi's defaults, owned by the library so the
+    # GUI and the detectors agree on the stored band token.
+    from turtlewave_hdEEG.utils import (PUBLISHED_BAND_SW_METHODS,
+                                        published_sw_band,
+                                        published_sw_duration)
 
     #from wonambi.dataset import Dataset as WonambiDataset
 except ImportError as e:
@@ -70,6 +76,15 @@ except ImportError as e:
     # shows up as one error at startup rather than a NameError per widget.
     DEFAULT_REJECT_TYPES = ('Artefact', 'Arousal', 'Move')
     KNOWN_REJECT_TYPES = ('Artefact', 'Arousal', 'Resp', 'Move', 'Snore')
+    PUBLISHED_BAND_SW_METHODS = ('Ngo2015', 'Staresina2015')
+
+    def published_sw_band(method):
+        raise RuntimeError("TurtleWave hdEEG library not available; "
+                           f"cannot look up the published band of {method}")
+
+    def published_sw_duration(method):
+        raise RuntimeError("TurtleWave hdEEG library not available; "
+                           f"cannot look up the published duration of {method}")
 
 try:
     from frontend.db_connect import connect_events_db
@@ -273,53 +288,9 @@ def plan_annotation_actions(process_artifacts, process_arousals, process_stages)
     return steps
 
 
-#: Slow-wave methods whose filter is a published low-pass, not a band the
-#: user sets: Ngo et al. 2015 (3.5 Hz) and Staresina et al. 2015 (1.25 Hz).
-PUBLISHED_BAND_SW_METHODS = ('Ngo2015', 'Staresina2015')
-
-
-def published_sw_band(method):
-    """``(lower, upper)`` Hz of a slow-wave method whose filter is published.
-
-    Read from Wonambi's own defaults for the method: the lower edge of its
-    ``det_filt`` and the cut-off of its ``lowpass``, which is the filter the
-    method actually applies. Ngo2015 -> ``(0.5, 3.5)``, Staresina2015 ->
-    ``(0.5, 1.25)``.
-
-    This is what the slow-wave tab sends as ``frequency`` for these methods.
-    ``ImprovedDetectSlowWave`` uses the upper bound as the low-pass, and
-    ``ParalSWA`` stores the pair as the run's band token, so the filter and
-    the stored band are both the published ones. The duration is the
-    published one too (:func:`published_sw_duration`), shown read-only.
-    """
-    if method not in PUBLISHED_BAND_SW_METHODS:
-        raise ValueError(f"{method!r} has no published band; "
-                         f"expected one of {PUBLISHED_BAND_SW_METHODS}")
-    from wonambi.detect import DetectSlowWave
-    det = DetectSlowWave(method)
-    return (float(det.det_filt['freq'][0]), float(det.lowpass['freq']))
-
-
 #: Tooltip on the read-only duration boxes of Ngo2015 / Staresina2015.
 PUBLISHED_DURATION_TIP = ("Published value; the detector does not take a "
                           "custom duration for this method.")
-
-
-def published_sw_duration(method):
-    """``(min_s, max_s)`` whole-wave duration a published-band slow-wave
-    method is detected with: Wonambi's ``DetectSlowWave(method).duration``.
-    Ngo2015 -> ``(0.833, 2.0)``, Staresina2015 -> ``(0.8, 2.0)``.
-
-    ``ImprovedDetectSlowWave`` keeps this for these two methods whatever
-    ``min_dur`` / ``max_dur`` it is given (by design; see
-    ``extensions.py``), so the tab shows it read-only and sends ``None``.
-    """
-    if method not in PUBLISHED_BAND_SW_METHODS:
-        raise ValueError(f"{method!r} has no published duration; "
-                         f"expected one of {PUBLISHED_BAND_SW_METHODS}")
-    from wonambi.detect import DetectSlowWave
-    lo, hi = DetectSlowWave(method).duration
-    return (float(lo), float(hi))
 
 
 class LoggingOutput(QtCore.QObject):
@@ -4118,98 +4089,30 @@ class TurtleWaveGUI(QMainWindow):
 
     # update frequency ranges from database
     def update_sw_freq_from_db(self, display_name):
-        """Update slow wave frequency range from database based on selected method"""
-        if not display_name:
-            self.sw_freq_label.setText("Not selected")
-            return
-        
-        try:
-            if hasattr(self, 'sw_methods_info') and display_name in self.sw_methods_info:
-                # Get frequency range from stored info
-                freq_range = self.sw_methods_info[display_name]['freq_range']
-                
-                # Store for later use in PAC analysis
-                self.sw_freq_range = freq_range
-            
-                # Update available channels based on selection
-                self.update_pac_available_channels()
+        """Record the stored band of the selected slow-wave detection run.
 
-
-            else:
-                # Fall back to database query if method info not found
-                # This is a fallback and shouldn't normally be needed
-                method = display_name.split(" (")[0] if " (" in display_name else display_name
-                
-                db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
-                if os.path.exists(db_path):
-                    conn = connect_events_db(db_path)
-                    cursor = conn.cursor()
-
-                    cursor.execute(
-                        "SELECT freq_lower, freq_upper FROM events WHERE event_type = 'slow_wave' AND method = ? LIMIT 1",
-                        (method,)
-                    )
-                    result = cursor.fetchone()
-                    
-                    if result:
-                        freq_lower, freq_upper = result
-                        self.sw_freq_range = (freq_lower, freq_upper)
-                        
-                    else:
-                        self.sw_freq_range = (0.5, 1.25)  # Default
-                    
-                    conn.close()
-                else:
-                    self.sw_freq_range = (0.5, 1.25)  # Default
-        
-        except Exception as e:
-            self.write_log(f"Error getting SW frequency: {str(e)}")
-            self.sw_freq_range = (0.5, 1.25)  # Default
+        ``display_name`` is a key of ``sw_methods_info``, built from the
+        events table by :meth:`populate_detection_methods`. A name that is
+        not there has no known band: ``sw_freq_range`` becomes ``None``
+        rather than a guessed default, because PAC selects events by exact
+        stored band and a guess would select nothing.
+        """
+        info = (getattr(self, 'sw_methods_info', None) or {}).get(display_name)
+        self.sw_freq_range = info['freq_range'] if info else None
+        if info:
+            self.update_pac_available_channels()
 
     def update_spindle_freq_from_db(self, display_name):
-        """Update spindle frequency range from database based on selected method"""
-        if not display_name:
-            self.spindle_freq_label.setText("Not selected")
-            return
-        
-        try:
-            if hasattr(self, 'spindle_methods_info') and display_name in self.spindle_methods_info:
-                # Get frequency range from stored info
-                freq_range = self.spindle_methods_info[display_name]['freq_range']
-                
-                # Store for later use in PAC analysis
-                self.spindle_freq_range = freq_range
-                
-                self.update_pac_available_channels()
-            else:
-                # Fall back to database query if method info not found
-                method = display_name.split(" (")[0] if " (" in display_name else display_name
-                
-                db_path = os.path.join(self.output_dir, "wonambi", "neural_events.db")
-                if os.path.exists(db_path):
-                    conn = connect_events_db(db_path)
-                    cursor = conn.cursor()
+        """Record the stored band of the selected spindle detection run.
 
-                    cursor.execute(
-                        "SELECT freq_lower, freq_upper FROM events WHERE event_type = 'spindle' AND method = ? LIMIT 1",
-                        (method,)
-                    )
-                    result = cursor.fetchone()
-                    
-                    if result:
-                        freq_lower, freq_upper = result
-                        self.spindle_freq_range = (freq_lower, freq_upper)
-                        
-                    else:
-                        self.spindle_freq_range = (11, 16)  # Default
-                    
-                    conn.close()
-                else:
-                    self.spindle_freq_range = (11, 16)  # Default
-        
-        except Exception as e:
-            self.write_log(f"Error getting spindle frequency: {str(e)}")
-            self.spindle_freq_range = (11, 16)  # Default
+        Same contract as :meth:`update_sw_freq_from_db`, for
+        ``spindle_methods_info``.
+        """
+        info = (getattr(self, 'spindle_methods_info', None) or {}).get(
+            display_name)
+        self.spindle_freq_range = info['freq_range'] if info else None
+        if info:
+            self.update_pac_available_channels()
 
     # Update method to get channels based on selected SW and spindle methods
     def update_pac_available_channels(self):
@@ -4683,14 +4586,31 @@ class TurtleWaveGUI(QMainWindow):
                 QMessageBox.critical(self, "Error", "Method information not found.")
                 return
 
-            # Extract base method names and parameters
+            # Extract base method names and parameters. Each combo entry is
+            # one stored (method, band, stage) group read from the events
+            # table, so freq_range is the band those events were stored
+            # under. ParalPAC selects events by EXACT band (4.6.3), so a
+            # guessed default would select nothing; refuse instead.
             sw_base_method = sw_info.get('method')
             sw_stage = sw_info.get('stage')
-            phase_freq = sw_info.get('freq_range', (0.5, 1.25))
-            
+            phase_freq = sw_info.get('freq_range')
+
             spindle_base_method = spindle_info.get('method')
             spindle_stage = spindle_info.get('stage')
-            amp_freq = spindle_info.get('freq_range', (11, 16))
+            amp_freq = spindle_info.get('freq_range')
+
+            missing = [label for label, band in
+                       (("slow wave", phase_freq), ("spindle", amp_freq))
+                       if not band or len(band) != 2
+                       or any(f is None for f in band)]
+            if missing:
+                QMessageBox.critical(
+                    self, "Detection band unknown",
+                    "The selected " + " and ".join(missing)
+                    + " detection run has no frequency band stored in the "
+                    "database, so its events cannot be selected for PAC. "
+                    "Re-run that detection, then refresh the PAC tab.")
+                return
             
             # Verify stages match
             if sw_stage != spindle_stage:
@@ -4833,10 +4753,19 @@ class TurtleWaveGUI(QMainWindow):
             # Setup event options if using SW-Spindle coupling
             event_opts = {}
             if params['method'] == "SW-Spindle":
+                # The stored band of each picked detection run selects its
+                # events (exact match). In SW-Spindle mode phase_freq and
+                # amp_freq ARE those stored bands (set in
+                # run_pac_analysis_thread), so the filter band and the
+                # selection band agree.
+                # Without these keys ParalPAC applies no band filter and
+                # pools every band stored for the method.
                 event_opts = {
                     'buffer': params['time_window'],
                     'sw_method': params['sw_method'],
-                    'spindle_method': params['spindle_method']
+                    'spindle_method': params['spindle_method'],
+                    'sw_freq_range': tuple(params['phase_freq']),
+                    'spindle_freq_range': tuple(params['amp_freq']),
                 }
 
             # Label for a continuous-data run. There are no detected events to

@@ -151,6 +151,7 @@ cannot take back a notice already printed. See
 
 ## See also
 
+- [Upgrade to 4.6.3](upgrade-to-4.6.3.md)
 - [Validate a detection run](validate-a-detection-run.md)
 - [Decide whether an event is genuine](decide-if-an-event-is-genuine.md)
 - [dbwrite reference](../reference/api/dbwrite.md)

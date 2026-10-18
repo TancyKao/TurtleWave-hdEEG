@@ -10,7 +10,7 @@ from turtlewave_hdEEG import dbwrite
 from turtlewave_hdEEG import event_metrics
 from turtlewave_hdEEG.extensions import detection_threshold_values
 from turtlewave_hdEEG.utils import (derive_subject, resolve_reject_types,
-                                    resolve_cat,
+                                    resolve_cat, resolve_sw_frequency,
                                     warn_interpolated_channels)
 from turtlewave_hdEEG.eventprocessor import (_build_epoch_lookup,
                                              _json_event_stages,
@@ -132,7 +132,7 @@ class ParalSWA:
 
 
     def detect_slow_waves(self, method='Massimini2004', chan=None, ref_chan=[], grp_name='eeg',
-                     frequency=(0.1, 4), trough_duration=None,
+                     frequency=None, trough_duration=None,
                      neg_peak_thresh=None,
                      p2p_thresh=None,
                      min_dur=None, max_dur=None,
@@ -163,8 +163,18 @@ class ParalSWA:
             Reference channel(s) for re-referencing
         grp_name : str
             Group name for channel selection
-        frequency : tuple
-            Frequency range for slow wave detection (min, max)
+        frequency : tuple or None
+            Detection band ``(min, max)`` in Hz, also stored as the run's
+            band token. ``None`` (default) uses the method's own band, via
+            :func:`turtlewave_hdEEG.utils.resolve_sw_frequency`:
+            ``(0.1, 4)`` for Massimini2004 and AASM/Massimini2004, the
+            published low-pass band for Ngo2015 ``(0.5, 3.5)`` and
+            Staresina2015 ``(0.5, 1.25)``. An explicit value is always
+            honoured. For Ngo2015/Staresina2015 the upper bound IS the
+            low-pass cut-off, so before 4.6.3 the old ``(0.1, 4)`` default
+            ran both methods at a 4 Hz low-pass, not the published one.
+            Several methods in one run must resolve to the same band, else
+            ``ValueError``.
         trough_duration : tuple or None
             Min/max duration of the NEGATIVE HALF-WAVE in seconds --
             Massimini's *"a negative zero crossing and a subsequent positive
@@ -392,6 +402,15 @@ class ParalSWA:
         #                directories are named this way.
         method_db = "_".join(method) if isinstance(method, list) else str(method)
         method_str = method_db.replace('/', '_')
+
+        # One band for the whole run, resolved from the method when the
+        # caller gave none: the published low-pass band for Ngo2015 /
+        # Staresina2015, (0.1, 4) for the Massimini family.
+        if frequency is None:
+            frequency = resolve_sw_frequency(method, None)
+            self.logger.info(
+                f"frequency not given; using the {method_db} default band "
+                f"{frequency[0]}-{frequency[1]} Hz.")
 
         # Convert frequency to string. Single source of truth for the band
         # token so the JSON filenames written here and any file_pattern a
