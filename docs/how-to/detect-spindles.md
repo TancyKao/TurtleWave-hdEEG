@@ -369,9 +369,6 @@ for subject in subjects:
     print(f"{subject}: detected spindles on {len(spindles)} channels")
 ```
 
-For HPC batch runs across many subjects, see `examples/NCI_commands/` and the
-`*_GADI.py` driver scripts referenced in the project README.
-
 ## Next Steps
 
 After detecting spindles, you might want to:

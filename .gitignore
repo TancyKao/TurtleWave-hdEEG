@@ -57,6 +57,8 @@ CLAUDE.md
 
 # Local design / research scratch
 _scratch/
+manuscript/
+examples/NCI_commands/
 
 # Misc project artifacts
 USEME.zip

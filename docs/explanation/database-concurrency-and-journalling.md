@@ -14,7 +14,7 @@ connection. For the task of getting a stuck database working again, see
 never by more than one *writer* at once, and the two access patterns are
 deliberately different:
 
-- **Batch detection (`qsub`/PBS on the NCI Gadi cluster, or a local loop over
+- **Batch detection (a cluster job scheduler, or a local loop over
   subjects)** — one process per subject writes spindles, slow waves,
   K-complexes, PAC results, and cycle/duration data into that subject's own
   database. Subjects never share a database file, so there is never more than
