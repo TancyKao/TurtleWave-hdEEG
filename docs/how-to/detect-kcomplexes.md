@@ -59,9 +59,9 @@ kcomplexes = event_processor.detect_kcomplexes(
     method='AASM/Massimini2004',
     chan=['E110', 'E111', 'E112'],
     frequency=(0.1, 4.0),
-    trough_duration=(0.25, 1.0),
-    neg_peak_thresh=-40.0,
-    p2p_thresh=75.0,
+    # trough_duration / neg_peak_thresh / p2p_thresh: leave unset (None, the
+    # default) to run the method's published criteria. For this method they
+    # are (0.25, 1.0) s, -40 uV and 75 uV; passing a value overrides them.
     min_isolation=1.0,
     polar='normal',
     stage=['NREM2'],
@@ -96,11 +96,24 @@ kcomplexes = event_processor.detect_kcomplexes(
 
 `method` accepts `'AASM/Massimini2004'` (default) or `'Massimini2004'`. No
 other Wonambi slow-wave methods are exposed here, since they target slow
-oscillations rather than the isolated K-complex morphology. The AASM defaults
-(`neg_peak_thresh=-40.0`, `p2p_thresh=75.0`, `trough_duration=(0.25, 1.0)`)
-are the parameters shown above — Wonambi's own published `'AASM/Massimini2004'`
-values, not `turtlewave_hdEEG`'s pre-4.3 `-37.0`/`70.0` defaults, which
-matched no published criterion.
+oscillations rather than the isolated K-complex morphology.
+
+`trough_duration`, `neg_peak_thresh` and `p2p_thresh` default to `None`, which
+means the criteria of the chosen method:
+
+| Method | `trough_duration` (s) | `neg_peak_thresh` (µV) | `p2p_thresh` (µV) |
+|--------|-----------------------|------------------------|-------------------|
+| `AASM/Massimini2004` | (0.25, 1.0) | -40 | 75 |
+| `Massimini2004` | (0.3, 1.0) | -80 | 140 |
+
+The AASM numbers are Wonambi's own published `'AASM/Massimini2004'` values, not
+`turtlewave_hdEEG`'s pre-4.3 `-37.0`/`70.0` defaults, which matched no published
+criterion. Before 4.6.3 the AASM numbers were the default for **every** method,
+so `method='Massimini2004'` with no explicit criteria silently ran with AASM
+criteria; it now uses Massimini's own and detects fewer, larger events. The
+criteria a run actually applied are stored in `detection_runs.params_json`
+(`resolved_criteria`, per method), never as `None`. See
+[Upgrade to 4.6.3](upgrade-to-4.6.3.md).
 
 `min_isolation` is K-complex-specific: it is the minimum gap, in seconds,
 required between successive K-complex trough times — measured between the
@@ -206,8 +219,8 @@ If you want to detect more K-complexes:
 
 If you want only unambiguous, AASM-conforming K-complexes:
 
-- Use the AASM defaults: `neg_peak_thresh=-40.0`, `p2p_thresh=75.0`,
-  `trough_duration=(0.25, 1.0)`
+- Use the `'AASM/Massimini2004'` defaults (leave the three criteria unset):
+  `neg_peak_thresh=-40.0`, `p2p_thresh=75.0`, `trough_duration=(0.25, 1.0)`
 - Keep `min_isolation=1.0` so consecutive slow-oscillation cycles in N3 are
   not double-counted as separate K-complexes
 - Restrict `stage=['NREM2']` only

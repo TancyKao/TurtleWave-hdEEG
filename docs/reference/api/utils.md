@@ -36,6 +36,13 @@ the warning filter itself just before it warns; called later it still handles th
 NumPy warning. See
 [Upgrade to 4.6](../../how-to/upgrade-to-4.6.md#quiet-two-harmless-wonambi-warnings).
 
+`resolve_sw_frequency`, `published_sw_band` and `published_sw_duration` give the
+slow-wave detection band a method uses when you pass none: Ngo2015
+(0.5, 3.5) Hz, Staresina2015 (0.5, 1.25) Hz, the Massimini family
+`DEFAULT_MASSIMINI_SW_BAND` (0.1, 4) Hz. `PUBLISHED_BAND_SW_METHODS` lists the
+two methods whose band is a published low-pass. See
+[Choosing the detection band](../../how-to/detect-slow-waves.md#choosing-the-detection-band).
+
 ::: turtlewave_hdEEG.utils
     options:
       show_root_heading: true

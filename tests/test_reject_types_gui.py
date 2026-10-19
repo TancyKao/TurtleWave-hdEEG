@@ -282,6 +282,15 @@ for name in ('detect_spindles', 'detect_slow_waves', 'detect_kcomplexes',
           'reject_artifacts' not in kw and 'reject_arousals' not in kw,
           str(sorted(k for k in kw if 'reject' in k)))
 
+# PAC event selection is by EXACT stored band (4.6.3): the GUI must pass
+# the picked runs' bands, or ParalPAC pools every band of the method.
+pac_opts = (captured.get('analyze_pac') or {}).get('event_opts') or {}
+check(8, "analyze_pac event_opts carries the picked SW and spindle bands",
+      pac_opts.get('sw_freq_range') == (0.5, 1.25)
+      and pac_opts.get('spindle_freq_range') == (11, 16),
+      repr({k: pac_opts.get(k) for k in ('sw_freq_range',
+                                          'spindle_freq_range')}))
+
 # and the summary dicts the run methods build
 sw_params = win.sw_detection_params
 kc_params = win.kc_detection_params

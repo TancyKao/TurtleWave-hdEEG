@@ -62,11 +62,47 @@ class ParalKC:
                 logger.addHandler(fh)
         return logger
 
+    @staticmethod
+    def _resolve_criteria(methods, frequency, trough_duration,
+                          neg_peak_thresh, p2p_thresh, polar, min_isolation):
+        """Criteria each method's detector actually applies.
+
+        Built through the real constructor, so a ``None`` argument resolves
+        exactly as detection resolves it (``ImprovedDetectSlowWave`` applies
+        the method's published values, then any explicit override).
+
+        Parameters
+        ----------
+        methods : list of str
+            K-complex methods of the run.
+        frequency, trough_duration, neg_peak_thresh, p2p_thresh, polar, min_isolation
+            As passed to :meth:`detect_kcomplexes`.
+
+        Returns
+        -------
+        dict
+            ``{method: {'trough_duration': [lo, hi], 'neg_peak_thresh':
+            float (negative, uV), 'p2p_thresh': float (uV)}}``.
+        """
+        out = {}
+        for meth in methods:
+            det = ImprovedDetectKComplex(
+                method=meth, frequency=frequency,
+                trough_duration=trough_duration,
+                neg_peak_thresh=neg_peak_thresh, p2p_thresh=p2p_thresh,
+                polar=polar, min_isolation=min_isolation)
+            out[meth] = {
+                'trough_duration': [float(v) for v in det.trough_duration],
+                'neg_peak_thresh': float(det.max_trough_amp),
+                'p2p_thresh': float(det.min_ptp),
+            }
+        return out
+
     def detect_kcomplexes(self, method='AASM/Massimini2004', chan=None,
                           ref_chan=None, grp_name='eeg',
                           frequency=(0.1, 4.0),
-                          trough_duration=(0.25, 1.0),
-                          neg_peak_thresh=-40.0, p2p_thresh=75.0,
+                          trough_duration=None,
+                          neg_peak_thresh=None, p2p_thresh=None,
                           min_isolation=1.0,
                           detrend=False, polar='normal',
                           reject_artifacts=None, reject_arousals=None,
@@ -92,18 +128,28 @@ class ParalKC:
             Bandpass for KC detection. AASM KC default is (0.1, 4.0) Hz —
             wider than the SO band so the full KC waveform is captured.
         trough_duration : tuple or None
-            Min/max duration of the NEGATIVE HALF-WAVE (s), AASM KC default
-            (0.25, 1.0). It bounds the half-wave, not the whole K-complex --
-            a KC with a 0.5 s negative half-wave typically runs ~1 s in
-            total. ``None`` uses the method's published window.
+            Min/max duration of the NEGATIVE HALF-WAVE (s). It bounds the
+            half-wave, not the whole K-complex -- a KC with a 0.5 s negative
+            half-wave typically runs ~1 s in total. ``None`` (default) uses
+            the method's published window: (0.25, 1.0) s for
+            AASM/Massimini2004, (0.3, 1.0) s for Massimini2004.
         neg_peak_thresh : float or None
             Depth the trough must reach in µV; the sign is ignored. ``None``
-            uses the method's published value. Default −40 µV, matching
-            Wonambi's own ``AASM/Massimini2004`` configuration.
+            (default) uses the method's published value: -40 µV for
+            AASM/Massimini2004 (Wonambi's own configuration), -80 µV for
+            Massimini2004.
         p2p_thresh : float or None
-            Minimum peak-to-peak amplitude in µV. ``None`` uses the method's
-            published value. Default 75 µV -- the AASM slow-wave-activity
-            figure, and Wonambi's ``AASM/Massimini2004`` value.
+            Minimum peak-to-peak amplitude in µV. ``None`` (default) uses the
+            method's published value: 75 µV for AASM/Massimini2004 (the AASM
+            slow-wave-activity figure), 140 µV for Massimini2004.
+
+            Before 4.6.3 these three defaulted to the AASM numbers
+            ((0.25, 1.0), -40, 75) for EVERY method, so
+            ``method='Massimini2004'`` silently ran with AASM criteria. The
+            default method's criteria are unchanged; a Massimini2004 run with
+            no explicit criteria now uses Massimini's own and detects fewer,
+            larger events. ``detection_runs.params_json`` records the values
+            actually applied, never ``None``; see Notes.
         min_isolation : float
             Minimum gap in seconds between successive KC trough times. KCs
             closer than this are dropped — this is what distinguishes a KC
@@ -190,6 +236,15 @@ class ParalKC:
         in-stage seconds it actually analysed -- in ``analysed_time``, so
         :func:`turtlewave_hdEEG.density.event_density` can derive K-complex
         density from the database without re-reading any file.
+
+        Provenance of the criteria: ``params_json`` stores the
+        ``trough_duration`` / ``neg_peak_thresh`` / ``p2p_thresh`` the
+        detector actually applied (read back from a constructed
+        :class:`~turtlewave_hdEEG.extensions.ImprovedDetectKComplex`), plus
+        ``resolved_criteria`` (the same, per method) and
+        ``published_criteria`` (the names left at ``None``, i.e. taken from
+        the method). With several methods whose criteria differ, the flat
+        keys hold ``None`` and only ``resolved_criteria`` is per method.
         """
         # Wonambi fetch() raises on cat=None; validate up front (default
         # (1, 1, 1, 0), as the GUI and the Gadi drivers pass).
@@ -379,13 +434,29 @@ class ParalKC:
                 except Exception:
                     rec_start = None
                 run_id = str(uuid.uuid4())
+                # Record the criteria the detector APPLIES, not the
+                # arguments: since 4.6.3 they default to None ("the
+                # method's own"), and a None in provenance would make the
+                # run's thresholds unreadable from the database.
+                resolved = self._resolve_criteria(
+                    methods, frequency, trough_duration, neg_peak_thresh,
+                    p2p_thresh, polar, min_isolation)
+
+                def _flat(key):
+                    vals = [resolved[m][key] for m in methods]
+                    return vals[0] if all(v == vals[0] for v in vals) else None
+
                 params_dict = {
                     'frequency': list(frequency),
-                    'trough_duration': (list(trough_duration)
-                                        if trough_duration is not None
-                                        else None),
-                    'neg_peak_thresh': neg_peak_thresh,
-                    'p2p_thresh': p2p_thresh,
+                    'trough_duration': _flat('trough_duration'),
+                    'neg_peak_thresh': _flat('neg_peak_thresh'),
+                    'p2p_thresh': _flat('p2p_thresh'),
+                    'resolved_criteria': resolved,
+                    'published_criteria': [
+                        name for name, val in (
+                            ('trough_duration', trough_duration),
+                            ('neg_peak_thresh', neg_peak_thresh),
+                            ('p2p_thresh', p2p_thresh)) if val is None],
                     'min_isolation': min_isolation,
                     'detrend': detrend, 'polar': polar,
                     'method': method_db,

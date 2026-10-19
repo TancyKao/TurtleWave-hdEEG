@@ -227,6 +227,130 @@ def resolve_cat(cat):
     return tuple(int(c) for c in cat)
 
 
+#: Slow-wave methods whose filter is a published low-pass, not a band the
+#: user sets: Ngo et al. 2015 (3.5 Hz) and Staresina et al. 2015 (1.25 Hz).
+PUBLISHED_BAND_SW_METHODS = ('Ngo2015', 'Staresina2015')
+
+#: Detection band of the Massimini family (Massimini2004 and
+#: AASM/Massimini2004) when the caller gives none: Wonambi's own
+#: ``det_filt`` for both methods. The upper bound is the INT 4 on purpose:
+#: ``dbwrite.fmt_freq_token`` renders ``(0.1, 4)`` as ``0.1-4Hz`` but
+#: ``(0.1, 4.0)`` as ``0.1-4.0Hz``, and ``0.1-4Hz`` is the token every
+#: default ``ParalSWA`` run has always stored.
+DEFAULT_MASSIMINI_SW_BAND = (0.1, 4)
+
+
+def published_sw_band(method):
+    """``(lower, upper)`` Hz of a slow-wave method whose filter is published.
+
+    Read from Wonambi's own defaults for the method: the lower edge of its
+    ``det_filt`` and the cut-off of its ``lowpass``, which is the filter the
+    method actually applies (for these two methods ``det_filt`` is only a
+    label). Ngo2015 -> ``(0.5, 3.5)``, Staresina2015 -> ``(0.5, 1.25)``.
+
+    ``ImprovedDetectSlowWave`` uses the upper bound as the low-pass, and
+    ``ParalSWA`` stores the pair as the run's band token, so the filter and
+    the stored band are both the published ones.
+
+    Parameters
+    ----------
+    method : str
+        One of :data:`PUBLISHED_BAND_SW_METHODS`.
+
+    Returns
+    -------
+    tuple of float
+        ``(lower, upper)`` in Hz.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` has no published band.
+    """
+    if method not in PUBLISHED_BAND_SW_METHODS:
+        raise ValueError(f"{method!r} has no published band; "
+                         f"expected one of {PUBLISHED_BAND_SW_METHODS}")
+    # Lazy: utils must stay importable without pulling in Wonambi.
+    from wonambi.detect import DetectSlowWave
+    det = DetectSlowWave(method)
+    return (float(det.det_filt['freq'][0]), float(det.lowpass['freq']))
+
+
+def published_sw_duration(method):
+    """Whole-wave duration a published-band slow-wave method is detected with.
+
+    Wonambi's ``DetectSlowWave(method).duration``: Ngo2015 ->
+    ``(0.833, 2.0)``, Staresina2015 -> ``(0.8, 2.0)``.
+    ``ImprovedDetectSlowWave`` keeps this for these two methods whatever
+    ``min_dur`` / ``max_dur`` it is given (by design; see ``extensions.py``).
+
+    Parameters
+    ----------
+    method : str
+        One of :data:`PUBLISHED_BAND_SW_METHODS`.
+
+    Returns
+    -------
+    tuple of float
+        ``(min_s, max_s)``.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` has no published duration.
+    """
+    if method not in PUBLISHED_BAND_SW_METHODS:
+        raise ValueError(f"{method!r} has no published duration; "
+                         f"expected one of {PUBLISHED_BAND_SW_METHODS}")
+    from wonambi.detect import DetectSlowWave
+    lo, hi = DetectSlowWave(method).duration
+    return (float(lo), float(hi))
+
+
+def resolve_sw_frequency(method, frequency=None):
+    """Detection band for a slow-wave run, filling in the method's default.
+
+    Parameters
+    ----------
+    method : str or sequence of str
+        Slow-wave method(s) of the run. A run stores ONE band token, so with
+        several methods they must all resolve to the same band.
+    frequency : tuple of float or None
+        Explicit ``(lower, upper)`` Hz; always honoured as given.
+
+    Returns
+    -------
+    tuple of float
+        ``frequency`` when given, returned unchanged (its exact values feed
+        the band token, so ``4`` and ``4.0`` are not coerced). Otherwise :func:`published_sw_band` for
+        Ngo2015 / Staresina2015 and :data:`DEFAULT_MASSIMINI_SW_BAND` for
+        Massimini2004 and AASM/Massimini2004 (and any other method).
+
+    Raises
+    ------
+    ValueError
+        If ``frequency`` is ``None`` and no method is given, or the methods
+        resolve to different bands -- one run cannot store two band tokens,
+        so the caller must choose.
+    """
+    if frequency is not None:
+        return frequency
+    methods = [method] if isinstance(method, str) else list(method or [])
+    if not methods:
+        raise ValueError("No slow-wave method given; cannot resolve a "
+                         "detection band.")
+    bands = {m: (published_sw_band(m) if m in PUBLISHED_BAND_SW_METHODS
+                 else DEFAULT_MASSIMINI_SW_BAND)
+             for m in methods}
+    distinct = set(bands.values())
+    if len(distinct) != 1:
+        raise ValueError(
+            f"frequency=None resolves to different bands for {bands}; one "
+            f"run stores one band, so pass frequency= explicitly or run the "
+            f"methods separately.")
+    return distinct.pop()
+
+
 def missing_json_message(json_dir, file_pattern, max_listed=25):
     """Build the error text for a ``file_pattern`` that matched no JSON file.
 

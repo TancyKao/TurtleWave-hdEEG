@@ -146,7 +146,7 @@ def get_event_stats(db_path, sw_method=None, spindle_method=None, channel=None, 
         
         # Add frequency range filtering for slow waves
         if sw_freq_range and len(sw_freq_range) == 2:
-            sw_query += " AND freq_lower >= ? AND freq_upper <= ?"
+            sw_query += " AND freq_lower = ? AND freq_upper = ?"
             sw_params.extend(sw_freq_range)
         
         sw_query += " GROUP BY channel, stage"
@@ -176,7 +176,7 @@ def get_event_stats(db_path, sw_method=None, spindle_method=None, channel=None, 
         
         # Add frequency range filtering for spindles
         if spindle_freq_range and len(spindle_freq_range) == 2:
-            sp_query += " AND freq_lower >= ? AND freq_upper <= ?"
+            sp_query += " AND freq_lower = ? AND freq_upper = ?"
             sp_params.extend(spindle_freq_range)
         
         sp_query += " GROUP BY channel, stage"

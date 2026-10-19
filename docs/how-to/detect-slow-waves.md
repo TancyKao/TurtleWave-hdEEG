@@ -111,6 +111,10 @@ To customize slow wave detection for your specific needs:
 2. Set the low frequency (default: 0.1 Hz)
 3. Set the high frequency (default: 4 Hz)
 
+These GUI defaults suit the Massimini family. For `Ngo2015` and `Staresina2015`
+the GUI sends the published band and shows it read-only; see
+[Choosing the detection band](#choosing-the-detection-band) for the values.
+
 Typical slow wave frequencies are 0.5-4 Hz, but you may adjust based on your research requirements.
 
 **Trough Duration:** (Massimini-family methods only — see below)
@@ -190,7 +194,7 @@ event_processor = ParalSWA(dataset=data, annotations=annot)
 slow_waves = event_processor.detect_slow_waves(
     method='Massimini2004',
     chan=['E110', 'E111', 'E112'],
-    frequency=(0.5, 1.25),
+    frequency=(0.5, 1.25),       # omit (None) for the method's own band
     trough_duration=(0.3, 1.0),  # negative half-wave, in seconds — Massimini's published window
     # neg_peak_thresh / p2p_thresh: leave unset (None, the default) to run
     # Massimini2004's PUBLISHED criteria, -80 uV / 140 uV. Passing an
@@ -218,6 +222,42 @@ slow_waves = event_processor.detect_slow_waves(
     still work as deprecated shims but cannot express `Move`; use
     `reject_types` for anything beyond the default. See
     [Which events are rejected by default, and why](../explanation/overview.md#which-annotation-events-are-rejected-by-default).
+
+### Choosing the detection band
+
+`ParalSWA.detect_slow_waves(frequency=None)` resolves the band from the method.
+An explicit `frequency=(lo, hi)` is always used as given.
+
+| Method | Band when `frequency` is `None` (Hz) |
+|--------|--------------------------------------|
+| `Massimini2004`, `AASM/Massimini2004` | (0.1, 4) |
+| `Ngo2015` | (0.5, 3.5) |
+| `Staresina2015` | (0.5, 1.25) |
+
+For `Ngo2015` and `Staresina2015` the upper bound is the low-pass cut-off the
+method applies, so these are the published filters. The band is also stored
+with every event, so downstream selection (for example
+[PAC event selection](run-pac-analysis.md#select-events-by-the-exact-stored-band))
+must use the same pair. Several methods in one call must resolve to the same
+band, otherwise `ValueError` asks you to pass `frequency=` or run them
+separately.
+
+!!! warning "Ngo2015 and Staresina2015 runs from before 4.6.3 used a 4 Hz low-pass"
+    The old default `(0.1, 4)` applied to every method, so these two ran with
+    a 4 Hz low-pass and stored `0.1-4Hz`, not their published band. Events
+    detected with default arguments differ from a 4.6.3 run. See
+    [Upgrade to 4.6.3](upgrade-to-4.6.3.md).
+
+To read the band yourself:
+
+```python
+from turtlewave_hdEEG.utils import published_sw_band, resolve_sw_frequency
+
+published_sw_band('Staresina2015')                 # (0.5, 1.25)
+resolve_sw_frequency(['Ngo2015'])                  # (0.5, 3.5)
+resolve_sw_frequency('Massimini2004')              # (0.1, 4)
+resolve_sw_frequency('Ngo2015', (0.5, 4.0))        # (0.5, 4.0), as given
+```
 
 ## Interpreting Results
 
